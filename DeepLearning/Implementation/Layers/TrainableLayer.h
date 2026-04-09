@@ -47,6 +47,8 @@ class TrainableLayer : public Parameterizable {
 
         Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
         assert(aFeatureInput.isPresent());
+        Optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureOutputs);
+        assert(aFeatureOutput.isPresent());
 
         for (const auto &parameter : parameters) {
             if (!parameter->isTrainable())
@@ -57,7 +59,7 @@ class TrainableLayer : public Parameterizable {
             }
         }
         for (const auto &parameter : parameters) {
-            parameter->compile(aFeatureInput, gradientUpdateStream, isInferenceOnly(), getFanIn(), getFanOut());
+            parameter->compile(aFeatureInput, aFeatureOutput, gradientUpdateStream, isInferenceOnly(), getFanIn(), getFanOut());
         }
 
         numBackwardConnections = 0;
@@ -78,8 +80,8 @@ class TrainableLayer : public Parameterizable {
     std::vector<Optional<Tensor>> errorInputs;
     std::vector<Optional<Tensor>> errorOutputs;
     std::vector<Stream> streams;
-    std::vector<Optional<Layer *>> nextLayers;
-    std::vector<Optional<Layer *>> previousLayers;
+    std::vector<Optional<TrainableLayer *>> nextLayers;
+    std::vector<Optional<TrainableLayer *>> previousLayers;
     static Optional<Tensor> getFirstPresentTensor(const std::vector<Optional<Tensor>> &tensors) {
         for (auto it = tensors.begin(); it != tensors.end(); ++it) {
             if (it->isPresent())
@@ -95,50 +97,169 @@ class TrainableLayer : public Parameterizable {
         }
         return numPresent;
     }
+    static Optional<Tensor> getLastPresentTensor(std::vector<Optional<Tensor>> tensors) {
+        for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
+            if (it->isPresent())
+                return *it;
+        }
+        return Optional<Tensor>::empty();
+    }
+    virtual void ensureNoDeviceCrossing() {
+        Optional<Tensor> lastFeatureInput = getLastPresentTensor(featureInputs);
+        Optional<Tensor> lastErrorOutput = getLastPresentTensor(errorOutputs);
+        Optional<Tensor> lastErrorInput = getLastPresentTensor(errorInputs);
+        Optional<Tensor> lastFeatureOutput = getLastPresentTensor(featureOutputs);
+
+        if (lastFeatureInput.isPresent() && lastFeatureOutput.isPresent())
+            assert(lastFeatureInput.get().getPlacement() == lastFeatureOutput.get().getPlacement());
+        if (lastFeatureInput.isPresent() && lastErrorInput.isPresent())
+            assert(lastFeatureInput.get().getPlacement() == lastErrorInput.get().getPlacement());
+        if (lastFeatureInput.isPresent() && lastErrorOutput.isPresent())
+            assert(lastFeatureInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+
+        if (lastFeatureOutput.isPresent() && lastErrorInput.isPresent())
+            assert(lastFeatureOutput.get().getPlacement() == lastErrorInput.get().getPlacement());
+        if (lastFeatureOutput.isPresent() && lastErrorOutput.isPresent())
+            assert(lastFeatureOutput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+
+        if (lastErrorInput.isPresent() && lastErrorOutput.isPresent())
+            assert(lastErrorInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+    }
+    virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) {
+        // backPropagateError allows the previous layer to specify that it does not support back propagation,
+        // inferenceOnly means that even though back propagation may be supported, we are not using it since we are not training.
+        if (backPropagateError && !isInferenceOnly())
+            return getFirstPresentTensor(featureInputs).get().clone();
+        else
+            return Optional<Tensor>::empty();
+    }
+    virtual Optional<Tensor> connectToPreviousLayer(
+        TrainableLayer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
+        assert(!compiled);
+
+        Optional<Tensor> previouslyConnectedFeatureInput = getFirstPresentTensor(featureInputs);
+        if (previouslyConnectedFeatureInput.isPresent() && featureInput.isPresent()) {
+            assert(featureInput.get().getDescriptor() == previouslyConnectedFeatureInput.get().getDescriptor());
+            assert(featureInput.get().getPlacement() == previouslyConnectedFeatureInput.get().getPlacement());
+        }
+
+        streams.push_back(stream);
+
+        previousLayers.push_back(previousLayer);
+        featureInputs.emplace_back(featureInput);
+        errorOutputs.emplace_back(createErrorOutputTensor(backPropagateError, errorOutputs.size()));
+
+        Optional<Tensor> lastFeatureInput = getLastPresentTensor(featureInputs);
+        Optional<Tensor> firstFeatureInput = getFirstPresentTensor(featureInputs);
+        Optional<Tensor> lastErrorOutput = getLastPresentTensor(errorOutputs);
+        if (firstFeatureInput.isPresent()) {
+            assert(lastFeatureInput.get().getDescriptor() == firstFeatureInput.get().getDescriptor());
+            assert(lastFeatureInput.get().getPlacement() == firstFeatureInput.get().getPlacement());
+            if (lastErrorOutput.isPresent()) {
+                assert(lastFeatureInput.get().getDescriptor() == lastErrorOutput.get().getDescriptor());
+                assert(lastFeatureInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+            }
+        } else if (lastErrorOutput.isPresent()) {
+            Optional<Tensor> firstErrorOutput = getFirstPresentTensor(errorOutputs);
+            assert(lastErrorOutput.get().getDescriptor() == firstErrorOutput.get().getDescriptor());
+            assert(lastErrorOutput.get().getPlacement() == firstErrorOutput.get().getPlacement());
+        }
+        ensureNoDeviceCrossing();
+
+        return errorOutputs.back();
+    }
     // FIXME: Temporarily moved here from layer
 
     // compute the fan in for one element of a batch
-    virtual uint64_t getFanIn() {
-        uint64_t totalFanIn = 0;
-        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            if (featureInputs[i].isPresent()) {
-                Tensor aFeatureInput = featureInputs[i];
-                std::vector<uint64_t> inputDimensions = aFeatureInput.getDescriptor().getDimensions();
-                uint64_t fanIn = 1;
-                for (uint32_t j = 1; j < inputDimensions.size(); ++j) {
-                    fanIn *= inputDimensions[j];
-                }
-                totalFanIn += fanIn;
-            }
-        }
-        if (totalFanIn == 0) {
-            // return a 1 to avoid possible divide by 0
-            totalFanIn = 1;
-        }
-        return totalFanIn;
-    }
+    // FIXME: These fan in/out calculations are the special case for fully connected. Convolution (kernel aware fan) and broadcast is
+    // different. virtual uint64_t getFanIn() {
+    //     Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
+    //     assert(anyFeatureInput.isPresent());
+    //     std::vector<uint64_t> inputDimensions = anyFeatureInput.get().getDescriptor().getDimensions();
+    //     uint64_t fanIn = 1;
+    //     for (uint32_t i = 1; i < inputDimensions.size(); ++i) {
+    //         fanIn *= inputDimensions[i];
+    //     }
+    //     return fanIn;
+    // }
+    // // compute the fan out for one element of a batch
+    // virtual uint64_t getFanOut() {
+    //     Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+    //     assert(anyFeatureOutput.isPresent());
+    //     std::vector<uint64_t> outputDimensions = anyFeatureOutput.get().getDescriptor().getDimensions();
+    //     uint64_t fanOut = 1;
+    //     for (uint32_t i = 1; i < outputDimensions.size(); ++i) {
+    //         fanOut *= outputDimensions[i];
+    //     }
+    //     return fanOut;
+    // }
+    // Default applies to elementwise operations. It doesn't apply to fully connected or convolutions.
+    // I also have parameters[] as shared pointers that have p->getStorage() that can give dimensions
+    // compute the fan in for one element of a batch
+    virtual uint64_t getFanIn() { return 1; }
+    virtual uint64_t getAverageBroadcastFanOut() {
+        Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+        assert(anyFeatureOutput.isPresent());
 
-    // compute the fan out for one element of a batch
-    virtual uint64_t getFanOut() {
-        uint64_t totalFanOut = 0;
-        for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
-            if (featureOutputs[i].isPresent()) {
-                Tensor aFeatureOutput = featureOutputs[i];
-                std::vector<uint64_t> outputDimensions = aFeatureOutput.getDescriptor().getDimensions();
-                uint64_t fanOut = 1;
-                for (uint32_t j = 1; j < outputDimensions.size(); ++j)
-                    fanOut *= outputDimensions[j];
-                if (nextLayers[i].isPresent())
-                    fanOut *= nextLayers[i].get()->getDownStreamFanoutMultiplier();
-                totalFanOut += fanOut;
-            }
+        const std::vector<uint64_t> outputDims = anyFeatureOutput.get().getDescriptor().getDimensions();
+        assert(!outputDims.empty());
+
+        uint64_t outputNumelPerExample = 1;
+        for (uint32_t i = 1; i < outputDims.size(); ++i) {
+            outputNumelPerExample *= outputDims[i];
         }
-        if (totalFanOut == 0) {
-            // return a 1 to avoid possible divide by 0
-            totalFanOut = 1;
+
+        uint64_t totalReuse = 0;
+        uint64_t numTrainableParams = 0;
+
+        for (const auto &param : parameters) {
+            if (!param->isTrainable())
+                continue;
+
+            const uint64_t paramNumel = param->getStorage().getTotalNumElements();
+            if (paramNumel == 0)
+                continue;
+
+            ++numTrainableParams;
+            totalReuse += std::max<uint64_t>(1, outputNumelPerExample / paramNumel);
         }
-        return totalFanOut;
+
+        if (numTrainableParams == 0)
+            return 1;
+
+        return std::max<uint64_t>(1, totalReuse / numTrainableParams);
     }
+    // compute the fan out for one element of a batch, for pointwise or broadcast.
+    // Uses the max fanout of any parameter.
+    virtual uint64_t getFanOut() {
+        Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+        assert(anyFeatureOutput.isPresent());
+
+        const std::vector<uint64_t> outputDims = anyFeatureOutput.get().getDescriptor().getDimensions();
+        assert(!outputDims.empty());
+
+        uint64_t outputNumelPerExample = 1;
+        for (uint32_t i = 1; i < outputDims.size(); ++i) {
+            outputNumelPerExample *= outputDims[i];
+        }
+
+        uint64_t fanOut = 1;
+        for (const auto &param : parameters) {
+            if (!param->isTrainable())
+                continue;
+
+            const uint64_t paramNumel = param->getStorage().getTotalNumElements();
+            if (paramNumel == 0)
+                continue;
+
+            fanOut = std::max(fanOut, std::max<uint64_t>(1, outputNumelPerExample / paramNumel));
+        }
+
+        return fanOut;
+    }
+    // FIXME: fan in/out now computed at the parameter level. Need to override for specific layers, but this is meant to handle
+    //        pointwise and broadcast.
+    // FIXME: Fanout needs to be computed at the parameter level, how many params vs how many outpts.
 
    protected:
     virtual void forward(uint32_t connectionNumber, bool isValidation) {
@@ -163,8 +284,7 @@ class TrainableLayer : public Parameterizable {
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        // FIXME: Put back
-        // nextLayers[connectionNumber].get()->forward(connectionNumber, isValidation);
+        nextLayers[connectionNumber].get()->forward(connectionNumber, isValidation);
     }
 
     // Weights are up-to-date by end of data stream
@@ -235,8 +355,7 @@ class TrainableLayer : public Parameterizable {
 
         // Propagate output error gradient to the previous layer, on the data stream.
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        // FIXME: put back
-        // previousLayers[connectionNumber].get()->backward(connectionNumber);
+        previousLayers[connectionNumber].get()->backward(connectionNumber, batchSize);
     }
 
     // Error in is up-to-date by the end of the data stream.
@@ -246,48 +365,12 @@ class TrainableLayer : public Parameterizable {
     // Error in is up-to-date by the end of the data stream.
     virtual Optional<Event> computeErrorOut(uint32_t connectionNumber) = 0;
 
-    // FIXME: Weights created in parameter.compile. Gradients created when parameter.compile calls optimizer.compile()
-    // virtual void createWeights(Tensor featureInput) = 0;
-    // virtual void createGradients() = 0;
-
    public:
     // Setters/Getters
     uint64_t getStampedId() { return stampedId; }
 
-    virtual Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
-        // FIXME: put back
-        // Optional<Tensor> errorOutput =
-        //     MultiConnectionLayer::connectToPreviousLayer(previousLayer, featureInput, stream, backPropagateError, connectionType);
-        // return errorOutput;
-        return Optional<Tensor>::empty();
-    }
-
     virtual std::string getLayerType() = 0;
 
-    // FIXME: Use parameters instead
-    // virtual std::unordered_map<std::string, Tensor> getWeights() = 0;
-    // // All optimizers the same:
-    // virtual void setOptimizer(std::shared_ptr<Optimizer> newOptimizer) = 0;
-    // // Per weight optimizer:
-    // virtual void setOptimizer(std::string, std::shared_ptr<Optimizer> newOptimizer) = 0;
-    //
-    // virtual bool hasOptimizer() { return !optimizers.empty(); }
-    // virtual std::shared_ptr<Optimizer> getOptimizer(std::string weightsName) = 0;
-    // virtual std::unordered_map<std::string, std::shared_ptr<Optimizer>> getOptimizers() = 0;
-    //
-    // virtual void setInitializer(std::shared_ptr<ThorImplementation::Initializer> initializer) = 0;
-    // virtual void setInitializer(std::string weightsName, std::shared_ptr<ThorImplementation::Initializer> initializer) = 0;
-    // virtual std::vector<Event> initialize() = 0;
-    // virtual std::vector<Event> initialize(std::string weightsName) = 0;
-    // FIXME: Put back when fits
-    // std::vector<Event> initialize(std::vector<std::shared_ptr<Initializer>> initializers) {
-    //     for (const auto &initializer : initializers) {
-    //         initializer->initialize();
-    //     }
-    // }
-
-    // FIXME: just this comment. Now parameter owns optimizer and initializer side of things.
     virtual std::vector<std::string> getParameterNames() {
         std::vector<std::string> parameterNames;
         for (const auto &parameter : parameters) {
@@ -308,11 +391,6 @@ class TrainableLayer : public Parameterizable {
     }
 
    protected:
-    // FIXME: Since inherits Parameterizable, it gets parameters
-    // std::vector<std::shared_ptr<Parameter>> parameters;
-    // std::vector<std::shared_ptr<Optimizer>> optimizers; FIXME: parameters own optimizers and initializers
-    // std::vector<Initializer> weightsInitializers;
-
     std::vector<Stream> uniqueDataStreams;
     Optional<Stream> gradientUpdateStream;
     std::vector<Event> errorOutHasBeenComputedEvents;
@@ -325,6 +403,7 @@ class TrainableLayer : public Parameterizable {
     uint32_t numBackwardConnections = 0;
 
     bool wGradFusedWithEOutGrad = false;
+    bool compiled = false;
 
    private:
     // stampedId is used to identify which layers correspond to which other layers across multiple stamps of the same network.

@@ -14,10 +14,11 @@ Parameter::Parameter(string name, bool trainable, bool trainingEnabled)
 // Remember this is called by API layer so that will hand over the optimizer
 // 1. Create storage given featureInput 2. Compile the optimizer
 void Parameter::compile(const Tensor &featureInput,
+                        const Tensor &featureOutput,
                         const Optional<Stream> &gradientUpdateStream,
                         bool inferenceOnly,
-                        const uint64_t layerFanIn,
-                        const uint64_t layerFanOut) {
+                        uint64_t explicitFanIn,
+                        uint64_t explicitFanOut) {
     assert(featureInput.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     createStorage(featureInput, featureInput.getPlacement().getDeviceNum());
 
@@ -28,11 +29,29 @@ void Parameter::compile(const Tensor &featureInput,
     }
 
     if (hasInitializer()) {
-        if (gradientUpdateStream.isPresent())
-            initializer->compile(storage, gradientUpdateStream.get(), layerFanIn, layerFanOut);
+        uint64_t fanIn;
+        if (explicitFanIn == 0)
+            fanIn = 1;
         else
-            initializer->compile(
-                storage, Stream::getNextGradientUpdateStream(storage.get().getPlacement().getDeviceNum()), layerFanIn, layerFanOut);
+            fanIn = explicitFanIn;
+
+        uint64_t fanOut;
+        if (explicitFanOut == 0) {
+            uint64_t outputNumelPerExample = 1;
+            const auto outputDims = featureOutput.getDimensions();
+            for (uint32_t i = 1; i < outputDims.size(); ++i) {
+                outputNumelPerExample *= outputDims[i];
+            }
+            fanOut = max<uint64_t>(1, outputNumelPerExample / storage.get().getTotalNumElements());
+        } else {
+            fanOut = explicitFanOut;
+        }
+
+        Stream initStream = gradientUpdateStream.isPresent()
+                                ? gradientUpdateStream.get()
+                                : Stream::getMostRecentGradientUpdateStream(storage.get().getPlacement().getDeviceNum());
+
+        initializer->compile(storage, initStream, fanIn, fanOut);
     }
 }
 
@@ -40,7 +59,7 @@ void Parameter::createStorage(std::unordered_map<std::string, Tensor> featureInp
     throw runtime_error("Not implemented");
 }
 
-void Parameter::clearStorage() { storage = Optional<Tensor>::empty(); }
+void Parameter::clearStorage() { storage.clear(); }
 
 Event Parameter::initialize() {
     assert(hasInitializer());

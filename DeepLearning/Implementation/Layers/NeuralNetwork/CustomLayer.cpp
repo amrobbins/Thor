@@ -235,6 +235,15 @@ Optional<Tensor> CustomLayer::stampBackward(uint32_t connectionNumber) {
         if (errorOutput.isPresent()) {
             backwardMainPreallocatedOutputs[errorOutName] = errorOutput.get();
         }
+        for (auto& parameter : parameters) {
+            if (parameter->hasOptimizer()) {
+                shared_ptr<Optimizer> parameterOptimizer = parameter->getOptimizer();
+                assert(parameterOptimizer->getWeightsGradient().isPresent());
+                backwardMainPreallocatedOutputs[parameter->getName() + "_grad"] = parameterOptimizer->getWeightsGradient().get();
+            } else {
+                assert(parameter->isTrainable() == false);
+            }
+        }
 
         backwardErrorStampedByConnection[connectionNumber] =
             std::make_shared<StampedExecutionPlan>(preparedBackwardSource->stampBackward(mainTargets,
@@ -245,6 +254,7 @@ Optional<Tensor> CustomLayer::stampBackward(uint32_t connectionNumber) {
                                                                                          backwardMainPreallocatedOutputs));
 
         for (const std::string& parameterTarget : parameterTargets) {
+            // Connect accumulator stamp to existing gradient output memory
             const std::string gradName = parameterTarget + "_grad";
             backwardOutputs[gradName] = backwardErrorStampedByConnection[connectionNumber]->output(gradName);
         }
