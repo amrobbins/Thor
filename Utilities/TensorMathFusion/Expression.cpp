@@ -25,7 +25,7 @@ class HelperStreamPool {
         std::array<Stream, MAX_HELPER_STREAMS_PER_GPU> streams;
         std::atomic<uint32_t> next_index{0};
 
-        explicit PerGpuHelperStreams(uint32_t gpu)
+        explicit PerGpuHelperStreams(int32_t gpu)
             : streams{Stream(gpu), Stream(gpu), Stream(gpu), Stream(gpu), Stream(gpu), Stream(gpu), Stream(gpu), Stream(gpu)} {
             for (Stream& stream : streams) {
                 stream.informIsStatic();
@@ -288,7 +288,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         }
 
         default:
-            throw std::runtime_error("Unsupported ExprOp in canonicalizeNode: " + std::to_string((int)n.op));
+            throw std::runtime_error("Unsupported ExprOp in canonicalizeNode: " + std::to_string(static_cast<int>(n.op)));
     }
 
     appendNodeDTypeMetadata(out, n);
@@ -450,7 +450,7 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
     } else if (Expression::isLeafOp(srcNode.op)) {
         // nothing to recurse into
     } else {
-        std::string error_message = "Malformed expression: unsupported op in cloneSubtree: " + std::to_string((int)srcNode.op);
+        std::string error_message = "Malformed expression: unsupported op in cloneSubtree: " + std::to_string(static_cast<int>(srcNode.op));
         throw std::runtime_error(error_message.c_str());
     }
 
@@ -512,7 +512,7 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
     } else if (srcNode.op == ExprOp::SCALAR_FP) {
         // nothing to recurse into
     } else {
-        throw std::runtime_error("Unsupported op while merging expression outputs: " + std::to_string((int)srcNode.op));
+        throw std::runtime_error("Unsupported op while merging expression outputs: " + std::to_string(static_cast<int>(srcNode.op)));
     }
 
     uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());

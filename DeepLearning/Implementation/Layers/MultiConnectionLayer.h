@@ -176,7 +176,7 @@ class MultiConnectionLayer : public Layer {
         // backPropagateError allows the previous layer to specify that it does not support back propagation,
         // inferenceOnly means that even though back propagation may be supported, we are not using it since we are not training.
         if (backPropagateError && !isInferenceOnly())
-            return featureInput.get().clone();
+            return getFirstPresentTensor(featureInputs).get().clone();
         else
             return Optional<Tensor>::empty();
     }

@@ -190,6 +190,7 @@ class Stream : private ReferenceCounted {
     // The thought here is that this is ok because they all branch off data streams and then re-synchronize to a data stream,
     // so this cannot cause deadlock. If data streams were assigned this same way, deadlock would be possible - so that is not done.
     static Stream getNextGradientUpdateStream(uint32_t deviceNum);
+    static Stream getMostRecentGradientUpdateStream(uint32_t deviceNum);
     static void setMaxNumGradientUpdateStreams(uint32_t numGradientUpdateStreams);
 
     static Stream getNextUploadStream(uint32_t deviceNum);

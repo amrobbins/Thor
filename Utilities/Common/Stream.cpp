@@ -51,6 +51,31 @@ Stream Stream::getNextGradientUpdateStream(uint32_t deviceNum) {
     return stream;
 }
 
+// When you need one for maybe a single use and do not want to advance the round-robin sequence.
+Stream Stream::getMostRecentGradientUpdateStream(uint32_t deviceNum) {
+    unique_lock<mutex> lck(gradientUpdateStreamMutex);
+
+    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
+    if (deviceNum >= numGpus) {
+        printf("Error: trying to get a stream for gpu %d but there are only %d gpus\n", deviceNum, numGpus);
+        fflush(stdout);
+        assert(deviceNum < numGpus);
+    }
+
+    assert(maxNumGradientUpdateStreams > 0);
+
+    while (gradientUpdateStreams.size() < numGpus)
+        gradientUpdateStreams.emplace_back();
+
+    if (gradientUpdateStreams[deviceNum].empty()) {
+        gradientUpdateStreams[deviceNum].emplace_front(deviceNum);
+        gradientUpdateStreams[deviceNum].front().informIsStatic();
+    }
+
+    Stream stream = gradientUpdateStreams[deviceNum].front();
+    return stream;
+}
+
 void Stream::setMaxNumGradientUpdateStreams(uint32_t numGradientUpdateStreams) {
     unique_lock<mutex> lck(gradientUpdateStreamMutex);
 

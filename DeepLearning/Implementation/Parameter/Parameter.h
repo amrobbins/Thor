@@ -16,12 +16,14 @@ class Parameter {
     // Remember this is called by API layer so that will hand over the optimizer
     // 1. Create storage given featureInput 2. Compile the optimizer
     virtual void compile(const Tensor &featureInput,
+                         const Tensor &featureOutput,
                          const Optional<Stream> &gradientUpdateStream,
                          bool inferenceOnly,
-                         const uint64_t layerFanIn,
-                         const uint64_t layerFanOut);
+                         uint64_t explicitFanIn = 0,
+                         uint64_t explicitFanOut = 0);
 
     virtual void compile(std::unordered_map<std::string, Tensor> featureInput,
+                         std::unordered_map<std::string, Tensor> featureOutput,
                          const Optional<Stream> &gradientUpdateStream,
                          bool inferenceOnly) {
         assert(false);
