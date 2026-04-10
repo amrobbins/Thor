@@ -3,6 +3,7 @@
 #include "Utilities/TensorMathFusion/EquationRunner.h"
 #include "Utilities/TensorMathFusion/FusedEquation.h"
 #include "Utilities/TensorMathFusion/ReduceMinMaxBackwardKernel.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include <optional>
 #include <stdexcept>
@@ -161,6 +162,93 @@ void StampedArgMinMax::runOn(Stream& run_stream) const {
                                   beta,
                                   built_reduction->c_desc,
                                   (void*)reduction_value_output.getMemPtr()));
+}
+
+StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
+                             std::shared_ptr<BuiltMatmul> built,
+                             const Tensor& lhs,
+                             const Tensor& rhs,
+                             const Optional<Tensor>& addend,
+                             const Tensor& output,
+                             const Stream& stream,
+                             Optional<Tensor> workspace)
+    : compiled_matmul(std::move(compiled)),
+      built_matmul(std::move(built)),
+      lhs(lhs),
+      rhs(rhs),
+      addend(addend),
+      output(output),
+      stream(stream),
+      workspace(workspace) {
+    if (!compiled_matmul) {
+        throw std::runtime_error("StampedMatmul requires non-null compiled payload.");
+    }
+    if (!built_matmul) {
+        throw std::runtime_error("StampedMatmul requires non-null built matmul payload.");
+    }
+    if (built_matmul->workspace_bytes != 0) {
+        if (!workspace.isPresent()) {
+            throw std::runtime_error("StampedMatmul requires workspace for the chosen optimal kernel.");
+        }
+        assert(workspace.get().getArraySizeInBytes() >= built_matmul->workspace_bytes);
+    }
+}
+
+void StampedMatmul::run() { runOn(stream); }
+
+void StampedMatmul::runOn(Stream& run_stream) const {
+    if (lhs.getDimensions().size() != 2 || rhs.getDimensions().size() != 2 || output.getDimensions().size() != 2) {
+        throw std::runtime_error("StampedMatmul currently only supports rank-2 tensors.");
+    }
+
+    const auto lhs_dims = lhs.getDimensions();
+    const auto rhs_dims = rhs.getDimensions();
+    const int32_t a_rows = static_cast<int32_t>(lhs_dims[0]);
+    const int32_t a_cols = static_cast<int32_t>(lhs_dims[1]);
+    const int32_t b_rows = static_cast<int32_t>(rhs_dims[0]);
+    const int32_t b_cols = static_cast<int32_t>(rhs_dims[1]);
+
+    if (compiled_matmul->op == ExprOp::MATMUL) {
+        CublasMatrixMultiply::instance().multiply(lhs,
+                                                  rhs,
+                                                  output,
+                                                  workspace,
+                                                  a_rows,
+                                                  a_cols,
+                                                  b_rows,
+                                                  b_cols,
+                                                  compiled_matmul->transpose_lhs,
+                                                  compiled_matmul->transpose_rhs,
+                                                  false,
+                                                  false,
+                                                  compiled_matmul->output_dtype,
+                                                  run_stream);
+        return;
+    }
+
+    if (!addend.isPresent()) {
+        throw std::runtime_error("Stamped GEMM requires an addend tensor.");
+    }
+    if (addend.get().getDimensions().size() != 2) {
+        throw std::runtime_error("Stamped GEMM currently only supports rank-2 addend tensors.");
+    }
+
+    CublasMatrixMultiply::instance().gemm(lhs,
+                                          rhs,
+                                          addend.get(),
+                                          output,
+                                          workspace,
+                                          a_rows,
+                                          a_cols,
+                                          b_rows,
+                                          b_cols,
+                                          compiled_matmul->transpose_lhs,
+                                          compiled_matmul->transpose_rhs,
+                                          compiled_matmul->transpose_aux,
+                                          static_cast<float>(compiled_matmul->alpha),
+                                          static_cast<float>(compiled_matmul->beta),
+                                          compiled_matmul->output_dtype,
+                                          run_stream);
 }
 
 StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
@@ -335,6 +423,16 @@ static shared_ptr<BuiltReduction> cacheLookup(const ReductionCacheKey& key) {
     return nullptr;
 }
 
+static LruCacheThreadSafe<MatmulCacheKey, shared_ptr<BuiltMatmul>> builtMatmulCache(10'000);
+
+static shared_ptr<BuiltMatmul> cacheLookup(const MatmulCacheKey& key) {
+    optional<shared_ptr<BuiltMatmul>> hit = builtMatmulCache.get(key);
+    if (hit.has_value()) {
+        return hit.value();
+    }
+    return nullptr;
+}
+
 static cudnnDataType_t toCudnnDataType(TensorDescriptor::DataType dtype) {
     switch (dtype) {
         case TensorDescriptor::DataType::FP32:
@@ -487,6 +585,133 @@ static size_t getReductionIndicesSize(int device_num,
     size_t indices_bytes = 0;
     CUDNN_CHECK(cudnnGetReductionIndicesSize(stream.getCudnnHandle(), reduce_desc, a_desc, c_desc, &indices_bytes));
     return indices_bytes;
+}
+
+static int32_t leadingDimensionForStoredMatrix(const Tensor& matrix) {
+    const std::vector<uint64_t> dims = matrix.getDimensions();
+    if (dims.size() != 2) {
+        throw std::runtime_error("Matmul/gemm workspace planning currently only supports rank-2 tensors.");
+    }
+    return static_cast<int32_t>(dims[1]);
+}
+
+std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
+                                                          const Tensor& lhs,
+                                                          const Tensor& rhs,
+                                                          const Optional<Tensor>& addend,
+                                                          const Tensor& output,
+                                                          int device_num) {
+    if (!compiled_matmul) {
+        throw std::runtime_error("buildMatmul requires non-null compiled payload.");
+    }
+    if (lhs.getDimensions().size() != 2 || rhs.getDimensions().size() != 2 || output.getDimensions().size() != 2) {
+        throw std::runtime_error("buildMatmul currently only supports rank-2 tensors.");
+    }
+    if (compiled_matmul->op == ExprOp::GEMM) {
+        if (!addend.isPresent()) {
+            throw std::runtime_error("buildMatmul requires an addend tensor for GEMM.");
+        }
+        if (addend.get().getDimensions().size() != 2) {
+            throw std::runtime_error("buildMatmul currently only supports rank-2 GEMM addend tensors.");
+        }
+        if (compiled_matmul->transpose_aux) {
+            throw std::runtime_error("GEMM transpose_aux/transposeC is not supported by CublasMatrixMultiply in this staged path.");
+        }
+    }
+
+    const std::vector<uint64_t> lhs_dims = lhs.getDimensions();
+    const std::vector<uint64_t> rhs_dims = rhs.getDimensions();
+    const int32_t a_rows = static_cast<int32_t>(lhs_dims[0]);
+    const int32_t a_cols = static_cast<int32_t>(lhs_dims[1]);
+    const int32_t b_rows = static_cast<int32_t>(rhs_dims[0]);
+    const int32_t b_cols = static_cast<int32_t>(rhs_dims[1]);
+    const int32_t ld_a = leadingDimensionForStoredMatrix(lhs);
+    const int32_t ld_b = leadingDimensionForStoredMatrix(rhs);
+    const int32_t ld_d = leadingDimensionForStoredMatrix(output);
+    const int32_t ld_c = addend.isPresent() ? leadingDimensionForStoredMatrix(addend.get()) : ld_d;
+
+    MatmulCacheKey key(compiled_matmul->op,
+                       a_rows,
+                       a_cols,
+                       b_rows,
+                       b_cols,
+                       ld_a,
+                       ld_b,
+                       ld_c,
+                       ld_d,
+                       compiled_matmul->transpose_lhs,
+                       compiled_matmul->transpose_rhs,
+                       compiled_matmul->transpose_aux,
+                       compiled_matmul->output_dtype,
+                       device_num);
+
+    std::shared_ptr<BuiltMatmul> hit = cacheLookup(key);
+    if (hit) {
+        return hit;
+    }
+
+    auto built = std::make_shared<BuiltMatmul>(key);
+    bool kernelWillRunOnGpu = false;
+    if (compiled_matmul->op == ExprOp::MATMUL) {
+        CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(device_num,
+                                                                           a_rows,
+                                                                           a_cols,
+                                                                           b_rows,
+                                                                           b_cols,
+                                                                           ld_a,
+                                                                           ld_b,
+                                                                           ld_d,
+                                                                           compiled_matmul->transpose_lhs,
+                                                                           compiled_matmul->transpose_rhs,
+                                                                           compiled_matmul->output_dtype);
+        built->workspace_bytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(device_num,
+                                                                                                        a_rows,
+                                                                                                        a_cols,
+                                                                                                        b_rows,
+                                                                                                        b_cols,
+                                                                                                        ld_a,
+                                                                                                        ld_b,
+                                                                                                        ld_d,
+                                                                                                        compiled_matmul->transpose_lhs,
+                                                                                                        compiled_matmul->transpose_rhs,
+                                                                                                        compiled_matmul->output_dtype,
+                                                                                                        kernelWillRunOnGpu);
+    } else {
+        CublasMatrixMultiply::instance().chooseOptimalGemmKernel(device_num,
+                                                                 a_rows,
+                                                                 a_cols,
+                                                                 b_rows,
+                                                                 b_cols,
+                                                                 ld_a,
+                                                                 ld_b,
+                                                                 ld_c,
+                                                                 ld_d,
+                                                                 compiled_matmul->transpose_lhs,
+                                                                 compiled_matmul->transpose_rhs,
+                                                                 compiled_matmul->transpose_aux,
+                                                                 compiled_matmul->output_dtype);
+        built->workspace_bytes = CublasMatrixMultiply::instance().getGemmWorkspaceSizeInBytes(device_num,
+                                                                                              a_rows,
+                                                                                              a_cols,
+                                                                                              b_rows,
+                                                                                              b_cols,
+                                                                                              ld_a,
+                                                                                              ld_b,
+                                                                                              ld_c,
+                                                                                              ld_d,
+                                                                                              compiled_matmul->transpose_lhs,
+                                                                                              compiled_matmul->transpose_rhs,
+                                                                                              compiled_matmul->transpose_aux,
+                                                                                              compiled_matmul->output_dtype,
+                                                                                              kernelWillRunOnGpu);
+    }
+
+    if (!kernelWillRunOnGpu) {
+        throw std::runtime_error("No GPU kernel available for the staged matmul/gemm configuration.");
+    }
+
+    builtMatmulCache.put(key, built);
+    return built;
 }
 
 std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::shared_ptr<CompiledReduction>& compiled_reduction,

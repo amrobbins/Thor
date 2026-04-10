@@ -986,6 +986,9 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::REDUCE_NORM2:
                 node_dims[i] = StampedEquation::computeReductionOutputDims(node_dims[node.lhs], node.reduction_axes, node.squeeze_axes);
                 break;
+            case ExprOp::MATMUL:
+            case ExprOp::GEMM:
+                throw std::runtime_error("Thor expressions autodiff shape inference does not yet support matmul/gemm.");
             default:
                 throw std::runtime_error("inferForwardNodeDims encountered unknown ExprOp.");
         }
@@ -1647,6 +1650,8 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
             case ExprOp::REDUCE_ARGMIN:
             case ExprOp::REDUCE_ARGMAX:
+            case ExprOp::MATMUL:
+            case ExprOp::GEMM:
                 throw std::runtime_error("Thor expressions autodiff does not support backward for op " + opName(node.op) + ".");
 
             default:

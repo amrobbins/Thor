@@ -27,7 +27,7 @@ struct ParameterFanOverride {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -36,6 +36,8 @@ struct CompiledExecutionStage {
                 return "Reduction";
             case Kind::ArgMinMax:
                 return "ArgMinMax";
+            case Kind::Matmul:
+                return "Matmul";
             case Kind::ReduceMinMaxBackward:
                 return "ReduceMinMaxBackward";
         }
@@ -49,6 +51,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledEquation> flat = nullptr;
     const std::shared_ptr<CompiledReduction> reduction = nullptr;
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
+    const std::shared_ptr<CompiledMatmul> matmul = nullptr;
     const std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = nullptr;
 
     const std::vector<uint32_t> input_value_ids;
@@ -84,6 +87,16 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::ArgMinMax),
           arg_minmax(arg_minmax),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledMatmul>& matmul,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::Matmul),
+          matmul(matmul),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
@@ -274,6 +287,19 @@ class FusedEquation {
                                                                    const Optional<Tensor>& preallocatedOutput,
                                                                    const Stream& stream,
                                                                    const std::vector<uint64_t>& requested_output_shape) const;
+
+    [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
+                                                             Tensor& lhs,
+                                                             Tensor& rhs,
+                                                             const Optional<Tensor>& preallocatedOutput,
+                                                             const Stream& stream) const;
+
+    [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
+                                                             Tensor& lhs,
+                                                             Tensor& rhs,
+                                                             Tensor& addend,
+                                                             const Optional<Tensor>& preallocatedOutput,
+                                                             const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
         const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,

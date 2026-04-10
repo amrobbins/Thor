@@ -173,8 +173,11 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
     if (!Expression::isLeafOp(node.op)) {
         add_tensor_parent(node.lhs);
     }
-    if (Expression::isBinaryOp(node.op)) {
+    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         add_tensor_parent(node.rhs);
+    }
+    if (Expression::isTernaryOp(node.op)) {
+        add_tensor_parent(node.aux);
     }
 
     return tensor_parent_dtypes.empty() ? DataType::FP32 : promoteTensorValueDTypes(tensor_parent_dtypes);
@@ -220,8 +223,11 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
     if (!Expression::isLeafOp(node.op)) {
         add_tensor_parent(node.lhs);
     }
-    if (Expression::isBinaryOp(node.op)) {
+    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         add_tensor_parent(node.rhs);
+    }
+    if (Expression::isTernaryOp(node.op)) {
+        add_tensor_parent(node.aux);
     }
 
     if (node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX) {

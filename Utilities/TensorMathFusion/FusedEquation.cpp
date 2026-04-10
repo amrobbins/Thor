@@ -122,6 +122,52 @@ static Tensor adaptReductionInputDTypeIfNeeded(const Tensor& input,
     return castInput;
 }
 
+static Tensor adaptMatmulInputDTypeIfNeeded(const Tensor& input, DataType expected_input_dtype, const Stream& stream) {
+    if (input.getDataType() == expected_input_dtype) {
+        return input;
+    }
+    TensorDescriptor castDescriptor(expected_input_dtype, input.getDimensions());
+    Tensor castInput(input.getPlacement(), castDescriptor);
+    castInput.copyFromAsync(input, stream);
+    return castInput;
+}
+
+static std::vector<uint64_t> resolveMatmulOutputDimsFromInputs(const CompiledMatmul& compiled_stage,
+                                                               const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    const size_t expected_inputs = compiled_stage.op == ExprOp::MATMUL ? 2u : 3u;
+    if (stage_input_dims.size() != expected_inputs) {
+        throw std::runtime_error("Matmul/gemm stage expected " + std::to_string(expected_inputs) + " input shapes.");
+    }
+
+    const auto& a_dims = stage_input_dims[0];
+    const auto& b_dims = stage_input_dims[1];
+    if (a_dims.size() != 2 || b_dims.size() != 2) {
+        throw std::runtime_error("Matmul/gemm stage currently only supports rank-2 tensors.");
+    }
+
+    const uint64_t a_rows = compiled_stage.transpose_lhs ? a_dims[1] : a_dims[0];
+    const uint64_t a_cols = compiled_stage.transpose_lhs ? a_dims[0] : a_dims[1];
+    const uint64_t b_rows = compiled_stage.transpose_rhs ? b_dims[1] : b_dims[0];
+    const uint64_t b_cols = compiled_stage.transpose_rhs ? b_dims[0] : b_dims[1];
+
+    if (a_cols != b_rows) {
+        throw std::runtime_error("Matmul/gemm stage has incompatible matrix dimensions.");
+    }
+
+    std::vector<uint64_t> out_dims{a_rows, b_cols};
+    if (compiled_stage.op == ExprOp::GEMM) {
+        const auto& c_dims = stage_input_dims[2];
+        if (c_dims.size() != 2) {
+            throw std::runtime_error("GEMM addend currently must be rank-2.");
+        }
+        std::vector<uint64_t> expected_c = compiled_stage.transpose_aux ? std::vector<uint64_t>{out_dims[1], out_dims[0]} : out_dims;
+        if (c_dims != expected_c) {
+            throw std::runtime_error("GEMM addend tensor dimensions are incompatible with the matmul output.");
+        }
+    }
+    return out_dims;
+}
+
 static RuntimeDTypeKey makeRuntimeDTypeKey(const std::vector<NamedInput>& root_inputs,
                                            const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
     RuntimeDTypeKey key;
@@ -374,6 +420,11 @@ static DataType compiledStageOutputDType(const CompiledExecutionStage& stage, si
                 throw std::runtime_error("compiledStageOutputDType missing arg-min/max stage.");
             }
             return stage.arg_minmax->output_dtype;
+        case CompiledExecutionStage::Kind::Matmul:
+            if (!stage.matmul) {
+                throw std::runtime_error("compiledStageOutputDType missing matmul/gemm stage.");
+            }
+            return stage.matmul->output_dtype;
         case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("compiledStageOutputDType missing reduce-min/max-backward stage.");
@@ -769,6 +820,13 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                     "resolveOutputDimsForStageOutput reduce-min/max-backward stage expected at least one input shape.");
             }
             return stage_input_dims[0];
+        }
+
+        case CompiledExecutionStage::Kind::Matmul: {
+            if (!stage.matmul) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput matmul stage missing payload.");
+            }
+            return resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
         }
 
         case CompiledExecutionStage::Kind::FusedKernel:
@@ -1322,6 +1380,14 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
             }
 
             value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
+        } else if (stage.kind == CompiledExecutionStage::Kind::Matmul) {
+            if (!stage.matmul) {
+                throw std::runtime_error("Missing compiled matmul stage.");
+            }
+            if (stage.outputs.size() != 1) {
+                throw std::runtime_error("Matmul/gemm stage expected exactly one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
         } else {
             throw std::runtime_error("Unknown execution stage kind in getOutputShapes.");
         }
@@ -2146,6 +2212,101 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
     return make_shared<StampedArgMinMax>(std::move(built), adaptedInput, output, reductionValueOutput, stream, workspace);
 }
 
+std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
+                                                          Tensor& lhs,
+                                                          Tensor& rhs,
+                                                          const Optional<Tensor>& preallocatedOutput,
+                                                          const Stream& stream) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampMatmul requires non-null compiled stage.");
+    }
+    if (compiledStage->op != ExprOp::MATMUL) {
+        throw std::runtime_error("stampMatmul(lhs, rhs, ...) called for a non-matmul stage.");
+    }
+
+    Tensor adaptedLhs = adaptMatmulInputDTypeIfNeeded(lhs, compiledStage->input_dtype, stream);
+    Tensor adaptedRhs = adaptMatmulInputDTypeIfNeeded(rhs, compiledStage->input_dtype, stream);
+    const std::vector<uint64_t> output_dims =
+        resolveMatmulOutputDimsFromInputs(*compiledStage, {adaptedLhs.getDimensions(), adaptedRhs.getDimensions()});
+
+    Tensor output;
+    if (preallocatedOutput.isPresent()) {
+        output = preallocatedOutput.get();
+        if (output.getPlacement() != adaptedLhs.getPlacement()) {
+            throw std::runtime_error("Preallocated matmul output tensor placement does not match the input placement.");
+        }
+        if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
+            throw std::runtime_error("Preallocated matmul output tensor dtype does not match the compiled output dtype.");
+        }
+        if (output.getDimensions() != output_dims) {
+            throw std::runtime_error("Preallocated matmul output tensor dimensions are incompatible with the matmul output shape.");
+        }
+    } else {
+        TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dims);
+        output = Tensor(adaptedLhs.getPlacement(), outputDescriptor);
+    }
+
+    std::shared_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(
+        compiledStage, adaptedLhs, adaptedRhs, Optional<Tensor>::empty(), output, adaptedLhs.getPlacement().getDeviceNum());
+
+    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    if (built->workspace_bytes > 0) {
+        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
+        workspace = Tensor(adaptedLhs.getPlacement(), workspaceDescriptor);
+    }
+
+    return make_shared<StampedMatmul>(compiledStage, built, adaptedLhs, adaptedRhs, Optional<Tensor>::empty(), output, stream, workspace);
+}
+
+std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
+                                                          Tensor& lhs,
+                                                          Tensor& rhs,
+                                                          Tensor& addend,
+                                                          const Optional<Tensor>& preallocatedOutput,
+                                                          const Stream& stream) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampMatmul requires non-null compiled stage.");
+    }
+    if (compiledStage->op != ExprOp::GEMM) {
+        throw std::runtime_error("stampMatmul(lhs, rhs, addend, ...) called for a non-gemm stage.");
+    }
+
+    Tensor adaptedLhs = adaptMatmulInputDTypeIfNeeded(lhs, compiledStage->input_dtype, stream);
+    Tensor adaptedRhs = adaptMatmulInputDTypeIfNeeded(rhs, compiledStage->input_dtype, stream);
+    Tensor adaptedAddend = adaptMatmulInputDTypeIfNeeded(addend, compiledStage->input_dtype, stream);
+    const std::vector<uint64_t> output_dims = resolveMatmulOutputDimsFromInputs(
+        *compiledStage, {adaptedLhs.getDimensions(), adaptedRhs.getDimensions(), adaptedAddend.getDimensions()});
+
+    Tensor output;
+    if (preallocatedOutput.isPresent()) {
+        output = preallocatedOutput.get();
+        if (output.getPlacement() != adaptedLhs.getPlacement()) {
+            throw std::runtime_error("Preallocated gemm output tensor placement does not match the input placement.");
+        }
+        if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
+            throw std::runtime_error("Preallocated gemm output tensor dtype does not match the compiled output dtype.");
+        }
+        if (output.getDimensions() != output_dims) {
+            throw std::runtime_error("Preallocated gemm output tensor dimensions are incompatible with the gemm output shape.");
+        }
+    } else {
+        TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dims);
+        output = Tensor(adaptedLhs.getPlacement(), outputDescriptor);
+    }
+
+    std::shared_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(
+        compiledStage, adaptedLhs, adaptedRhs, Optional<Tensor>(adaptedAddend), output, adaptedLhs.getPlacement().getDeviceNum());
+
+    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    if (built->workspace_bytes > 0) {
+        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
+        workspace = Tensor(adaptedLhs.getPlacement(), workspaceDescriptor);
+    }
+
+    return make_shared<StampedMatmul>(
+        compiledStage, built, adaptedLhs, adaptedRhs, Optional<Tensor>(adaptedAddend), output, stream, workspace);
+}
+
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
     const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const {
     return stampReduceMinMaxBackward(compiledStage, input, grad_output, Optional<Tensor>::empty(), stream);
@@ -2481,6 +2642,46 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
                 stampedStages.emplace_back(stampedArgMinMax, std::move(dependency_stage_indices));
+                break;
+            }
+            case CompiledExecutionStage::Kind::Matmul: {
+                if (!stage.matmul) {
+                    throw std::runtime_error("Matmul/gemm stage missing compiled payload.");
+                }
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Matmul/gemm stage expects exactly one output.");
+                }
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Optional<Tensor> preallocated = Optional<Tensor>::empty();
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    preallocated = preallocated_it->second;
+                }
+                std::shared_ptr<StampedMatmul> stampedMatmul;
+                if (stage.matmul->op == ExprOp::MATMUL) {
+                    if (stageInputs.size() != 2) {
+                        throw std::runtime_error("Matmul stage expects exactly two inputs.");
+                    }
+                    Tensor lhsTensor = runtimeInputTensor(stageInputs[0]);
+                    Tensor rhsTensor = runtimeInputTensor(stageInputs[1]);
+                    stampedMatmul = stampMatmul(stage.matmul, lhsTensor, rhsTensor, preallocated, stream);
+                } else {
+                    if (stageInputs.size() != 3) {
+                        throw std::runtime_error("GEMM stage expects exactly three inputs.");
+                    }
+                    Tensor lhsTensor = runtimeInputTensor(stageInputs[0]);
+                    Tensor rhsTensor = runtimeInputTensor(stageInputs[1]);
+                    Tensor addendTensor = runtimeInputTensor(stageInputs[2]);
+                    stampedMatmul = stampMatmul(stage.matmul, lhsTensor, rhsTensor, addendTensor, preallocated, stream);
+                }
+                Tensor outputTensor = stampedMatmul->getOutputTensor();
+                if (outputTensor.getDimensions() != output_dims) {
+                    throw std::runtime_error("Stamped matmul/gemm output tensor dimensions are incompatible with the staged output shape.");
+                }
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedMatmul, std::move(dependency_stage_indices));
                 break;
             }
             case CompiledExecutionStage::Kind::ReduceMinMaxBackward: {

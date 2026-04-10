@@ -45,6 +45,8 @@ enum class ExprOp : uint16_t {
     MIN_GRAD_RIGHT,
     MAX_GRAD_LEFT,
     MAX_GRAD_RIGHT,
+    MATMUL,
+    GEMM,
     REDUCE_SUM,
     REDUCE_PROD,
     REDUCE_MIN,
@@ -53,7 +55,6 @@ enum class ExprOp : uint16_t {
     REDUCE_ARGMAX,
     REDUCE_MIN_BACKWARD,
     REDUCE_MAX_BACKWARD,
-    // REDUCE_AMAX, <-- requires indices, not doing for now.
     REDUCE_AVG,
     REDUCE_NORM1,
     REDUCE_NORM2,
@@ -92,8 +93,14 @@ struct ExprNode {
     ExprOp op;
     uint32_t lhs = UINT32_MAX;
     uint32_t rhs = UINT32_MAX;  // unused for unary/scalar ops
+    uint32_t aux = UINT32_MAX;  // third input for ternary ops like GEMM
     uint32_t input_slot = UINT32_MAX;
     double scalar_fp = 0.0;
+    double alpha_fp = 1.0;
+    double beta_fp = 0.0;
+    bool transpose_lhs = false;
+    bool transpose_rhs = false;
+    bool transpose_aux = false;
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     Optional<TensorDescriptor::DataType> input_tensor_dtype = Optional<TensorDescriptor::DataType>::empty();
@@ -223,6 +230,23 @@ class Expression {
     [[nodiscard]] Expression unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const;
     [[nodiscard]] Expression squeeze(const std::vector<uint64_t>& squeeze_axes) const;
     [[nodiscard]] Expression pow(const Expression& exponent) const;
+    [[nodiscard]] static Expression matmul(
+        const Expression& lhs,
+        const Expression& rhs,
+        bool transpose_lhs = false,
+        bool transpose_rhs = false,
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
+        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+    [[nodiscard]] static Expression gemm(const Expression& lhs,
+                                         const Expression& rhs,
+                                         const Expression& addend,
+                                         double alpha = 1.0,
+                                         double beta = 1.0,
+                                         bool transpose_lhs = false,
+                                         bool transpose_rhs = false,
+                                         bool transpose_addend = false,
+                                         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
+                                         Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
 
     [[nodiscard]] Expression reduction(ExprOp op,
                                        const std::vector<uint64_t>& reduction_axes,
@@ -277,6 +301,7 @@ class Expression {
     [[nodiscard]] static bool isLeafOp(ExprOp op);
     [[nodiscard]] static bool isUnaryOp(ExprOp op);
     [[nodiscard]] static bool isBinaryOp(ExprOp op);
+    [[nodiscard]] static bool isTernaryOp(ExprOp op);
 
    private:
     std::shared_ptr<PhysicalExpression> expr;
@@ -285,6 +310,7 @@ class Expression {
     [[nodiscard]] Expression(std::shared_ptr<PhysicalExpression> expr, uint32_t nodeIndex) : expr(std::move(expr)), nodeIndex(nodeIndex) {}
 
     [[nodiscard]] static Expression binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprOp op);
+    [[nodiscard]] static Expression ternaryOp(const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, ExprOp op);
     [[nodiscard]] static Expression unaryOp(const Expression& inputExpr, ExprOp op);
 };
 
