@@ -75,8 +75,14 @@ struct StageNodeKey {
     ExprOp op = ExprOp::INPUT;
     uint32_t lhs = UINT32_MAX;
     uint32_t rhs = UINT32_MAX;
+    uint32_t aux = UINT32_MAX;
     uint32_t input_slot = UINT32_MAX;
     uint64_t scalar_bits = 0;
+    uint64_t alpha_bits = 0;
+    uint64_t beta_bits = 0;
+    bool transpose_lhs = false;
+    bool transpose_rhs = false;
+    bool transpose_aux = false;
     int32_t input_tensor_dtype = -1;
     int32_t output_dtype = -1;
     int32_t compute_dtype = -1;
@@ -95,8 +101,14 @@ struct StageNodeKeyHash {
         size_t h = std::hash<int>{}(static_cast<int>(k.op));
         hashCombine(h, std::hash<uint32_t>{}(k.lhs));
         hashCombine(h, std::hash<uint32_t>{}(k.rhs));
+        hashCombine(h, std::hash<uint32_t>{}(k.aux));
         hashCombine(h, std::hash<uint32_t>{}(k.input_slot));
         hashCombine(h, std::hash<uint64_t>{}(k.scalar_bits));
+        hashCombine(h, std::hash<uint64_t>{}(k.alpha_bits));
+        hashCombine(h, std::hash<uint64_t>{}(k.beta_bits));
+        hashCombine(h, std::hash<bool>{}(k.transpose_lhs));
+        hashCombine(h, std::hash<bool>{}(k.transpose_rhs));
+        hashCombine(h, std::hash<bool>{}(k.transpose_aux));
         hashCombine(h, std::hash<int32_t>{}(k.input_tensor_dtype));
         hashCombine(h, std::hash<int32_t>{}(k.output_dtype));
         hashCombine(h, std::hash<int32_t>{}(k.compute_dtype));
@@ -137,6 +149,11 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.compute_dtype = optionalDTypeTag(n.compute_dtype);
     key.backward_output_dtype = optionalDTypeTag(n.backward_output_dtype);
     key.backward_compute_dtype = optionalDTypeTag(n.backward_compute_dtype);
+    key.transpose_lhs = n.transpose_lhs;
+    key.transpose_rhs = n.transpose_rhs;
+    key.transpose_aux = n.transpose_aux;
+    key.alpha_bits = scalarBits(n.alpha_fp);
+    key.beta_bits = scalarBits(n.beta_fp);
 
     switch (n.op) {
         case ExprOp::INPUT:
@@ -161,6 +178,10 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
                 if (isCommutativeStageOp(n.op) && key.lhs > key.rhs) {
                     std::swap(key.lhs, key.rhs);
                 }
+            }
+            if (Expression::isTernaryOp(n.op)) {
+                key.rhs = n.rhs;
+                key.aux = n.aux;
             }
             key.reduction_axes = n.reduction_axes;
             key.squeeze_axes = n.squeeze_axes;
@@ -200,6 +221,10 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
         if (Expression::isBinaryOp(n.op)) {
             n.rhs = remapNode(n.rhs);
         }
+        if (Expression::isTernaryOp(n.op)) {
+            n.rhs = remapNode(n.rhs);
+            n.aux = remapNode(n.aux);
+        }
 
         if (isCommutativeStageOp(n.op) && Expression::isBinaryOp(n.op) && n.lhs > n.rhs) {
             std::swap(n.lhs, n.rhs);
@@ -228,9 +253,10 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
 }
 
 static bool isArgMinMaxOp(ExprOp op) { return op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX; }
+static bool isMatmulOp(ExprOp op) { return op == ExprOp::MATMUL || op == ExprOp::GEMM; }
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
 
-static bool isStageBoundaryOp(ExprOp op) { return isCudnnReduceOp(op) || isReduceMinMaxBackwardOp(op); }
+static bool isStageBoundaryOp(ExprOp op) { return isCudnnReduceOp(op) || isMatmulOp(op) || isReduceMinMaxBackwardOp(op); }
 
 static void collectExternalValueIds(const PhysicalExpression& expr,
                                     const std::unordered_set<uint32_t>& region_nodes,
@@ -383,6 +409,10 @@ static const char* fusedOpTag(ExprOp op) {
             return "RNORM1";
         case ExprOp::REDUCE_NORM2:
             return "RNORM2";
+        case ExprOp::MATMUL:
+            return "MATMUL";
+        case ExprOp::GEMM:
+            return "GEMM";
         default:
             throw std::runtime_error("Unsupported op in fusedRegionSignature, value: " + to_string((int)op));
     }
@@ -456,14 +486,29 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
 
     if (isStageBoundaryOp(node.op)) {
         std::string s;
+
         if (isReduceMinMaxBackwardOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",axes=" + uintVecSignature(node.reduction_axes) +
                 ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
+        } else if (isMatmulOp(node.op)) {
+            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+
+            if (node.op == ExprOp::MATMUL) {
+                s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",ta=" + std::to_string(node.transpose_lhs ? 1 : 0) +
+                    ",tb=" + std::to_string(node.transpose_rhs ? 1 : 0) + ")";
+            } else {
+                const std::string aux = fusedRegionSignatureRec(expr, node.aux);
+                s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",aux=" + aux +
+                    ",ta=" + std::to_string(node.transpose_lhs ? 1 : 0) + ",tb=" + std::to_string(node.transpose_rhs ? 1 : 0) +
+                    ",tc=" + std::to_string(node.transpose_aux ? 1 : 0) + ",alpha=" + std::to_string(scalarBits(node.alpha_fp)) +
+                    ",beta=" + std::to_string(scalarBits(node.beta_fp)) + ")";
+            }
         } else {
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",axes=" + uintVecSignature(node.reduction_axes) +
                 ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
         }
+
         appendNodeDTypeSignature(s, node);
         return s;
     }
@@ -828,6 +873,78 @@ shared_ptr<CompiledArgMinMax> EquationCompiler::compileArgMinMax(const PhysicalE
         node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.get(), node.compute_dtype);
 }
 
+shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpression& expr) {
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("Matmul stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isMatmulOp(node.op)) {
+        throw std::runtime_error("Matmul stage output node is not a supported matmul/gemm op.");
+    }
+
+    const uint32_t expected_inputs = node.op == ExprOp::MATMUL ? 2u : 3u;
+    if (expr.numInputs() != expected_inputs) {
+        throw std::runtime_error("Matmul stage must have exactly " + std::to_string(expected_inputs) + " inputs.");
+    }
+
+    auto validate_local_input = [&](uint32_t local_idx, const char* label) -> const ExprNode& {
+        if (local_idx >= expr.nodes.size()) {
+            throw std::runtime_error(std::string("Matmul stage ") + label + " input index is out of range.");
+        }
+        const ExprNode& input_node = expr.nodes[local_idx];
+        if (input_node.op != ExprOp::INPUT) {
+            throw std::runtime_error(std::string("Matmul stage ") + label + " input must be a local INPUT node.");
+        }
+        if (!input_node.input_tensor_dtype.isPresent()) {
+            throw std::runtime_error(std::string("Matmul stage ") + label + " input missing resolved input_tensor_dtype.");
+        }
+        return input_node;
+    };
+
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || (node.op == ExprOp::GEMM && node.aux == UINT32_MAX)) {
+        throw std::runtime_error("Matmul/gemm node is missing required input(s).");
+    }
+
+    const ExprNode& lhs_input = validate_local_input(node.lhs, "lhs");
+    const ExprNode& rhs_input = validate_local_input(node.rhs, "rhs");
+    const ExprNode* aux_input = nullptr;
+    if (node.op == ExprOp::GEMM) {
+        aux_input = &validate_local_input(node.aux, "aux");
+    }
+    (void)aux_input;
+
+    if (!node.output_dtype.isPresent()) {
+        throw std::runtime_error("Matmul/gemm node missing resolved output_dtype.");
+    }
+
+    std::vector<DataType> input_dtypes;
+    input_dtypes.push_back(lhs_input.input_tensor_dtype.get());
+    input_dtypes.push_back(rhs_input.input_tensor_dtype.get());
+
+    if (node.op == ExprOp::GEMM) {
+        const ExprNode& aux_input = validate_local_input(node.aux, "aux");
+        input_dtypes.push_back(aux_input.input_tensor_dtype.get());
+    }
+
+    if (!node.output_dtype.isPresent()) {
+        throw std::runtime_error("Matmul/gemm node missing resolved output_dtype.");
+    }
+
+    const DataType logical_input_dtype = promoteTensorValueDTypes(input_dtypes);
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, logical_input_dtype);
+
+    return make_shared<CompiledMatmul>(node.op,
+                                       node.transpose_lhs,
+                                       node.transpose_rhs,
+                                       node.transpose_aux,
+                                       node.alpha_fp,
+                                       node.beta_fp,
+                                       supported_input_dtype,
+                                       node.output_dtype.get(),
+                                       node.compute_dtype);
+}
+
 shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBackward(const PhysicalExpression& expr) {
     if (expr.numInputs() != 2) {
         throw std::runtime_error("ReduceMinMaxBackward stage must have exactly two inputs.");
@@ -1116,7 +1233,7 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
                                                   const std::string& output_name,
                                                   const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
     const ExprNode& node = expr.nodes[node_idx];
-    if (!isStageBoundaryOp(node.op)) {
+    if (!isCudnnReduceOp(node.op)) {
         throw std::runtime_error("buildReductionStage called on non-reduction node.");
     }
 
@@ -1193,6 +1310,94 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
 
     return PhysicalExecutionStage{
         .kind = isArgMinMaxOp(node.op) ? PhysicalExecutionStage::Kind::ArgMinMax : PhysicalExecutionStage::Kind::Reduction,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = std::move(stage_outputs),
+    };
+}
+
+static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
+                                               uint32_t node_idx,
+                                               uint32_t output_value_id,
+                                               const std::string& output_name,
+                                               const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isMatmulOp(node.op)) {
+        throw std::runtime_error("buildMatmulStage called on non-matmul node.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || (node.op == ExprOp::GEMM && node.aux == UINT32_MAX)) {
+        throw std::runtime_error("Matmul/gemm node missing required input(s).");
+    }
+
+    PhysicalExpression stage_expr;
+    stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
+    stage_expr.inputs.push_back(NamedInput{"__arg1", 1});
+    if (node.op == ExprOp::GEMM) {
+        stage_expr.inputs.push_back(NamedInput{"__arg2", 2});
+    }
+
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(node.op == ExprOp::MATMUL ? 2u : 3u);
+
+    auto bind_parent_to_local_input = [&](uint32_t parent_idx, uint32_t local_slot) {
+        if (parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Matmul/gemm input node index out of range.");
+        }
+
+        const ExprNode& parent = expr.nodes[parent_idx];
+        Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            input_value_ids.push_back(out_it->second);
+            actual_input_dtype = parent.output_dtype;
+        } else if (parent.op == ExprOp::INPUT) {
+            input_value_ids.push_back(parent.input_slot);
+            actual_input_dtype = parent.input_tensor_dtype;
+        } else {
+            throw std::runtime_error("Missing value id for matmul/gemm input.");
+        }
+
+        if (!parent.output_dtype.isPresent()) {
+            throw std::runtime_error("Matmul/gemm parent node missing resolved output_dtype.");
+        }
+        if (!actual_input_dtype.isPresent()) {
+            throw std::runtime_error("Matmul/gemm parent node missing resolved actual input dtype.");
+        }
+
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = actual_input_dtype.get();
+        input_node.output_dtype = parent.output_dtype;
+        input_node.compute_dtype = parent.compute_dtype;
+        input_node.backward_output_dtype = parent.backward_output_dtype;
+        input_node.backward_compute_dtype = parent.backward_compute_dtype;
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+
+    bind_parent_to_local_input(node.lhs, 0);
+    bind_parent_to_local_input(node.rhs, 1);
+    if (node.op == ExprOp::GEMM) {
+        bind_parent_to_local_input(node.aux, 2);
+    }
+
+    ExprNode route = node;
+    route.lhs = 0;
+    route.rhs = 1;
+    route.aux = node.op == ExprOp::GEMM ? 2 : UINT32_MAX;
+    stage_expr.nodes.push_back(std::move(route));
+    stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{
+        .name = output_name,
+        .local_node_idx = stage_expr.output_node,
+        .value_id = output_value_id,
+    });
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::Matmul,
         .expr = std::move(stage_expr),
         .input_value_ids = std::move(input_value_ids),
         .outputs = std::move(stage_outputs),
@@ -1385,15 +1590,20 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 }
             };
 
-            ensureBoundaryParentEmitted(root.lhs, "lhs", true);
-            if (isReduceMinMaxBackwardOp(root.op)) {
+            ensureBoundaryParentEmitted(root.lhs, "lhs", isCudnnReduceOp(root.op));
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op)) {
                 ensureBoundaryParentEmitted(root.rhs, "rhs", false);
+            }
+            if (root.op == ExprOp::GEMM) {
+                ensureBoundaryParentEmitted(root.aux, "aux", false);
             }
 
             uint32_t stage_out_id = next_value_id++;
             node_output_value_id[root_idx] = stage_out_id;
             if (isReduceMinMaxBackwardOp(root.op)) {
                 planned.stages.push_back(buildReduceMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isMatmulOp(root.op)) {
+                planned.stages.push_back(buildMatmulStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else {
                 planned.stages.push_back(buildReductionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             }
@@ -1517,9 +1727,12 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 }
             };
 
-            ensureBoundaryParentEmitted(root.lhs, "lhs", true);
-            if (isReduceMinMaxBackwardOp(root.op)) {
+            ensureBoundaryParentEmitted(root.lhs, "lhs", isCudnnReduceOp(root.op));
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op)) {
                 ensureBoundaryParentEmitted(root.rhs, "rhs", false);
+            }
+            if (root.op == ExprOp::GEMM) {
+                ensureBoundaryParentEmitted(root.aux, "aux", false);
             }
 
             uint32_t stage_out_id = next_value_id++;
@@ -1527,6 +1740,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (isReduceMinMaxBackwardOp(root.op)) {
                 planned.stages.push_back(
                     buildReduceMinMaxBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isMatmulOp(root.op)) {
+                planned.stages.push_back(
+                    buildMatmulStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else {
                 planned.stages.push_back(
                     buildReductionStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -1650,6 +1866,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::ArgMinMax: {
                 std::shared_ptr<CompiledArgMinMax> arg_minmax = compileArgMinMax(stage.expr);
                 compiled->stages.emplace_back(arg_minmax, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::Matmul: {
+                std::shared_ptr<CompiledMatmul> matmul = compileMatmul(stage.expr);
+                compiled->stages.emplace_back(matmul, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::ReduceMinMaxBackward: {

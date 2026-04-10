@@ -133,6 +133,10 @@ std::string opName(ExprOp op) {
             return "MAX_GL";
         case ExprOp::MAX_GRAD_RIGHT:
             return "MAX_GR";
+        case ExprOp::MATMUL:
+            return "MATMUL";
+        case ExprOp::GEMM:
+            return "GEMM";
         case ExprOp::REDUCE_SUM:
             return "RSUM";
         case ExprOp::REDUCE_PROD:
@@ -276,14 +280,30 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::MIN_GRAD_LEFT:
         case ExprOp::MIN_GRAD_RIGHT:
         case ExprOp::MAX_GRAD_LEFT:
-        case ExprOp::MAX_GRAD_RIGHT: {
+        case ExprOp::MAX_GRAD_RIGHT:
+        case ExprOp::MATMUL: {
             std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
             std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
 
             if (isCommutative(n.op) && a > b)
                 std::swap(a, b);
 
-            out = opName(n.op) + "(" + a + "," + b + ")";
+            out = opName(n.op) + "(" + a + "," + b;
+            if (n.op == ExprOp::MATMUL) {
+                out += ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0);
+                out += ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0);
+            }
+            out += ")";
+            break;
+        }
+
+        case ExprOp::GEMM: {
+            std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            std::string c = canonicalizeNode(expr, n.aux, memo, memoReady);
+            out = opName(n.op) + "(" + a + "," + b + "," + c + ";alpha=" + formatFloatCanonical(n.alpha_fp) +
+                  ";beta=" + formatFloatCanonical(n.beta_fp) + ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0) +
+                  ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0) + ";tC=" + std::to_string(n.transpose_aux ? 1 : 0) + ")";
             break;
         }
 
@@ -320,6 +340,9 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
             break;
         case PhysicalExecutionStage::Kind::ArgMinMax:
             ss << "argminmax";
+            break;
+        case PhysicalExecutionStage::Kind::Matmul:
+            ss << "matmul";
             break;
         case PhysicalExecutionStage::Kind::ReduceMinMaxBackward:
             ss << "reduce_minmax_backward";
@@ -414,8 +437,18 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::MIN_GRAD_RIGHT:
         case ExprOp::MAX_GRAD_LEFT:
         case ExprOp::MAX_GRAD_RIGHT:
+        case ExprOp::MATMUL:
         case ExprOp::REDUCE_MIN_BACKWARD:
         case ExprOp::REDUCE_MAX_BACKWARD:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool Expression::isTernaryOp(const ExprOp op) {
+    switch (op) {
+        case ExprOp::GEMM:
             return true;
         default:
             return false;
@@ -440,6 +473,7 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
             throw std::runtime_error("Malformed expression: missing lhs for unary op");
         newNode.lhs = cloneSubtree(src, srcNode.lhs, dst, oldToNew);
         newNode.rhs = UINT32_MAX;
+        newNode.aux = UINT32_MAX;
     } else if (Expression::isBinaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing lhs for binary op");
@@ -447,6 +481,13 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
             throw std::runtime_error("Malformed expression: missing rhs for binary op");
         newNode.lhs = cloneSubtree(src, srcNode.lhs, dst, oldToNew);
         newNode.rhs = cloneSubtree(src, srcNode.rhs, dst, oldToNew);
+        newNode.aux = UINT32_MAX;
+    } else if (Expression::isTernaryOp(srcNode.op)) {
+        if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX || srcNode.aux == UINT32_MAX)
+            throw std::runtime_error("Malformed expression: missing child for ternary op");
+        newNode.lhs = cloneSubtree(src, srcNode.lhs, dst, oldToNew);
+        newNode.rhs = cloneSubtree(src, srcNode.rhs, dst, oldToNew);
+        newNode.aux = cloneSubtree(src, srcNode.aux, dst, oldToNew);
     } else if (Expression::isLeafOp(srcNode.op)) {
         // nothing to recurse into
     } else {
@@ -499,17 +540,26 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
         newNode.input_slot = mergedSlot;
         newNode.lhs = UINT32_MAX;
         newNode.rhs = UINT32_MAX;
+        newNode.aux = UINT32_MAX;
     } else if (Expression::isUnaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing lhs for unary op while merging outputs.");
         newNode.lhs = cloneSubtreeWithMergedInputs(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName);
         newNode.rhs = UINT32_MAX;
+        newNode.aux = UINT32_MAX;
     } else if (Expression::isBinaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing child for binary op while merging outputs.");
         newNode.lhs = cloneSubtreeWithMergedInputs(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName);
         newNode.rhs = cloneSubtreeWithMergedInputs(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName);
-    } else if (srcNode.op == ExprOp::SCALAR_FP) {
+        newNode.aux = UINT32_MAX;
+    } else if (Expression::isTernaryOp(srcNode.op)) {
+        if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX || srcNode.aux == UINT32_MAX)
+            throw std::runtime_error("Malformed expression: missing child for ternary op while merging outputs.");
+        newNode.lhs = cloneSubtreeWithMergedInputs(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName);
+        newNode.rhs = cloneSubtreeWithMergedInputs(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName);
+        newNode.aux = cloneSubtreeWithMergedInputs(src, srcNode.aux, dst, oldToNew, dstInputSlotsByName);
+    } else if (srcNode.op == ExprOp::SCALAR_FP || srcNode.op == ExprOp::FILL) {
         // nothing to recurse into
     } else {
         throw std::runtime_error("Unsupported op while merging expression outputs: " + std::to_string(static_cast<int>(srcNode.op)));
@@ -703,6 +753,70 @@ Expression Expression::binaryOp(const Expression& lhsExpr, const Expression& rhs
     return Expression(out, newIndex);
 }
 
+Expression Expression::ternaryOp(const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, ExprOp op) {
+    if (!lhsExpr.expr || !rhsExpr.expr || !auxExpr.expr)
+        throw std::runtime_error("Cannot combine empty expressions");
+
+    auto out = std::make_shared<PhysicalExpression>();
+
+    const MergeInputsResult lhs_rhs_inputs = mergeInputsByName(*lhsExpr.expr, *rhsExpr.expr);
+
+    std::unordered_map<std::string, uint32_t> mergedByName;
+    mergedByName.reserve(lhs_rhs_inputs.mergedInputs.size());
+    for (const NamedInput& input : lhs_rhs_inputs.mergedInputs) {
+        mergedByName.emplace(input.name, input.slot);
+    }
+
+    // Reuse the final out expression directly so slot indices stay stable.
+    out->inputs = lhs_rhs_inputs.mergedInputs;
+    for (const NamedInput& input : auxExpr.expr->inputs) {
+        auto it = mergedByName.find(input.name);
+        if (it != mergedByName.end()) {
+            if (out->inputs[it->second].kind != input.kind) {
+                throw std::runtime_error("Input kind mismatch while combining expressions for input: " + input.name);
+            }
+        } else {
+            const uint32_t slot = static_cast<uint32_t>(out->inputs.size());
+            out->inputs.push_back(NamedInput{input.name, slot, input.kind});
+            mergedByName.emplace(input.name, slot);
+        }
+    }
+
+    std::unordered_map<uint32_t, uint32_t> lhsMap;
+    std::unordered_map<uint32_t, uint32_t> rhsMap;
+    std::unordered_map<uint32_t, uint32_t> auxMap;
+
+    uint32_t newLhsIndex = cloneSubtree(*lhsExpr.expr, lhsExpr.nodeIndex, *out, lhsMap);
+    uint32_t newRhsIndex = cloneSubtree(*rhsExpr.expr, rhsExpr.nodeIndex, *out, rhsMap);
+    uint32_t newAuxIndex = cloneSubtree(*auxExpr.expr, auxExpr.nodeIndex, *out, auxMap);
+
+    std::vector<uint32_t> lhsSlotRemap(lhsExpr.expr->inputs.size());
+    for (size_t i = 0; i < lhsExpr.expr->inputs.size(); ++i)
+        lhsSlotRemap[i] = mergedByName.at(lhsExpr.expr->inputs[i].name);
+    std::vector<uint32_t> rhsSlotRemap(rhsExpr.expr->inputs.size());
+    for (size_t i = 0; i < rhsExpr.expr->inputs.size(); ++i)
+        rhsSlotRemap[i] = mergedByName.at(rhsExpr.expr->inputs[i].name);
+    std::vector<uint32_t> auxSlotRemap(auxExpr.expr->inputs.size());
+    for (size_t i = 0; i < auxExpr.expr->inputs.size(); ++i)
+        auxSlotRemap[i] = mergedByName.at(auxExpr.expr->inputs[i].name);
+
+    remapClonedInputSlots(*lhsExpr.expr, lhsMap, lhsSlotRemap, *out);
+    remapClonedInputSlots(*rhsExpr.expr, rhsMap, rhsSlotRemap, *out);
+    remapClonedInputSlots(*auxExpr.expr, auxMap, auxSlotRemap, *out);
+
+    ExprNode node{};
+    node.op = op;
+    node.lhs = newLhsIndex;
+    node.rhs = newRhsIndex;
+    node.aux = newAuxIndex;
+
+    uint32_t newIndex = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(node);
+    out->output_node = newIndex;
+
+    return Expression(out, newIndex);
+}
+
 Expression Expression::unaryOp(const Expression& inputExpr, ExprOp op) {
     if (!inputExpr.expr)
         throw std::runtime_error("Cannot apply unary op to empty expression");
@@ -758,6 +872,51 @@ Expression Expression::squeeze(const std::vector<uint64_t>& squeeze_axes) const 
 }
 
 Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }
+
+Expression Expression::matmul(const Expression& lhs,
+                              const Expression& rhs,
+                              bool transpose_lhs,
+                              bool transpose_rhs,
+                              Optional<DataType> compute_dtype,
+                              Optional<DataType> output_dtype) {
+    Expression out = binaryOp(lhs, rhs, ExprOp::MATMUL);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.transpose_lhs = transpose_lhs;
+    node.transpose_rhs = transpose_rhs;
+    if (compute_dtype.isPresent()) {
+        node.compute_dtype = compute_dtype.get();
+    }
+    if (output_dtype.isPresent()) {
+        node.output_dtype = output_dtype.get();
+    }
+    return out;
+}
+
+Expression Expression::gemm(const Expression& lhs,
+                            const Expression& rhs,
+                            const Expression& addend,
+                            double alpha,
+                            double beta,
+                            bool transpose_lhs,
+                            bool transpose_rhs,
+                            bool transpose_addend,
+                            Optional<DataType> compute_dtype,
+                            Optional<DataType> output_dtype) {
+    Expression out = ternaryOp(lhs, rhs, addend, ExprOp::GEMM);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.alpha_fp = alpha;
+    node.beta_fp = beta;
+    node.transpose_lhs = transpose_lhs;
+    node.transpose_rhs = transpose_rhs;
+    node.transpose_aux = transpose_addend;
+    if (compute_dtype.isPresent()) {
+        node.compute_dtype = compute_dtype.get();
+    }
+    if (output_dtype.isPresent()) {
+        node.output_dtype = output_dtype.get();
+    }
+    return out;
+}
 
 // Reductions
 DataType validate_reduction_compute_type(Optional<DataType> compute_dtype) {

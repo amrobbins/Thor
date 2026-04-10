@@ -177,6 +177,39 @@ struct CompiledReduceMinMaxBackward {
     }
 };
 
+struct CompiledMatmul {
+    const ExprOp op;
+    const bool transpose_lhs;
+    const bool transpose_rhs;
+    const bool transpose_aux;
+    const double alpha;
+    const double beta;
+    const TensorDescriptor::DataType input_dtype;
+    const TensorDescriptor::DataType output_dtype;
+    const TensorDescriptor::DataType compute_dtype;
+
+    bool operator==(const CompiledMatmul& other) const = default;
+
+    CompiledMatmul(ExprOp op,
+                   bool transpose_lhs,
+                   bool transpose_rhs,
+                   bool transpose_aux,
+                   double alpha,
+                   double beta,
+                   TensorDescriptor::DataType input_dtype,
+                   TensorDescriptor::DataType output_dtype,
+                   Optional<TensorDescriptor::DataType> compute_dtype)
+        : op(op),
+          transpose_lhs(transpose_lhs),
+          transpose_rhs(transpose_rhs),
+          transpose_aux(transpose_aux),
+          alpha(alpha),
+          beta(beta),
+          input_dtype(input_dtype),
+          output_dtype(output_dtype),
+          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : output_dtype) {}
+};
+
 }  // namespace ThorImplementation
 
 inline void hashCombine(std::size_t& seed, std::size_t value) { seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2); }

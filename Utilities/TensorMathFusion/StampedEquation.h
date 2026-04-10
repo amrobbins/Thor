@@ -86,6 +86,64 @@ struct BuiltReduction {
     BuiltReduction& operator=(const BuiltReduction&) = delete;
 };
 
+struct MatmulCacheKey {
+    const ExprOp op;
+    const int32_t a_rows;
+    const int32_t a_cols;
+    const int32_t b_rows;
+    const int32_t b_cols;
+    const int32_t ld_a;
+    const int32_t ld_b;
+    const int32_t ld_c;
+    const int32_t ld_d;
+    const bool transpose_a;
+    const bool transpose_b;
+    const bool transpose_c;
+    const TensorDescriptor::DataType data_dtype;
+    const int device_num;
+
+    bool operator==(const MatmulCacheKey& other) const = default;
+
+    MatmulCacheKey(ExprOp op,
+                   int32_t a_rows,
+                   int32_t a_cols,
+                   int32_t b_rows,
+                   int32_t b_cols,
+                   int32_t ld_a,
+                   int32_t ld_b,
+                   int32_t ld_c,
+                   int32_t ld_d,
+                   bool transpose_a,
+                   bool transpose_b,
+                   bool transpose_c,
+                   TensorDescriptor::DataType data_dtype,
+                   int device_num)
+        : op(op),
+          a_rows(a_rows),
+          a_cols(a_cols),
+          b_rows(b_rows),
+          b_cols(b_cols),
+          ld_a(ld_a),
+          ld_b(ld_b),
+          ld_c(ld_c),
+          ld_d(ld_d),
+          transpose_a(transpose_a),
+          transpose_b(transpose_b),
+          transpose_c(transpose_c),
+          data_dtype(data_dtype),
+          device_num(device_num) {}
+};
+
+struct BuiltMatmul {
+    MatmulCacheKey key;
+    size_t workspace_bytes = 0;
+
+    explicit BuiltMatmul(MatmulCacheKey key) : key(std::move(key)) {}
+
+    BuiltMatmul(const BuiltMatmul&) = delete;
+    BuiltMatmul& operator=(const BuiltMatmul&) = delete;
+};
+
 class StampedEquation {
    public:
     StampedEquation(std::shared_ptr<CompiledEquation> compiledEquation,
@@ -137,6 +195,13 @@ class StampedEquation {
                                                           bool output_indices,
                                                           const Tensor& input,
                                                           int device_num);
+
+    static std::shared_ptr<BuiltMatmul> buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
+                                                    const Tensor& lhs,
+                                                    const Tensor& rhs,
+                                                    const Optional<Tensor>& addend,
+                                                    const Tensor& output,
+                                                    int device_num);
 
     [[nodiscard]] bool requiresRuntimeScalars() const;
     [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
@@ -203,6 +268,35 @@ class StampedArgMinMax {
     const void* beta = &beta_0;
 };
 
+class StampedMatmul {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+    Tensor getOutputTensor() const { return output; }
+
+    StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
+                  std::shared_ptr<BuiltMatmul> built,
+                  const Tensor& lhs,
+                  const Tensor& rhs,
+                  const Optional<Tensor>& addend,
+                  const Tensor& output,
+                  const Stream& stream,
+                  Optional<Tensor> workspace);
+
+   private:
+    const std::shared_ptr<CompiledMatmul> compiled_matmul;
+    const std::shared_ptr<BuiltMatmul> built_matmul;
+    const Tensor lhs;
+    const Tensor rhs;
+    const Optional<Tensor> addend;
+    Tensor output;
+    Stream stream;
+    const Optional<Tensor> workspace;
+};
+
 class StampedReduceMinMaxBackward {
    public:
     void run();
@@ -238,7 +332,7 @@ class StampedReduceMinMaxBackward {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, ReduceMinMaxBackward };
     const Kind kind;
 
     const std::vector<uint32_t> dependency_stage_indices;
@@ -247,6 +341,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedEquation> kernel = nullptr;
     const std::shared_ptr<StampedReduction> reduction = nullptr;
     const std::shared_ptr<StampedArgMinMax> arg_minmax = nullptr;
+    const std::shared_ptr<StampedMatmul> matmul = nullptr;
     const std::shared_ptr<StampedReduceMinMaxBackward> reduce_minmax_backward = nullptr;
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused, std::vector<uint32_t> dependency_stage_indices = {})
@@ -263,6 +358,9 @@ struct StampedExecutionStage {
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(arg_minmax->gpuNum()),
           arg_minmax(arg_minmax) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedMatmul>& matmul, std::vector<uint32_t> dependency_stage_indices = {})
+        : kind(Kind::Matmul), dependency_stage_indices(std::move(dependency_stage_indices)), gpu_num(matmul->gpuNum()), matmul(matmul) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedReduceMinMaxBackward>& reduce_minmax_backward,
                                    std::vector<uint32_t> dependency_stage_indices = {})
@@ -286,6 +384,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::ArgMinMax) {
             assert(arg_minmax != nullptr);
             arg_minmax->runOn(run_stream);
+        } else if (kind == Kind::Matmul) {
+            assert(matmul != nullptr);
+            matmul->runOn(run_stream);
         } else if (kind == Kind::ReduceMinMaxBackward) {
             assert(reduce_minmax_backward != nullptr);
             reduce_minmax_backward->runOn(run_stream);
@@ -359,6 +460,27 @@ struct hash<ThorImplementation::ReductionCacheKey> {
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.compute_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.output_dtype));
         hashCombine(h, hash<bool>{}(k.output_indices));
+        hashCombine(h, hash<int>{}(k.device_num));
+        return h;
+    }
+};
+
+template <>
+struct hash<ThorImplementation::MatmulCacheKey> {
+    size_t operator()(const ThorImplementation::MatmulCacheKey& k) const noexcept {
+        size_t h = hash<ThorImplementation::ExprOp>{}(k.op);
+        hashCombine(h, hash<int32_t>{}(k.a_rows));
+        hashCombine(h, hash<int32_t>{}(k.a_cols));
+        hashCombine(h, hash<int32_t>{}(k.b_rows));
+        hashCombine(h, hash<int32_t>{}(k.b_cols));
+        hashCombine(h, hash<int32_t>{}(k.ld_a));
+        hashCombine(h, hash<int32_t>{}(k.ld_b));
+        hashCombine(h, hash<int32_t>{}(k.ld_c));
+        hashCombine(h, hash<int32_t>{}(k.ld_d));
+        hashCombine(h, hash<bool>{}(k.transpose_a));
+        hashCombine(h, hash<bool>{}(k.transpose_b));
+        hashCombine(h, hash<bool>{}(k.transpose_c));
+        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.data_dtype));
         hashCombine(h, hash<int>{}(k.device_num));
         return h;
     }

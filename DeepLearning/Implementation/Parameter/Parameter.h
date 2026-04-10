@@ -25,19 +25,10 @@ class Parameter {
     virtual void compileInitializer();
     virtual void compileInitializer(uint64_t explicitFanIn, uint64_t explicitFanOut);
 
-    //  Maybe something like this later, but two stage anyway.
-    // virtual void compile(std::unordered_map<std::string, Tensor> featureInput,
-    //                      std::unordered_map<std::string, Tensor> featureOutput,
-    //                      const Optional<Stream>& gradientUpdateStream,
-    //                      bool inferenceOnly) {
-    //     assert(false);
-    // }
-
     virtual void createStorage(const std::vector<uint64_t>& inputDims,
                                const std::vector<uint64_t>& outputDims,
-                               const TensorDescriptor::DataType& dataType,
+                               const TensorDescriptor::DataType& outputDataType,
                                const TensorPlacement& placement) = 0;
-    // virtual void createStorage(std::unordered_map<std::string, Tensor> featureInput, uint32_t gpuId);
     void clearStorage();
 
     Event initialize();
