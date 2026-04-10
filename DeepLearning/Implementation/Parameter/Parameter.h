@@ -15,12 +15,15 @@ class Parameter {
 
     // Remember this is called by API layer so that will hand over the optimizer
     // 1. Create storage given featureInput 2. Compile the optimizer
-    virtual void compileStorageAndOptimizer(const Tensor& featureInput, const Optional<Stream>& gradientUpdateStream, bool inferenceOnly);
+    virtual void compileStorageAndOptimizer(const std::vector<uint64_t>& inputDims,
+                                            const std::vector<uint64_t>& outputDims,
+                                            const TensorDescriptor::DataType& outputDataType,
+                                            const TensorPlacement& placement,
+                                            const Optional<Stream>& gradientUpdateStream,
+                                            bool inferenceOnly);
 
-    virtual void compileInitializer(const std::vector<uint64_t>& outputDims,
-                                    const Optional<Stream>& gradientUpdateStream,
-                                    uint64_t explicitFanIn = 0,
-                                    uint64_t explicitFanOut = 0);
+    virtual void compileInitializer();
+    virtual void compileInitializer(uint64_t explicitFanIn, uint64_t explicitFanOut);
 
     //  Maybe something like this later, but two stage anyway.
     // virtual void compile(std::unordered_map<std::string, Tensor> featureInput,
@@ -30,8 +33,11 @@ class Parameter {
     //     assert(false);
     // }
 
-    virtual void createStorage(Tensor featureInput, uint32_t gpuId) = 0;
-    virtual void createStorage(std::unordered_map<std::string, Tensor> featureInput, uint32_t gpuId);
+    virtual void createStorage(const std::vector<uint64_t>& inputDims,
+                               const std::vector<uint64_t>& outputDims,
+                               const TensorDescriptor::DataType& dataType,
+                               const TensorPlacement& placement) = 0;
+    // virtual void createStorage(std::unordered_map<std::string, Tensor> featureInput, uint32_t gpuId);
     void clearStorage();
 
     Event initialize();
@@ -64,6 +70,9 @@ class Parameter {
 
     std::shared_ptr<Optimizer> optimizer;
     std::shared_ptr<Initializer> initializer;
+
+    std::vector<uint64_t> outputDims;
+    Optional<Stream> gradientUpdateStream;
 };
 
 }  // namespace ThorImplementation

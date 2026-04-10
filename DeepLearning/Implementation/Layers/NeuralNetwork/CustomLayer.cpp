@@ -53,8 +53,11 @@ void CustomLayer::compileImpl() {
     backwardWeightsAccumulateStampedByConnection.clear();
     backwardOutputsByConnection.clear();
 
+    // A bias-only layer may have no feature input.
     Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
-    assert(aFeatureInput.isPresent());
+    // A CustomLayer with no featureOutput would just waste computation, and doesn't make sense.
+    Optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureInputs);
+    assert(aFeatureOutput.isPresent());
 
     for (const auto& parameter : parameters) {
         if (!parameter->isTrainable())
@@ -63,7 +66,13 @@ void CustomLayer::compileImpl() {
     }
 
     for (const auto& parameter : parameters) {
-        parameter->compileStorageAndOptimizer(aFeatureInput.get(), gradientUpdateStream, isInferenceOnly());
+        const std::vector<uint64_t> inputDims = aFeatureInput.isPresent() ? aFeatureInput.get().getDimensions() : std::vector<uint64_t>();
+        parameter->compileStorageAndOptimizer(inputDims,
+                                              aFeatureOutput.get().getDimensions(),
+                                              aFeatureOutput.get().getDataType(),
+                                              aFeatureOutput.get().getPlacement(),
+                                              gradientUpdateStream,
+                                              isInferenceOnly());
     }
 
     // Forward stamps: require both input and output tensors for the connection.
@@ -147,9 +156,9 @@ Optional<Tensor> CustomLayer::stampForward(uint32_t connectionNumber) {
         for (const auto& parameter : parameters) {
             auto it = parameterFanOverrides.find(parameter->getName());
             if (it != parameterFanOverrides.end()) {
-                parameter->compileInitializer(outputDims, gradientUpdateStream, it->second.fan_in, it->second.fan_out);
+                parameter->compileInitializer(it->second.fan_in, it->second.fan_out);
             } else {
-                parameter->compileInitializer(outputDims, gradientUpdateStream);
+                parameter->compileInitializer();
             }
         }
 
