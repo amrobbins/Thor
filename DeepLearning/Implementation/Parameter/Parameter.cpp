@@ -11,9 +11,16 @@ Parameter::Parameter(string name, bool trainable, bool trainingEnabled)
     assert(!(trainable == false && trainingEnabled));
 }
 
-void Parameter::compileStorageAndOptimizer(const Tensor& featureInput, const Optional<Stream>& gradientUpdateStream, bool inferenceOnly) {
-    assert(featureInput.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    createStorage(featureInput, featureInput.getPlacement().getDeviceNum());
+void Parameter::compileStorageAndOptimizer(const std::vector<uint64_t>& inputDims,
+                                           const std::vector<uint64_t>& outputDims,
+                                           const TensorDescriptor::DataType& outputDataType,
+                                           const TensorPlacement& placement,
+                                           const Optional<Stream>& gradientUpdateStream,
+                                           bool inferenceOnly) {
+    this->outputDims = outputDims;
+    this->gradientUpdateStream = gradientUpdateStream;
+
+    createStorage(inputDims, outputDims, outputDataType, placement);
 
     if (isTrainable() && !inferenceOnly) {
         assert(hasOptimizer());
@@ -22,10 +29,9 @@ void Parameter::compileStorageAndOptimizer(const Tensor& featureInput, const Opt
     }
 }
 
-void Parameter::compileInitializer(const std::vector<uint64_t>& outputDims,
-                                   const Optional<Stream>& gradientUpdateStream,
-                                   uint64_t explicitFanIn,
-                                   uint64_t explicitFanOut) {
+void Parameter::compileInitializer() { compileInitializer(0, 0); }
+
+void Parameter::compileInitializer(uint64_t explicitFanIn, uint64_t explicitFanOut) {
     if (!hasInitializer()) {
         return;
     }
@@ -48,10 +54,6 @@ void Parameter::compileInitializer(const std::vector<uint64_t>& outputDims,
                             : Stream::getMostRecentGradientUpdateStream(storage.get().getPlacement().getDeviceNum());
 
     initializer->compile(storage, initStream, fanIn, fanOut);
-}
-
-void Parameter::createStorage(std::unordered_map<std::string, Tensor> featureInput, uint32_t gpuId) {
-    throw runtime_error("Not implemented");
 }
 
 void Parameter::clearStorage() { storage.clear(); }
