@@ -80,6 +80,8 @@ struct StageNodeKey {
     uint64_t scalar_bits = 0;
     uint64_t alpha_bits = 0;
     uint64_t beta_bits = 0;
+    uint32_t alpha_node = UINT32_MAX;
+    uint32_t beta_node = UINT32_MAX;
     bool transpose_lhs = false;
     bool transpose_rhs = false;
     bool transpose_aux = false;
@@ -106,6 +108,8 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<uint64_t>{}(k.scalar_bits));
         hashCombine(h, std::hash<uint64_t>{}(k.alpha_bits));
         hashCombine(h, std::hash<uint64_t>{}(k.beta_bits));
+        hashCombine(h, std::hash<uint32_t>{}(k.alpha_node));
+        hashCombine(h, std::hash<uint32_t>{}(k.beta_node));
         hashCombine(h, std::hash<bool>{}(k.transpose_lhs));
         hashCombine(h, std::hash<bool>{}(k.transpose_rhs));
         hashCombine(h, std::hash<bool>{}(k.transpose_aux));
@@ -154,6 +158,8 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.transpose_aux = n.transpose_aux;
     key.alpha_bits = scalarBits(n.alpha_fp);
     key.beta_bits = scalarBits(n.beta_fp);
+    key.alpha_node = n.alpha_node;
+    key.beta_node = n.beta_node;
 
     switch (n.op) {
         case ExprOp::INPUT:
@@ -224,6 +230,12 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
         if (Expression::isTernaryOp(n.op)) {
             n.rhs = remapNode(n.rhs);
             n.aux = remapNode(n.aux);
+            if (n.alpha_node != UINT32_MAX) {
+                n.alpha_node = remapNode(n.alpha_node);
+            }
+            if (n.beta_node != UINT32_MAX) {
+                n.beta_node = remapNode(n.beta_node);
+            }
         }
 
         if (isCommutativeStageOp(n.op) && Expression::isBinaryOp(n.op) && n.lhs > n.rhs) {
@@ -433,6 +445,8 @@ static void appendNodeDTypeSignature(std::string& s, const ExprNode& node) {
     s += ";bwd_compute=" + optionalDTypeSignature(node.backward_compute_dtype);
 }
 
+static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint32_t node_idx);
+
 static std::string uintVecSignature(const std::vector<uint64_t>& v) {
     std::string s = "[";
     for (size_t i = 0; i < v.size(); ++i) {
@@ -443,6 +457,13 @@ static std::string uintVecSignature(const std::vector<uint64_t>& v) {
     }
     s += "]";
     return s;
+}
+
+static std::string gemmScaleSignature(const PhysicalExpression& expr, uint32_t node_idx, double scale_fp) {
+    if (node_idx == UINT32_MAX) {
+        return std::to_string(scalarBits(scale_fp));
+    }
+    return fusedRegionSignatureRec(expr, node_idx) + "*" + std::to_string(scalarBits(scale_fp));
 }
 
 static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint32_t node_idx) {
@@ -501,8 +522,9 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 const std::string aux = fusedRegionSignatureRec(expr, node.aux);
                 s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",aux=" + aux +
                     ",ta=" + std::to_string(node.transpose_lhs ? 1 : 0) + ",tb=" + std::to_string(node.transpose_rhs ? 1 : 0) +
-                    ",tc=" + std::to_string(node.transpose_aux ? 1 : 0) + ",alpha=" + std::to_string(scalarBits(node.alpha_fp)) +
-                    ",beta=" + std::to_string(scalarBits(node.beta_fp)) + ")";
+                    ",tc=" + std::to_string(node.transpose_aux ? 1 : 0) +
+                    ",alpha=" + gemmScaleSignature(expr, node.alpha_node, node.alpha_fp) +
+                    ",beta=" + gemmScaleSignature(expr, node.beta_node, node.beta_fp) + ")";
             }
         } else {
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",axes=" + uintVecSignature(node.reduction_axes) +
@@ -883,9 +905,9 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
         throw std::runtime_error("Matmul stage output node is not a supported matmul/gemm op.");
     }
 
-    const uint32_t expected_inputs = node.op == ExprOp::MATMUL ? 2u : 3u;
-    if (expr.numInputs() != expected_inputs) {
-        throw std::runtime_error("Matmul stage must have exactly " + std::to_string(expected_inputs) + " inputs.");
+    const uint32_t min_expected_inputs = node.op == ExprOp::MATMUL ? 2u : 3u;
+    if (expr.numInputs() < min_expected_inputs) {
+        throw std::runtime_error("Matmul stage must have at least " + std::to_string(min_expected_inputs) + " inputs.");
     }
 
     auto validate_local_input = [&](uint32_t local_idx, const char* label) -> const ExprNode& {
@@ -902,6 +924,25 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
         return input_node;
     };
 
+    auto resolve_dynamic_scale_input_slot = [&](uint32_t local_idx, const char* label, double& scale_fp) -> uint32_t {
+        if (local_idx == UINT32_MAX) {
+            return UINT32_MAX;
+        }
+        if (local_idx >= expr.nodes.size()) {
+            throw std::runtime_error(std::string("Matmul stage ") + label + " scale node index is out of range.");
+        }
+        const ExprNode& scale_node = expr.nodes[local_idx];
+        if (scale_node.op == ExprOp::SCALAR_FP) {
+            scale_fp *= scale_node.scalar_fp;
+            return UINT32_MAX;
+        }
+        if (scale_node.op != ExprOp::RUNTIME_SCALAR) {
+            throw std::runtime_error(std::string("Matmul stage ") + label +
+                                     " dynamic scale must be a local RUNTIME_SCALAR or SCALAR_FP node.");
+        }
+        return scale_node.input_slot;
+    };
+
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || (node.op == ExprOp::GEMM && node.aux == UINT32_MAX)) {
         throw std::runtime_error("Matmul/gemm node is missing required input(s).");
     }
@@ -912,7 +953,6 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
     if (node.op == ExprOp::GEMM) {
         aux_input = &validate_local_input(node.aux, "aux");
     }
-    (void)aux_input;
 
     if (!node.output_dtype.isPresent()) {
         throw std::runtime_error("Matmul/gemm node missing resolved output_dtype.");
@@ -921,25 +961,26 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
     std::vector<DataType> input_dtypes;
     input_dtypes.push_back(lhs_input.input_tensor_dtype.get());
     input_dtypes.push_back(rhs_input.input_tensor_dtype.get());
-
-    if (node.op == ExprOp::GEMM) {
-        const ExprNode& aux_input = validate_local_input(node.aux, "aux");
-        input_dtypes.push_back(aux_input.input_tensor_dtype.get());
-    }
-
-    if (!node.output_dtype.isPresent()) {
-        throw std::runtime_error("Matmul/gemm node missing resolved output_dtype.");
+    if (aux_input != nullptr) {
+        input_dtypes.push_back(aux_input->input_tensor_dtype.get());
     }
 
     const DataType logical_input_dtype = promoteTensorValueDTypes(input_dtypes);
     const DataType supported_input_dtype = toSupportedInputDType(node.op, logical_input_dtype);
 
+    double alpha_scale = node.alpha_fp;
+    double beta_scale = node.beta_fp;
+    const uint32_t alpha_input_slot = resolve_dynamic_scale_input_slot(node.alpha_node, "alpha", alpha_scale);
+    const uint32_t beta_input_slot = resolve_dynamic_scale_input_slot(node.beta_node, "beta", beta_scale);
+
     return make_shared<CompiledMatmul>(node.op,
                                        node.transpose_lhs,
                                        node.transpose_rhs,
                                        node.transpose_aux,
-                                       node.alpha_fp,
-                                       node.beta_fp,
+                                       alpha_scale,
+                                       beta_scale,
+                                       alpha_input_slot,
+                                       beta_input_slot,
                                        supported_input_dtype,
                                        node.output_dtype.get(),
                                        node.compute_dtype);
@@ -1330,16 +1371,12 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
     }
 
     PhysicalExpression stage_expr;
-    stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
-    stage_expr.inputs.push_back(NamedInput{"__arg1", 1});
-    if (node.op == ExprOp::GEMM) {
-        stage_expr.inputs.push_back(NamedInput{"__arg2", 2});
-    }
-
     std::vector<uint32_t> input_value_ids;
-    input_value_ids.reserve(node.op == ExprOp::MATMUL ? 2u : 3u);
+    input_value_ids.reserve(node.op == ExprOp::MATMUL ? 4u : 5u);
 
-    auto bind_parent_to_local_input = [&](uint32_t parent_idx, uint32_t local_slot) {
+    auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
+
+    auto bind_parent_to_local_tensor_input = [&](uint32_t parent_idx, uint32_t local_slot) {
         if (parent_idx >= expr.nodes.size()) {
             throw std::runtime_error("Matmul/gemm input node index out of range.");
         }
@@ -1365,6 +1402,8 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
             throw std::runtime_error("Matmul/gemm parent node missing resolved actual input dtype.");
         }
 
+        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot), local_slot, NamedInput::Kind::Tensor});
+
         ExprNode input_node;
         input_node.op = ExprOp::INPUT;
         input_node.input_slot = local_slot;
@@ -1376,16 +1415,69 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
         stage_expr.nodes.push_back(std::move(input_node));
     };
 
-    bind_parent_to_local_input(node.lhs, 0);
-    bind_parent_to_local_input(node.rhs, 1);
+    auto bind_parent_to_local_scalar = [&](uint32_t parent_idx, uint32_t local_slot) {
+        if (parent_idx == UINT32_MAX) {
+            return;
+        }
+        if (parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Matmul/gemm scalar node index out of range.");
+        }
+
+        const ExprNode& parent = expr.nodes[parent_idx];
+        if (parent.op == ExprOp::SCALAR_FP) {
+            ExprNode scalar_node = parent;
+            scalar_node.input_slot = UINT32_MAX;
+            stage_expr.nodes.push_back(std::move(scalar_node));
+            return;
+        }
+        if (parent.op != ExprOp::RUNTIME_SCALAR) {
+            throw std::runtime_error("Matmul/gemm dynamic scale parent must be RUNTIME_SCALAR or SCALAR_FP.");
+        }
+
+        if (parent.input_slot >= expr.inputs.size()) {
+            throw std::runtime_error("Matmul/gemm dynamic scale parent input slot is out of range.");
+        }
+        input_value_ids.push_back(parent.input_slot);
+        stage_expr.inputs.push_back(NamedInput{expr.inputs[parent.input_slot].name, local_slot, NamedInput::Kind::RuntimeScalarFp32});
+
+        ExprNode input_node;
+        input_node.op = ExprOp::RUNTIME_SCALAR;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = DataType::FP32;
+        input_node.output_dtype = parent.output_dtype.isPresent() ? parent.output_dtype.get() : DataType::FP32;
+        input_node.compute_dtype = parent.compute_dtype;
+        input_node.backward_output_dtype = parent.backward_output_dtype;
+        input_node.backward_compute_dtype = parent.backward_compute_dtype;
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+
+    bind_parent_to_local_tensor_input(node.lhs, static_cast<uint32_t>(stage_expr.inputs.size()));
+    const uint32_t lhs_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+    bind_parent_to_local_tensor_input(node.rhs, static_cast<uint32_t>(stage_expr.inputs.size()));
+    const uint32_t rhs_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+    uint32_t aux_local = UINT32_MAX;
     if (node.op == ExprOp::GEMM) {
-        bind_parent_to_local_input(node.aux, 2);
+        bind_parent_to_local_tensor_input(node.aux, static_cast<uint32_t>(stage_expr.inputs.size()));
+        aux_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+    }
+
+    uint32_t alpha_local = UINT32_MAX;
+    if (node.alpha_node != UINT32_MAX) {
+        bind_parent_to_local_scalar(node.alpha_node, static_cast<uint32_t>(stage_expr.inputs.size()));
+        alpha_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+    }
+    uint32_t beta_local = UINT32_MAX;
+    if (node.beta_node != UINT32_MAX) {
+        bind_parent_to_local_scalar(node.beta_node, static_cast<uint32_t>(stage_expr.inputs.size()));
+        beta_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
     }
 
     ExprNode route = node;
-    route.lhs = 0;
-    route.rhs = 1;
-    route.aux = node.op == ExprOp::GEMM ? 2 : UINT32_MAX;
+    route.lhs = lhs_local;
+    route.rhs = rhs_local;
+    route.aux = aux_local;
+    route.alpha_node = alpha_local;
+    route.beta_node = beta_local;
     stage_expr.nodes.push_back(std::move(route));
     stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
 

@@ -47,6 +47,12 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
         new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new);
         new_node.rhs = cloneForwardSubtree(src, src_node.rhs, dst, old_to_new);
         new_node.aux = cloneForwardSubtree(src, src_node.aux, dst, old_to_new);
+        if (src_node.alpha_node != UINT32_MAX) {
+            new_node.alpha_node = cloneForwardSubtree(src, src_node.alpha_node, dst, old_to_new);
+        }
+        if (src_node.beta_node != UINT32_MAX) {
+            new_node.beta_node = cloneForwardSubtree(src, src_node.beta_node, dst, old_to_new);
+        }
     } else if (Expression::isLeafOp(src_node.op)) {
         // Nothing to recurse into.
     } else {
@@ -684,6 +690,20 @@ class BackwardGraphBuilder {
 
     uint32_t cloneForward(uint32_t forward_node_index) {
         return cloneForwardSubtree(forward_expr, forward_node_index, grad_expr, forward_to_grad_node_map);
+    }
+
+    uint32_t buildScaledByGemmFactor(uint32_t maybe_scale_node, double constant_scale, uint32_t value_node) {
+        if (maybe_scale_node != UINT32_MAX) {
+            uint32_t scale = cloneForward(maybe_scale_node);
+            if (constant_scale != 1.0) {
+                scale = mul(scalar(constant_scale), scale);
+            }
+            return mul(scale, value_node);
+        }
+        if (constant_scale != 1.0) {
+            return mul(scalar(constant_scale), value_node);
+        }
+        return value_node;
     }
 
     void addContribution(uint32_t forward_node_index, uint32_t contrib_root) {
@@ -1767,9 +1787,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                         lhs_grad = builder.matmul(rhs, grad_like_output, true, true, lhs_grad_dtype, node.compute_dtype);
                     }
 
-                    if (node.alpha_fp != 1.0) {
-                        lhs_grad = builder.mul(builder.scalar(node.alpha_fp), lhs_grad);
-                    }
+                    lhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, lhs_grad);
                     addContributionToChild(node.lhs, lhs_grad, lhs_dims);
                 }
 
@@ -1786,9 +1804,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                         rhs_grad = builder.matmul(grad_like_output, lhs, true, true, rhs_grad_dtype, node.compute_dtype);
                     }
 
-                    if (node.alpha_fp != 1.0) {
-                        rhs_grad = builder.mul(builder.scalar(node.alpha_fp), rhs_grad);
-                    }
+                    rhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, rhs_grad);
                     addContributionToChild(node.rhs, rhs_grad, rhs_dims);
                 }
                 break;
@@ -1816,9 +1832,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                         lhs_grad = builder.matmul(rhs, grad_like_output, true, true, lhs_grad_dtype, node.compute_dtype);
                     }
 
-                    if (node.alpha_fp != 1.0) {
-                        lhs_grad = builder.mul(builder.scalar(node.alpha_fp), lhs_grad);
-                    }
+                    lhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, lhs_grad);
                     addContributionToChild(node.lhs, lhs_grad, lhs_dims);
                 }
 
@@ -1835,9 +1849,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                         rhs_grad = builder.matmul(grad_like_output, lhs, true, true, rhs_grad_dtype, node.compute_dtype);
                     }
 
-                    if (node.alpha_fp != 1.0) {
-                        rhs_grad = builder.mul(builder.scalar(node.alpha_fp), rhs_grad);
-                    }
+                    rhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, rhs_grad);
                     addContributionToChild(node.rhs, rhs_grad, rhs_dims);
                 }
 
@@ -1847,9 +1859,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                             "Thor expressions autodiff does not yet support backward for GEMM with transpose_aux/transposeC.");
                     }
                     uint32_t aux_grad = grad_like_output;
-                    if (node.beta_fp != 1.0) {
-                        aux_grad = builder.mul(builder.scalar(node.beta_fp), aux_grad);
-                    }
+                    aux_grad = builder.buildScaledByGemmFactor(node.beta_node, node.beta_fp, aux_grad);
                     aux_grad = broadcastGradToDims(aux_grad, aux_dims, aux_grad_dtype);
                     addContributionToChild(node.aux, aux_grad, aux_dims);
                 }

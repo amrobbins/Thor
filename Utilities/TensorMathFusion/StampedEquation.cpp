@@ -171,7 +171,11 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                              const Optional<Tensor>& addend,
                              const Tensor& output,
                              const Stream& stream,
-                             Optional<Tensor> workspace)
+                             Optional<Tensor> workspace,
+                             Optional<RuntimeInputValue> alpha_input,
+                             Optional<RuntimeInputValue> beta_input,
+                             std::optional<std::string> alpha_runtime_name,
+                             std::optional<std::string> beta_runtime_name)
     : compiled_matmul(std::move(compiled)),
       built_matmul(std::move(built)),
       lhs(lhs),
@@ -179,7 +183,11 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
       addend(addend),
       output(output),
       stream(stream),
-      workspace(workspace) {
+      workspace(workspace),
+      alpha_input(alpha_input),
+      beta_input(beta_input),
+      alpha_runtime_name(std::move(alpha_runtime_name)),
+      beta_runtime_name(std::move(beta_runtime_name)) {
     if (!compiled_matmul) {
         throw std::runtime_error("StampedMatmul requires non-null compiled payload.");
     }
@@ -194,9 +202,34 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
     }
 }
 
+static float resolveMatmulRuntimeScale(const Optional<RuntimeInputValue>& bound_input,
+                                       const std::optional<std::string>& runtime_name,
+                                       double base_scale,
+                                       const std::unordered_map<std::string, float>& runtime_scalars) {
+    float scale = static_cast<float>(base_scale);
+    if (runtime_name.has_value()) {
+        auto it = runtime_scalars.find(*runtime_name);
+        if (it != runtime_scalars.end()) {
+            scale *= it->second;
+            return scale;
+        }
+    }
+    if (bound_input.isPresent()) {
+        const RuntimeInputValue& value = bound_input.get();
+        if (std::holds_alternative<float>(value)) {
+            scale *= std::get<float>(value);
+            return scale;
+        }
+        throw std::runtime_error("Dynamic GEMM scale currently requires fp32 runtime scalar bindings.");
+    }
+    return scale;
+}
+
 void StampedMatmul::run() { runOn(stream); }
 
-void StampedMatmul::runOn(Stream& run_stream) const {
+void StampedMatmul::runOn(Stream& run_stream) const { runOn(run_stream, {}); }
+
+void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
     if (lhs.getDimensions().size() != 2 || rhs.getDimensions().size() != 2 || output.getDimensions().size() != 2) {
         throw std::runtime_error("StampedMatmul currently only supports rank-2 tensors.");
     }
@@ -207,6 +240,9 @@ void StampedMatmul::runOn(Stream& run_stream) const {
     const int32_t a_cols = static_cast<int32_t>(lhs_dims[1]);
     const int32_t b_rows = static_cast<int32_t>(rhs_dims[0]);
     const int32_t b_cols = static_cast<int32_t>(rhs_dims[1]);
+
+    const float resolved_alpha = resolveMatmulRuntimeScale(alpha_input, alpha_runtime_name, compiled_matmul->alpha, runtime_scalars);
+    const float resolved_beta = resolveMatmulRuntimeScale(beta_input, beta_runtime_name, compiled_matmul->beta, runtime_scalars);
 
     if (compiled_matmul->op == ExprOp::MATMUL) {
         CublasMatrixMultiply::instance().multiply(lhs,
@@ -245,8 +281,8 @@ void StampedMatmul::runOn(Stream& run_stream) const {
                                           compiled_matmul->transpose_lhs,
                                           compiled_matmul->transpose_rhs,
                                           compiled_matmul->transpose_aux,
-                                          static_cast<float>(compiled_matmul->alpha),
-                                          static_cast<float>(compiled_matmul->beta),
+                                          resolved_alpha,
+                                          resolved_beta,
                                           compiled_matmul->output_dtype,
                                           run_stream);
 }
@@ -374,19 +410,34 @@ void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& run
         }
 
         std::unordered_map<std::string, float> stage_runtime_scalars;
-        if (!runtime_scalars.empty() && stage.kind == StampedExecutionStage::Kind::FusedKernel && stage.kernel != nullptr &&
-            stage.kernel->requiresRuntimeScalars()) {
-            const std::unordered_set<std::string> needed_names = stage.kernel->runtimeScalarNames();
-            stage_runtime_scalars.reserve(needed_names.size());
 
-            for (const std::string& name : needed_names) {
-                auto it = runtime_scalars.find(name);
-                if (it == runtime_scalars.end()) {
-                    throw std::runtime_error("Missing value for runtime scalar: " + name +
-                                             "  - if it was meant to be constant, use a constant scalar instead.");
+        if (!runtime_scalars.empty()) {
+            std::unordered_set<std::string> needed_names;
+
+            if (stage.kind == StampedExecutionStage::Kind::FusedKernel && stage.kernel != nullptr &&
+                stage.kernel->requiresRuntimeScalars()) {
+                needed_names = stage.kernel->runtimeScalarNames();
+            } else if (stage.kind == StampedExecutionStage::Kind::Matmul && stage.matmul != nullptr) {
+                if (stage.matmul->alphaRuntimeName().has_value()) {
+                    needed_names.insert(*stage.matmul->alphaRuntimeName());
                 }
-                stage_runtime_scalars.emplace(name, it->second);
-                consumed_runtime_scalar_names.insert(name);
+                if (stage.matmul->betaRuntimeName().has_value()) {
+                    needed_names.insert(*stage.matmul->betaRuntimeName());
+                }
+            }
+
+            if (!needed_names.empty()) {
+                stage_runtime_scalars.reserve(needed_names.size());
+
+                for (const std::string& name : needed_names) {
+                    auto it = runtime_scalars.find(name);
+                    if (it == runtime_scalars.end()) {
+                        throw std::runtime_error("Missing value for runtime scalar: " + name +
+                                                 "  - if it was meant to be constant, use a constant scalar instead.");
+                    }
+                    stage_runtime_scalars.emplace(name, it->second);
+                    consumed_runtime_scalar_names.insert(name);
+                }
             }
         }
 
@@ -652,6 +703,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
 
     auto built = std::make_shared<BuiltMatmul>(key);
     bool kernelWillRunOnGpu = false;
+
     if (compiled_matmul->op == ExprOp::MATMUL) {
         CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(device_num,
                                                                            a_rows,

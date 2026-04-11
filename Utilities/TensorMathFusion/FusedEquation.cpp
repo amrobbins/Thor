@@ -205,6 +205,48 @@ static bool tryGetStaticScalarNodeValue(const PhysicalExpression& expr, uint32_t
     return true;
 }
 
+static bool tryGetLowerableScaleNode(const PhysicalExpression& expr, uint32_t node_idx, double& scale_fp, uint32_t& scale_node_idx) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (node.op == ExprOp::SCALAR_FP) {
+        scale_fp = node.scalar_fp;
+        scale_node_idx = UINT32_MAX;
+        return true;
+    }
+    if (node.op == ExprOp::RUNTIME_SCALAR) {
+        scale_fp = 1.0;
+        scale_node_idx = node_idx;
+        return true;
+    }
+    return false;
+}
+
+static bool expressionHasPotentialGemmLoweringPattern(const PhysicalExpression& expr) {
+    bool saw_matmul = false;
+    bool saw_add_or_sub = false;
+
+    for (const ExprNode& node : expr.nodes) {
+        switch (node.op) {
+            case ExprOp::MATMUL:
+                saw_matmul = true;
+                break;
+
+            case ExprOp::ADD:
+            case ExprOp::SUB:
+                saw_add_or_sub = true;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    return saw_matmul && saw_add_or_sub;
+}
+
 static std::vector<uint64_t> inferExpressionMatmulOutputDims(const ExprNode& node,
                                                              const std::vector<uint64_t>& lhs_dims,
                                                              const std::vector<uint64_t>& rhs_dims,
@@ -341,14 +383,16 @@ struct ScaledMatmulPattern {
     uint32_t rhs_idx = UINT32_MAX;
     bool transpose_lhs = false;
     bool transpose_rhs = false;
-    double alpha = 1.0;
+    double alpha_scale = 1.0;
+    uint32_t alpha_node = UINT32_MAX;
     Optional<DataType> compute_dtype = Optional<DataType>::empty();
     Optional<DataType> backward_compute_dtype = Optional<DataType>::empty();
 };
 
 struct ScaledAddendPattern {
     uint32_t node_idx = UINT32_MAX;
-    double beta = 1.0;
+    double beta_scale = 1.0;
+    uint32_t beta_node = UINT32_MAX;
 };
 
 struct GemmLoweringPattern {
@@ -357,8 +401,10 @@ struct GemmLoweringPattern {
     uint32_t addend_idx = UINT32_MAX;
     bool transpose_lhs = false;
     bool transpose_rhs = false;
-    double alpha = 1.0;
-    double beta = 1.0;
+    double alpha_scale = 1.0;
+    double beta_scale = 1.0;
+    uint32_t alpha_node = UINT32_MAX;
+    uint32_t beta_node = UINT32_MAX;
     Optional<DataType> inherited_compute_dtype = Optional<DataType>::empty();
     Optional<DataType> inherited_backward_compute_dtype = Optional<DataType>::empty();
 };
@@ -375,7 +421,8 @@ static bool tryMatchScaledMatmulPattern(const PhysicalExpression& expr, uint32_t
         out.rhs_idx = node.rhs;
         out.transpose_lhs = node.transpose_lhs;
         out.transpose_rhs = node.transpose_rhs;
-        out.alpha = 1.0;
+        out.alpha_scale = 1.0;
+        out.alpha_node = UINT32_MAX;
         out.compute_dtype = node.compute_dtype;
         out.backward_compute_dtype = node.backward_compute_dtype;
         return true;
@@ -385,14 +432,16 @@ static bool tryMatchScaledMatmulPattern(const PhysicalExpression& expr, uint32_t
         return false;
     }
 
-    double scalar = 0.0;
+    double scale_fp = 0.0;
+    uint32_t scale_node = UINT32_MAX;
     const ExprNode* matmul = nullptr;
     uint32_t matmul_idx = UINT32_MAX;
 
-    if (tryGetStaticScalarNodeValue(expr, node.lhs, scalar) && node.rhs < expr.nodes.size() && expr.nodes[node.rhs].op == ExprOp::MATMUL) {
+    if (tryGetLowerableScaleNode(expr, node.lhs, scale_fp, scale_node) && node.rhs < expr.nodes.size() &&
+        expr.nodes[node.rhs].op == ExprOp::MATMUL) {
         matmul = &expr.nodes[node.rhs];
         matmul_idx = node.rhs;
-    } else if (tryGetStaticScalarNodeValue(expr, node.rhs, scalar) && node.lhs < expr.nodes.size() &&
+    } else if (tryGetLowerableScaleNode(expr, node.rhs, scale_fp, scale_node) && node.lhs < expr.nodes.size() &&
                expr.nodes[node.lhs].op == ExprOp::MATMUL) {
         matmul = &expr.nodes[node.lhs];
         matmul_idx = node.lhs;
@@ -405,59 +454,66 @@ static bool tryMatchScaledMatmulPattern(const PhysicalExpression& expr, uint32_t
     out.rhs_idx = matmul->rhs;
     out.transpose_lhs = matmul->transpose_lhs;
     out.transpose_rhs = matmul->transpose_rhs;
-    out.alpha = scalar;
+    out.alpha_scale = scale_fp;
+    out.alpha_node = scale_node;
     out.compute_dtype = matmul->compute_dtype;
     out.backward_compute_dtype = matmul->backward_compute_dtype;
     return true;
 }
 
-static bool tryMatchScaledAddendPattern(const PhysicalExpression& expr, uint32_t node_idx, ScaledAddendPattern& out) {
-    if (node_idx >= expr.nodes.size()) {
-        return false;
-    }
-
-    ScaledMatmulPattern matmul_pattern;
-    if (tryMatchScaledMatmulPattern(expr, node_idx, matmul_pattern)) {
+static bool tryMatchScaledAddendPattern(const PhysicalExpression& expr,
+                                        uint32_t node_idx,
+                                        const std::vector<std::vector<uint64_t>>& node_dims,
+                                        const std::vector<uint64_t>& expected_dims,
+                                        ScaledAddendPattern& out) {
+    if (node_idx >= expr.nodes.size() || node_idx >= node_dims.size()) {
         return false;
     }
 
     const ExprNode& node = expr.nodes[node_idx];
-    if (isScalarLikeNodeOp(node.op)) {
-        return false;
-    }
 
+    // First, prefer matching an explicitly scaled addend like beta * C or C * beta.
+    // Otherwise a MUL node whose overall dims match would be incorrectly treated as
+    // an unscaled addend with beta = 1.
     if (node.op == ExprOp::MUL) {
-        double scalar = 0.0;
-        if (tryGetStaticScalarNodeValue(expr, node.lhs, scalar)) {
-            if (node.rhs >= expr.nodes.size() || isScalarLikeNodeOp(expr.nodes[node.rhs].op) ||
-                tryMatchScaledMatmulPattern(expr, node.rhs, matmul_pattern)) {
-                return false;
+        double scale_fp = 0.0;
+        uint32_t scale_node = UINT32_MAX;
+
+        if (tryGetLowerableScaleNode(expr, node.lhs, scale_fp, scale_node)) {
+            if (node.rhs < node_dims.size() && !node_dims[node.rhs].empty() && node_dims[node.rhs] == expected_dims) {
+                out.node_idx = node.rhs;
+                out.beta_scale = scale_fp;
+                out.beta_node = scale_node;
+                return true;
             }
-            out.node_idx = node.rhs;
-            out.beta = scalar;
-            return true;
         }
-        if (tryGetStaticScalarNodeValue(expr, node.rhs, scalar)) {
-            if (node.lhs >= expr.nodes.size() || isScalarLikeNodeOp(expr.nodes[node.lhs].op) ||
-                tryMatchScaledMatmulPattern(expr, node.lhs, matmul_pattern)) {
-                return false;
+
+        if (tryGetLowerableScaleNode(expr, node.rhs, scale_fp, scale_node)) {
+            if (node.lhs < node_dims.size() && !node_dims[node.lhs].empty() && node_dims[node.lhs] == expected_dims) {
+                out.node_idx = node.lhs;
+                out.beta_scale = scale_fp;
+                out.beta_node = scale_node;
+                return true;
             }
-            out.node_idx = node.lhs;
-            out.beta = scalar;
-            return true;
         }
     }
 
-    out.node_idx = node_idx;
-    out.beta = 1.0;
-    return true;
+    // Fallback: plain unscaled addend C.
+    if (!node_dims[node_idx].empty() && node_dims[node_idx] == expected_dims) {
+        out.node_idx = node_idx;
+        out.beta_scale = 1.0;
+        out.beta_node = UINT32_MAX;
+        return true;
+    }
+
+    return false;
 }
 
 static bool tryBuildGemmLoweringPattern(const PhysicalExpression& expr,
                                         uint32_t node_idx,
-                                        const std::vector<std::vector<uint64_t>>* node_dims,
+                                        const std::vector<std::vector<uint64_t>>& node_dims,
                                         GemmLoweringPattern& out) {
-    if (node_idx >= expr.nodes.size()) {
+    if (node_idx >= expr.nodes.size() || node_idx >= node_dims.size()) {
         return false;
     }
 
@@ -466,25 +522,22 @@ static bool tryBuildGemmLoweringPattern(const PhysicalExpression& expr,
         return false;
     }
 
-    auto attempt = [&](uint32_t matmul_side_idx, uint32_t addend_side_idx, double matmul_sign, double addend_sign) {
+    auto attempt = [&](uint32_t matmul_candidate, uint32_t addend_candidate, double matmul_sign, double addend_sign) -> bool {
         ScaledMatmulPattern matmul;
-        ScaledAddendPattern addend;
-        if (!tryMatchScaledMatmulPattern(expr, matmul_side_idx, matmul)) {
+        if (!tryMatchScaledMatmulPattern(expr, matmul_candidate, matmul)) {
             return false;
         }
-        if (!tryMatchScaledAddendPattern(expr, addend_side_idx, addend)) {
+        if (matmul.matmul_node_idx >= node_dims.size()) {
+            return false;
+        }
+        const std::vector<uint64_t>& matmul_dims = node_dims[matmul.matmul_node_idx];
+        if (matmul_dims.size() != 2) {
             return false;
         }
 
-        if (node_dims != nullptr) {
-            if (matmul.matmul_node_idx >= node_dims->size() || addend.node_idx >= node_dims->size()) {
-                return false;
-            }
-            const std::vector<uint64_t>& matmul_dims = (*node_dims)[matmul.matmul_node_idx];
-            const std::vector<uint64_t>& addend_dims = (*node_dims)[addend.node_idx];
-            if (matmul_dims.size() != 2 || addend_dims.size() != 2 || matmul_dims != addend_dims) {
-                return false;
-            }
+        ScaledAddendPattern addend;
+        if (!tryMatchScaledAddendPattern(expr, addend_candidate, node_dims, matmul_dims, addend)) {
+            return false;
         }
 
         out.lhs_idx = matmul.lhs_idx;
@@ -492,8 +545,10 @@ static bool tryBuildGemmLoweringPattern(const PhysicalExpression& expr,
         out.addend_idx = addend.node_idx;
         out.transpose_lhs = matmul.transpose_lhs;
         out.transpose_rhs = matmul.transpose_rhs;
-        out.alpha = matmul_sign * matmul.alpha;
-        out.beta = addend_sign * addend.beta;
+        out.alpha_scale = matmul_sign * matmul.alpha_scale;
+        out.beta_scale = addend_sign * addend.beta_scale;
+        out.alpha_node = matmul.alpha_node;
+        out.beta_node = addend.beta_node;
         out.inherited_compute_dtype = matmul.compute_dtype;
         out.inherited_backward_compute_dtype = matmul.backward_compute_dtype;
         return true;
@@ -518,16 +573,6 @@ static bool tryBuildGemmLoweringPattern(const PhysicalExpression& expr,
     return false;
 }
 
-static bool expressionHasPotentialGemmLoweringPattern(const PhysicalExpression& expr) {
-    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
-        GemmLoweringPattern pattern;
-        if (tryBuildGemmLoweringPattern(expr, node_idx, nullptr, pattern)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static void optimizeExpressionGemmPatternsInPlace(PhysicalExpression& expr,
                                                   const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
     if (expr.nodes.empty() || !expressionHasPotentialGemmLoweringPattern(expr)) {
@@ -538,7 +583,7 @@ static void optimizeExpressionGemmPatternsInPlace(PhysicalExpression& expr,
 
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
         GemmLoweringPattern pattern;
-        if (!tryBuildGemmLoweringPattern(expr, node_idx, &node_dims, pattern)) {
+        if (!tryBuildGemmLoweringPattern(expr, node_idx, node_dims, pattern)) {
             continue;
         }
 
@@ -547,8 +592,10 @@ static void optimizeExpressionGemmPatternsInPlace(PhysicalExpression& expr,
         node.lhs = pattern.lhs_idx;
         node.rhs = pattern.rhs_idx;
         node.aux = pattern.addend_idx;
-        node.alpha_fp = pattern.alpha;
-        node.beta_fp = pattern.beta;
+        node.alpha_fp = pattern.alpha_scale;
+        node.beta_fp = pattern.beta_scale;
+        node.alpha_node = pattern.alpha_node;
+        node.beta_node = pattern.beta_node;
         node.transpose_lhs = pattern.transpose_lhs;
         node.transpose_rhs = pattern.transpose_rhs;
         node.transpose_aux = false;
@@ -613,9 +660,9 @@ static Tensor adaptMatmulInputDTypeIfNeeded(const Tensor& input, DataType expect
 
 static std::vector<uint64_t> resolveMatmulOutputDimsFromInputs(const CompiledMatmul& compiled_stage,
                                                                const std::vector<std::vector<uint64_t>>& stage_input_dims) {
-    const size_t expected_inputs = compiled_stage.op == ExprOp::MATMUL ? 2u : 3u;
-    if (stage_input_dims.size() != expected_inputs) {
-        throw std::runtime_error("Matmul/gemm stage expected " + std::to_string(expected_inputs) + " input shapes.");
+    const size_t min_expected_inputs = compiled_stage.op == ExprOp::MATMUL ? 2u : 3u;
+    if (stage_input_dims.size() < min_expected_inputs) {
+        throw std::runtime_error("Matmul/gemm stage expected at least " + std::to_string(min_expected_inputs) + " input shapes.");
     }
 
     const auto& a_dims = stage_input_dims[0];
@@ -769,6 +816,29 @@ static size_t externalRootInputCount(const std::vector<NamedInput>& root_inputs,
         throw std::runtime_error("Invalid backward accumulation input accounting.");
     }
     return root_inputs.size() - accumulation_count;
+}
+
+static std::vector<const NamedInput*> externalRootTensorInputs(const std::vector<NamedInput>& root_inputs,
+                                                               const std::optional<BackwardEquationConfig>& backward_config) {
+    std::vector<const NamedInput*> tensor_inputs;
+    tensor_inputs.reserve(root_inputs.size());
+
+    const auto accumulation_output_names = backwardAccumulationOutputNames(backward_config);
+    for (const NamedInput& input : root_inputs) {
+        if (accumulation_output_names.contains(input.name)) {
+            continue;
+        }
+        if (input.kind == NamedInput::Kind::Tensor) {
+            tensor_inputs.push_back(&input);
+        }
+    }
+
+    return tensor_inputs;
+}
+
+static size_t externalRootTensorInputCount(const std::vector<NamedInput>& root_inputs,
+                                           const std::optional<BackwardEquationConfig>& backward_config) {
+    return externalRootTensorInputs(root_inputs, backward_config).size();
 }
 
 static std::vector<std::string> inferBackwardWrtNamesFromOutputs(const PhysicalOutputs& backward_outputs) {
@@ -1713,14 +1783,15 @@ std::vector<uint64_t> FusedEquation::getOutputShape(const Tensor& input) const {
             "Use getOutputShapes(...) instead.");
     }
 
-    if (externalRootInputCount(root_inputs, backward_config) != 1) {
-        throw std::runtime_error("FusedEquation::getOutputShape was passed a single input, but this equation requires " +
-                                 std::to_string(externalRootInputCount(root_inputs, backward_config)) +
-                                 " inputs. Pass a dict of name -> Tensor to getOutputShapes(...).");
+    const auto tensor_inputs = externalRootTensorInputs(root_inputs, backward_config);
+    if (tensor_inputs.size() != 1) {
+        throw std::runtime_error("FusedEquation::getOutputShape was passed a single tensor input, but this equation requires " +
+                                 std::to_string(tensor_inputs.size()) +
+                                 " tensor inputs. Pass a dict of name -> Tensor to getOutputShape(...).");
     }
 
     std::unordered_map<std::string, Tensor> input_map = {
-        {root_inputs[0].name, input},
+        {tensor_inputs[0]->name, input},
     };
 
     return getOutputShape(input_map);
@@ -1733,11 +1804,11 @@ std::vector<uint64_t> FusedEquation::getOutputShape(const std::unordered_map<std
             "Use getOutputShapes(...) instead.");
     }
 
-    if (externalRootInputCount(root_inputs, backward_config) != inputs.size()) {
+    if (externalRootTensorInputCount(root_inputs, backward_config) != inputs.size()) {
         throw std::runtime_error("FusedEquation::getOutputShape was passed " + to_string(inputs.size()) +
-                                 " inputs, but this equation requires " +
-                                 std::to_string(externalRootInputCount(root_inputs, backward_config)) +
-                                 " inputs. Pass a dict of name -> Tensor to getOutputShape(...).");
+                                 " tensor inputs, but this equation requires " +
+                                 std::to_string(externalRootTensorInputCount(root_inputs, backward_config)) +
+                                 " tensor inputs. Pass a dict of name -> Tensor to getOutputShape(...).");
     }
 
     std::unordered_map<std::string, std::vector<uint64_t>> output_shapes = getOutputShapes(inputs);
@@ -1746,14 +1817,15 @@ std::vector<uint64_t> FusedEquation::getOutputShape(const std::unordered_map<std
 }
 
 std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputShapes(const Tensor& input) const {
-    if (externalRootInputCount(root_inputs, backward_config) != 1) {
-        throw std::runtime_error("FusedEquation::getOutputShapes was passed a single input, but this equation requires " +
-                                 std::to_string(externalRootInputCount(root_inputs, backward_config)) +
-                                 " inputs. Pass a dict of name -> Tensor to getOutputShapes(...).");
+    const auto tensor_inputs = externalRootTensorInputs(root_inputs, backward_config);
+    if (tensor_inputs.size() != 1) {
+        throw std::runtime_error("FusedEquation::getOutputShapes was passed a single tensor input, but this equation requires " +
+                                 std::to_string(tensor_inputs.size()) +
+                                 " tensor inputs. Pass a dict of name -> Tensor to getOutputShapes(...).");
     }
 
     std::unordered_map<std::string, Tensor> input_map = {
-        {root_inputs[0].name, input},
+        {tensor_inputs[0]->name, input},
     };
 
     return getOutputShapes(input_map);
@@ -2662,7 +2734,11 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                           Tensor& lhs,
                                                           Tensor& rhs,
                                                           const Optional<Tensor>& preallocatedOutput,
-                                                          const Stream& stream) const {
+                                                          const Stream& stream,
+                                                          const Optional<RuntimeInputValue>& alpha_input,
+                                                          const Optional<RuntimeInputValue>& beta_input,
+                                                          const std::optional<std::string>& alpha_runtime_name,
+                                                          const std::optional<std::string>& beta_runtime_name) const {
     if (!compiledStage) {
         throw std::runtime_error("stampMatmul requires non-null compiled stage.");
     }
@@ -2701,7 +2777,18 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         workspace = Tensor(adaptedLhs.getPlacement(), workspaceDescriptor);
     }
 
-    return make_shared<StampedMatmul>(compiledStage, built, adaptedLhs, adaptedRhs, Optional<Tensor>::empty(), output, stream, workspace);
+    return make_shared<StampedMatmul>(compiledStage,
+                                      built,
+                                      adaptedLhs,
+                                      adaptedRhs,
+                                      Optional<Tensor>::empty(),
+                                      output,
+                                      stream,
+                                      workspace,
+                                      alpha_input,
+                                      beta_input,
+                                      alpha_runtime_name,
+                                      beta_runtime_name);
 }
 
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
@@ -2709,7 +2796,11 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                           Tensor& rhs,
                                                           Tensor& addend,
                                                           const Optional<Tensor>& preallocatedOutput,
-                                                          const Stream& stream) const {
+                                                          const Stream& stream,
+                                                          const Optional<RuntimeInputValue>& alpha_input,
+                                                          const Optional<RuntimeInputValue>& beta_input,
+                                                          const std::optional<std::string>& alpha_runtime_name,
+                                                          const std::optional<std::string>& beta_runtime_name) const {
     if (!compiledStage) {
         throw std::runtime_error("stampMatmul requires non-null compiled stage.");
     }
@@ -2749,8 +2840,18 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         workspace = Tensor(adaptedLhs.getPlacement(), workspaceDescriptor);
     }
 
-    return make_shared<StampedMatmul>(
-        compiledStage, built, adaptedLhs, adaptedRhs, Optional<Tensor>(adaptedAddend), output, stream, workspace);
+    return make_shared<StampedMatmul>(compiledStage,
+                                      built,
+                                      adaptedLhs,
+                                      adaptedRhs,
+                                      Optional<Tensor>(adaptedAddend),
+                                      output,
+                                      stream,
+                                      workspace,
+                                      alpha_input,
+                                      beta_input,
+                                      alpha_runtime_name,
+                                      beta_runtime_name);
 }
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
@@ -3105,21 +3206,87 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     preallocated = preallocated_it->second;
                 }
                 std::shared_ptr<StampedMatmul> stampedMatmul;
+                Optional<RuntimeInputValue> alpha_input = Optional<RuntimeInputValue>::empty();
+                Optional<RuntimeInputValue> beta_input = Optional<RuntimeInputValue>::empty();
+                std::optional<std::string> alpha_runtime_name = std::nullopt;
+                std::optional<std::string> beta_runtime_name = std::nullopt;
+
+                auto runtimeScalarNameForStageLocalSlot = [&](uint32_t local_slot) -> std::optional<std::string> {
+                    if (local_slot == UINT32_MAX) {
+                        return std::nullopt;
+                    }
+                    if (local_slot >= stage.input_value_ids.size()) {
+                        throw std::runtime_error("Matmul stage runtime scalar local slot is out of range.");
+                    }
+
+                    const uint32_t root_value_id = stage.input_value_ids[local_slot];
+                    if (root_value_id >= root_inputs.size()) {
+                        return std::nullopt;
+                    }
+
+                    const NamedInput& root_input = root_inputs[root_value_id];
+                    if (root_input.kind != NamedInput::Kind::RuntimeScalarFp32) {
+                        return std::nullopt;
+                    }
+
+                    return root_input.name;
+                };
+
+                if (stage.matmul->alpha_input_slot != UINT32_MAX) {
+                    if (stage.matmul->alpha_input_slot >= stageInputs.size()) {
+                        throw std::runtime_error("Matmul stage alpha runtime scalar slot is out of range.");
+                    }
+                    alpha_input = stageInputs[stage.matmul->alpha_input_slot];
+                    alpha_runtime_name = runtimeScalarNameForStageLocalSlot(stage.matmul->alpha_input_slot);
+                }
+
+                if (stage.matmul->beta_input_slot != UINT32_MAX) {
+                    if (stage.matmul->beta_input_slot >= stageInputs.size()) {
+                        throw std::runtime_error("Matmul stage beta runtime scalar slot is out of range.");
+                    }
+                    beta_input = stageInputs[stage.matmul->beta_input_slot];
+                    beta_runtime_name = runtimeScalarNameForStageLocalSlot(stage.matmul->beta_input_slot);
+                }
+
+                if (stage.matmul->alpha_input_slot != UINT32_MAX && !alpha_runtime_name.has_value()) {
+                    throw std::runtime_error("Matmul stage lost alpha runtime scalar name during stamping.");
+                }
+                if (stage.matmul->beta_input_slot != UINT32_MAX && !beta_runtime_name.has_value()) {
+                    throw std::runtime_error("Matmul stage lost beta runtime scalar name during stamping.");
+                }
+
                 if (stage.matmul->op == ExprOp::MATMUL) {
-                    if (stageInputs.size() != 2) {
-                        throw std::runtime_error("Matmul stage expects exactly two inputs.");
+                    if (stageInputs.size() < 2) {
+                        throw std::runtime_error("Matmul stage expects at least two inputs.");
                     }
                     Tensor lhsTensor = runtimeInputTensor(stageInputs[0]);
                     Tensor rhsTensor = runtimeInputTensor(stageInputs[1]);
-                    stampedMatmul = stampMatmul(stage.matmul, lhsTensor, rhsTensor, preallocated, stream);
+                    stampedMatmul = stampMatmul(stage.matmul,
+                                                lhsTensor,
+                                                rhsTensor,
+                                                preallocated,
+                                                stream,
+                                                alpha_input,
+                                                beta_input,
+                                                alpha_runtime_name,
+                                                beta_runtime_name);
                 } else {
-                    if (stageInputs.size() != 3) {
-                        throw std::runtime_error("GEMM stage expects exactly three inputs.");
+                    if (stageInputs.size() < 3) {
+                        throw std::runtime_error("GEMM stage expects at least three inputs.");
                     }
                     Tensor lhsTensor = runtimeInputTensor(stageInputs[0]);
                     Tensor rhsTensor = runtimeInputTensor(stageInputs[1]);
                     Tensor addendTensor = runtimeInputTensor(stageInputs[2]);
-                    stampedMatmul = stampMatmul(stage.matmul, lhsTensor, rhsTensor, addendTensor, preallocated, stream);
+                    stampedMatmul = stampMatmul(stage.matmul,
+                                                lhsTensor,
+                                                rhsTensor,
+                                                addendTensor,
+                                                preallocated,
+                                                stream,
+                                                alpha_input,
+                                                beta_input,
+                                                alpha_runtime_name,
+                                                beta_runtime_name);
                 }
                 Tensor outputTensor = stampedMatmul->getOutputTensor();
                 if (outputTensor.getDimensions() != output_dims) {

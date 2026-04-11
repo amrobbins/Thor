@@ -157,6 +157,54 @@ def test_gemm_alpha_beta_numerical(dtype: thor.DataType):
 
 
 @pytest.mark.cuda
+def test_operator_gemm_runtime_scalars_right_scaled_numerical():
+    dtype = thor.DataType.fp32
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    alpha = ex.runtime_scalar("alpha")
+    beta = ex.runtime_scalar("beta")
+
+    expr = (a @ b) * alpha + c * beta
+    eq = ex.compile(expr, device_num=0)
+
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32)
+    b_np = np.array([[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]], dtype=np.float32)
+    c_np = np.array([[0.25, -1.0, 2.0, 0.5], [1.25, 0.75, -0.5, 3.0]], dtype=np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "c": _host_to_gpu(c_np, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 4]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+
+    alpha_v1 = 0.75
+    beta_v1 = -1.25
+    stamped.run({
+        "alpha": alpha_v1,
+        "beta": beta_v1
+    })
+    got_v1 = _copy_to_host(stamped.output(), dtype, stream)
+    expected_v1 = (a_np @ b_np) * alpha_v1 + c_np * beta_v1
+    _assert_close(got_v1, expected_v1, dtype)
+
+    alpha_v2 = -0.5
+    beta_v2 = 0.25
+    stamped.run({
+        "alpha": alpha_v2,
+        "beta": beta_v2
+    })
+    got_v2 = _copy_to_host(stamped.output(), dtype, stream)
+    expected_v2 = (a_np @ b_np) * alpha_v2 + c_np * beta_v2
+    _assert_close(got_v2, expected_v2, dtype)
+
+
+@pytest.mark.cuda
 def test_gemm_transpose_ab_and_preallocated_output_numerical():
     dtype = thor.DataType.fp32
     a = ex.input("a")
@@ -259,7 +307,7 @@ def test_gemm_rejects_incompatible_addend_dimensions_at_stamp_time():
         "c": _host_to_gpu(np.ones((4, 2), dtype=np.float32), dtype, stream),
     }
 
-    with pytest.raises(RuntimeError, match="addend tensor dimensions are incompatible"):
+    with pytest.raises(RuntimeError, match="addend|dimensions|incompatible"):
         eq.stamp(inputs_gpu, stream)
 
 

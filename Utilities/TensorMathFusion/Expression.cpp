@@ -301,8 +301,15 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
             std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
             std::string c = canonicalizeNode(expr, n.aux, memo, memoReady);
-            out = opName(n.op) + "(" + a + "," + b + "," + c + ";alpha=" + formatFloatCanonical(n.alpha_fp) +
-                  ";beta=" + formatFloatCanonical(n.beta_fp) + ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0) +
+            auto gemmScaleString = [&](const char* label, uint32_t scale_node, double scale_fp) {
+                if (scale_node != UINT32_MAX) {
+                    return std::string(";") + label + "Node=" + canonicalizeNode(expr, scale_node, memo, memoReady) + ";" + label +
+                           "Scale=" + formatFloatCanonical(scale_fp);
+                }
+                return std::string(";") + label + "=" + formatFloatCanonical(scale_fp);
+            };
+            out = opName(n.op) + "(" + a + "," + b + "," + c + gemmScaleString("alpha", n.alpha_node, n.alpha_fp) +
+                  gemmScaleString("beta", n.beta_node, n.beta_fp) + ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0) +
                   ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0) + ";tC=" + std::to_string(n.transpose_aux ? 1 : 0) + ")";
             break;
         }
@@ -488,6 +495,12 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
         newNode.lhs = cloneSubtree(src, srcNode.lhs, dst, oldToNew);
         newNode.rhs = cloneSubtree(src, srcNode.rhs, dst, oldToNew);
         newNode.aux = cloneSubtree(src, srcNode.aux, dst, oldToNew);
+        if (srcNode.alpha_node != UINT32_MAX) {
+            newNode.alpha_node = cloneSubtree(src, srcNode.alpha_node, dst, oldToNew);
+        }
+        if (srcNode.beta_node != UINT32_MAX) {
+            newNode.beta_node = cloneSubtree(src, srcNode.beta_node, dst, oldToNew);
+        }
     } else if (Expression::isLeafOp(srcNode.op)) {
         // nothing to recurse into
     } else {
@@ -559,6 +572,12 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
         newNode.lhs = cloneSubtreeWithMergedInputs(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName);
         newNode.rhs = cloneSubtreeWithMergedInputs(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName);
         newNode.aux = cloneSubtreeWithMergedInputs(src, srcNode.aux, dst, oldToNew, dstInputSlotsByName);
+        if (srcNode.alpha_node != UINT32_MAX) {
+            newNode.alpha_node = cloneSubtreeWithMergedInputs(src, srcNode.alpha_node, dst, oldToNew, dstInputSlotsByName);
+        }
+        if (srcNode.beta_node != UINT32_MAX) {
+            newNode.beta_node = cloneSubtreeWithMergedInputs(src, srcNode.beta_node, dst, oldToNew, dstInputSlotsByName);
+        }
     } else if (srcNode.op == ExprOp::SCALAR_FP || srcNode.op == ExprOp::FILL) {
         // nothing to recurse into
     } else {

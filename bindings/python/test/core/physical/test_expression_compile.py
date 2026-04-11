@@ -599,7 +599,7 @@ def test_fused_equation_output_shape_rejects_single_tensor_for_multi_input_equat
     eq = ex.compile(expr, device_num=0, use_fast_math=False)
     x_gpu = _gpu_tensor([2, 3], thor.DataType.fp32)
 
-    with pytest.raises(RuntimeError, match="single input|requires 2 inputs|getOutputShapes"):
+    with pytest.raises(RuntimeError, match="single tensor input|requires 2 tensor inputs|getOutputShapes"):
         eq.output_shape(x_gpu)
 
 

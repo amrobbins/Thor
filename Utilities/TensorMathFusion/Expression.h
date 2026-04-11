@@ -98,6 +98,8 @@ struct ExprNode {
     double scalar_fp = 0.0;
     double alpha_fp = 1.0;
     double beta_fp = 0.0;
+    uint32_t alpha_node = UINT32_MAX;
+    uint32_t beta_node = UINT32_MAX;
     bool transpose_lhs = false;
     bool transpose_rhs = false;
     bool transpose_aux = false;

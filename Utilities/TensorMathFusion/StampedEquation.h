@@ -272,6 +272,7 @@ class StampedMatmul {
    public:
     void run();
     void runOn(Stream& run_stream) const;
+    void runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const;
 
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
@@ -284,7 +285,14 @@ class StampedMatmul {
                   const Optional<Tensor>& addend,
                   const Tensor& output,
                   const Stream& stream,
-                  Optional<Tensor> workspace);
+                  Optional<Tensor> workspace,
+                  Optional<RuntimeInputValue> alpha_input,
+                  Optional<RuntimeInputValue> beta_input,
+                  std::optional<std::string> alpha_runtime_name,
+                  std::optional<std::string> beta_runtime_name);
+
+    [[nodiscard]] std::optional<std::string> alphaRuntimeName() const { return alpha_runtime_name; }
+    [[nodiscard]] std::optional<std::string> betaRuntimeName() const { return beta_runtime_name; }
 
    private:
     const std::shared_ptr<CompiledMatmul> compiled_matmul;
@@ -295,6 +303,10 @@ class StampedMatmul {
     Tensor output;
     Stream stream;
     const Optional<Tensor> workspace;
+    const Optional<RuntimeInputValue> alpha_input;
+    const Optional<RuntimeInputValue> beta_input;
+    const std::optional<std::string> alpha_runtime_name;
+    const std::optional<std::string> beta_runtime_name;
 };
 
 class StampedReduceMinMaxBackward {
@@ -386,7 +398,10 @@ struct StampedExecutionStage {
             arg_minmax->runOn(run_stream);
         } else if (kind == Kind::Matmul) {
             assert(matmul != nullptr);
-            matmul->runOn(run_stream);
+            if (runtime_scalars.empty())
+                matmul->runOn(run_stream);
+            else
+                matmul->runOn(run_stream, runtime_scalars);
         } else if (kind == Kind::ReduceMinMaxBackward) {
             assert(reduce_minmax_backward != nullptr);
             reduce_minmax_backward->runOn(run_stream);

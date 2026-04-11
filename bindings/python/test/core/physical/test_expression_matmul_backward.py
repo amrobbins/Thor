@@ -430,3 +430,36 @@ def test_matmul_backward_large_fp16_likely_workspace_numerical():
 
     _assert_close(got_a_grad, _cast_reference_to_storage_dtype(expected_a_grad, dtype), dtype)
     _assert_close(got_b_grad, _cast_reference_to_storage_dtype(expected_b_grad, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_operator_gemm_pattern_right_scaled_matmul_and_addend_numerical():
+    dtype = thor.DataType.fp32
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+
+    alpha = 0.75
+    beta = 1.25
+
+    expr = (a @ b) * alpha + c * beta
+    eq = ex.compile(expr, device_num=0)
+
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, -1.0, 2.0]], dtype=np.float32)
+    b_np = np.array([[0.25, 1.5], [-0.5, 2.0], [1.25, -1.0]], dtype=np.float32)
+    c_np = np.array([[0.1, -0.2], [0.3, 0.4]], dtype=np.float32)
+
+    expected = (a_np @ b_np) * alpha + c_np * beta
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "c": _host_to_gpu(c_np, dtype, stream),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, expected, dtype)

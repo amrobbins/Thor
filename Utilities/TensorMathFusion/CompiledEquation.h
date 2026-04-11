@@ -184,6 +184,8 @@ struct CompiledMatmul {
     const bool transpose_aux;
     const double alpha;
     const double beta;
+    const uint32_t alpha_input_slot;
+    const uint32_t beta_input_slot;
     const TensorDescriptor::DataType input_dtype;
     const TensorDescriptor::DataType output_dtype;
     const TensorDescriptor::DataType compute_dtype;
@@ -196,6 +198,8 @@ struct CompiledMatmul {
                    bool transpose_aux,
                    double alpha,
                    double beta,
+                   uint32_t alpha_input_slot,
+                   uint32_t beta_input_slot,
                    TensorDescriptor::DataType input_dtype,
                    TensorDescriptor::DataType output_dtype,
                    Optional<TensorDescriptor::DataType> compute_dtype)
@@ -205,6 +209,8 @@ struct CompiledMatmul {
           transpose_aux(transpose_aux),
           alpha(alpha),
           beta(beta),
+          alpha_input_slot(alpha_input_slot),
+          beta_input_slot(beta_input_slot),
           input_dtype(input_dtype),
           output_dtype(output_dtype),
           compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : output_dtype) {}
