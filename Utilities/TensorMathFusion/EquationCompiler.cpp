@@ -267,8 +267,11 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
 static bool isArgMinMaxOp(ExprOp op) { return op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX; }
 static bool isMatmulOp(ExprOp op) { return op == ExprOp::MATMUL || op == ExprOp::GEMM; }
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
+static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
-static bool isStageBoundaryOp(ExprOp op) { return isCudnnReduceOp(op) || isMatmulOp(op) || isReduceMinMaxBackwardOp(op); }
+static bool isStageBoundaryOp(ExprOp op) {
+    return isCudnnReduceOp(op) || isMatmulOp(op) || isReduceMinMaxBackwardOp(op) || isTransposeOp(op);
+}
 
 static void collectExternalValueIds(const PhysicalExpression& expr,
                                     const std::unordered_set<uint32_t>& region_nodes,
@@ -385,6 +388,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "UNSQ";
         case ExprOp::SQUEEZE:
             return "SQZ";
+        case ExprOp::TRANSPOSE:
+            return "TRANSPOSE";
         case ExprOp::POW:
             return "POW";
         case ExprOp::MIN:
@@ -508,7 +513,9 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
     if (isStageBoundaryOp(node.op)) {
         std::string s;
 
-        if (isReduceMinMaxBackwardOp(node.op)) {
+        if (isTransposeOp(node.op)) {
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ")";
+        } else if (isReduceMinMaxBackwardOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",axes=" + uintVecSignature(node.reduction_axes) +
                 ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
@@ -810,6 +817,54 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     auto compiled = loadCubin(key, cubin, kernel_name, input_names, input_kinds, input_dtypes, output_dtypes, sig.device_num);
     compiled->elements_per_thread = CudaSourceEmitter::flatElementsPerThread(stage);
     compiled->uses_uint32_numel_arg = use_uint32_index_math;
+
+    cacheInsert(key, compiled);
+    return compiled;
+}
+
+shared_ptr<CompiledEquation> EquationCompiler::compileTransposeStage(const PhysicalExecutionStage& stage, const EquationSignature& sig) {
+    if (stage.kind != PhysicalExecutionStage::Kind::Transpose) {
+        throw runtime_error("compileTransposeStage called on non-transpose stage.");
+    }
+    if (stage.expr.inputs.size() != 1 || stage.outputs.size() != 1) {
+        throw runtime_error("Transpose stage expects exactly one input and one output.");
+    }
+
+    ensureCudaContextCurrent(sig.device_num);
+
+    EquationCacheKey key(canonicalize(stage), sig, false);
+    shared_ptr<CompiledEquation> hit = cacheLookup(key);
+    if (hit) {
+        return hit;
+    }
+
+    const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
+    const std::vector<DataType> output_dtypes = collectCompiledOutputDTypes(stage);
+    if (input_dtypes.size() != 1 || output_dtypes.size() != 1) {
+        throw runtime_error("Transpose stage expects exactly one compiled input dtype and one compiled output dtype.");
+    }
+    if (input_dtypes[0] != output_dtypes[0]) {
+        throw runtime_error("Transpose stage currently requires matching input/output dtypes.");
+    }
+
+    string kernel_name = "transpose_kernel";
+    const std::string cuda_src = CudaSourceEmitter::emitTranspose(stage, kernel_name);
+
+    vector<string> input_names;
+    std::vector<NamedInput::Kind> input_kinds;
+    input_names.reserve(stage.expr.inputs.size());
+    input_kinds.reserve(stage.expr.inputs.size());
+    for (const NamedInput& input : stage.expr.inputs) {
+        input_names.push_back(input.name);
+        input_kinds.push_back(input.kind);
+    }
+
+    vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
+    vector<char> cubin = linkToCubin(ltoir, sig);
+    auto compiled = loadCubin(key, cubin, kernel_name, input_names, input_kinds, input_dtypes, output_dtypes, sig.device_num);
+    compiled->launch_kind = CompiledEquation::LaunchKind::Transpose;
+    compiled->elements_per_thread = 1;
+    compiled->uses_uint32_numel_arg = false;
 
     cacheInsert(key, compiled);
     return compiled;
@@ -1360,6 +1415,83 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     };
 }
 
+static PhysicalExecutionStage buildTransposeStage(const PhysicalExpression& expr,
+                                                  uint32_t node_idx,
+                                                  uint32_t output_value_id,
+                                                  const std::string& output_name,
+                                                  const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isTransposeOp(node.op)) {
+        throw std::runtime_error("buildTransposeStage called on non-transpose node.");
+    }
+    if (node.lhs == UINT32_MAX) {
+        throw std::runtime_error("Transpose node missing lhs input.");
+    }
+
+    PhysicalExpression stage_expr;
+    stage_expr.inputs.push_back(NamedInput{"__arg0", 0, NamedInput::Kind::Tensor});
+
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(1);
+
+    uint32_t parent_idx = node.lhs;
+    if (parent_idx >= expr.nodes.size()) {
+        throw std::runtime_error("Transpose input node index out of range.");
+    }
+
+    const ExprNode& parent = expr.nodes[parent_idx];
+    Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+
+    auto out_it = node_output_value_id.find(parent_idx);
+    if (out_it != node_output_value_id.end()) {
+        input_value_ids.push_back(out_it->second);
+        actual_input_dtype = parent.output_dtype;
+    } else if (parent.op == ExprOp::INPUT) {
+        input_value_ids.push_back(parent.input_slot);
+        actual_input_dtype = parent.input_tensor_dtype;
+    } else {
+        throw std::runtime_error("Missing value id for transpose input.");
+    }
+
+    if (!actual_input_dtype.isPresent()) {
+        throw std::runtime_error("Transpose parent node is missing resolved actual input dtype.");
+    }
+    if (!parent.output_dtype.isPresent()) {
+        throw std::runtime_error("Transpose parent node is missing resolved output_dtype.");
+    }
+
+    ExprNode input_node;
+    input_node.op = ExprOp::INPUT;
+    input_node.input_slot = 0;
+    input_node.input_tensor_dtype = actual_input_dtype.get();
+    input_node.output_dtype = parent.output_dtype;
+    input_node.compute_dtype = parent.compute_dtype;
+    input_node.backward_output_dtype = parent.backward_output_dtype;
+    input_node.backward_compute_dtype = parent.backward_compute_dtype;
+    stage_expr.nodes.push_back(std::move(input_node));
+
+    ExprNode transpose = node;
+    transpose.lhs = 0;
+    transpose.rhs = UINT32_MAX;
+    transpose.aux = UINT32_MAX;
+    stage_expr.nodes.push_back(std::move(transpose));
+    stage_expr.output_node = 1;
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{
+        .name = output_name,
+        .local_node_idx = 1,
+        .value_id = output_value_id,
+    });
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::Transpose,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = std::move(stage_outputs),
+    };
+}
+
 static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
                                                uint32_t node_idx,
                                                uint32_t output_value_id,
@@ -1723,6 +1855,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 planned.stages.push_back(buildReduceMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isMatmulOp(root.op)) {
                 planned.stages.push_back(buildMatmulStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isTransposeOp(root.op)) {
+                planned.stages.push_back(buildTransposeStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else {
                 planned.stages.push_back(buildReductionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             }
@@ -1879,6 +2013,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isMatmulOp(root.op)) {
                 planned.stages.push_back(
                     buildMatmulStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isTransposeOp(root.op)) {
+                planned.stages.push_back(
+                    buildTransposeStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else {
                 planned.stages.push_back(
                     buildReductionStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -2012,6 +2149,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::ReduceMinMaxBackward: {
                 std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = compileReduceMinMaxBackward(stage.expr);
                 compiled->stages.emplace_back(reduce_minmax_backward, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::Transpose: {
+                std::shared_ptr<CompiledEquation> transpose = compileTransposeStage(stage, sig);
+                compiled->stages.emplace_back(transpose, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides, nullptr);
                 break;
             }
             default:

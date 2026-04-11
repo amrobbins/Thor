@@ -39,6 +39,7 @@ enum class ExprOp : uint16_t {
     FILL,
     UNSQUEEZE,
     SQUEEZE,
+    TRANSPOSE,
     MIN,
     MAX,
     MIN_GRAD_LEFT,
@@ -231,6 +232,7 @@ class Expression {
     [[nodiscard]] static Expression sqrt(const Expression& expr);
     [[nodiscard]] Expression unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const;
     [[nodiscard]] Expression squeeze(const std::vector<uint64_t>& squeeze_axes) const;
+    [[nodiscard]] Expression transpose() const;
     [[nodiscard]] Expression pow(const Expression& exponent) const;
     [[nodiscard]] static Expression matmul(
         const Expression& lhs,

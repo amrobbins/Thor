@@ -286,6 +286,13 @@ static std::vector<uint64_t> inferExpressionMatmulOutputDims(const ExprNode& nod
     return out_dims;
 }
 
+static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims) {
+    if (input_dims.size() != 2) {
+        throw std::runtime_error("Transpose shape inference currently only supports rank-2 tensors.");
+    }
+    return std::vector<uint64_t>{input_dims[1], input_dims[0]};
+}
+
 static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization(
     const PhysicalExpression& expr, const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
     std::vector<std::vector<uint64_t>> node_dims(expr.nodes.size());
@@ -349,6 +356,9 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::LOG10:
             case ExprOp::SQRT:
                 node_dims[i] = node_dims[node.lhs];
+                break;
+            case ExprOp::TRANSPOSE:
+                node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
                 break;
             case ExprOp::UNSQUEEZE:
                 node_dims[i] = applyNormalizedUnsqueezeDims(node_dims[node.lhs], node.unsqueeze_axes);
@@ -1073,6 +1083,11 @@ static DataType compiledStageOutputDType(const CompiledExecutionStage& stage, si
                 throw std::runtime_error("compiledStageOutputDType missing matmul/gemm stage.");
             }
             return stage.matmul->output_dtype;
+        case CompiledExecutionStage::Kind::Transpose:
+            if (!stage.transpose) {
+                throw std::runtime_error("compiledStageOutputDType missing transpose stage.");
+            }
+            return stage.transpose->output_dtypes.at(output_idx);
         case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("compiledStageOutputDType missing reduce-min/max-backward stage.");
@@ -1321,6 +1336,8 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::SQRT:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::TRANSPOSE:
+                throw std::runtime_error("inferFusedStageNodeDims encountered unexpected transpose op in fused stage.");
             case ExprOp::UNSQUEEZE: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
 
@@ -1495,6 +1512,8 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
                 node_dims[i] = StampedEquation::computeReductionOutputDims(lhs_dims, reduction_axes, node.squeeze_axes);
                 break;
             }
+            case ExprOp::TRANSPOSE:
+                throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unexpected transpose op in fused stage.");
             case ExprOp::MATMUL:
             case ExprOp::GEMM:
                 throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unexpected matmul/gemm op in fused stage.");
@@ -1553,6 +1572,16 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 throw std::runtime_error("resolveOutputDimsForStageOutput matmul stage missing payload.");
             }
             return resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+        }
+
+        case CompiledExecutionStage::Kind::Transpose: {
+            if (!stage.transpose) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput transpose stage missing payload.");
+            }
+            if (stage_input_dims.size() != 1) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput transpose stage expected exactly one input shape.");
+            }
+            return inferTransposeOutputDims(stage_input_dims[0]);
         }
 
         case CompiledExecutionStage::Kind::FusedKernel:
@@ -1693,6 +1722,8 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
             return {};
         case ExprOp::FILL:
             return {};
+        case ExprOp::TRANSPOSE:
+            throw std::runtime_error("collectEffectiveInputDimsForNode encountered unexpected transpose op in fused stage.");
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE: {
             auto result = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
@@ -2176,6 +2207,14 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("Matmul/gemm stage expected exactly one output.");
             }
             value_dims[stage.outputs[0].value_id] = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Transpose) {
+            if (!stage.transpose) {
+                throw std::runtime_error("Missing compiled transpose stage.");
+            }
+            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Transpose stage expected exactly one input and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = inferTransposeOutputDims(stage_input_dims[0]);
         } else {
             throw std::runtime_error("Unknown execution stage kind in getOutputShapes.");
         }
@@ -3639,6 +3678,44 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedMatmul, std::move(dependency_stage_indices));
                 break;
             }
+            case CompiledExecutionStage::Kind::Transpose: {
+                if (!stage.transpose) {
+                    throw std::runtime_error("Transpose stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 1) {
+                    throw std::runtime_error("Transpose stage expects exactly one input.");
+                }
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Transpose stage expects exactly one output.");
+                }
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Tensor outputTensor;
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    outputTensor = preallocated_it->second;
+                    if (outputTensor.getDimensions() != output_dims) {
+                        throw std::runtime_error(
+                            "Preallocated transpose output tensor dimensions are incompatible with the staged output shape.");
+                    }
+                    if (outputTensor.getDataType() != stage.transpose->output_dtypes.at(0)) {
+                        throw std::runtime_error(
+                            "Preallocated transpose output tensor dtype is incompatible with the compiled transpose stage.");
+                    }
+                } else {
+                    TensorDescriptor outputDescriptor(stage.transpose->output_dtypes.at(0), output_dims);
+                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
+                }
+                std::vector<RuntimeInputValue> transposeInputs{stageInputs[0]};
+                std::vector<Tensor> transposeOutputs{outputTensor};
+                std::shared_ptr<StampedEquation> stampedTranspose =
+                    stampEquation(stage.transpose, transposeInputs, transposeOutputs, stream);
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedTranspose, std::move(dependency_stage_indices));
+                break;
+            }
             case CompiledExecutionStage::Kind::ReduceMinMaxBackward: {
                 if (!stage.reduce_minmax_backward) {
                     throw std::runtime_error("Reduce-min/max-backward stage missing compiled payload.");
@@ -3961,6 +4038,14 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                 throw std::runtime_error("Matmul/gemm stage expected exactly one output.");
             }
             value_dims[stage.outputs[0].value_id] = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Transpose) {
+            if (!stage.transpose) {
+                throw std::runtime_error("Missing compiled transpose stage.");
+            }
+            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Transpose stage expected exactly one input and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = inferTransposeOutputDims(stage_input_dims[0]);
         } else {
             throw std::runtime_error("Unknown execution stage kind in getParameterFanOverrides.");
         }

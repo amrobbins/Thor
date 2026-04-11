@@ -27,7 +27,7 @@ struct ParameterFanOverride {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, ReduceMinMaxBackward, Transpose };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -40,6 +40,8 @@ struct CompiledExecutionStage {
                 return "Matmul";
             case Kind::ReduceMinMaxBackward:
                 return "ReduceMinMaxBackward";
+            case Kind::Transpose:
+                return "Transpose";
         }
         return "<unknown>";
     }
@@ -53,6 +55,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<CompiledMatmul> matmul = nullptr;
     const std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = nullptr;
+    const std::shared_ptr<CompiledEquation> transpose = nullptr;
 
     const std::vector<uint32_t> input_value_ids;
     const std::vector<CompiledStageOutput> outputs;
@@ -107,6 +110,17 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::ReduceMinMaxBackward),
           reduce_minmax_backward(reduce_minmax_backward),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledEquation>& transpose,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides,
+                           std::nullptr_t)
+        : kind(Kind::Transpose),
+          transpose(transpose),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}

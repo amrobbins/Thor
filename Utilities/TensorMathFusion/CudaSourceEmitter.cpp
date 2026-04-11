@@ -269,6 +269,50 @@ static std::string scalarStorageType(DataType dtype) {
     }
 }
 
+static uint32_t scalarStorageTypeSizeBytes(DataType dtype) {
+    switch (dtype) {
+        case DataType::FP32:
+            return 4;
+        case DataType::FP16:
+        case DataType::BF16:
+            return 2;
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+            return 1;
+        default:
+            throw runtime_error("Unsupported scalar storage dtype size in transpose emitter: " +
+                                TensorDescriptor::getElementTypeName(dtype));
+    }
+}
+
+static uint32_t transposePackScalars(DataType dtype) {
+    switch (dtype) {
+        case DataType::FP16:
+        case DataType::BF16:
+            return 2;
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+            return 4;
+        default:
+            return 1;
+    }
+}
+
+static std::string transposePackType(DataType dtype) {
+    switch (dtype) {
+        case DataType::FP16:
+            return "half2";
+        case DataType::BF16:
+            return "__nv_bfloat162";
+        case DataType::FP8_E4M3:
+            return "__nv_fp8x4_e4m3";
+        case DataType::FP8_E5M2:
+            return "__nv_fp8x4_e5m2";
+        default:
+            throw runtime_error("Unsupported transpose pack dtype: " + TensorDescriptor::getElementTypeName(dtype));
+    }
+}
+
 static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstream& ss) {
     bool need_fp16 = false;
     bool need_bf16 = false;
@@ -1992,6 +2036,119 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
     }
 
     ss << "}";
+    return ss.str();
+}
+
+std::string CudaSourceEmitter::emitTranspose(const PhysicalExecutionStage& stage, const std::string& kernel_name) {
+    if (stage.kind != PhysicalExecutionStage::Kind::Transpose) {
+        throw runtime_error("CudaSourceEmitter::emitTranspose called on non-transpose stage.");
+    }
+    if (stage.expr.inputs.size() != 1 || stage.outputs.size() != 1) {
+        throw runtime_error("Transpose stage expects exactly one input and one output.");
+    }
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+    const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
+    if (input_dtypes.size() != 1 || output_dtypes.size() != 1) {
+        throw runtime_error("Transpose stage expects exactly one compiled input dtype and one compiled output dtype.");
+    }
+    const DataType input_dtype = input_dtypes[0];
+    const DataType output_dtype = output_dtypes[0];
+    if (input_dtype != output_dtype) {
+        throw runtime_error("Transpose stage currently requires matching input/output dtypes.");
+    }
+
+    const std::string scalar_type = scalarStorageType(input_dtype);
+    const uint32_t pack_scalars = transposePackScalars(input_dtype);
+    const bool emit_packed_fast_path = pack_scalars > 1;
+    const std::string pack_type = emit_packed_fast_path ? transposePackType(input_dtype) : std::string();
+
+    std::ostringstream ss;
+    emitRequiredHeaders(stage.expr, ss);
+    ss << "#define TILE_DIM 32\n";
+    ss << "#define BLOCK_ROWS 8\n\n";
+    ss << "extern \"C\" __global__\n";
+    ss << "void " << kernel_name << "(const " << scalar_type << "* in0, " << scalar_type
+       << "* out0, unsigned int numRows, unsigned int numCols) {\n";
+
+    if (emit_packed_fast_path) {
+        ss << "  constexpr unsigned int PACK_SCALARS = " << pack_scalars << "U;\n";
+        ss << "  if ((numRows % PACK_SCALARS) == 0U && (numCols % PACK_SCALARS) == 0U) {\n";
+        ss << "    if ((blockIdx.x % PACK_SCALARS) != 0U || (blockIdx.y % PACK_SCALARS) != 0U) return;\n";
+        ss << "    using Pack = " << pack_type << ";\n";
+        ss << "    __shared__ Pack tile[PACK_SCALARS * TILE_DIM][TILE_DIM + 1];\n";
+        ss << "    const unsigned int packedBlockX = static_cast<unsigned int>(blockIdx.x) / PACK_SCALARS;\n";
+        ss << "    const unsigned int packedBlockY = static_cast<unsigned int>(blockIdx.y) / PACK_SCALARS;\n";
+        ss << "    unsigned int tileRow = threadIdx.y;\n";
+        ss << "    unsigned int tileCol = threadIdx.x;\n";
+        ss << "    const unsigned int matrixPackCol = threadIdx.x + packedBlockX * TILE_DIM;\n";
+        ss << "    const unsigned int matrixPackCols = numCols / PACK_SCALARS;\n";
+        ss << "    const unsigned int matrixRowStart = packedBlockY * PACK_SCALARS * TILE_DIM;\n";
+        ss << "    const unsigned int matrixRowStartNextBlock = matrixRowStart + PACK_SCALARS * TILE_DIM;\n";
+        ss << "    if (matrixPackCol < matrixPackCols) {\n";
+        ss << "      for (unsigned int matrixRow = threadIdx.y + matrixRowStart;\n";
+        ss << "           matrixRow < matrixRowStartNextBlock && matrixRow < numRows && tileRow < PACK_SCALARS * TILE_DIM;\n";
+        ss << "           matrixRow += BLOCK_ROWS, tileRow += BLOCK_ROWS) {\n";
+        ss << "        const Pack* row_ptr = reinterpret_cast<const Pack*>(in0 + matrixRow * numCols);\n";
+        ss << "        tile[tileRow][tileCol] = row_ptr[matrixPackCol];\n";
+        ss << "      }\n";
+        ss << "    }\n";
+        ss << "\n";
+        ss << "    __syncthreads();\n";
+        ss << "\n";
+        ss << "    const unsigned int transposedRows = numCols;\n";
+        ss << "    const unsigned int transposedPackCols = numRows / PACK_SCALARS;\n";
+        ss << "    const unsigned int transposedRowStart = packedBlockX * PACK_SCALARS * TILE_DIM;\n";
+        ss << "    const unsigned int transposedRowStartNextBlock = transposedRowStart + PACK_SCALARS * TILE_DIM;\n";
+        ss << "    const unsigned int transposedPackCol = threadIdx.x + packedBlockY * TILE_DIM;\n";
+        ss << "    if (transposedPackCol < transposedPackCols) {\n";
+        ss << "      unsigned int writeTileCol = threadIdx.y;\n";
+        ss << "      const unsigned int tileBaseRow = PACK_SCALARS * threadIdx.x;\n";
+        ss << "      for (unsigned int transposedBaseRow = transposedRowStart + PACK_SCALARS * threadIdx.y;\n";
+        ss << "           transposedBaseRow < transposedRowStartNextBlock && transposedBaseRow < transposedRows && writeTileCol < "
+              "TILE_DIM;\n";
+        ss << "           transposedBaseRow += PACK_SCALARS * BLOCK_ROWS, writeTileCol += BLOCK_ROWS) {\n";
+        ss << "        Pack input_buffers[PACK_SCALARS];\n";
+        ss << "        for (unsigned int pack_lane = 0; pack_lane < PACK_SCALARS; ++pack_lane) {\n";
+        ss << "          input_buffers[pack_lane] = tile[tileBaseRow + pack_lane][writeTileCol];\n";
+        ss << "        }\n";
+        ss << "        for (unsigned int out_lane = 0; out_lane < PACK_SCALARS; ++out_lane) {\n";
+        ss << "          const unsigned int out_row = transposedBaseRow + out_lane;\n";
+        ss << "          if (out_row >= transposedRows) break;\n";
+        ss << "          Pack output_buffer;\n";
+        ss << "          " << scalar_type << "* out_data = reinterpret_cast<" << scalar_type << "*>(&output_buffer);\n";
+        ss << "          for (unsigned int pack_lane = 0; pack_lane < PACK_SCALARS; ++pack_lane) {\n";
+        ss << "            const " << scalar_type << "* in_data = reinterpret_cast<const " << scalar_type
+           << "*>(&input_buffers[pack_lane]);\n";
+        ss << "            out_data[pack_lane] = in_data[out_lane];\n";
+        ss << "          }\n";
+        ss << "          Pack* out_row_ptr = reinterpret_cast<Pack*>(out0 + out_row * numRows);\n";
+        ss << "          out_row_ptr[transposedPackCol] = output_buffer;\n";
+        ss << "        }\n";
+        ss << "      }\n";
+        ss << "    }\n";
+        ss << "    return;\n";
+        ss << "  }\n\n";
+    }
+
+    ss << "  __shared__ " << scalar_type << " tile[TILE_DIM][TILE_DIM + 1];\n";
+    ss << "  const unsigned int x = blockIdx.x * TILE_DIM + threadIdx.x;\n";
+    ss << "  const unsigned int y = blockIdx.y * TILE_DIM + threadIdx.y;\n";
+    ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
+    ss << "    if (x < numCols && (y + j) < numRows) {\n";
+    ss << "      tile[threadIdx.y + j][threadIdx.x] = in0[(y + j) * numCols + x];\n";
+    ss << "    }\n";
+    ss << "  }\n";
+    ss << "\n";
+    ss << "  __syncthreads();\n";
+    ss << "\n";
+    ss << "  const unsigned int tx = blockIdx.y * TILE_DIM + threadIdx.x;\n";
+    ss << "  const unsigned int ty = blockIdx.x * TILE_DIM + threadIdx.y;\n";
+    ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
+    ss << "    if (tx < numRows && (ty + j) < numCols) {\n";
+    ss << "      out0[(ty + j) * numRows + tx] = tile[threadIdx.x][threadIdx.y + j];\n";
+    ss << "    }\n";
+    ss << "  }\n";
+    ss << "}\n";
     return ss.str();
 }
 

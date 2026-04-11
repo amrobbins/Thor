@@ -45,6 +45,8 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         throw std::runtime_error("Wrong number of outputs passed to EquationRunner::run.");
     }
 
+    const bool is_transpose_launch = compiledEquation->launch_kind == CompiledEquation::LaunchKind::Transpose;
+
     uint64_t max_numel = 0;
     for (size_t i = 0; i < outputs.size(); ++i) {
         const Tensor& output = outputs[i];
@@ -119,7 +121,9 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         }
     }
 
-    assert(max_numel != 0);
+    if (!is_transpose_launch) {
+        assert(max_numel != 0);
+    }
     std::vector<const void*> input_ptrs;
     input_ptrs.reserve(inputs.size());
     std::vector<float> scalar_inputs_fp32;
@@ -144,7 +148,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
 
     std::vector<void*> args;
-    args.reserve(inputs.size() + outputs.size() + 1);
+    args.reserve(inputs.size() + outputs.size() + 2);
 
     size_t next_scalar_index = 0;
     for (size_t i = 0; i < input_ptrs.size(); ++i) {
@@ -156,6 +160,38 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
     for (size_t i = 0; i < output_ptrs.size(); ++i) {
         args.push_back((void*)&output_ptrs[i]);
+    }
+
+    if (is_transpose_launch) {
+        if (inputs.size() != 1 || outputs.size() != 1) {
+            throw std::runtime_error("Transpose launch expects exactly one input and one output.");
+        }
+        if (!std::holds_alternative<Tensor>(inputs[0])) {
+            throw std::runtime_error("Transpose launch expects a tensor input.");
+        }
+        const Tensor& input_tensor = std::get<Tensor>(inputs[0]);
+        const Tensor& output_tensor = outputs[0];
+        const std::vector<uint64_t> input_dims = input_tensor.getDimensions();
+        const std::vector<uint64_t> output_dims = output_tensor.getDimensions();
+        if (input_dims.size() != 2 || output_dims.size() != 2) {
+            throw std::runtime_error("Transpose launch currently only supports rank-2 tensors.");
+        }
+        if (output_dims[0] != input_dims[1] || output_dims[1] != input_dims[0]) {
+            throw std::runtime_error("Transpose launch output dimensions must be the input dimensions swapped.");
+        }
+        if (input_tensor.getTotalNumElements() == 0 || output_tensor.getTotalNumElements() == 0) {
+            return;
+        }
+        uint32_t numRows = static_cast<uint32_t>(input_dims[0]);
+        uint32_t numCols = static_cast<uint32_t>(input_dims[1]);
+        args.push_back((void*)&numRows);
+        args.push_back((void*)&numCols);
+        constexpr uint32_t block_x = 32;
+        constexpr uint32_t block_y = 8;
+        const uint32_t grid_x = (numCols + block_x - 1U) / block_x;
+        const uint32_t grid_y = (numRows + block_x - 1U) / block_x;
+        CU_CHECK(cuLaunchKernel(compiledEquation->kernel, grid_x, grid_y, 1, block_x, block_y, 1, 0, stream, args.data(), nullptr));
+        return;
     }
 
     uint32_t max_numel_u32 = 0;
