@@ -203,6 +203,7 @@ Create a floating-point scalar constant expression.
     expr.def("__rpow__", [](const Expression& a, const Expression& b) { return b.pow(a); }, "other"_a);
     expr.def("__matmul__", [](const Expression& a, const Expression& b) { return Expression::matmul(a, b); }, "other"_a);
     expr.def("__rmatmul__", [](const Expression& a, const Expression& b) { return Expression::matmul(b, a); }, "other"_a);
+    expr.def("__imatmul__", [](const Expression& a, const Expression& b) { return Expression::matmul(a, b); }, "other"_a);
 
     expr.def("__neg__", [](const Expression& a) { return -a; });
 

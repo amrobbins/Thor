@@ -76,6 +76,107 @@ static DataType runtimeInputDType(const RuntimeInputValue& value) {
     return DataType::FP32;
 }
 
+static bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions) {
+    if (inputs.empty()) {
+        throw std::runtime_error("resolveLayoutFromDims requires at least one input shape.");
+    }
+
+    uint64_t maxRank = 0;
+    for (const auto& dims : inputs) {
+        maxRank = std::max<uint64_t>(maxRank, dims.size());
+    }
+
+    outputDimensions.assign(maxRank, 1);
+
+    for (uint64_t axis = 0; axis < maxRank; ++axis) {
+        uint64_t resolvedDim = 1;
+
+        for (const auto& dims : inputs) {
+            const uint64_t pad = maxRank - dims.size();
+            const uint64_t dim = (axis < pad) ? 1ULL : dims[axis - pad];
+
+            if (dim == 1) {
+                continue;
+            }
+
+            if (resolvedDim == 1) {
+                resolvedDim = dim;
+            } else if (resolvedDim != dim) {
+                throw std::runtime_error("resolveLayoutFromDims found non-broadcast-compatible dimensions.");
+            }
+        }
+
+        outputDimensions[axis] = resolvedDim;
+    }
+
+    bool requiresBroadcast = false;
+    for (const auto& dims : inputs) {
+        std::vector<uint64_t> padded(maxRank - dims.size(), 1ULL);
+        padded.insert(padded.end(), dims.begin(), dims.end());
+        if (padded != outputDimensions) {
+            requiresBroadcast = true;
+            break;
+        }
+    }
+
+    return requiresBroadcast;
+}
+
+static std::vector<uint64_t> applyNormalizedSqueezeDims(const std::vector<uint64_t>& input_dims,
+                                                        const std::vector<uint64_t>& squeeze_axes) {
+    // Scalar literals are already rank-0. Any squeeze is shape-preserving for stage inference.
+    if (input_dims.empty()) {
+        return {};
+    }
+
+    const std::vector<uint64_t> actual_axes = normalizeSqueezeAxesForInputDims(input_dims, squeeze_axes);
+
+    if (actual_axes.empty()) {
+        return input_dims;
+    }
+
+    std::vector<uint64_t> output_dims;
+    output_dims.reserve(input_dims.size() - actual_axes.size());
+
+    size_t next_remove = 0;
+    for (uint64_t axis = 0; axis < input_dims.size(); ++axis) {
+        if (next_remove < actual_axes.size() && actual_axes[next_remove] == axis) {
+            ++next_remove;
+            continue;
+        }
+        output_dims.push_back(input_dims[axis]);
+    }
+
+    return output_dims;
+}
+
+static std::vector<uint64_t> applyNormalizedUnsqueezeDims(const std::vector<uint64_t>& input_dims,
+                                                          const std::vector<uint64_t>& unsqueeze_axes) {
+    // Scalar literals are rank-0 broadcastable leaves in the IR.
+    // Unsqueezing a scalar produces an all-ones shape of the requested rank.
+    if (input_dims.empty()) {
+        std::vector<uint64_t> normalized = unsqueeze_axes;
+        std::sort(normalized.begin(), normalized.end());
+        normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+
+        for (uint64_t i = 0; i < normalized.size(); ++i) {
+            if (normalized[i] != i) {
+                throw std::runtime_error("unsqueeze axes are invalid for scalar input.");
+            }
+        }
+
+        return std::vector<uint64_t>(normalized.size(), 1ULL);
+    }
+
+    const std::vector<uint64_t> actual_axes = normalizeUnsqueezeAxesForInputDims(input_dims, unsqueeze_axes);
+
+    std::vector<uint64_t> output_dims = input_dims;
+    for (uint64_t axis : actual_axes) {
+        output_dims.insert(output_dims.begin() + static_cast<std::ptrdiff_t>(axis), 1ULL);
+    }
+    return output_dims;
+}
+
 static const Optional<TensorPlacement> runtimeInputPlacementOrNull(const RuntimeInputValue& value) {
     if (std::holds_alternative<Tensor>(value)) {
         return std::get<Tensor>(value).getPlacement();
@@ -84,6 +185,384 @@ static const Optional<TensorPlacement> runtimeInputPlacementOrNull(const Runtime
         return std::get<TensorScalarBinding>(value).buffer.getPlacement();
     }
     return Optional<TensorPlacement>::empty();
+}
+
+static bool isScalarLikeNodeOp(ExprOp op) {
+    return op == ExprOp::SCALAR_FP || op == ExprOp::RUNTIME_SCALAR || op == ExprOp::TENSOR_RUNTIME_SCALAR;
+}
+
+static bool tryGetStaticScalarNodeValue(const PhysicalExpression& expr, uint32_t node_idx, double& value) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (node.op != ExprOp::SCALAR_FP) {
+        return false;
+    }
+
+    value = node.scalar_fp;
+    return true;
+}
+
+static std::vector<uint64_t> inferExpressionMatmulOutputDims(const ExprNode& node,
+                                                             const std::vector<uint64_t>& lhs_dims,
+                                                             const std::vector<uint64_t>& rhs_dims,
+                                                             const std::vector<uint64_t>* aux_dims = nullptr) {
+    if (lhs_dims.size() != 2 || rhs_dims.size() != 2) {
+        throw std::runtime_error("Matmul/gemm shape inference currently only supports rank-2 tensors.");
+    }
+
+    const uint64_t a_rows = node.transpose_lhs ? lhs_dims[1] : lhs_dims[0];
+    const uint64_t a_cols = node.transpose_lhs ? lhs_dims[0] : lhs_dims[1];
+    const uint64_t b_rows = node.transpose_rhs ? rhs_dims[1] : rhs_dims[0];
+    const uint64_t b_cols = node.transpose_rhs ? rhs_dims[0] : rhs_dims[1];
+
+    if (a_cols != b_rows) {
+        throw std::runtime_error("Matmul/gemm shape inference found incompatible matrix dimensions.");
+    }
+
+    std::vector<uint64_t> out_dims{a_rows, b_cols};
+    if (aux_dims) {
+        if (aux_dims->size() != 2) {
+            throw std::runtime_error("GEMM addend shape inference currently only supports rank-2 tensors.");
+        }
+        const std::vector<uint64_t> expected_aux = node.transpose_aux ? std::vector<uint64_t>{out_dims[1], out_dims[0]} : out_dims;
+        if (*aux_dims != expected_aux) {
+            throw std::runtime_error("GEMM addend shape inference found incompatible addend dimensions.");
+        }
+    }
+
+    return out_dims;
+}
+
+static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization(
+    const PhysicalExpression& expr, const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
+    std::vector<std::vector<uint64_t>> node_dims(expr.nodes.size());
+
+    for (size_t i = 0; i < expr.nodes.size(); ++i) {
+        const ExprNode& node = expr.nodes[i];
+
+        switch (node.op) {
+            case ExprOp::INPUT: {
+                auto it = root_values.find(node.input_slot);
+                if (it == root_values.end()) {
+                    throw std::runtime_error("Missing bound runtime input while inferring expression node dims.");
+                }
+                node_dims[i] = runtimeInputDims(it->second);
+                break;
+            }
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+            case ExprOp::SCALAR_FP:
+                node_dims[i] = {};
+                break;
+            case ExprOp::FILL:
+                node_dims[i] = node.fill_dims;
+                break;
+            case ExprOp::ADD:
+            case ExprOp::SUB:
+            case ExprOp::MUL:
+            case ExprOp::DIV:
+            case ExprOp::POW:
+            case ExprOp::MIN:
+            case ExprOp::MAX:
+            case ExprOp::MIN_GRAD_LEFT:
+            case ExprOp::MIN_GRAD_RIGHT:
+            case ExprOp::MAX_GRAD_LEFT:
+            case ExprOp::MAX_GRAD_RIGHT: {
+                std::vector<std::vector<uint64_t>> non_scalar_inputs;
+                if (!node_dims[node.lhs].empty()) {
+                    non_scalar_inputs.push_back(node_dims[node.lhs]);
+                }
+                if (!node_dims[node.rhs].empty()) {
+                    non_scalar_inputs.push_back(node_dims[node.rhs]);
+                }
+                if (non_scalar_inputs.empty()) {
+                    node_dims[i] = {};
+                } else if (non_scalar_inputs.size() == 1) {
+                    node_dims[i] = non_scalar_inputs[0];
+                } else {
+                    std::vector<uint64_t> out_dims;
+                    resolveLayoutFromDims(non_scalar_inputs, out_dims);
+                    node_dims[i] = std::move(out_dims);
+                }
+                break;
+            }
+            case ExprOp::NEG:
+            case ExprOp::ABS:
+            case ExprOp::EXP:
+            case ExprOp::EXP2:
+            case ExprOp::EXP10:
+            case ExprOp::LN:
+            case ExprOp::LOG2:
+            case ExprOp::LOG10:
+            case ExprOp::SQRT:
+                node_dims[i] = node_dims[node.lhs];
+                break;
+            case ExprOp::UNSQUEEZE:
+                node_dims[i] = applyNormalizedUnsqueezeDims(node_dims[node.lhs], node.unsqueeze_axes);
+                break;
+            case ExprOp::SQUEEZE:
+                node_dims[i] = applyNormalizedSqueezeDims(node_dims[node.lhs], node.squeeze_axes);
+                break;
+            case ExprOp::REDUCE_SUM:
+            case ExprOp::REDUCE_PROD:
+            case ExprOp::REDUCE_MIN:
+            case ExprOp::REDUCE_MAX:
+            case ExprOp::REDUCE_ARGMIN:
+            case ExprOp::REDUCE_ARGMAX:
+            case ExprOp::REDUCE_AVG:
+            case ExprOp::REDUCE_NORM1:
+            case ExprOp::REDUCE_NORM2:
+                node_dims[i] = StampedEquation::computeReductionOutputDims(node_dims[node.lhs], node.reduction_axes, node.squeeze_axes);
+                break;
+            case ExprOp::MATMUL:
+                node_dims[i] = inferExpressionMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                break;
+            case ExprOp::GEMM:
+                node_dims[i] = inferExpressionMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs], &node_dims[node.aux]);
+                break;
+            case ExprOp::REDUCE_MIN_BACKWARD:
+            case ExprOp::REDUCE_MAX_BACKWARD:
+                node_dims[i] = node_dims[node.lhs];
+                break;
+            default:
+                throw std::runtime_error("inferExpressionNodeDimsForOptimization encountered unknown ExprOp.");
+        }
+    }
+
+    return node_dims;
+}
+
+struct ScaledMatmulPattern {
+    uint32_t matmul_node_idx = UINT32_MAX;
+    uint32_t lhs_idx = UINT32_MAX;
+    uint32_t rhs_idx = UINT32_MAX;
+    bool transpose_lhs = false;
+    bool transpose_rhs = false;
+    double alpha = 1.0;
+    Optional<DataType> compute_dtype = Optional<DataType>::empty();
+    Optional<DataType> backward_compute_dtype = Optional<DataType>::empty();
+};
+
+struct ScaledAddendPattern {
+    uint32_t node_idx = UINT32_MAX;
+    double beta = 1.0;
+};
+
+struct GemmLoweringPattern {
+    uint32_t lhs_idx = UINT32_MAX;
+    uint32_t rhs_idx = UINT32_MAX;
+    uint32_t addend_idx = UINT32_MAX;
+    bool transpose_lhs = false;
+    bool transpose_rhs = false;
+    double alpha = 1.0;
+    double beta = 1.0;
+    Optional<DataType> inherited_compute_dtype = Optional<DataType>::empty();
+    Optional<DataType> inherited_backward_compute_dtype = Optional<DataType>::empty();
+};
+
+static bool tryMatchScaledMatmulPattern(const PhysicalExpression& expr, uint32_t node_idx, ScaledMatmulPattern& out) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (node.op == ExprOp::MATMUL) {
+        out.matmul_node_idx = node_idx;
+        out.lhs_idx = node.lhs;
+        out.rhs_idx = node.rhs;
+        out.transpose_lhs = node.transpose_lhs;
+        out.transpose_rhs = node.transpose_rhs;
+        out.alpha = 1.0;
+        out.compute_dtype = node.compute_dtype;
+        out.backward_compute_dtype = node.backward_compute_dtype;
+        return true;
+    }
+
+    if (node.op != ExprOp::MUL) {
+        return false;
+    }
+
+    double scalar = 0.0;
+    const ExprNode* matmul = nullptr;
+    uint32_t matmul_idx = UINT32_MAX;
+
+    if (tryGetStaticScalarNodeValue(expr, node.lhs, scalar) && node.rhs < expr.nodes.size() && expr.nodes[node.rhs].op == ExprOp::MATMUL) {
+        matmul = &expr.nodes[node.rhs];
+        matmul_idx = node.rhs;
+    } else if (tryGetStaticScalarNodeValue(expr, node.rhs, scalar) && node.lhs < expr.nodes.size() &&
+               expr.nodes[node.lhs].op == ExprOp::MATMUL) {
+        matmul = &expr.nodes[node.lhs];
+        matmul_idx = node.lhs;
+    } else {
+        return false;
+    }
+
+    out.matmul_node_idx = matmul_idx;
+    out.lhs_idx = matmul->lhs;
+    out.rhs_idx = matmul->rhs;
+    out.transpose_lhs = matmul->transpose_lhs;
+    out.transpose_rhs = matmul->transpose_rhs;
+    out.alpha = scalar;
+    out.compute_dtype = matmul->compute_dtype;
+    out.backward_compute_dtype = matmul->backward_compute_dtype;
+    return true;
+}
+
+static bool tryMatchScaledAddendPattern(const PhysicalExpression& expr, uint32_t node_idx, ScaledAddendPattern& out) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+
+    ScaledMatmulPattern matmul_pattern;
+    if (tryMatchScaledMatmulPattern(expr, node_idx, matmul_pattern)) {
+        return false;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (isScalarLikeNodeOp(node.op)) {
+        return false;
+    }
+
+    if (node.op == ExprOp::MUL) {
+        double scalar = 0.0;
+        if (tryGetStaticScalarNodeValue(expr, node.lhs, scalar)) {
+            if (node.rhs >= expr.nodes.size() || isScalarLikeNodeOp(expr.nodes[node.rhs].op) ||
+                tryMatchScaledMatmulPattern(expr, node.rhs, matmul_pattern)) {
+                return false;
+            }
+            out.node_idx = node.rhs;
+            out.beta = scalar;
+            return true;
+        }
+        if (tryGetStaticScalarNodeValue(expr, node.rhs, scalar)) {
+            if (node.lhs >= expr.nodes.size() || isScalarLikeNodeOp(expr.nodes[node.lhs].op) ||
+                tryMatchScaledMatmulPattern(expr, node.lhs, matmul_pattern)) {
+                return false;
+            }
+            out.node_idx = node.lhs;
+            out.beta = scalar;
+            return true;
+        }
+    }
+
+    out.node_idx = node_idx;
+    out.beta = 1.0;
+    return true;
+}
+
+static bool tryBuildGemmLoweringPattern(const PhysicalExpression& expr,
+                                        uint32_t node_idx,
+                                        const std::vector<std::vector<uint64_t>>* node_dims,
+                                        GemmLoweringPattern& out) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (node.op != ExprOp::ADD && node.op != ExprOp::SUB) {
+        return false;
+    }
+
+    auto attempt = [&](uint32_t matmul_side_idx, uint32_t addend_side_idx, double matmul_sign, double addend_sign) {
+        ScaledMatmulPattern matmul;
+        ScaledAddendPattern addend;
+        if (!tryMatchScaledMatmulPattern(expr, matmul_side_idx, matmul)) {
+            return false;
+        }
+        if (!tryMatchScaledAddendPattern(expr, addend_side_idx, addend)) {
+            return false;
+        }
+
+        if (node_dims != nullptr) {
+            if (matmul.matmul_node_idx >= node_dims->size() || addend.node_idx >= node_dims->size()) {
+                return false;
+            }
+            const std::vector<uint64_t>& matmul_dims = (*node_dims)[matmul.matmul_node_idx];
+            const std::vector<uint64_t>& addend_dims = (*node_dims)[addend.node_idx];
+            if (matmul_dims.size() != 2 || addend_dims.size() != 2 || matmul_dims != addend_dims) {
+                return false;
+            }
+        }
+
+        out.lhs_idx = matmul.lhs_idx;
+        out.rhs_idx = matmul.rhs_idx;
+        out.addend_idx = addend.node_idx;
+        out.transpose_lhs = matmul.transpose_lhs;
+        out.transpose_rhs = matmul.transpose_rhs;
+        out.alpha = matmul_sign * matmul.alpha;
+        out.beta = addend_sign * addend.beta;
+        out.inherited_compute_dtype = matmul.compute_dtype;
+        out.inherited_backward_compute_dtype = matmul.backward_compute_dtype;
+        return true;
+    };
+
+    if (node.op == ExprOp::ADD) {
+        if (attempt(node.lhs, node.rhs, 1.0, 1.0)) {
+            return true;
+        }
+        if (attempt(node.rhs, node.lhs, 1.0, 1.0)) {
+            return true;
+        }
+        return false;
+    }
+
+    if (attempt(node.lhs, node.rhs, 1.0, -1.0)) {
+        return true;
+    }
+    if (attempt(node.rhs, node.lhs, -1.0, 1.0)) {
+        return true;
+    }
+    return false;
+}
+
+static bool expressionHasPotentialGemmLoweringPattern(const PhysicalExpression& expr) {
+    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+        GemmLoweringPattern pattern;
+        if (tryBuildGemmLoweringPattern(expr, node_idx, nullptr, pattern)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void optimizeExpressionGemmPatternsInPlace(PhysicalExpression& expr,
+                                                  const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
+    if (expr.nodes.empty() || !expressionHasPotentialGemmLoweringPattern(expr)) {
+        return;
+    }
+
+    std::vector<std::vector<uint64_t>> node_dims = inferExpressionNodeDimsForOptimization(expr, root_values);
+
+    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+        GemmLoweringPattern pattern;
+        if (!tryBuildGemmLoweringPattern(expr, node_idx, &node_dims, pattern)) {
+            continue;
+        }
+
+        ExprNode& node = expr.nodes[node_idx];
+        node.op = ExprOp::GEMM;
+        node.lhs = pattern.lhs_idx;
+        node.rhs = pattern.rhs_idx;
+        node.aux = pattern.addend_idx;
+        node.alpha_fp = pattern.alpha;
+        node.beta_fp = pattern.beta;
+        node.transpose_lhs = pattern.transpose_lhs;
+        node.transpose_rhs = pattern.transpose_rhs;
+        node.transpose_aux = false;
+        node.reduction_axes.clear();
+        node.squeeze_axes.clear();
+        node.unsqueeze_axes.clear();
+        node.fill_dims.clear();
+        if (!node.compute_dtype.isPresent() && pattern.inherited_compute_dtype.isPresent()) {
+            node.compute_dtype = pattern.inherited_compute_dtype.get();
+        }
+        if (!node.backward_compute_dtype.isPresent() && pattern.inherited_backward_compute_dtype.isPresent()) {
+            node.backward_compute_dtype = pattern.inherited_backward_compute_dtype.get();
+        }
+    }
 }
 
 std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::makeSingleOutputRequestedShapeMap(
@@ -567,7 +1046,7 @@ static void collectReferencedLocalInputSlots(const PhysicalExpression& expr, uin
     }
 }
 
-static bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions);
+// static bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions);
 
 // static std::vector<uint64_t> applySqueezeDims(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& squeeze_axes) {
 //     if (squeeze_axes.empty()) {
@@ -611,61 +1090,6 @@ static bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inpu
 //
 //     return out_dims;
 // }
-
-static std::vector<uint64_t> applyNormalizedUnsqueezeDims(const std::vector<uint64_t>& input_dims,
-                                                          const std::vector<uint64_t>& unsqueeze_axes) {
-    // Scalar literals are rank-0 broadcastable leaves in the IR.
-    // Unsqueezing a scalar produces an all-ones shape of the requested rank.
-    if (input_dims.empty()) {
-        std::vector<uint64_t> normalized = unsqueeze_axes;
-        std::sort(normalized.begin(), normalized.end());
-        normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
-
-        for (uint64_t i = 0; i < normalized.size(); ++i) {
-            if (normalized[i] != i) {
-                throw std::runtime_error("unsqueeze axes are invalid for scalar input.");
-            }
-        }
-
-        return std::vector<uint64_t>(normalized.size(), 1ULL);
-    }
-
-    const std::vector<uint64_t> actual_axes = normalizeUnsqueezeAxesForInputDims(input_dims, unsqueeze_axes);
-
-    std::vector<uint64_t> output_dims = input_dims;
-    for (uint64_t axis : actual_axes) {
-        output_dims.insert(output_dims.begin() + static_cast<std::ptrdiff_t>(axis), 1ULL);
-    }
-    return output_dims;
-}
-
-static std::vector<uint64_t> applyNormalizedSqueezeDims(const std::vector<uint64_t>& input_dims,
-                                                        const std::vector<uint64_t>& squeeze_axes) {
-    // Scalar literals are already rank-0. Any squeeze is shape-preserving for stage inference.
-    if (input_dims.empty()) {
-        return {};
-    }
-
-    const std::vector<uint64_t> actual_axes = normalizeSqueezeAxesForInputDims(input_dims, squeeze_axes);
-
-    if (actual_axes.empty()) {
-        return input_dims;
-    }
-
-    std::vector<uint64_t> output_dims;
-    output_dims.reserve(input_dims.size() - actual_axes.size());
-
-    size_t next_remove = 0;
-    for (uint64_t axis = 0; axis < input_dims.size(); ++axis) {
-        if (next_remove < actual_axes.size() && actual_axes[next_remove] == axis) {
-            ++next_remove;
-            continue;
-        }
-        output_dims.push_back(input_dims[axis]);
-    }
-
-    return output_dims;
-}
 
 static std::string dimsToString(const std::vector<uint64_t>& dims) {
     std::ostringstream oss;
@@ -1120,52 +1544,6 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
     }
 }
 
-static bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions) {
-    if (inputs.empty()) {
-        throw std::runtime_error("resolveLayoutFromDims requires at least one input shape.");
-    }
-
-    uint64_t maxRank = 0;
-    for (const auto& dims : inputs) {
-        maxRank = std::max<uint64_t>(maxRank, dims.size());
-    }
-
-    outputDimensions.assign(maxRank, 1);
-
-    for (uint64_t axis = 0; axis < maxRank; ++axis) {
-        uint64_t resolvedDim = 1;
-
-        for (const auto& dims : inputs) {
-            const uint64_t pad = maxRank - dims.size();
-            const uint64_t dim = (axis < pad) ? 1ULL : dims[axis - pad];
-
-            if (dim == 1) {
-                continue;
-            }
-
-            if (resolvedDim == 1) {
-                resolvedDim = dim;
-            } else if (resolvedDim != dim) {
-                throw std::runtime_error("resolveLayoutFromDims found non-broadcast-compatible dimensions.");
-            }
-        }
-
-        outputDimensions[axis] = resolvedDim;
-    }
-
-    bool requiresBroadcast = false;
-    for (const auto& dims : inputs) {
-        std::vector<uint64_t> padded(maxRank - dims.size(), 1ULL);
-        padded.insert(padded.end(), dims.begin(), dims.end());
-        if (padded != outputDimensions) {
-            requiresBroadcast = true;
-            break;
-        }
-    }
-
-    return requiresBroadcast;
-}
-
 static std::vector<uint64_t> computeInputPackedStridesForBroadcast(const std::vector<uint64_t>& input_dims,
                                                                    const std::vector<uint64_t>& output_dims) {
     if (input_dims.size() > output_dims.size()) {
@@ -1577,8 +1955,10 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
     }
 
     const RuntimeDTypeKey dtype_cache_key = makeRuntimeDTypeKey(root_inputs, root_values);
+    const bool has_shape_dependent_gemm_lowering =
+        outputs_template.expr && expressionHasPotentialGemmLoweringPattern(*outputs_template.expr);
 
-    if (!backward_config.has_value()) {
+    if (!backward_config.has_value() && !has_shape_dependent_gemm_lowering) {
         std::shared_ptr<CompiledOutputs> cached_compiled_outputs;
         if (compiled_outputs_runtime_cache->tryGet(dtype_cache_key, cached_compiled_outputs)) {
             return cached_compiled_outputs;
@@ -1599,8 +1979,9 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
         return cached_compiled_outputs;
     }
 
-    PhysicalOutputs resolved_outputs = buildShapeSpecializedOutputs(root_values);
+    PhysicalOutputs resolved_outputs = backward_config.has_value() ? buildShapeSpecializedOutputs(root_values) : outputs_template;
     resolved_outputs.expr = std::make_shared<PhysicalExpression>(*resolved_outputs.expr);
+    optimizeExpressionGemmPatternsInPlace(*resolved_outputs.expr, root_values);
     resolveOutputsDTypesInPlace(resolved_outputs, dtype_cache_key.root_input_dtypes);
 
     std::shared_ptr<CompiledOutputs> compiled_outputs = EquationCompiler::compile(resolved_outputs, base_signature, true);
