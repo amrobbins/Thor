@@ -911,6 +911,38 @@ Expression Expression::matmul(const Expression& lhs,
     return out;
 }
 
+namespace {
+
+static uint32_t cloneSubtreeIntoMergedExpression(const Expression& src_expr,
+                                                 PhysicalExpression& dst,
+                                                 std::unordered_map<uint32_t, uint32_t>& old_to_new,
+                                                 std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name) {
+    PhysicalExpression src = src_expr.expression();
+    return cloneSubtreeWithMergedInputs(src, src.output_node, dst, old_to_new, dst_input_slots_by_name);
+}
+
+static uint32_t encodeLowerableGemmScaleExpression(const Expression& scale_expr,
+                                                   PhysicalExpression& dst,
+                                                   std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name,
+                                                   double& scale_fp) {
+    PhysicalExpression scale = scale_expr.expression();
+    const ExprNode& src_node = scale.nodes.at(scale.output_node);
+    if (src_node.op == ExprOp::SCALAR_FP) {
+        scale_fp *= src_node.scalar_fp;
+        return UINT32_MAX;
+    }
+    if (src_node.op != ExprOp::RUNTIME_SCALAR && src_node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+        throw std::runtime_error(
+            "GEMM alpha/beta expressions must currently be scalar leaves: constantScalar(...), runtimeScalar(...), or "
+            "tensorRuntimeScalar(...).");
+    }
+
+    std::unordered_map<uint32_t, uint32_t> old_to_new;
+    return cloneSubtreeIntoMergedExpression(scale_expr, dst, old_to_new, dst_input_slots_by_name);
+}
+
+}  // namespace
+
 Expression Expression::gemm(const Expression& lhs,
                             const Expression& rhs,
                             const Expression& addend,
@@ -921,10 +953,53 @@ Expression Expression::gemm(const Expression& lhs,
                             bool transpose_addend,
                             Optional<DataType> compute_dtype,
                             Optional<DataType> output_dtype) {
-    Expression out = ternaryOp(lhs, rhs, addend, ExprOp::GEMM);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.alpha_fp = alpha;
-    node.beta_fp = beta;
+    return gemm(lhs,
+                rhs,
+                addend,
+                Expression::constantScalar(alpha),
+                Expression::constantScalar(beta),
+                transpose_lhs,
+                transpose_rhs,
+                transpose_addend,
+                compute_dtype,
+                output_dtype);
+}
+
+Expression Expression::gemm(const Expression& lhs,
+                            const Expression& rhs,
+                            const Expression& addend,
+                            const Expression& alpha,
+                            const Expression& beta,
+                            bool transpose_lhs,
+                            bool transpose_rhs,
+                            bool transpose_addend,
+                            Optional<DataType> compute_dtype,
+                            Optional<DataType> output_dtype) {
+    if (!lhs.expr || !rhs.expr || !addend.expr || !alpha.expr || !beta.expr) {
+        throw std::runtime_error("Cannot build GEMM from empty expressions.");
+    }
+
+    auto out = std::make_shared<PhysicalExpression>();
+    std::unordered_map<std::string, uint32_t> merged_by_name;
+
+    auto clone_root = [&](const Expression& src_expr) {
+        std::unordered_map<uint32_t, uint32_t> old_to_new;
+        return cloneSubtreeIntoMergedExpression(src_expr, *out, old_to_new, merged_by_name);
+    };
+
+    const uint32_t new_lhs_index = clone_root(lhs);
+    const uint32_t new_rhs_index = clone_root(rhs);
+    const uint32_t new_aux_index = clone_root(addend);
+
+    ExprNode node{};
+    node.op = ExprOp::GEMM;
+    node.lhs = new_lhs_index;
+    node.rhs = new_rhs_index;
+    node.aux = new_aux_index;
+    node.alpha_fp = 1.0;
+    node.beta_fp = 1.0;
+    node.alpha_node = encodeLowerableGemmScaleExpression(alpha, *out, merged_by_name, node.alpha_fp);
+    node.beta_node = encodeLowerableGemmScaleExpression(beta, *out, merged_by_name, node.beta_fp);
     node.transpose_lhs = transpose_lhs;
     node.transpose_rhs = transpose_rhs;
     node.transpose_aux = transpose_addend;
@@ -934,7 +1009,11 @@ Expression Expression::gemm(const Expression& lhs,
     if (output_dtype.isPresent()) {
         node.output_dtype = output_dtype.get();
     }
-    return out;
+
+    const uint32_t new_index = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(node);
+    out->output_node = new_index;
+    return Expression(out, new_index);
 }
 
 // Reductions

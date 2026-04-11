@@ -5,6 +5,7 @@
 #include "Utilities/TensorMathFusion/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
+#include <cstring>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
@@ -202,10 +203,24 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
     }
 }
 
+static float loadTensorRuntimeScalarToHost(const TensorScalarBinding& binding, Stream& run_stream) {
+    if (binding.sourceDType != TensorDescriptor::DataType::FP32) {
+        throw std::runtime_error("Dynamic GEMM tensor-backed alpha/beta currently require FP32 source dtype.");
+    }
+
+    run_stream.synchronize();
+
+    float value = 0.0f;
+    const char* device_ptr = static_cast<const char*>(binding.buffer.getMemPtr());
+    CUDA_CHECK(cudaMemcpy(&value, device_ptr + binding.byteOffset, sizeof(float), cudaMemcpyDeviceToHost));
+    return value;
+}
+
 static float resolveMatmulRuntimeScale(const Optional<RuntimeInputValue>& bound_input,
                                        const std::optional<std::string>& runtime_name,
                                        double base_scale,
-                                       const std::unordered_map<std::string, float>& runtime_scalars) {
+                                       const std::unordered_map<std::string, float>& runtime_scalars,
+                                       Stream& run_stream) {
     float scale = static_cast<float>(base_scale);
     if (runtime_name.has_value()) {
         auto it = runtime_scalars.find(*runtime_name);
@@ -220,7 +235,11 @@ static float resolveMatmulRuntimeScale(const Optional<RuntimeInputValue>& bound_
             scale *= std::get<float>(value);
             return scale;
         }
-        throw std::runtime_error("Dynamic GEMM scale currently requires fp32 runtime scalar bindings.");
+        if (std::holds_alternative<TensorScalarBinding>(value)) {
+            scale *= loadTensorRuntimeScalarToHost(std::get<TensorScalarBinding>(value), run_stream);
+            return scale;
+        }
+        throw std::runtime_error("Dynamic GEMM scale currently requires fp32 runtime scalar or tensor-backed runtime scalar bindings.");
     }
     return scale;
 }
@@ -241,8 +260,10 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
     const int32_t b_rows = static_cast<int32_t>(rhs_dims[0]);
     const int32_t b_cols = static_cast<int32_t>(rhs_dims[1]);
 
-    const float resolved_alpha = resolveMatmulRuntimeScale(alpha_input, alpha_runtime_name, compiled_matmul->alpha, runtime_scalars);
-    const float resolved_beta = resolveMatmulRuntimeScale(beta_input, beta_runtime_name, compiled_matmul->beta, runtime_scalars);
+    const float resolved_alpha =
+        resolveMatmulRuntimeScale(alpha_input, alpha_runtime_name, compiled_matmul->alpha, runtime_scalars, run_stream);
+    const float resolved_beta =
+        resolveMatmulRuntimeScale(beta_input, beta_runtime_name, compiled_matmul->beta, runtime_scalars, run_stream);
 
     if (compiled_matmul->op == ExprOp::MATMUL) {
         CublasMatrixMultiply::instance().multiply(lhs,

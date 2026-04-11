@@ -936,9 +936,9 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
             scale_fp *= scale_node.scalar_fp;
             return UINT32_MAX;
         }
-        if (scale_node.op != ExprOp::RUNTIME_SCALAR) {
+        if (scale_node.op != ExprOp::RUNTIME_SCALAR && scale_node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
             throw std::runtime_error(std::string("Matmul stage ") + label +
-                                     " dynamic scale must be a local RUNTIME_SCALAR or SCALAR_FP node.");
+                                     " dynamic scale must be a local RUNTIME_SCALAR, TENSOR_RUNTIME_SCALAR, or SCALAR_FP node.");
         }
         return scale_node.input_slot;
     };
@@ -1430,18 +1430,22 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
             stage_expr.nodes.push_back(std::move(scalar_node));
             return;
         }
-        if (parent.op != ExprOp::RUNTIME_SCALAR) {
-            throw std::runtime_error("Matmul/gemm dynamic scale parent must be RUNTIME_SCALAR or SCALAR_FP.");
+        if (parent.op != ExprOp::RUNTIME_SCALAR && parent.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+            throw std::runtime_error("Matmul/gemm dynamic scale parent must be RUNTIME_SCALAR, TENSOR_RUNTIME_SCALAR, or SCALAR_FP.");
         }
 
         if (parent.input_slot >= expr.inputs.size()) {
             throw std::runtime_error("Matmul/gemm dynamic scale parent input slot is out of range.");
         }
         input_value_ids.push_back(parent.input_slot);
-        stage_expr.inputs.push_back(NamedInput{expr.inputs[parent.input_slot].name, local_slot, NamedInput::Kind::RuntimeScalarFp32});
+
+        const NamedInput::Kind input_kind =
+            (parent.op == ExprOp::RUNTIME_SCALAR) ? NamedInput::Kind::RuntimeScalarFp32 : NamedInput::Kind::TensorRuntimeScalar;
+
+        stage_expr.inputs.push_back(NamedInput{expr.inputs[parent.input_slot].name, local_slot, input_kind});
 
         ExprNode input_node;
-        input_node.op = ExprOp::RUNTIME_SCALAR;
+        input_node.op = parent.op;
         input_node.input_slot = local_slot;
         input_node.input_tensor_dtype = DataType::FP32;
         input_node.output_dtype = parent.output_dtype.isPresent() ? parent.output_dtype.get() : DataType::FP32;

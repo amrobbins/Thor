@@ -249,6 +249,16 @@ class Expression {
                                          bool transpose_addend = false,
                                          Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
                                          Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+    [[nodiscard]] static Expression gemm(const Expression& lhs,
+                                         const Expression& rhs,
+                                         const Expression& addend,
+                                         const Expression& alpha,
+                                         const Expression& beta,
+                                         bool transpose_lhs = false,
+                                         bool transpose_rhs = false,
+                                         bool transpose_addend = false,
+                                         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
+                                         Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
 
     [[nodiscard]] Expression reduction(ExprOp op,
                                        const std::vector<uint64_t>& reduction_axes,

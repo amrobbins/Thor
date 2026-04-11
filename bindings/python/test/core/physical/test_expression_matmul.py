@@ -414,3 +414,79 @@ def test_operator_matmul_plus_scalar_stays_valid_and_is_not_over_lowered():
 
     got = _copy_to_host(stamped.output(), dtype, stream)
     _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_gemm_tensor_runtime_scalars_explicit_api_numerical():
+    dtype = thor.DataType.fp32
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    alpha = ex.tensor_runtime_scalar("alpha")
+    beta = ex.tensor_runtime_scalar("beta")
+
+    expr = ex.gemm(a, b, c, alpha=alpha, beta=beta)
+    eq = ex.compile(expr, device_num=0)
+
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32)
+    b_np = np.array([[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]], dtype=np.float32)
+    c_np = np.array([[0.25, -1.0, 2.0, 0.5], [1.25, 0.75, -0.5, 3.0]], dtype=np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "c": _host_to_gpu(c_np, dtype, stream),
+    }
+
+    alpha_buffer = _host_to_gpu(np.array([0.75], dtype=np.float32), dtype, stream)
+    beta_buffer = _host_to_gpu(np.array([-1.25], dtype=np.float32), dtype, stream)
+    tensor_scalar_inputs = {
+        "alpha": thor.physical.TensorScalarBinding(alpha_buffer, 0, dtype),
+        "beta": thor.physical.TensorScalarBinding(beta_buffer, 0, dtype),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream, tensor_scalar_inputs=tensor_scalar_inputs)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    expected = (a_np @ b_np) * 0.75 + c_np * -1.25
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_operator_gemm_tensor_runtime_scalars_right_scaled_numerical():
+    dtype = thor.DataType.fp32
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    alpha = ex.tensor_runtime_scalar("alpha")
+    beta = ex.tensor_runtime_scalar("beta")
+
+    expr = (a @ b) * alpha + c * beta
+    eq = ex.compile(expr, device_num=0)
+
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32)
+    b_np = np.array([[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]], dtype=np.float32)
+    c_np = np.array([[0.25, -1.0, 2.0, 0.5], [1.25, 0.75, -0.5, 3.0]], dtype=np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "c": _host_to_gpu(c_np, dtype, stream),
+    }
+
+    alpha_buffer = _host_to_gpu(np.array([-0.5], dtype=np.float32), dtype, stream)
+    beta_buffer = _host_to_gpu(np.array([0.25], dtype=np.float32), dtype, stream)
+    tensor_scalar_inputs = {
+        "alpha": thor.physical.TensorScalarBinding(alpha_buffer, 0, dtype),
+        "beta": thor.physical.TensorScalarBinding(beta_buffer, 0, dtype),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream, tensor_scalar_inputs=tensor_scalar_inputs)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    expected = (a_np @ b_np) * -0.5 + c_np * 0.25
+    _assert_close(got, expected, dtype)

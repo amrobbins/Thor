@@ -71,9 +71,10 @@ thor.physical.Expression
 
     nb::class_<TensorScalarBinding>(physical, "TensorScalarBinding")
         .def(nb::init<>())
+        .def(nb::init<const Tensor&, uint64_t, DataType>(), "buffer"_a, "source_dtype"_a, "byte_offset"_a = 0)
         .def_rw("buffer", &TensorScalarBinding::buffer)
-        .def_rw("byte_offset", &TensorScalarBinding::byteOffset)
-        .def_rw("source_dtype", &TensorScalarBinding::sourceDType);
+        .def_rw("source_dtype", &TensorScalarBinding::sourceDType)
+        .def_rw("byte_offset", &TensorScalarBinding::byteOffset);
 
     expr.def_static(
         "runtime_scalar",
@@ -259,6 +260,39 @@ Create a floating-point scalar constant expression.
         "c"_a,
         "alpha"_a = 1.0,
         "beta"_a = 1.0,
+        "transpose_a"_a = false,
+        "transpose_b"_a = false,
+        "transpose_c"_a = false,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none());
+
+    expr.def_static(
+        "gemm",
+        [](const Expression& a,
+           const Expression& b,
+           const Expression& c,
+           const Expression& alpha,
+           const Expression& beta,
+           bool transpose_a,
+           bool transpose_b,
+           bool transpose_c,
+           nb::object output_dtype_obj,
+           nb::object compute_dtype_obj) {
+            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            if (!output_dtype_obj.is_none()) {
+                output_dtype = nb::cast<DataType>(output_dtype_obj);
+            }
+            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            if (!compute_dtype_obj.is_none()) {
+                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
+            }
+            return Expression::gemm(a, b, c, alpha, beta, transpose_a, transpose_b, transpose_c, compute_dtype, output_dtype);
+        },
+        "a"_a,
+        "b"_a,
+        "c"_a,
+        "alpha"_a,
+        "beta"_a,
         "transpose_a"_a = false,
         "transpose_b"_a = false,
         "transpose_c"_a = false,
