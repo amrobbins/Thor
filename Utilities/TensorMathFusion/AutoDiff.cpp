@@ -32,12 +32,21 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
         }
         new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new);
         new_node.rhs = UINT32_MAX;
+        new_node.aux = UINT32_MAX;
     } else if (Expression::isBinaryOp(src_node.op)) {
         if (src_node.lhs == UINT32_MAX || src_node.rhs == UINT32_MAX) {
             throw std::runtime_error("Malformed forward expression: binary node missing child.");
         }
         new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new);
         new_node.rhs = cloneForwardSubtree(src, src_node.rhs, dst, old_to_new);
+        new_node.aux = UINT32_MAX;
+    } else if (Expression::isTernaryOp(src_node.op)) {
+        if (src_node.lhs == UINT32_MAX || src_node.rhs == UINT32_MAX || src_node.aux == UINT32_MAX) {
+            throw std::runtime_error("Malformed forward expression: ternary node missing child.");
+        }
+        new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new);
+        new_node.rhs = cloneForwardSubtree(src, src_node.rhs, dst, old_to_new);
+        new_node.aux = cloneForwardSubtree(src, src_node.aux, dst, old_to_new);
     } else if (Expression::isLeafOp(src_node.op)) {
         // Nothing to recurse into.
     } else {
@@ -199,6 +208,12 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::REDUCE_NORM1:
             case ExprOp::REDUCE_NORM2:
                 reaches[i] = reaches.at(node.lhs);
+                break;
+            case ExprOp::MATMUL:
+                reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs);
+                break;
+            case ExprOp::GEMM:
+                reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs) || reaches.at(node.aux);
                 break;
             default:
                 throw std::runtime_error("Unsupported op while computing reverse relevance: " + std::to_string((int)node.op));
@@ -519,6 +534,56 @@ class BackwardGraphBuilder {
         node.op = op;
         node.lhs = lhs;
         node.rhs = rhs;
+        return push(std::move(node));
+    }
+
+    uint32_t matmul(uint32_t lhs,
+                    uint32_t rhs,
+                    bool transpose_lhs = false,
+                    bool transpose_rhs = false,
+                    Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
+                    Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+        ExprNode node{};
+        node.op = ExprOp::MATMUL;
+        node.lhs = lhs;
+        node.rhs = rhs;
+        node.transpose_lhs = transpose_lhs;
+        node.transpose_rhs = transpose_rhs;
+        if (output_dtype.isPresent()) {
+            node.output_dtype = output_dtype.get();
+        }
+        if (compute_dtype.isPresent()) {
+            node.compute_dtype = compute_dtype.get();
+        }
+        return push(std::move(node));
+    }
+
+    uint32_t gemm(uint32_t lhs,
+                  uint32_t rhs,
+                  uint32_t addend,
+                  double alpha,
+                  double beta,
+                  bool transpose_lhs = false,
+                  bool transpose_rhs = false,
+                  bool transpose_addend = false,
+                  Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
+                  Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+        ExprNode node{};
+        node.op = ExprOp::GEMM;
+        node.lhs = lhs;
+        node.rhs = rhs;
+        node.aux = addend;
+        node.alpha_fp = alpha;
+        node.beta_fp = beta;
+        node.transpose_lhs = transpose_lhs;
+        node.transpose_rhs = transpose_rhs;
+        node.transpose_aux = transpose_addend;
+        if (output_dtype.isPresent()) {
+            node.output_dtype = output_dtype.get();
+        }
+        if (compute_dtype.isPresent()) {
+            node.compute_dtype = compute_dtype.get();
+        }
         return push(std::move(node));
     }
 
@@ -872,6 +937,37 @@ std::vector<uint64_t> applySqueezeDims(const std::vector<uint64_t>& input_dims, 
 //     return normalizeSqueezeAxesForInputDims(unsqueezed_output_dims, squeeze_axes);
 // }
 
+std::vector<uint64_t> inferMatmulOutputDims(const ExprNode& node,
+                                            const std::vector<uint64_t>& lhs_dims,
+                                            const std::vector<uint64_t>& rhs_dims,
+                                            const std::vector<uint64_t>* aux_dims = nullptr) {
+    if (lhs_dims.size() != 2 || rhs_dims.size() != 2) {
+        throw std::runtime_error("Autodiff shape inference for matmul/gemm currently only supports rank-2 tensors.");
+    }
+
+    const uint64_t a_rows = node.transpose_lhs ? lhs_dims[1] : lhs_dims[0];
+    const uint64_t a_cols = node.transpose_lhs ? lhs_dims[0] : lhs_dims[1];
+    const uint64_t b_rows = node.transpose_rhs ? rhs_dims[1] : rhs_dims[0];
+    const uint64_t b_cols = node.transpose_rhs ? rhs_dims[0] : rhs_dims[1];
+
+    if (a_cols != b_rows) {
+        throw std::runtime_error("Autodiff shape inference found incompatible matmul/gemm matrix dimensions.");
+    }
+
+    std::vector<uint64_t> out_dims{a_rows, b_cols};
+    if (aux_dims) {
+        if (aux_dims->size() != 2) {
+            throw std::runtime_error("Autodiff shape inference for GEMM currently only supports rank-2 addends.");
+        }
+        const std::vector<uint64_t> expected_aux = node.transpose_aux ? std::vector<uint64_t>{out_dims[1], out_dims[0]} : out_dims;
+        if (*aux_dims != expected_aux) {
+            throw std::runtime_error("Autodiff shape inference found GEMM addend dimensions incompatible with the matmul output.");
+        }
+    }
+
+    return out_dims;
+}
+
 std::vector<std::vector<uint64_t>> inferForwardNodeDims(
     const PhysicalExpression& forward_expr,
     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims) {
@@ -987,8 +1083,11 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 node_dims[i] = StampedEquation::computeReductionOutputDims(node_dims[node.lhs], node.reduction_axes, node.squeeze_axes);
                 break;
             case ExprOp::MATMUL:
+                node_dims[i] = inferMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                break;
             case ExprOp::GEMM:
-                throw std::runtime_error("Thor expressions autodiff shape inference does not yet support matmul/gemm.");
+                node_dims[i] = inferMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs], &node_dims[node.aux]);
+                break;
             default:
                 throw std::runtime_error("inferForwardNodeDims encountered unknown ExprOp.");
         }
@@ -1648,10 +1747,117 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 break;
             }
 
+            case ExprOp::MATMUL: {
+                const uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : std::vector<uint64_t>{};
+                const std::vector<uint64_t> rhs_dims = has_forward_dims ? forward_node_dims.at(node.rhs) : std::vector<uint64_t>{};
+                const auto lhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
+                const auto rhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.rhs));
+
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    uint32_t lhs_grad = UINT32_MAX;
+                    if (!node.transpose_lhs && !node.transpose_rhs) {
+                        lhs_grad = builder.matmul(grad_like_output, rhs, false, true, lhs_grad_dtype, node.compute_dtype);
+                    } else if (!node.transpose_lhs && node.transpose_rhs) {
+                        lhs_grad = builder.matmul(grad_like_output, rhs, false, false, lhs_grad_dtype, node.compute_dtype);
+                    } else if (node.transpose_lhs && !node.transpose_rhs) {
+                        lhs_grad = builder.matmul(rhs, grad_like_output, false, true, lhs_grad_dtype, node.compute_dtype);
+                    } else {
+                        lhs_grad = builder.matmul(rhs, grad_like_output, true, true, lhs_grad_dtype, node.compute_dtype);
+                    }
+
+                    if (node.alpha_fp != 1.0) {
+                        lhs_grad = builder.mul(builder.scalar(node.alpha_fp), lhs_grad);
+                    }
+                    addContributionToChild(node.lhs, lhs_grad, lhs_dims);
+                }
+
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    uint32_t rhs_grad = UINT32_MAX;
+                    if (!node.transpose_lhs && !node.transpose_rhs) {
+                        rhs_grad = builder.matmul(lhs, grad_like_output, true, false, rhs_grad_dtype, node.compute_dtype);
+                    } else if (!node.transpose_lhs && node.transpose_rhs) {
+                        rhs_grad = builder.matmul(grad_like_output, lhs, true, false, rhs_grad_dtype, node.compute_dtype);
+                    } else if (node.transpose_lhs && !node.transpose_rhs) {
+                        rhs_grad = builder.matmul(lhs, grad_like_output, false, false, rhs_grad_dtype, node.compute_dtype);
+                    } else {
+                        rhs_grad = builder.matmul(grad_like_output, lhs, true, true, rhs_grad_dtype, node.compute_dtype);
+                    }
+
+                    if (node.alpha_fp != 1.0) {
+                        rhs_grad = builder.mul(builder.scalar(node.alpha_fp), rhs_grad);
+                    }
+                    addContributionToChild(node.rhs, rhs_grad, rhs_dims);
+                }
+                break;
+            }
+
+            case ExprOp::GEMM: {
+                const uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : std::vector<uint64_t>{};
+                const std::vector<uint64_t> rhs_dims = has_forward_dims ? forward_node_dims.at(node.rhs) : std::vector<uint64_t>{};
+                const std::vector<uint64_t> aux_dims = has_forward_dims ? forward_node_dims.at(node.aux) : std::vector<uint64_t>{};
+                const auto lhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
+                const auto rhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.rhs));
+                const auto aux_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.aux));
+
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    uint32_t lhs_grad = UINT32_MAX;
+                    if (!node.transpose_lhs && !node.transpose_rhs) {
+                        lhs_grad = builder.matmul(grad_like_output, rhs, false, true, lhs_grad_dtype, node.compute_dtype);
+                    } else if (!node.transpose_lhs && node.transpose_rhs) {
+                        lhs_grad = builder.matmul(grad_like_output, rhs, false, false, lhs_grad_dtype, node.compute_dtype);
+                    } else if (node.transpose_lhs && !node.transpose_rhs) {
+                        lhs_grad = builder.matmul(rhs, grad_like_output, false, true, lhs_grad_dtype, node.compute_dtype);
+                    } else {
+                        lhs_grad = builder.matmul(rhs, grad_like_output, true, true, lhs_grad_dtype, node.compute_dtype);
+                    }
+
+                    if (node.alpha_fp != 1.0) {
+                        lhs_grad = builder.mul(builder.scalar(node.alpha_fp), lhs_grad);
+                    }
+                    addContributionToChild(node.lhs, lhs_grad, lhs_dims);
+                }
+
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    uint32_t rhs_grad = UINT32_MAX;
+                    if (!node.transpose_lhs && !node.transpose_rhs) {
+                        rhs_grad = builder.matmul(lhs, grad_like_output, true, false, rhs_grad_dtype, node.compute_dtype);
+                    } else if (!node.transpose_lhs && node.transpose_rhs) {
+                        rhs_grad = builder.matmul(grad_like_output, lhs, true, false, rhs_grad_dtype, node.compute_dtype);
+                    } else if (node.transpose_lhs && !node.transpose_rhs) {
+                        rhs_grad = builder.matmul(lhs, grad_like_output, false, false, rhs_grad_dtype, node.compute_dtype);
+                    } else {
+                        rhs_grad = builder.matmul(grad_like_output, lhs, true, true, rhs_grad_dtype, node.compute_dtype);
+                    }
+
+                    if (node.alpha_fp != 1.0) {
+                        rhs_grad = builder.mul(builder.scalar(node.alpha_fp), rhs_grad);
+                    }
+                    addContributionToChild(node.rhs, rhs_grad, rhs_dims);
+                }
+
+                if (node_reaches_requested_inputs.at(node.aux)) {
+                    if (node.transpose_aux) {
+                        throw std::runtime_error(
+                            "Thor expressions autodiff does not yet support backward for GEMM with transpose_aux/transposeC.");
+                    }
+                    uint32_t aux_grad = grad_like_output;
+                    if (node.beta_fp != 1.0) {
+                        aux_grad = builder.mul(builder.scalar(node.beta_fp), aux_grad);
+                    }
+                    aux_grad = broadcastGradToDims(aux_grad, aux_dims, aux_grad_dtype);
+                    addContributionToChild(node.aux, aux_grad, aux_dims);
+                }
+                break;
+            }
+
             case ExprOp::REDUCE_ARGMIN:
             case ExprOp::REDUCE_ARGMAX:
-            case ExprOp::MATMUL:
-            case ExprOp::GEMM:
                 throw std::runtime_error("Thor expressions autodiff does not support backward for op " + opName(node.op) + ".");
 
             default:

@@ -168,6 +168,71 @@ static std::vector<uint64_t> resolveMatmulOutputDimsFromInputs(const CompiledMat
     return out_dims;
 }
 
+static void mergeParameterFanOverride(FusedEquation::ParameterFanOverrideMap& result, const ParameterFanOverride& hint) {
+    auto [it, inserted] = result.emplace(hint.input_name, hint);
+    if (!inserted) {
+        it->second.input_name = hint.input_name;
+        it->second.fan_in = std::max(it->second.fan_in, hint.fan_in);
+        it->second.fan_out = std::max(it->second.fan_out, hint.fan_out);
+    }
+}
+
+static void addMatmulParameterFanOverrides(const CompiledExecutionStage& stage,
+                                           const std::vector<std::vector<uint64_t>>& stage_input_dims,
+                                           const std::unordered_map<uint32_t, std::string>& root_input_name_by_slot,
+                                           const std::unordered_set<std::string>& parameter_names,
+                                           FusedEquation::ParameterFanOverrideMap& result) {
+    if (stage.kind != CompiledExecutionStage::Kind::Matmul || !stage.matmul) {
+        return;
+    }
+    if (stage_input_dims.size() < 2 || stage.input_value_ids.size() < 2) {
+        throw std::runtime_error("Matmul/gemm stage expected at least two inputs for parameter fan override inference.");
+    }
+
+    const CompiledMatmul& compiled = *stage.matmul;
+    const std::vector<uint64_t>& lhs_dims = stage_input_dims[0];
+    const std::vector<uint64_t>& rhs_dims = stage_input_dims[1];
+    if (lhs_dims.size() != 2 || rhs_dims.size() != 2) {
+        throw std::runtime_error("Matmul/gemm parameter fan override inference currently only supports rank-2 inputs.");
+    }
+
+    const uint64_t lhs_rows = compiled.transpose_lhs ? lhs_dims[1] : lhs_dims[0];
+    const uint64_t lhs_cols = compiled.transpose_lhs ? lhs_dims[0] : lhs_dims[1];
+    const uint64_t rhs_rows = compiled.transpose_rhs ? rhs_dims[1] : rhs_dims[0];
+    const uint64_t rhs_cols = compiled.transpose_rhs ? rhs_dims[0] : rhs_dims[1];
+
+    if (lhs_cols != rhs_rows) {
+        throw std::runtime_error("Matmul/gemm parameter fan override inference found incompatible matrix dimensions.");
+    }
+
+    auto maybe_add = [&](size_t operand_idx, uint64_t fan_in, uint64_t fan_out) {
+        if (operand_idx >= stage.input_value_ids.size()) {
+            return;
+        }
+
+        auto name_it = root_input_name_by_slot.find(stage.input_value_ids[operand_idx]);
+        if (name_it == root_input_name_by_slot.end()) {
+            return;
+        }
+        if (!parameter_names.contains(name_it->second)) {
+            return;
+        }
+
+        mergeParameterFanOverride(result,
+                                  ParameterFanOverride{
+                                      .input_name = name_it->second,
+                                      .fan_in = std::max<uint64_t>(1, fan_in),
+                                      .fan_out = std::max<uint64_t>(1, fan_out),
+                                  });
+    };
+
+    // For effective op(A)[m, k] @ op(B)[k, n], dense-initializer semantics are:
+    //  - lhs parameter: fan_in = k, fan_out = m
+    //  - rhs parameter: fan_in = k, fan_out = n
+    maybe_add(0, lhs_cols, lhs_rows);
+    maybe_add(1, rhs_rows, rhs_cols);
+}
+
 static RuntimeDTypeKey makeRuntimeDTypeKey(const std::vector<NamedInput>& root_inputs,
                                            const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
     RuntimeDTypeKey key;
@@ -2932,22 +2997,82 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
     const auto root_values = bindRootInputsForCompilation(named_inputs, {}, tensor_scalar_inputs, requested_output_shapes);
     const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
 
+    std::unordered_map<uint32_t, std::string> root_input_name_by_slot;
+    root_input_name_by_slot.reserve(root_inputs.size());
+    for (const NamedInput& input : root_inputs) {
+        if (input.kind == NamedInput::Kind::Tensor) {
+            root_input_name_by_slot.emplace(input.slot, input.name);
+        }
+    }
+
+    std::unordered_map<uint32_t, std::vector<uint64_t>> value_dims;
+    value_dims.reserve(root_values.size() + compiled_outputs->stages.size());
+    for (const auto& [value_id, value] : root_values) {
+        value_dims.emplace(value_id, runtimeInputDims(value));
+    }
+
     for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
-        if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
-            continue;
+        std::vector<std::vector<uint64_t>> stage_input_dims;
+        stage_input_dims.reserve(stage.input_value_ids.size());
+        for (uint32_t value_id : stage.input_value_ids) {
+            auto it = value_dims.find(value_id);
+            if (it == value_dims.end()) {
+                throw std::runtime_error("Missing input shape for parameter fan override inference.");
+            }
+            stage_input_dims.push_back(it->second);
+        }
+
+        if (stage.kind == CompiledExecutionStage::Kind::Matmul) {
+            addMatmulParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
         }
 
         for (const ParameterFanOverride& hint : stage.parameter_fan_overrides) {
             if (!parameter_names.contains(hint.input_name)) {
                 continue;
             }
+            mergeParameterFanOverride(result, hint);
+        }
 
-            auto [it, inserted] = result.emplace(hint.input_name, hint);
-            if (!inserted) {
-                it->second.input_name = hint.input_name;
-                it->second.fan_in = std::max(it->second.fan_in, hint.fan_in);
-                it->second.fan_out = std::max(it->second.fan_out, hint.fan_out);
+        if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
+            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                value_dims[stage.outputs[output_idx].value_id] = resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
             }
+        } else if (stage.kind == CompiledExecutionStage::Kind::Reduction) {
+            if (!stage.reduction) {
+                throw std::runtime_error("Missing compiled reduction stage.");
+            }
+            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Reduction stage expected exactly one input and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
+                stage_input_dims[0], stage.reduction->reduction_axes, stage.reduction->squeeze_axes);
+        } else if (stage.kind == CompiledExecutionStage::Kind::ArgMinMax) {
+            if (!stage.arg_minmax) {
+                throw std::runtime_error("Missing compiled arg-min/max stage.");
+            }
+            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Arg-min/max stage expected exactly one input and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
+                stage_input_dims[0], stage.arg_minmax->reduction_axes, stage.arg_minmax->squeeze_axes);
+        } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
+            if (!stage.reduce_minmax_backward) {
+                throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");
+            }
+            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Reduce-min/max-backward stage expected exactly two inputs and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
+        } else if (stage.kind == CompiledExecutionStage::Kind::Matmul) {
+            if (!stage.matmul) {
+                throw std::runtime_error("Missing compiled matmul stage.");
+            }
+            if (stage.outputs.size() != 1) {
+                throw std::runtime_error("Matmul/gemm stage expected exactly one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+        } else {
+            throw std::runtime_error("Unknown execution stage kind in getParameterFanOverrides.");
         }
     }
 
