@@ -47,6 +47,7 @@ struct CompiledEquation {
         Flat,
         BroadcastSingle,
         BroadcastGrouped,
+        Transpose,
     };
 
     EquationCacheKey key;

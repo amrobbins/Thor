@@ -1018,7 +1018,7 @@ def test_gemm_forward_arbitrary_scalar_expression_alpha_beta_numerical():
     alpha_src = ex.input("alpha_src")
     beta_src = ex.input("beta_src")
 
-    alpha = ex.exp(ex.reduce_sum(alpha_src, axis=[0], squeeze=False) * 0.5)
+    alpha = ex.exp(ex.reduce_sum(alpha_src, axis=[0], squeeze=True) * 0.5)
     beta = ex.reduce_sum(ex.abs(beta_src), axis=[0, 1], squeeze=False) - 0.75
 
     eq = ex.compile(ex.gemm(a, b, c, alpha=alpha, beta=beta), device_num=0)

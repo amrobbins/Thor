@@ -10,6 +10,8 @@
 
 namespace ThorImplementation {
 namespace {
+static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims);
+
 uint32_t cloneForwardSubtree(const PhysicalExpression& src,
                              uint32_t src_node_index,
                              PhysicalExpression& dst,
@@ -202,6 +204,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::LOG2:
             case ExprOp::LOG10:
             case ExprOp::SQRT:
+            case ExprOp::TRANSPOSE:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
             case ExprOp::REDUCE_SUM:
@@ -301,6 +304,14 @@ class BackwardGraphBuilder {
                 value = node.scalar_fp;
                 dims = node.fill_dims;
                 return true;
+            case ExprOp::TRANSPOSE: {
+                std::vector<uint64_t> lhs_dims;
+                if (!tryGetConstantLike(node.lhs, value, lhs_dims)) {
+                    return false;
+                }
+                dims = inferTransposeOutputDims(lhs_dims);
+                return true;
+            }
             case ExprOp::UNSQUEEZE: {
                 std::vector<uint64_t> lhs_dims;
                 if (!tryGetConstantLike(node.lhs, value, lhs_dims)) {
@@ -988,6 +999,13 @@ std::vector<uint64_t> inferMatmulOutputDims(const ExprNode& node,
     return out_dims;
 }
 
+static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims) {
+    if (input_dims.size() != 2) {
+        throw std::runtime_error("Autodiff transpose shape inference currently only supports rank-2 tensors.");
+    }
+    return std::vector<uint64_t>{input_dims[1], input_dims[0]};
+}
+
 std::vector<std::vector<uint64_t>> inferForwardNodeDims(
     const PhysicalExpression& forward_expr,
     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims) {
@@ -1061,6 +1079,9 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::LOG10:
             case ExprOp::SQRT:
                 node_dims[i] = node_dims[node.lhs];
+                break;
+            case ExprOp::TRANSPOSE:
+                node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
                 break;
             case ExprOp::UNSQUEEZE: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
@@ -1440,6 +1461,17 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
                     const uint32_t scaled = builder.mul(grad, sign_lhs);
                     addContributionToChild(node.lhs, scaled, node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::TRANSPOSE: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    if (has_forward_dims) {
+                        addContributionToChild(node.lhs, builder.unary(ExprOp::TRANSPOSE, grad), forward_node_dims.at(node.lhs));
+                    } else {
+                        builder.addContribution(node.lhs, builder.unary(ExprOp::TRANSPOSE, grad));
+                    }
                 }
                 break;
             }

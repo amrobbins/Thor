@@ -115,6 +115,8 @@ std::string opName(ExprOp op) {
             return "UNSQ";
         case ExprOp::SQUEEZE:
             return "SQZ";
+        case ExprOp::TRANSPOSE:
+            return "TRANSPOSE";
         case ExprOp::EXP2:
             return "EXP2";
         case ExprOp::EXP10:
@@ -238,6 +240,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::LOG2:
         case ExprOp::LOG10:
         case ExprOp::SQRT:
+        case ExprOp::TRANSPOSE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ")";
             break;
         case ExprOp::UNSQUEEZE:
@@ -356,6 +359,9 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
         case PhysicalExecutionStage::Kind::ReduceMinMaxBackward:
             ss << "reduce_minmax_backward";
             break;
+        case PhysicalExecutionStage::Kind::Transpose:
+            ss << "transpose";
+            break;
         default:
             throw std::runtime_error("canonicalize(PhysicalExecutionStage): unknown stage kind.");
     }
@@ -416,6 +422,7 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::LOG2:
         case ExprOp::LOG10:
         case ExprOp::SQRT:
+        case ExprOp::TRANSPOSE:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
         case ExprOp::REDUCE_SUM:
@@ -891,6 +898,8 @@ Expression Expression::squeeze(const std::vector<uint64_t>& squeeze_axes) const 
     out.expr->nodes[out.nodeIndex].squeeze_axes = std::move(normalized);
     return out;
 }
+
+Expression Expression::transpose() const { return unaryOp(*this, ExprOp::TRANSPOSE); }
 
 Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }
 
