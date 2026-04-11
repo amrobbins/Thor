@@ -288,18 +288,28 @@ class FusedEquation {
                                                                    const Stream& stream,
                                                                    const std::vector<uint64_t>& requested_output_shape) const;
 
-    [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
-                                                             Tensor& lhs,
-                                                             Tensor& rhs,
-                                                             const Optional<Tensor>& preallocatedOutput,
-                                                             const Stream& stream) const;
+    [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(
+        const std::shared_ptr<CompiledMatmul>& compiledStage,
+        Tensor& lhs,
+        Tensor& rhs,
+        const Optional<Tensor>& preallocatedOutput,
+        const Stream& stream,
+        const Optional<RuntimeInputValue>& alpha_input = Optional<RuntimeInputValue>::empty(),
+        const Optional<RuntimeInputValue>& beta_input = Optional<RuntimeInputValue>::empty(),
+        const std::optional<std::string>& alpha_runtime_name = std::nullopt,
+        const std::optional<std::string>& beta_runtime_name = std::nullopt) const;
 
-    [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
-                                                             Tensor& lhs,
-                                                             Tensor& rhs,
-                                                             Tensor& addend,
-                                                             const Optional<Tensor>& preallocatedOutput,
-                                                             const Stream& stream) const;
+    [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(
+        const std::shared_ptr<CompiledMatmul>& compiledStage,
+        Tensor& lhs,
+        Tensor& rhs,
+        Tensor& addend,
+        const Optional<Tensor>& preallocatedOutput,
+        const Stream& stream,
+        const Optional<RuntimeInputValue>& alpha_input = Optional<RuntimeInputValue>::empty(),
+        const Optional<RuntimeInputValue>& beta_input = Optional<RuntimeInputValue>::empty(),
+        const std::optional<std::string>& alpha_runtime_name = std::nullopt,
+        const std::optional<std::string>& beta_runtime_name = std::nullopt) const;
 
     [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
         const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
