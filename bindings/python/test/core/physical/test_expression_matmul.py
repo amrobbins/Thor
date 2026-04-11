@@ -280,3 +280,89 @@ def test_matmul_idunder():
     c = a.__imatmul__(b)
     eq = ex.compile(c, device_num=0)
     assert eq is not None
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", MATMUL_DTYPES)
+def test_operator_gemm_pattern_matmul_plus_addend_numerical(dtype: thor.DataType):
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    eq = ex.compile(a @ b + c, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32).astype(storage_dtype)
+    b_np = np.array([[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]],
+                    dtype=np.float32).astype(storage_dtype)
+    c_np = np.array([[0.25, -1.0, 2.0, 0.5], [1.25, 0.75, -0.5, 3.0]], dtype=np.float32).astype(storage_dtype)
+
+    expected = a_np.astype(np.float32) @ b_np.astype(np.float32) + c_np.astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "c": _host_to_gpu(c_np, dtype, stream),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_operator_gemm_pattern_scaled_and_reordered_numerical():
+    dtype = thor.DataType.fp32
+    alpha = 0.75
+    beta = -1.25
+
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    eq = ex.compile(beta * c + alpha * (a @ b), device_num=0)
+
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32)
+    b_np = np.array([[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]], dtype=np.float32)
+    c_np = np.array([[0.25, -1.0, 2.0, 0.5], [1.25, 0.75, -0.5, 3.0]], dtype=np.float32)
+
+    expected = beta * c_np + alpha * (a_np @ b_np)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "c": _host_to_gpu(c_np, dtype, stream),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_operator_matmul_plus_scalar_stays_valid_and_is_not_over_lowered():
+    dtype = thor.DataType.fp32
+
+    a = ex.input("a")
+    b = ex.input("b")
+    eq = ex.compile(a @ b + 1.5, device_num=0)
+
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32)
+    b_np = np.array([[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]], dtype=np.float32)
+    expected = (a_np @ b_np) + 1.5
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, expected, dtype)
