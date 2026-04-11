@@ -1853,6 +1853,38 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     addContributionToChild(node.rhs, rhs_grad, rhs_dims);
                 }
 
+                const std::vector<uint64_t> alpha_dims =
+                    (has_forward_dims && node.alpha_node != UINT32_MAX) ? forward_node_dims.at(node.alpha_node) : std::vector<uint64_t>{};
+                const std::vector<uint64_t> beta_dims =
+                    (has_forward_dims && node.beta_node != UINT32_MAX) ? forward_node_dims.at(node.beta_node) : std::vector<uint64_t>{};
+
+                if (node.alpha_node != UINT32_MAX && node_reaches_requested_inputs.at(node.alpha_node)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t rhs = builder.cloneForward(node.rhs);
+
+                    uint32_t alpha_term = builder.matmul(lhs,
+                                                         rhs,
+                                                         node.transpose_lhs,
+                                                         node.transpose_rhs,
+                                                         Optional<TensorDescriptor::DataType>::empty(),
+                                                         node.compute_dtype);
+
+                    uint32_t alpha_grad = builder.mul(grad_like_output, alpha_term);
+                    addContributionToChild(node.alpha_node, alpha_grad, node_dims);
+                }
+
+                if (node.beta_node != UINT32_MAX && node_reaches_requested_inputs.at(node.beta_node)) {
+                    if (node.transpose_aux) {
+                        throw std::runtime_error(
+                            "Thor expressions autodiff does not yet support backward for GEMM beta subexpression with "
+                            "transpose_aux/transposeC.");
+                    }
+
+                    const uint32_t aux = builder.cloneForward(node.aux);
+                    uint32_t beta_grad = builder.mul(grad_like_output, aux);
+                    addContributionToChild(node.beta_node, beta_grad, node_dims);
+                }
+
                 if (node_reaches_requested_inputs.at(node.aux)) {
                     if (node.transpose_aux) {
                         throw std::runtime_error(

@@ -1007,3 +1007,124 @@ def test_matmul_backward_large_fp16_likely_workspace_numerical():
 
     _assert_close(got_a_grad, _cast_reference_to_storage_dtype(expected_a_grad, dtype), dtype)
     _assert_close(got_b_grad, _cast_reference_to_storage_dtype(expected_b_grad, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_gemm_forward_arbitrary_scalar_expression_alpha_beta_numerical():
+    dtype = thor.DataType.fp32
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    alpha_src = ex.input("alpha_src")
+    beta_src = ex.input("beta_src")
+
+    alpha = ex.exp(ex.reduce_sum(alpha_src, axis=[0], squeeze=False) * 0.5)
+    beta = ex.reduce_sum(ex.abs(beta_src), axis=[0, 1], squeeze=False) - 0.75
+
+    eq = ex.compile(ex.gemm(a, b, c, alpha=alpha, beta=beta), device_num=0)
+
+    a_np, b_np, c_np, _ = _matmul_case_arrays(False, False, dtype)
+    alpha_src_np = np.array([0.25, -0.5], dtype=np.float32)
+    beta_src_np = np.array([[1.5, -0.25]], dtype=np.float32)
+
+    alpha_v = np.exp(alpha_src_np.sum() * 0.5)
+    beta_v = np.abs(beta_src_np).sum() - 0.75
+    expected = _gemm_reference(a_np, b_np, c_np, alpha=alpha_v, beta=beta_v)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "c": _host_to_gpu(c_np, dtype, stream),
+        "alpha_src": _host_to_gpu(alpha_src_np.astype(_numpy_storage_dtype(dtype)), dtype, stream),
+        "beta_src": _host_to_gpu(beta_src_np.astype(_numpy_storage_dtype(dtype)), dtype, stream),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_gemm_forward_arbitrary_scalar_expression_must_resolve_to_single_element():
+    dtype = thor.DataType.fp32
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    alpha_bad = ex.input("alpha_bad")
+
+    eq = ex.compile(ex.gemm(a, b, c, alpha=alpha_bad, beta=1.0), device_num=0)
+
+    a_np, b_np, c_np, _ = _matmul_case_arrays(False, False, dtype)
+    alpha_bad_np = np.array([1.0, 2.0], dtype=np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "c": _host_to_gpu(c_np, dtype, stream),
+        "alpha_bad": _host_to_gpu(alpha_bad_np.astype(_numpy_storage_dtype(dtype)), dtype, stream),
+    }
+
+    with pytest.raises(RuntimeError, match="single element"):
+        eq.output_shape(inputs_gpu)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", BACKWARD_DTYPES)
+def test_gemm_backward_arbitrary_scalar_expression_wrt_all_inputs_numerical(dtype: thor.DataType):
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    alpha_src = ex.input("alpha_src")
+    beta_src = ex.input("beta_src")
+    upstream_name = "__grad_output"
+
+    alpha = ex.reduce_sum(alpha_src, axis=[0], squeeze=False) * 0.5
+    beta = ex.reduce_sum(ex.abs(beta_src), axis=[0], squeeze=False) - 0.75
+
+    fwd_eq = ex.compile(ex.gemm(a, b, c, alpha=alpha, beta=beta), device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["a", "b", "c", "alpha_src", "beta_src"], error_input_name=upstream_name)
+
+    a_np, b_np, c_np, grad_np = _matmul_case_arrays(False, False, dtype)
+    alpha_src_np = np.array([0.25, -0.5], dtype=np.float32).astype(_numpy_storage_dtype(dtype))
+    beta_src_np = np.array([1.5, -0.25, 0.5], dtype=np.float32).astype(_numpy_storage_dtype(dtype))
+
+    alpha_v = alpha_src_np.astype(np.float32).sum() * 0.5
+    beta_v = np.abs(beta_src_np.astype(np.float32)).sum() - 0.75
+    expected_a_grad, expected_b_grad, expected_c_grad = _gemm_backward_reference(
+        a_np, b_np, c_np, grad_np, alpha=alpha_v, beta=beta_v)
+
+    matmul_ref = _matmul_reference(a_np, b_np)
+    upstream_ref = grad_np.astype(np.float32)
+    alpha_common = float(np.sum(upstream_ref * matmul_ref))
+    beta_common = float(np.sum(upstream_ref * c_np.astype(np.float32)))
+    expected_alpha_src_grad = np.full_like(alpha_src_np.astype(np.float32), alpha_common * 0.5)
+    expected_beta_src_grad = beta_common * np.sign(beta_src_np.astype(np.float32))
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "c": _host_to_gpu(c_np, dtype, stream),
+        "alpha_src": _host_to_gpu(alpha_src_np, dtype, stream),
+        "beta_src": _host_to_gpu(beta_src_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got_a_grad = _copy_to_host(stamped.output("a_grad"), dtype, stream)
+    got_b_grad = _copy_to_host(stamped.output("b_grad"), dtype, stream)
+    got_c_grad = _copy_to_host(stamped.output("c_grad"), dtype, stream)
+    got_alpha_src_grad = _copy_to_host(stamped.output("alpha_src_grad"), dtype, stream)
+    got_beta_src_grad = _copy_to_host(stamped.output("beta_src_grad"), dtype, stream)
+
+    _assert_close(got_a_grad, _cast_reference_to_storage_dtype(expected_a_grad, dtype), dtype)
+    _assert_close(got_b_grad, _cast_reference_to_storage_dtype(expected_b_grad, dtype), dtype)
+    _assert_close(got_c_grad, _cast_reference_to_storage_dtype(expected_c_grad, dtype), dtype)
+    _assert_close(got_alpha_src_grad, _cast_reference_to_storage_dtype(expected_alpha_src_grad, dtype), dtype)
+    _assert_close(got_beta_src_grad, _cast_reference_to_storage_dtype(expected_beta_src_grad, dtype), dtype)
