@@ -104,10 +104,11 @@ class CublasMatrixMultiply {
               bool transposeA,
               bool transposeB,
               bool transposeC,
-              float alpha,
-              float beta,
+              const float *alpha,
+              const float *beta,
               const TensorDescriptor::DataType ABCDDataType,
-              Stream stream);
+              Stream stream,
+              CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
 
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
@@ -156,10 +157,11 @@ class CublasMatrixMultiply {
                                         bool transposeA,
                                         bool transposeB,
                                         bool transposeC,
-                                        float alpha,
-                                        float beta,
+                                        const float *alpha,
+                                        const float *beta,
                                         const TensorDescriptor::DataType ABCDDataType,
-                                        Stream stream);
+                                        Stream stream,
+                                        CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
 
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation

@@ -289,7 +289,11 @@ class StampedMatmul {
                   Optional<RuntimeInputValue> alpha_input,
                   Optional<RuntimeInputValue> beta_input,
                   std::optional<std::string> alpha_runtime_name,
-                  std::optional<std::string> beta_runtime_name);
+                  std::optional<std::string> beta_runtime_name,
+                  Optional<Tensor> alpha_device_scratch,
+                  Optional<Tensor> beta_device_scratch,
+                  Optional<Tensor> alpha_host_scratch,
+                  Optional<Tensor> beta_host_scratch);
 
     [[nodiscard]] std::optional<std::string> alphaRuntimeName() const { return alpha_runtime_name; }
     [[nodiscard]] std::optional<std::string> betaRuntimeName() const { return beta_runtime_name; }
@@ -307,6 +311,10 @@ class StampedMatmul {
     const Optional<RuntimeInputValue> beta_input;
     const std::optional<std::string> alpha_runtime_name;
     const std::optional<std::string> beta_runtime_name;
+    const Optional<Tensor> alpha_device_scratch;
+    const Optional<Tensor> beta_device_scratch;
+    const Optional<Tensor> alpha_host_scratch;
+    const Optional<Tensor> beta_host_scratch;
 };
 
 class StampedReduceMinMaxBackward {

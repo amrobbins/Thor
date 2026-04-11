@@ -238,39 +238,6 @@ Create a floating-point scalar constant expression.
         [](const Expression& a,
            const Expression& b,
            const Expression& c,
-           double alpha,
-           double beta,
-           bool transpose_a,
-           bool transpose_b,
-           bool transpose_c,
-           nb::object output_dtype_obj,
-           nb::object compute_dtype_obj) {
-            Optional<DataType> output_dtype = Optional<DataType>::empty();
-            if (!output_dtype_obj.is_none()) {
-                output_dtype = nb::cast<DataType>(output_dtype_obj);
-            }
-            Optional<DataType> compute_dtype = Optional<DataType>::empty();
-            if (!compute_dtype_obj.is_none()) {
-                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
-            }
-            return Expression::gemm(a, b, c, alpha, beta, transpose_a, transpose_b, transpose_c, compute_dtype, output_dtype);
-        },
-        "a"_a,
-        "b"_a,
-        "c"_a,
-        "alpha"_a = 1.0,
-        "beta"_a = 1.0,
-        "transpose_a"_a = false,
-        "transpose_b"_a = false,
-        "transpose_c"_a = false,
-        "output_dtype"_a.none() = nb::none(),
-        "compute_dtype"_a.none() = nb::none());
-
-    expr.def_static(
-        "gemm",
-        [](const Expression& a,
-           const Expression& b,
-           const Expression& c,
            const Expression& alpha,
            const Expression& beta,
            bool transpose_a,
@@ -291,8 +258,8 @@ Create a floating-point scalar constant expression.
         "a"_a,
         "b"_a,
         "c"_a,
-        "alpha"_a,
-        "beta"_a,
+        "alpha"_a = 1.0,
+        "beta"_a = 1.0,
         "transpose_a"_a = false,
         "transpose_b"_a = false,
         "transpose_c"_a = false,
@@ -768,8 +735,9 @@ void bind_fused_equation(nb::module_& physical) {
            const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
            const std::optional<Tensor>& preallocated_output,
            const std::vector<uint64_t>& requestedOutputShape) {
-            if (tensor_scalar_inputs.empty() && !preallocated_output.has_value() && requestedOutputShape.empty()) {
-                // Support either single output or multi output when no distinction can be made
+            if (!preallocated_output.has_value() && requestedOutputShape.empty()) {
+                // No single-output-only arguments were supplied.
+                // Route through the general multi-output stamp path, which also works for single-output equations.
                 const std::unordered_map<std::string, Tensor> preallocated_outputs{};
                 const std::unordered_map<std::string, std::vector<uint64_t>> requestedOutputShapes{};
                 return self.stamp(inputs, stream, tensor_scalar_inputs, preallocated_outputs, requestedOutputShapes);
@@ -784,7 +752,7 @@ void bind_fused_equation(nb::module_& physical) {
         "preallocated_output"_a.none() = nb::none(),
         "requested_output_shape"_a = std::vector<uint64_t>{},
         R"nbdoc(
-Create an executable instance of a single-output fused equation.
+Create an executable instance of a fused equation.
 
 Parameters
 ----------

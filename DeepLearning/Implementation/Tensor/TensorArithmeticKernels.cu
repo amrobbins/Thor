@@ -3114,8 +3114,8 @@ void Tensor::gemm(Tensor A, Tensor B, Optional<Tensor> C, float alpha, float bet
                                                                     false,
                                                                     false,
                                                                     false,
-                                                                    alpha,
-                                                                    beta,
+                                                                    &alpha,
+                                                                    &beta,
                                                                     getDataType(),
                                                                     stream);
 }

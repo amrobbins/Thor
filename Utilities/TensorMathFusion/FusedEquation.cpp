@@ -27,6 +27,10 @@ static const TensorScalarBinding& runtimeInputTensorScalarBinding(const RuntimeI
     return std::get<TensorScalarBinding>(value);
 }
 
+static bool optionalRuntimeInputIsTensorScalarBinding(const Optional<RuntimeInputValue>& value) {
+    return value.isPresent() && std::holds_alternative<TensorScalarBinding>(value.get());
+}
+
 static size_t dataTypeSizeBytes(DataType dtype) {
     switch (dtype) {
         case DataType::FP32:
@@ -1514,15 +1518,11 @@ static bool fusedStageRequiresBroadcastLaunch(const CompiledExecutionStage& stag
         return false;
     }
 
-    std::vector<Tensor> layout_inputs;
-    layout_inputs.reserve(stage_inputs.size());
-    for (const RuntimeInputValue& input : stage_inputs) {
-        if (runtimeInputIsTensor(input)) {
-            layout_inputs.push_back(runtimeInputTensor(input));
-        }
-    }
-    const bool requires_broadcast = layout_inputs.empty() ? false : FusedEquation::resolveLayout(layout_inputs, resolved_output_dims);
-
+    // First resolve each output's logical dims. If different outputs in the same fused stage
+    // have different output domains, we must go through the grouped-broadcast path instead of
+    // trying to globally resolve one common layout across all stage tensor inputs.
+    bool have_common_output_dims = false;
+    std::vector<uint64_t> common_output_dims;
     for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
         std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stage_inputs);
         auto requested_it = requested_output_shapes.find(stage.outputs[output_idx].name);
@@ -1532,9 +1532,38 @@ static bool fusedStageRequiresBroadcastLaunch(const CompiledExecutionStage& stag
             }
             output_dims = requested_it->second;
         }
-        if (output_dims != resolved_output_dims) {
+
+        if (!have_common_output_dims) {
+            common_output_dims = output_dims;
+            have_common_output_dims = true;
+        } else if (output_dims != common_output_dims) {
+            // Different output domains in one fused stage: let grouped broadcast handle it.
             return true;
         }
+    }
+
+    if (have_common_output_dims) {
+        resolved_output_dims = common_output_dims;
+    }
+
+    std::vector<Tensor> layout_inputs;
+    layout_inputs.reserve(stage_inputs.size());
+    for (const RuntimeInputValue& input : stage_inputs) {
+        if (runtimeInputIsTensor(input)) {
+            layout_inputs.push_back(runtimeInputTensor(input));
+        }
+    }
+
+    std::vector<uint64_t> layout_resolved_output_dims;
+    const bool requires_broadcast =
+        layout_inputs.empty() ? false : FusedEquation::resolveLayout(layout_inputs, layout_resolved_output_dims);
+
+    if (have_common_output_dims && layout_resolved_output_dims != common_output_dims) {
+        return true;
+    }
+
+    if (!layout_resolved_output_dims.empty()) {
+        resolved_output_dims = std::move(layout_resolved_output_dims);
     }
 
     return requires_broadcast;
@@ -1996,6 +2025,11 @@ PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered
     }
 
     resolveOutputsDTypesInPlace(resolved_forward_outputs, forward_root_input_dtypes);
+
+    // Lower any shape-valid matmul+add/sub patterns to GEMM before building backward.
+    // This makes operator-lowered forward expressions follow the same backward path
+    // as explicit GEMM expressions, preserving alpha/beta handling consistently.
+    optimizeExpressionGemmPatternsInPlace(*resolved_forward_outputs.expr, root_values);
 
     if (backward_config->upstream_input_names_by_output.has_value()) {
         return buildBackwardOutputs(resolved_forward_outputs,
@@ -2788,7 +2822,11 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       alpha_input,
                                       beta_input,
                                       alpha_runtime_name,
-                                      beta_runtime_name);
+                                      beta_runtime_name,
+                                      Optional<Tensor>::empty(),
+                                      Optional<Tensor>::empty(),
+                                      Optional<Tensor>::empty(),
+                                      Optional<Tensor>::empty());
 }
 
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
@@ -2840,6 +2878,21 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         workspace = Tensor(adaptedLhs.getPlacement(), workspaceDescriptor);
     }
 
+    Optional<Tensor> alpha_device_scratch = Optional<Tensor>::empty();
+    Optional<Tensor> beta_device_scratch = Optional<Tensor>::empty();
+    Optional<Tensor> alpha_host_scratch = Optional<Tensor>::empty();
+    Optional<Tensor> beta_host_scratch = Optional<Tensor>::empty();
+    const bool any_tensor_backed_scale =
+        optionalRuntimeInputIsTensorScalarBinding(alpha_input) || optionalRuntimeInputIsTensorScalarBinding(beta_input);
+    if (any_tensor_backed_scale) {
+        TensorDescriptor scalarDescriptor(TensorDescriptor::DataType::FP32, {1});
+        alpha_device_scratch = Tensor(adaptedLhs.getPlacement(), scalarDescriptor);
+        beta_device_scratch = Tensor(adaptedLhs.getPlacement(), scalarDescriptor);
+        const TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+        alpha_host_scratch = Tensor(cpuPlacement, scalarDescriptor);
+        beta_host_scratch = Tensor(cpuPlacement, scalarDescriptor);
+    }
+
     return make_shared<StampedMatmul>(compiledStage,
                                       built,
                                       adaptedLhs,
@@ -2851,7 +2904,11 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       alpha_input,
                                       beta_input,
                                       alpha_runtime_name,
-                                      beta_runtime_name);
+                                      beta_runtime_name,
+                                      alpha_device_scratch,
+                                      beta_device_scratch,
+                                      alpha_host_scratch,
+                                      beta_host_scratch);
 }
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(

@@ -324,6 +324,11 @@ class Expression {
     [[nodiscard]] static Expression binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprOp op);
     [[nodiscard]] static Expression ternaryOp(const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, ExprOp op);
     [[nodiscard]] static Expression unaryOp(const Expression& inputExpr, ExprOp op);
+
+    static uint32_t encodeLowerableGemmScaleExpression(const Expression& scale_expr,
+                                                       PhysicalExpression& dst,
+                                                       std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name,
+                                                       double& scale_fp);
 };
 
 std::string formatFloatCanonical(double x);
