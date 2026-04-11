@@ -376,3 +376,57 @@ def test_gemm_backward_rejects_transpose_c():
 
     with pytest.raises(RuntimeError, match="transpose_aux|transposeC|transpose_c"):
         fwd_eq.compile_backward(["c"], error_input_name="__grad_output")
+
+
+@pytest.mark.cuda
+def test_matmul_backward_large_fp16_likely_workspace_numerical():
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+
+    # Chosen to be large enough to make workspace-backed matmul algorithms likely,
+    # while still being reasonable for a unit test.
+    m = 512
+    k = 768
+    n = 640
+
+    a = ex.input("a")
+    b = ex.input("b")
+
+    # Add a little pointwise structure so backward is not just a bare matmul.
+    out = ex.exp((a @ b) * 0.125 - 0.25)
+
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["a", "b"], error_input_name=upstream_name)
+    assert bwd_eq.output_names() == ["a_grad", "b_grad"]
+
+    # Keep values small so the exp stays well behaved in fp16.
+    a_ref = (((np.arange(m * k, dtype=np.float32).reshape(m, k) % 23.0) - 11.0) / 64.0)
+    b_ref = (((np.arange(k * n, dtype=np.float32).reshape(k, n) % 19.0) - 9.0) / 64.0)
+    upstream_ref = (((np.arange(m * n, dtype=np.float32).reshape(m, n) % 17.0) - 8.0) / 32.0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    a_np = a_ref.astype(storage_dtype)
+    b_np = b_ref.astype(storage_dtype)
+    grad_np = upstream_ref.astype(storage_dtype)
+
+    mm = a_ref @ b_ref
+    local_grad = upstream_ref * np.exp(mm * 0.125 - 0.25) * 0.125
+
+    expected_a_grad = local_grad @ b_ref.T
+    expected_b_grad = a_ref.T @ local_grad
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got_a_grad = _copy_to_host(stamped.output("a_grad"), dtype, stream)
+    got_b_grad = _copy_to_host(stamped.output("b_grad"), dtype, stream)
+
+    _assert_close(got_a_grad, _cast_reference_to_storage_dtype(expected_a_grad, dtype), dtype)
+    _assert_close(got_b_grad, _cast_reference_to_storage_dtype(expected_b_grad, dtype), dtype)
