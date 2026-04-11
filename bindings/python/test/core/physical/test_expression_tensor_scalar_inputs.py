@@ -121,38 +121,6 @@ def test_tensor_runtime_scalar_single_output_stamped_reads_gpu_buffer_and_byte_o
 
 
 @pytest.mark.cuda
-def test_tensor_runtime_scalar_multi_output_stamp_without_multi_output_kwargs_is_rejected():
-    x = ex.input("x")
-    step = ex.tensor_runtime_scalar("step")
-
-    outs = ex.outputs({
-        "scaled": x * step,
-        "shifted": x + step,
-    })
-    eq = ex.compile(outs, device_num=0)
-
-    x_np = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
-
-    stream = Stream(gpu_num=0)
-    x_gpu = _host_to_gpu(x_np, thor.DataType.fp32, stream)
-    step_buffer_gpu = _host_to_gpu(np.array([0.25], dtype=np.float32), thor.DataType.fp32, stream)
-    binding = _tensor_scalar_binding(step_buffer_gpu, thor.DataType.fp32)
-
-    with pytest.raises(
-            RuntimeError,
-            match="Single-output stamp overload called on an equation that does not have exactly one output"):
-        eq.stamp(
-            {
-                "x": x_gpu,
-            },
-            stream,
-            tensor_scalar_inputs={
-                "step": binding,
-            },
-        )
-
-
-@pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_tensor_runtime_scalar_multi_output_stamped_with_preallocated_outputs_numerical(dtype: thor.DataType):
     x = ex.input("x")

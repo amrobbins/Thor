@@ -2,6 +2,7 @@
 #include "Utilities/TensorMathFusion/CudaHelpers.h"
 #include "Utilities/TensorMathFusion/EquationRunner.h"
 #include "Utilities/TensorMathFusion/FusedEquation.h"
+#include "Utilities/TensorMathFusion/MatmulScalarKernel.h"
 #include "Utilities/TensorMathFusion/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
@@ -176,7 +177,11 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                              Optional<RuntimeInputValue> alpha_input,
                              Optional<RuntimeInputValue> beta_input,
                              std::optional<std::string> alpha_runtime_name,
-                             std::optional<std::string> beta_runtime_name)
+                             std::optional<std::string> beta_runtime_name,
+                             Optional<Tensor> alpha_device_scratch,
+                             Optional<Tensor> beta_device_scratch,
+                             Optional<Tensor> alpha_host_scratch,
+                             Optional<Tensor> beta_host_scratch)
     : compiled_matmul(std::move(compiled)),
       built_matmul(std::move(built)),
       lhs(lhs),
@@ -188,7 +193,11 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
       alpha_input(alpha_input),
       beta_input(beta_input),
       alpha_runtime_name(std::move(alpha_runtime_name)),
-      beta_runtime_name(std::move(beta_runtime_name)) {
+      beta_runtime_name(std::move(beta_runtime_name)),
+      alpha_device_scratch(alpha_device_scratch),
+      beta_device_scratch(beta_device_scratch),
+      alpha_host_scratch(alpha_host_scratch),
+      beta_host_scratch(beta_host_scratch) {
     if (!compiled_matmul) {
         throw std::runtime_error("StampedMatmul requires non-null compiled payload.");
     }
@@ -203,45 +212,144 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
     }
 }
 
-static float loadTensorRuntimeScalarToHost(const TensorScalarBinding& binding, Stream& run_stream) {
+struct ResolvedMatmulScale {
+    float host_value = 1.0f;
+    const float* ptr = nullptr;
+    bool is_device_pointer = false;
+    Optional<Tensor> device_scratch = Optional<Tensor>::empty();
+    Optional<Tensor> host_scratch = Optional<Tensor>::empty();
+
+    explicit ResolvedMatmulScale(Optional<Tensor> device_scratch = Optional<Tensor>::empty(),
+                                 Optional<Tensor> host_scratch = Optional<Tensor>::empty())
+        : ptr(&host_value), device_scratch(device_scratch), host_scratch(host_scratch) {}
+
+    void refreshHostPointer() {
+        if (!is_device_pointer) {
+            ptr = &host_value;
+        }
+    }
+
+    void setDevicePointer(const float* device_ptr) {
+        ptr = device_ptr;
+        is_device_pointer = true;
+    }
+
+    void copyHostValueToDevice(Stream& run_stream) {
+        if (!device_scratch.isPresent()) {
+            throw std::runtime_error("Missing preallocated GEMM device scalar scratch tensor.");
+        }
+        if (host_scratch.isPresent()) {
+            std::memcpy(host_scratch.get().getMemPtr(), &host_value, sizeof(float));
+            device_scratch.get().copyFromAsync(host_scratch.get(), run_stream);
+        } else {
+            CUDA_CHECK(cudaMemcpyAsync(device_scratch.get().getMemPtr(), &host_value, sizeof(float), cudaMemcpyHostToDevice, run_stream));
+        }
+        ptr = reinterpret_cast<const float*>(device_scratch.get().getMemPtr());
+        is_device_pointer = true;
+    }
+
+    void scaleTensorDeviceValueIntoScratch(const TensorScalarBinding& binding, Stream& run_stream) {
+        if (!device_scratch.isPresent()) {
+            throw std::runtime_error("Missing preallocated GEMM device scalar scratch tensor.");
+        }
+        if (binding.sourceDType != TensorDescriptor::DataType::FP32) {
+            throw std::runtime_error("Dynamic GEMM tensor-backed alpha/beta currently require FP32 source dtype.");
+        }
+        const char* device_ptr = static_cast<const char*>(binding.buffer.getMemPtr());
+        const float* source_ptr = reinterpret_cast<const float*>(device_ptr + binding.byteOffset);
+        launchScaleFp32DeviceScalar(source_ptr, static_cast<float*>(device_scratch.get().getMemPtr()), host_value, run_stream);
+        ptr = reinterpret_cast<const float*>(device_scratch.get().getMemPtr());
+        is_device_pointer = true;
+    }
+};
+
+struct ResolvedMatmulScales {
+    ResolvedMatmulScale alpha;
+    ResolvedMatmulScale beta;
+    CublasScalarPointerMode pointer_mode = CublasScalarPointerMode::Host;
+};
+
+static const float* getTensorRuntimeScalarDevicePtr(const TensorScalarBinding& binding) {
     if (binding.sourceDType != TensorDescriptor::DataType::FP32) {
         throw std::runtime_error("Dynamic GEMM tensor-backed alpha/beta currently require FP32 source dtype.");
     }
-
-    run_stream.synchronize();
-
-    float value = 0.0f;
     const char* device_ptr = static_cast<const char*>(binding.buffer.getMemPtr());
-    CUDA_CHECK(cudaMemcpy(&value, device_ptr + binding.byteOffset, sizeof(float), cudaMemcpyDeviceToHost));
-    return value;
+    return reinterpret_cast<const float*>(device_ptr + binding.byteOffset);
 }
 
-static float resolveMatmulRuntimeScale(const Optional<RuntimeInputValue>& bound_input,
-                                       const std::optional<std::string>& runtime_name,
-                                       double base_scale,
-                                       const std::unordered_map<std::string, float>& runtime_scalars,
-                                       Stream& run_stream) {
-    float scale = static_cast<float>(base_scale);
+static ResolvedMatmulScale resolveMatmulRuntimeScale(const Optional<RuntimeInputValue>& bound_input,
+                                                     const std::optional<std::string>& runtime_name,
+                                                     double base_scale,
+                                                     const std::unordered_map<std::string, float>& runtime_scalars,
+                                                     const Optional<Tensor>& device_scratch,
+                                                     const Optional<Tensor>& host_scratch,
+                                                     Stream& run_stream) {
+    ResolvedMatmulScale resolved(device_scratch, host_scratch);
+    resolved.host_value = static_cast<float>(base_scale);
+    resolved.ptr = &resolved.host_value;
+
+    bool used_runtime_override = false;
     if (runtime_name.has_value()) {
         auto it = runtime_scalars.find(*runtime_name);
         if (it != runtime_scalars.end()) {
-            scale *= it->second;
-            return scale;
+            resolved.host_value *= it->second;
+            used_runtime_override = true;
         }
     }
-    if (bound_input.isPresent()) {
-        const RuntimeInputValue& value = bound_input.get();
-        if (std::holds_alternative<float>(value)) {
-            scale *= std::get<float>(value);
-            return scale;
-        }
-        if (std::holds_alternative<TensorScalarBinding>(value)) {
-            scale *= loadTensorRuntimeScalarToHost(std::get<TensorScalarBinding>(value), run_stream);
-            return scale;
-        }
-        throw std::runtime_error("Dynamic GEMM scale currently requires fp32 runtime scalar or tensor-backed runtime scalar bindings.");
+    if (!bound_input.isPresent()) {
+        return resolved;
     }
-    return scale;
+
+    const RuntimeInputValue& value = bound_input.get();
+    if (std::holds_alternative<float>(value)) {
+        if (!used_runtime_override) {
+            resolved.host_value *= std::get<float>(value);
+        }
+        return resolved;
+    }
+    if (std::holds_alternative<TensorScalarBinding>(value)) {
+        const TensorScalarBinding& binding = std::get<TensorScalarBinding>(value);
+        if (resolved.host_value == 1.0f) {
+            resolved.setDevicePointer(getTensorRuntimeScalarDevicePtr(binding));
+            return resolved;
+        }
+        resolved.scaleTensorDeviceValueIntoScratch(binding, run_stream);
+        return resolved;
+    }
+    throw std::runtime_error("Dynamic GEMM scale currently requires fp32 runtime scalar or tensor-backed runtime scalar bindings.");
+}
+
+static ResolvedMatmulScales resolveMatmulRuntimeScales(const Optional<RuntimeInputValue>& alpha_input,
+                                                       const Optional<RuntimeInputValue>& beta_input,
+                                                       const std::optional<std::string>& alpha_runtime_name,
+                                                       const std::optional<std::string>& beta_runtime_name,
+                                                       double alpha_base_scale,
+                                                       double beta_base_scale,
+                                                       const std::unordered_map<std::string, float>& runtime_scalars,
+                                                       const Optional<Tensor>& alpha_device_scratch,
+                                                       const Optional<Tensor>& beta_device_scratch,
+                                                       const Optional<Tensor>& alpha_host_scratch,
+                                                       const Optional<Tensor>& beta_host_scratch,
+                                                       Stream& run_stream) {
+    ResolvedMatmulScales resolved;
+    resolved.alpha = resolveMatmulRuntimeScale(
+        alpha_input, alpha_runtime_name, alpha_base_scale, runtime_scalars, alpha_device_scratch, alpha_host_scratch, run_stream);
+    resolved.beta = resolveMatmulRuntimeScale(
+        beta_input, beta_runtime_name, beta_base_scale, runtime_scalars, beta_device_scratch, beta_host_scratch, run_stream);
+    resolved.alpha.refreshHostPointer();
+    resolved.beta.refreshHostPointer();
+
+    if (resolved.alpha.is_device_pointer || resolved.beta.is_device_pointer) {
+        resolved.pointer_mode = CublasScalarPointerMode::Device;
+        if (!resolved.alpha.is_device_pointer) {
+            resolved.alpha.copyHostValueToDevice(run_stream);
+        }
+        if (!resolved.beta.is_device_pointer) {
+            resolved.beta.copyHostValueToDevice(run_stream);
+        }
+    }
+
+    return resolved;
 }
 
 void StampedMatmul::run() { runOn(stream); }
@@ -259,11 +367,6 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
     const int32_t a_cols = static_cast<int32_t>(lhs_dims[1]);
     const int32_t b_rows = static_cast<int32_t>(rhs_dims[0]);
     const int32_t b_cols = static_cast<int32_t>(rhs_dims[1]);
-
-    const float resolved_alpha =
-        resolveMatmulRuntimeScale(alpha_input, alpha_runtime_name, compiled_matmul->alpha, runtime_scalars, run_stream);
-    const float resolved_beta =
-        resolveMatmulRuntimeScale(beta_input, beta_runtime_name, compiled_matmul->beta, runtime_scalars, run_stream);
 
     if (compiled_matmul->op == ExprOp::MATMUL) {
         CublasMatrixMultiply::instance().multiply(lhs,
@@ -290,6 +393,19 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
         throw std::runtime_error("Stamped GEMM currently only supports rank-2 addend tensors.");
     }
 
+    ResolvedMatmulScales resolved_scales = resolveMatmulRuntimeScales(alpha_input,
+                                                                      beta_input,
+                                                                      alpha_runtime_name,
+                                                                      beta_runtime_name,
+                                                                      compiled_matmul->alpha,
+                                                                      compiled_matmul->beta,
+                                                                      runtime_scalars,
+                                                                      alpha_device_scratch,
+                                                                      beta_device_scratch,
+                                                                      alpha_host_scratch,
+                                                                      beta_host_scratch,
+                                                                      run_stream);
+
     CublasMatrixMultiply::instance().gemm(lhs,
                                           rhs,
                                           addend.get(),
@@ -302,10 +418,11 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                           compiled_matmul->transpose_lhs,
                                           compiled_matmul->transpose_rhs,
                                           compiled_matmul->transpose_aux,
-                                          resolved_alpha,
-                                          resolved_beta,
+                                          resolved_scales.alpha.ptr,
+                                          resolved_scales.beta.ptr,
                                           compiled_matmul->output_dtype,
-                                          run_stream);
+                                          run_stream,
+                                          resolved_scales.pointer_mode);
 }
 
 StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,

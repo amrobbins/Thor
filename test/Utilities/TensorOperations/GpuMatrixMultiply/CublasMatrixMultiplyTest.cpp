@@ -941,8 +941,8 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
                                               transposeA,
                                               transposeB,
                                               transposeC,
-                                              alpha,
-                                              beta,
+                                              &alpha,
+                                              &beta,
                                               TensorDescriptor::DataType::FP32,
                                               stream);
 
@@ -1195,8 +1195,8 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP16) {
                                               transposeA,
                                               transposeB,
                                               transposeC,
-                                              alpha,
-                                              beta,
+                                              &alpha,
+                                              &beta,
                                               TensorDescriptor::DataType::FP16,
                                               stream);
 
@@ -1415,8 +1415,8 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP32) {
                                                                         transposeA,
                                                                         transposeB,
                                                                         transposeC,
-                                                                        alpha,
-                                                                        beta,
+                                                                        &alpha,
+                                                                        &beta,
                                                                         TensorDescriptor::DataType::FP32,
                                                                         stream);
 
@@ -1635,8 +1635,8 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
                                                                         transposeA,
                                                                         transposeB,
                                                                         transposeC,
-                                                                        alpha,
-                                                                        beta,
+                                                                        &alpha,
+                                                                        &beta,
                                                                         TensorDescriptor::DataType::FP16,
                                                                         stream);
 

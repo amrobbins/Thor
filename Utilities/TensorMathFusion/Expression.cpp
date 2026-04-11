@@ -2,6 +2,8 @@
 #include "Utilities/TensorMathFusion/EquationCompiler.h"
 #include "Utilities/TensorMathFusion/ExpressionDTypeResolution.h"
 
+#include <functional>
+
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 namespace ThorImplementation {
@@ -911,8 +913,6 @@ Expression Expression::matmul(const Expression& lhs,
     return out;
 }
 
-namespace {
-
 static uint32_t cloneSubtreeIntoMergedExpression(const Expression& src_expr,
                                                  PhysicalExpression& dst,
                                                  std::unordered_map<uint32_t, uint32_t>& old_to_new,
@@ -921,27 +921,38 @@ static uint32_t cloneSubtreeIntoMergedExpression(const Expression& src_expr,
     return cloneSubtreeWithMergedInputs(src, src.output_node, dst, old_to_new, dst_input_slots_by_name);
 }
 
-static uint32_t encodeLowerableGemmScaleExpression(const Expression& scale_expr,
-                                                   PhysicalExpression& dst,
-                                                   std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name,
-                                                   double& scale_fp) {
+uint32_t Expression::encodeLowerableGemmScaleExpression(const Expression& scale_expr,
+                                                        PhysicalExpression& dst,
+                                                        std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name,
+                                                        double& scale_fp) {
     PhysicalExpression scale = scale_expr.expression();
-    const ExprNode& src_node = scale.nodes.at(scale.output_node);
-    if (src_node.op == ExprOp::SCALAR_FP) {
-        scale_fp *= src_node.scalar_fp;
-        return UINT32_MAX;
-    }
-    if (src_node.op != ExprOp::RUNTIME_SCALAR && src_node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+
+    std::function<uint32_t(uint32_t)> visit = [&](uint32_t node_idx) -> uint32_t {
+        const ExprNode& src_node = scale.nodes.at(node_idx);
+        if (src_node.op == ExprOp::SCALAR_FP) {
+            scale_fp *= src_node.scalar_fp;
+            return UINT32_MAX;
+        }
+        if (src_node.op == ExprOp::RUNTIME_SCALAR || src_node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+            std::unordered_map<uint32_t, uint32_t> old_to_new;
+            return cloneSubtreeIntoMergedExpression(Expression(scale_expr.expr, node_idx), dst, old_to_new, dst_input_slots_by_name);
+        }
+        if (src_node.op == ExprOp::MUL) {
+            const uint32_t lhs_dynamic = visit(src_node.lhs);
+            const uint32_t rhs_dynamic = visit(src_node.rhs);
+            if (lhs_dynamic != UINT32_MAX && rhs_dynamic != UINT32_MAX) {
+                throw std::runtime_error("GEMM alpha/beta expressions may contain at most one runtime scalar leaf after constant folding.");
+            }
+            return lhs_dynamic != UINT32_MAX ? lhs_dynamic : rhs_dynamic;
+        }
+
         throw std::runtime_error(
-            "GEMM alpha/beta expressions must currently be scalar leaves: constantScalar(...), runtimeScalar(...), or "
-            "tensorRuntimeScalar(...).");
-    }
+            "GEMM alpha/beta expressions must currently be scalar leaves or a scalar leaf multiplied by scalar constants: "
+            "constantScalar(...), runtimeScalar(...), tensorRuntimeScalar(...), or leaf * constantScalar(...).");
+    };
 
-    std::unordered_map<uint32_t, uint32_t> old_to_new;
-    return cloneSubtreeIntoMergedExpression(scale_expr, dst, old_to_new, dst_input_slots_by_name);
+    return visit(scale.output_node);
 }
-
-}  // namespace
 
 Expression Expression::gemm(const Expression& lhs,
                             const Expression& rhs,
