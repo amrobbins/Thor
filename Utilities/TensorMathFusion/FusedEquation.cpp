@@ -216,7 +216,7 @@ static bool tryGetLowerableScaleNode(const PhysicalExpression& expr, uint32_t no
         scale_node_idx = UINT32_MAX;
         return true;
     }
-    if (node.op == ExprOp::RUNTIME_SCALAR) {
+    if (node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
         scale_fp = 1.0;
         scale_node_idx = node_idx;
         return true;
@@ -3246,13 +3246,6 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
                     beta_input = stageInputs[stage.matmul->beta_input_slot];
                     beta_runtime_name = runtimeScalarNameForStageLocalSlot(stage.matmul->beta_input_slot);
-                }
-
-                if (stage.matmul->alpha_input_slot != UINT32_MAX && !alpha_runtime_name.has_value()) {
-                    throw std::runtime_error("Matmul stage lost alpha runtime scalar name during stamping.");
-                }
-                if (stage.matmul->beta_input_slot != UINT32_MAX && !beta_runtime_name.has_value()) {
-                    throw std::runtime_error("Matmul stage lost beta runtime scalar name during stamping.");
                 }
 
                 if (stage.matmul->op == ExprOp::MATMUL) {
