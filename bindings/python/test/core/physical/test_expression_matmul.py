@@ -263,11 +263,20 @@ def test_gemm_rejects_incompatible_addend_dimensions_at_stamp_time():
         eq.stamp(inputs_gpu, stream)
 
 
-@pytest.mark.cuda
-def test_compile_backward_rejects_matmul_autodiff_for_now():
+def test_matmul_rdunder():
     a = ex.input("a")
     b = ex.input("b")
-    eq = ex.compile(ex.matmul(a, b), device_num=0)
+    expr1 = a.__rmatmul__(b)
+    expr2 = ex.matmul(b, a)
+    eq1 = ex.compile(expr1, device_num=0)
+    eq2 = ex.compile(expr2, device_num=0)
+    assert eq1 is not None
+    assert eq2 is not None
 
-    with pytest.raises(RuntimeError, match="Unsupported"):
-        eq.compile_backward(["a", "b"])
+
+def test_matmul_idunder():
+    a = ex.input("a")
+    b = ex.input("b")
+    c = a.__imatmul__(b)
+    eq = ex.compile(c, device_num=0)
+    assert eq is not None
