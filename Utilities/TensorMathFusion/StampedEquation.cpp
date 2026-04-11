@@ -261,6 +261,35 @@ struct ResolvedMatmulScale {
         ptr = reinterpret_cast<const float*>(device_scratch.get().getMemPtr());
         is_device_pointer = true;
     }
+
+    void copyTensorValueToScratch(const Tensor& tensor, Stream& run_stream) {
+        if (!device_scratch.isPresent()) {
+            throw std::runtime_error("Missing preallocated GEMM device scalar scratch tensor.");
+        }
+        device_scratch.get().copyFromAsync(tensor, run_stream);
+        ptr = reinterpret_cast<const float*>(device_scratch.get().getMemPtr());
+        is_device_pointer = true;
+    }
+
+    void scaleTensorValueIntoScratch(const Tensor& tensor, Stream& run_stream) {
+        if (!device_scratch.isPresent()) {
+            throw std::runtime_error("Missing preallocated GEMM device scalar scratch tensor.");
+        }
+        if (tensor.getDataType() == TensorDescriptor::DataType::FP32) {
+            launchScaleFp32DeviceScalar(static_cast<const float*>(tensor.getMemPtr()),
+                                        static_cast<float*>(device_scratch.get().getMemPtr()),
+                                        host_value,
+                                        run_stream);
+        } else {
+            device_scratch.get().copyFromAsync(tensor, run_stream);
+            launchScaleFp32DeviceScalar(static_cast<const float*>(device_scratch.get().getMemPtr()),
+                                        static_cast<float*>(device_scratch.get().getMemPtr()),
+                                        host_value,
+                                        run_stream);
+        }
+        ptr = reinterpret_cast<const float*>(device_scratch.get().getMemPtr());
+        is_device_pointer = true;
+    }
 };
 
 struct ResolvedMatmulScales {
@@ -275,6 +304,14 @@ static const float* getTensorRuntimeScalarDevicePtr(const TensorScalarBinding& b
     }
     const char* device_ptr = static_cast<const char*>(binding.buffer.getMemPtr());
     return reinterpret_cast<const float*>(device_ptr + binding.byteOffset);
+}
+
+static bool tensorResolvesToSingleElement(const Tensor& tensor) {
+    uint64_t numel = 1;
+    for (uint64_t d : tensor.getDimensions()) {
+        numel *= d;
+    }
+    return numel == 1;
 }
 
 static ResolvedMatmulScale resolveMatmulRuntimeScale(const Optional<RuntimeInputValue>& bound_input,
@@ -307,6 +344,22 @@ static ResolvedMatmulScale resolveMatmulRuntimeScale(const Optional<RuntimeInput
         }
         return resolved;
     }
+    if (std::holds_alternative<Tensor>(value)) {
+        const Tensor& tensor = std::get<Tensor>(value);
+        if (!tensorResolvesToSingleElement(tensor)) {
+            throw std::runtime_error("Dynamic GEMM alpha/beta expression must resolve to a single element.");
+        }
+        if (tensor.getDataType() == TensorDescriptor::DataType::FP32 && resolved.host_value == 1.0f) {
+            resolved.setDevicePointer(static_cast<const float*>(tensor.getMemPtr()));
+            return resolved;
+        }
+        if (resolved.host_value == 1.0f) {
+            resolved.copyTensorValueToScratch(tensor, run_stream);
+            return resolved;
+        }
+        resolved.scaleTensorValueIntoScratch(tensor, run_stream);
+        return resolved;
+    }
     if (std::holds_alternative<TensorScalarBinding>(value)) {
         const TensorScalarBinding& binding = std::get<TensorScalarBinding>(value);
         if (resolved.host_value == 1.0f) {
@@ -316,7 +369,8 @@ static ResolvedMatmulScale resolveMatmulRuntimeScale(const Optional<RuntimeInput
         resolved.scaleTensorDeviceValueIntoScratch(binding, run_stream);
         return resolved;
     }
-    throw std::runtime_error("Dynamic GEMM scale currently requires fp32 runtime scalar or tensor-backed runtime scalar bindings.");
+    throw std::runtime_error(
+        "Dynamic GEMM scale currently requires fp32 runtime scalar, tensor-backed runtime scalar, or single-element tensor bindings.");
 }
 
 static ResolvedMatmulScales resolveMatmulRuntimeScales(const Optional<RuntimeInputValue>& alpha_input,

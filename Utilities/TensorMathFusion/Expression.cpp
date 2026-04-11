@@ -927,31 +927,46 @@ uint32_t Expression::encodeLowerableGemmScaleExpression(const Expression& scale_
                                                         double& scale_fp) {
     PhysicalExpression scale = scale_expr.expression();
 
-    std::function<uint32_t(uint32_t)> visit = [&](uint32_t node_idx) -> uint32_t {
-        const ExprNode& src_node = scale.nodes.at(node_idx);
-        if (src_node.op == ExprOp::SCALAR_FP) {
-            scale_fp *= src_node.scalar_fp;
-            return UINT32_MAX;
-        }
-        if (src_node.op == ExprOp::RUNTIME_SCALAR || src_node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
-            std::unordered_map<uint32_t, uint32_t> old_to_new;
-            return cloneSubtreeIntoMergedExpression(Expression(scale_expr.expr, node_idx), dst, old_to_new, dst_input_slots_by_name);
-        }
-        if (src_node.op == ExprOp::MUL) {
-            const uint32_t lhs_dynamic = visit(src_node.lhs);
-            const uint32_t rhs_dynamic = visit(src_node.rhs);
-            if (lhs_dynamic != UINT32_MAX && rhs_dynamic != UINT32_MAX) {
-                throw std::runtime_error("GEMM alpha/beta expressions may contain at most one runtime scalar leaf after constant folding.");
-            }
-            return lhs_dynamic != UINT32_MAX ? lhs_dynamic : rhs_dynamic;
-        }
-
-        throw std::runtime_error(
-            "GEMM alpha/beta expressions must currently be scalar leaves or a scalar leaf multiplied by scalar constants: "
-            "constantScalar(...), runtimeScalar(...), tensorRuntimeScalar(...), or leaf * constantScalar(...).");
+    struct SimpleScaleEncodingResult {
+        bool success = false;
+        uint32_t dynamic_node = UINT32_MAX;
+        double constant_scale = 1.0;
     };
 
-    return visit(scale.output_node);
+    std::function<SimpleScaleEncodingResult(uint32_t)> try_encode_simple = [&](uint32_t node_idx) -> SimpleScaleEncodingResult {
+        const ExprNode& src_node = scale.nodes.at(node_idx);
+        if (src_node.op == ExprOp::SCALAR_FP) {
+            return SimpleScaleEncodingResult{true, UINT32_MAX, src_node.scalar_fp};
+        }
+        if (src_node.op == ExprOp::INPUT || src_node.op == ExprOp::RUNTIME_SCALAR || src_node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+            std::unordered_map<uint32_t, uint32_t> old_to_new;
+            uint32_t cloned =
+                cloneSubtreeIntoMergedExpression(Expression(scale_expr.expr, node_idx), dst, old_to_new, dst_input_slots_by_name);
+            return SimpleScaleEncodingResult{true, cloned, 1.0};
+        }
+        if (src_node.op == ExprOp::MUL) {
+            const SimpleScaleEncodingResult lhs = try_encode_simple(src_node.lhs);
+            const SimpleScaleEncodingResult rhs = try_encode_simple(src_node.rhs);
+            if (!lhs.success || !rhs.success) {
+                return {};
+            }
+            if (lhs.dynamic_node != UINT32_MAX && rhs.dynamic_node != UINT32_MAX) {
+                return {};
+            }
+            return SimpleScaleEncodingResult{
+                true, lhs.dynamic_node != UINT32_MAX ? lhs.dynamic_node : rhs.dynamic_node, lhs.constant_scale * rhs.constant_scale};
+        }
+        return {};
+    };
+
+    const SimpleScaleEncodingResult simple = try_encode_simple(scale.output_node);
+    if (simple.success) {
+        scale_fp *= simple.constant_scale;
+        return simple.dynamic_node;
+    }
+
+    std::unordered_map<uint32_t, uint32_t> old_to_new;
+    return cloneSubtreeIntoMergedExpression(scale_expr, dst, old_to_new, dst_input_slots_by_name);
 }
 
 Expression Expression::gemm(const Expression& lhs,

@@ -936,9 +936,12 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
             scale_fp *= scale_node.scalar_fp;
             return UINT32_MAX;
         }
-        if (scale_node.op != ExprOp::RUNTIME_SCALAR && scale_node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+        if (scale_node.op != ExprOp::INPUT && scale_node.op != ExprOp::RUNTIME_SCALAR && scale_node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
             throw std::runtime_error(std::string("Matmul stage ") + label +
-                                     " dynamic scale must be a local RUNTIME_SCALAR, TENSOR_RUNTIME_SCALAR, or SCALAR_FP node.");
+                                     " dynamic scale must be a local INPUT, RUNTIME_SCALAR, TENSOR_RUNTIME_SCALAR, or SCALAR_FP node.");
+        }
+        if (scale_node.input_slot >= expr.inputs.size()) {
+            throw std::runtime_error(std::string("Matmul stage ") + label + " dynamic scale input slot is out of range.");
         }
         return scale_node.input_slot;
     };
@@ -1430,29 +1433,32 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
             stage_expr.nodes.push_back(std::move(scalar_node));
             return;
         }
-        if (parent.op != ExprOp::RUNTIME_SCALAR && parent.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
-            throw std::runtime_error("Matmul/gemm dynamic scale parent must be RUNTIME_SCALAR, TENSOR_RUNTIME_SCALAR, or SCALAR_FP.");
+        if (parent.op == ExprOp::RUNTIME_SCALAR || parent.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+            if (parent.input_slot >= expr.inputs.size()) {
+                throw std::runtime_error("Matmul/gemm dynamic scale parent input slot is out of range.");
+            }
+            input_value_ids.push_back(parent.input_slot);
+
+            const NamedInput::Kind input_kind =
+                (parent.op == ExprOp::RUNTIME_SCALAR) ? NamedInput::Kind::RuntimeScalarFp32 : NamedInput::Kind::TensorRuntimeScalar;
+
+            stage_expr.inputs.push_back(NamedInput{expr.inputs[parent.input_slot].name, local_slot, input_kind});
+
+            ExprNode input_node;
+            input_node.op = parent.op;
+            input_node.input_slot = local_slot;
+            input_node.input_tensor_dtype = DataType::FP32;
+            input_node.output_dtype = parent.output_dtype.isPresent() ? parent.output_dtype.get() : DataType::FP32;
+            input_node.compute_dtype = parent.compute_dtype;
+            input_node.backward_output_dtype = parent.backward_output_dtype;
+            input_node.backward_compute_dtype = parent.backward_compute_dtype;
+            stage_expr.nodes.push_back(std::move(input_node));
+            return;
         }
 
-        if (parent.input_slot >= expr.inputs.size()) {
-            throw std::runtime_error("Matmul/gemm dynamic scale parent input slot is out of range.");
-        }
-        input_value_ids.push_back(parent.input_slot);
-
-        const NamedInput::Kind input_kind =
-            (parent.op == ExprOp::RUNTIME_SCALAR) ? NamedInput::Kind::RuntimeScalarFp32 : NamedInput::Kind::TensorRuntimeScalar;
-
-        stage_expr.inputs.push_back(NamedInput{expr.inputs[parent.input_slot].name, local_slot, input_kind});
-
-        ExprNode input_node;
-        input_node.op = parent.op;
-        input_node.input_slot = local_slot;
-        input_node.input_tensor_dtype = DataType::FP32;
-        input_node.output_dtype = parent.output_dtype.isPresent() ? parent.output_dtype.get() : DataType::FP32;
-        input_node.compute_dtype = parent.compute_dtype;
-        input_node.backward_output_dtype = parent.backward_output_dtype;
-        input_node.backward_compute_dtype = parent.backward_compute_dtype;
-        stage_expr.nodes.push_back(std::move(input_node));
+        // Arbitrary scalar subexpressions are materialized ahead of the GEMM stage as 1-element tensor values,
+        // and direct tensor inputs may also be used as GEMM scales when they resolve to a single element.
+        bind_parent_to_local_tensor_input(parent_idx, local_slot);
     };
 
     bind_parent_to_local_tensor_input(node.lhs, static_cast<uint32_t>(stage_expr.inputs.size()));
@@ -1686,12 +1692,29 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 }
             };
 
+            auto ensureScaleDependencyEmitted = [&](uint32_t parent_idx, const char* label) {
+                if (parent_idx == UINT32_MAX) {
+                    return;
+                }
+                if (parent_idx >= expr.nodes.size()) {
+                    throw std::runtime_error(std::string("Stage-boundary ") + label + " out of range.");
+                }
+                const ExprNode& parent = expr.nodes[parent_idx];
+                if (parent.op == ExprOp::INPUT || parent.op == ExprOp::RUNTIME_SCALAR || parent.op == ExprOp::TENSOR_RUNTIME_SCALAR ||
+                    parent.op == ExprOp::SCALAR_FP) {
+                    return;
+                }
+                emitForDependency(parent_idx);
+            };
+
             ensureBoundaryParentEmitted(root.lhs, "lhs", isCudnnReduceOp(root.op));
             if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op)) {
                 ensureBoundaryParentEmitted(root.rhs, "rhs", false);
             }
             if (root.op == ExprOp::GEMM) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);
+                ensureScaleDependencyEmitted(root.alpha_node, "alpha");
+                ensureScaleDependencyEmitted(root.beta_node, "beta");
             }
 
             uint32_t stage_out_id = next_value_id++;
@@ -1823,12 +1846,29 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 }
             };
 
+            auto ensureScaleDependencyEmitted = [&](uint32_t parent_idx, const char* label) {
+                if (parent_idx == UINT32_MAX) {
+                    return;
+                }
+                if (parent_idx >= expr.nodes.size()) {
+                    throw std::runtime_error(std::string("Stage-boundary ") + label + " out of range.");
+                }
+                const ExprNode& parent = expr.nodes[parent_idx];
+                if (parent.op == ExprOp::INPUT || parent.op == ExprOp::RUNTIME_SCALAR || parent.op == ExprOp::TENSOR_RUNTIME_SCALAR ||
+                    parent.op == ExprOp::SCALAR_FP) {
+                    return;
+                }
+                emitForDependency(parent_idx);
+            };
+
             ensureBoundaryParentEmitted(root.lhs, "lhs", isCudnnReduceOp(root.op));
             if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op)) {
                 ensureBoundaryParentEmitted(root.rhs, "rhs", false);
             }
             if (root.op == ExprOp::GEMM) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);
+                ensureScaleDependencyEmitted(root.alpha_node, "alpha");
+                ensureScaleDependencyEmitted(root.beta_node, "beta");
             }
 
             uint32_t stage_out_id = next_value_id++;

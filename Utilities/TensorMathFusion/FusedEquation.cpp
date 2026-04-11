@@ -31,6 +31,10 @@ static bool optionalRuntimeInputIsTensorScalarBinding(const Optional<RuntimeInpu
     return value.isPresent() && std::holds_alternative<TensorScalarBinding>(value.get());
 }
 
+static bool optionalRuntimeInputIsTensorLike(const Optional<RuntimeInputValue>& value) {
+    return value.isPresent() && (std::holds_alternative<Tensor>(value.get()) || std::holds_alternative<TensorScalarBinding>(value.get()));
+}
+
 static size_t dataTypeSizeBytes(DataType dtype) {
     switch (dtype) {
         case DataType::FP32:
@@ -662,6 +666,17 @@ static Tensor adaptMatmulInputDTypeIfNeeded(const Tensor& input, DataType expect
     return castInput;
 }
 
+static bool dimsResolveToSingleElement(const std::vector<uint64_t>& dims) {
+    if (dims.empty()) {
+        return true;
+    }
+    uint64_t numel = 1;
+    for (uint64_t d : dims) {
+        numel *= d;
+    }
+    return numel == 1;
+}
+
 static std::vector<uint64_t> resolveMatmulOutputDimsFromInputs(const CompiledMatmul& compiled_stage,
                                                                const std::vector<std::vector<uint64_t>>& stage_input_dims) {
     const size_t min_expected_inputs = compiled_stage.op == ExprOp::MATMUL ? 2u : 3u;
@@ -695,6 +710,21 @@ static std::vector<uint64_t> resolveMatmulOutputDimsFromInputs(const CompiledMat
             throw std::runtime_error("GEMM addend tensor dimensions are incompatible with the matmul output.");
         }
     }
+
+    auto validate_scalar_input_dims = [&](uint32_t input_slot, const char* label) {
+        if (input_slot == UINT32_MAX) {
+            return;
+        }
+        if (input_slot >= stage_input_dims.size()) {
+            throw std::runtime_error(std::string("Matmul/gemm ") + label + " scale input slot is out of range.");
+        }
+        if (!dimsResolveToSingleElement(stage_input_dims[input_slot])) {
+            throw std::runtime_error(std::string("Matmul/gemm ") + label + " scale expression must resolve to a single element.");
+        }
+    };
+
+    validate_scalar_input_dims(compiled_stage.alpha_input_slot, "alpha");
+    validate_scalar_input_dims(compiled_stage.beta_input_slot, "beta");
     return out_dims;
 }
 
@@ -1120,6 +1150,27 @@ static void collectReferencedLocalInputSlots(const PhysicalExpression& expr, uin
     }
 }
 
+static void collectReachableLocalNodes(const PhysicalExpression& expr, uint32_t node_idx, std::unordered_set<uint32_t>& nodes) {
+    if (node_idx >= expr.nodes.size()) {
+        throw std::runtime_error("collectReachableLocalNodes saw node index out of range.");
+    }
+
+    if (!nodes.insert(node_idx).second) {
+        return;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (Expression::isLeafOp(node.op)) {
+        return;
+    }
+
+    collectReachableLocalNodes(expr, node.lhs, nodes);
+
+    if (Expression::isBinaryOp(node.op)) {
+        collectReachableLocalNodes(expr, node.rhs, nodes);
+    }
+}
+
 // static bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions);
 
 // static std::vector<uint64_t> applySqueezeDims(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& squeeze_axes) {
@@ -1343,6 +1394,118 @@ static std::vector<uint64_t> resolveReductionAxesForInputRank(const std::vector<
     return reduction_axes;
 }
 
+static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(const PhysicalExpression& expr,
+                                                                              const std::vector<std::vector<uint64_t>>& stage_input_dims,
+                                                                              const std::unordered_set<uint32_t>& reachable_nodes) {
+    std::vector<std::vector<uint64_t>> node_dims(expr.nodes.size());
+
+    for (size_t i = 0; i < expr.nodes.size(); ++i) {
+        if (!reachable_nodes.contains(static_cast<uint32_t>(i))) {
+            continue;
+        }
+
+        const ExprNode& node = expr.nodes[i];
+
+        switch (node.op) {
+            case ExprOp::INPUT: {
+                if (node.input_slot >= stage_input_dims.size()) {
+                    throw std::runtime_error("Stage input slot out of range during fused-stage shape inference.");
+                }
+                node_dims[i] = stage_input_dims[node.input_slot];
+                break;
+            }
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+            case ExprOp::SCALAR_FP:
+                node_dims[i] = {};
+                break;
+            case ExprOp::FILL:
+                node_dims[i] = node.fill_dims;
+                break;
+            case ExprOp::ADD:
+            case ExprOp::SUB:
+            case ExprOp::MUL:
+            case ExprOp::DIV:
+            case ExprOp::POW:
+            case ExprOp::MIN:
+            case ExprOp::MAX:
+            case ExprOp::MIN_GRAD_LEFT:
+            case ExprOp::MIN_GRAD_RIGHT:
+            case ExprOp::MAX_GRAD_LEFT:
+            case ExprOp::MAX_GRAD_RIGHT: {
+                std::vector<std::vector<uint64_t>> non_scalar_inputs;
+                if (!node_dims[node.lhs].empty())
+                    non_scalar_inputs.push_back(node_dims[node.lhs]);
+                if (!node_dims[node.rhs].empty())
+                    non_scalar_inputs.push_back(node_dims[node.rhs]);
+
+                if (non_scalar_inputs.empty()) {
+                    node_dims[i] = {};
+                } else if (non_scalar_inputs.size() == 1) {
+                    node_dims[i] = non_scalar_inputs[0];
+                } else {
+                    std::vector<uint64_t> out_dims;
+                    try {
+                        resolveLayoutFromDims(non_scalar_inputs, out_dims);
+                    } catch (const std::exception& e) {
+                        std::ostringstream oss;
+                        oss << "inferFusedStageNodeDimsForReachable binary-op broadcast failure"
+                            << " local_node=" << i << " op=" << static_cast<int>(node.op) << " lhs=" << node.lhs << " rhs=" << node.rhs
+                            << " lhs_dims=" << dimsToString(node_dims[node.lhs]) << " rhs_dims=" << dimsToString(node_dims[node.rhs])
+                            << " reachable=" << (reachable_nodes.contains(static_cast<uint32_t>(i)) ? "true" : "false")
+                            << " error=" << e.what();
+                        throw std::runtime_error(oss.str());
+                    }
+                    node_dims[i] = std::move(out_dims);
+                }
+                break;
+            }
+            case ExprOp::NEG:
+            case ExprOp::ABS:
+            case ExprOp::EXP:
+            case ExprOp::EXP2:
+            case ExprOp::EXP10:
+            case ExprOp::LN:
+            case ExprOp::LOG2:
+            case ExprOp::LOG10:
+            case ExprOp::SQRT:
+                node_dims[i] = node_dims[node.lhs];
+                break;
+            case ExprOp::UNSQUEEZE: {
+                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
+                node_dims[i] = applyNormalizedUnsqueezeDims(lhs_dims, node.unsqueeze_axes);
+                break;
+            }
+            case ExprOp::SQUEEZE: {
+                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
+                node_dims[i] = applyNormalizedSqueezeDims(lhs_dims, node.squeeze_axes);
+                break;
+            }
+            case ExprOp::REDUCE_SUM:
+            case ExprOp::REDUCE_PROD:
+            case ExprOp::REDUCE_MIN:
+            case ExprOp::REDUCE_MAX:
+            case ExprOp::REDUCE_ARGMIN:
+            case ExprOp::REDUCE_ARGMAX:
+            case ExprOp::REDUCE_AVG:
+            case ExprOp::REDUCE_NORM1:
+            case ExprOp::REDUCE_NORM2: {
+                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
+                const std::vector<uint64_t> reduction_axes = resolveReductionAxesForInputRank(node.reduction_axes, lhs_dims.size());
+                node_dims[i] = StampedEquation::computeReductionOutputDims(lhs_dims, reduction_axes, node.squeeze_axes);
+                break;
+            }
+            case ExprOp::MATMUL:
+            case ExprOp::GEMM:
+                throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unexpected matmul/gemm op in fused stage.");
+            default:
+                throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unknown ExprOp.");
+        }
+    }
+
+    return node_dims;
+}
+
 static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecutionStage& stage,
                                                              size_t output_idx,
                                                              const std::vector<std::vector<uint64_t>>& stage_input_dims) {
@@ -1396,8 +1559,24 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
             break;
     }
 
-    const auto node_dims = inferFusedStageNodeDims(stage.expr, stage_input_dims);
     const uint32_t local_node_idx = stage.outputs[output_idx].local_node_idx;
+    std::unordered_set<uint32_t> reachable_nodes;
+    collectReachableLocalNodes(stage.expr, local_node_idx, reachable_nodes);
+
+    const auto safe_infer_node_dims = [&]() {
+        try {
+            return inferFusedStageNodeDimsForReachable(stage.expr, stage_input_dims, reachable_nodes);
+        } catch (const std::exception& e) {
+            std::ostringstream oss;
+            oss << "resolveOutputDimsForStageOutput failed"
+                << " stage_kind=" << static_cast<int>(stage.kind) << " output_idx=" << output_idx
+                << " output_name=" << stage.outputs[output_idx].name << " local_node_idx=" << local_node_idx << " error=" << e.what();
+            throw std::runtime_error(oss.str());
+        }
+    };
+
+    const auto node_dims = safe_infer_node_dims();
+
     if (local_node_idx >= node_dims.size()) {
         throw std::runtime_error("resolveOutputDimsForStageOutput local_node_idx out of range.");
     }
@@ -1450,6 +1629,14 @@ static TensorPlacement pickStageOutputPlacement(const std::vector<RuntimeInputVa
     throw std::runtime_error("Unable to infer output placement for fused stage with no available tensors.");
 }
 
+static void mergeEffectiveInputDimsMaps(std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>& dst,
+                                        const std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>& src) {
+    for (const auto& [slot, dims_set] : src) {
+        auto& out = dst[slot];
+        out.insert(dims_set.begin(), dims_set.end());
+    }
+}
+
 static std::unordered_map<std::string, std::vector<uint64_t>> defaultBackwardRequestedOutputShapes(
     const std::optional<BackwardEquationConfig>& backward_config,
     const std::vector<NamedInput>& root_inputs,
@@ -1487,94 +1674,6 @@ static std::unordered_map<std::string, std::vector<uint64_t>> defaultBackwardReq
     }
 
     return effective;
-}
-
-static bool fusedStageRequiresBroadcastLaunch(const CompiledExecutionStage& stage,
-                                              const std::vector<RuntimeInputValue>& stage_inputs,
-                                              const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes,
-                                              bool trust_requested_output_shapes,
-                                              std::vector<uint64_t>& resolved_output_dims) {
-    resolved_output_dims.clear();
-
-    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
-        return false;
-    }
-
-    if (stageHasShapeOnlyOps(stage)) {
-        if (!stage.outputs.empty()) {
-            resolved_output_dims = resolveOutputDimsForStageOutput(stage, 0, stage_inputs);
-        }
-        return true;
-    }
-
-    if (stage_inputs.empty()) {
-        if (!stage.outputs.empty()) {
-            resolved_output_dims = resolveOutputDimsForStageOutput(stage, 0, stage_inputs);
-            auto requested_it = requested_output_shapes.find(stage.outputs[0].name);
-            if (requested_it != requested_output_shapes.end() && !requested_it->second.empty()) {
-                resolved_output_dims = requested_it->second;
-            }
-        }
-        return false;
-    }
-
-    // First resolve each output's logical dims. If different outputs in the same fused stage
-    // have different output domains, we must go through the grouped-broadcast path instead of
-    // trying to globally resolve one common layout across all stage tensor inputs.
-    bool have_common_output_dims = false;
-    std::vector<uint64_t> common_output_dims;
-    for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
-        std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stage_inputs);
-        auto requested_it = requested_output_shapes.find(stage.outputs[output_idx].name);
-        if (requested_it != requested_output_shapes.end() && !requested_it->second.empty()) {
-            if (!trust_requested_output_shapes) {
-                verifyRequestedOutputLayout(requested_it->second, output_dims);
-            }
-            output_dims = requested_it->second;
-        }
-
-        if (!have_common_output_dims) {
-            common_output_dims = output_dims;
-            have_common_output_dims = true;
-        } else if (output_dims != common_output_dims) {
-            // Different output domains in one fused stage: let grouped broadcast handle it.
-            return true;
-        }
-    }
-
-    if (have_common_output_dims) {
-        resolved_output_dims = common_output_dims;
-    }
-
-    std::vector<Tensor> layout_inputs;
-    layout_inputs.reserve(stage_inputs.size());
-    for (const RuntimeInputValue& input : stage_inputs) {
-        if (runtimeInputIsTensor(input)) {
-            layout_inputs.push_back(runtimeInputTensor(input));
-        }
-    }
-
-    std::vector<uint64_t> layout_resolved_output_dims;
-    const bool requires_broadcast =
-        layout_inputs.empty() ? false : FusedEquation::resolveLayout(layout_inputs, layout_resolved_output_dims);
-
-    if (have_common_output_dims && layout_resolved_output_dims != common_output_dims) {
-        return true;
-    }
-
-    if (!layout_resolved_output_dims.empty()) {
-        resolved_output_dims = std::move(layout_resolved_output_dims);
-    }
-
-    return requires_broadcast;
-}
-
-static void mergeEffectiveInputDimsMaps(std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>& dst,
-                                        const std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>& src) {
-    for (const auto& [slot, dims_set] : src) {
-        auto& out = dst[slot];
-        out.insert(dims_set.begin(), dims_set.end());
-    }
 }
 
 static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffectiveInputDimsForNode(
@@ -1643,6 +1742,95 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
     }
 }
 
+static bool fusedStageRequiresBroadcastLaunch(const CompiledExecutionStage& stage,
+                                              const std::vector<RuntimeInputValue>& stage_inputs,
+                                              const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes,
+                                              bool trust_requested_output_shapes,
+                                              std::vector<uint64_t>& resolved_output_dims) {
+    resolved_output_dims.clear();
+
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        return false;
+    }
+
+    if (stageHasShapeOnlyOps(stage)) {
+        if (!stage.outputs.empty()) {
+            resolved_output_dims = resolveOutputDimsForStageOutput(stage, 0, stage_inputs);
+        }
+        return true;
+    }
+
+    if (stage_inputs.empty()) {
+        if (!stage.outputs.empty()) {
+            resolved_output_dims = resolveOutputDimsForStageOutput(stage, 0, stage_inputs);
+            auto requested_it = requested_output_shapes.find(stage.outputs[0].name);
+            if (requested_it != requested_output_shapes.end() && !requested_it->second.empty()) {
+                resolved_output_dims = requested_it->second;
+            }
+        }
+        return false;
+    }
+
+    bool have_common_output_dims = false;
+    std::vector<uint64_t> common_output_dims;
+    for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+        std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stage_inputs);
+        auto requested_it = requested_output_shapes.find(stage.outputs[output_idx].name);
+        if (requested_it != requested_output_shapes.end() && !requested_it->second.empty()) {
+            if (!trust_requested_output_shapes) {
+                verifyRequestedOutputLayout(requested_it->second, output_dims);
+            }
+            output_dims = requested_it->second;
+        }
+
+        if (!have_common_output_dims) {
+            common_output_dims = output_dims;
+            have_common_output_dims = true;
+        } else if (output_dims != common_output_dims) {
+            return true;
+        }
+    }
+
+    std::vector<std::vector<uint64_t>> stage_input_dims;
+    stage_input_dims.reserve(stage_inputs.size());
+    for (const RuntimeInputValue& input : stage_inputs) {
+        stage_input_dims.push_back(runtimeInputDims(input));
+    }
+
+    std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> effective_dims_by_slot;
+    for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+        std::unordered_set<uint32_t> reachable_nodes;
+        collectReachableLocalNodes(stage.expr, stage.outputs[output_idx].local_node_idx, reachable_nodes);
+
+        const auto node_dims = inferFusedStageNodeDimsForReachable(stage.expr, stage_input_dims, reachable_nodes);
+
+        auto per_output = collectEffectiveInputDimsForNode(stage.expr, node_dims, stage.outputs[output_idx].local_node_idx);
+        mergeEffectiveInputDimsMaps(effective_dims_by_slot, per_output);
+    }
+
+    bool requires_broadcast = false;
+    for (const auto& [slot, dims_set] : effective_dims_by_slot) {
+        for (const auto& dims : dims_set) {
+            if (dims.empty()) {
+                continue;
+            }
+            if (dims != common_output_dims) {
+                requires_broadcast = true;
+                break;
+            }
+        }
+        if (requires_broadcast) {
+            break;
+        }
+    }
+
+    if (have_common_output_dims) {
+        resolved_output_dims = common_output_dims;
+    }
+
+    return requires_broadcast;
+}
+
 static std::vector<uint64_t> computeInputPackedStridesForBroadcast(const std::vector<uint64_t>& input_dims,
                                                                    const std::vector<uint64_t>& output_dims) {
     if (input_dims.size() > output_dims.size()) {
@@ -1698,95 +1886,151 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
     for (const RuntimeInputValue& input : stage_inputs) {
         stage_input_dims.push_back(runtimeInputDims(input));
     }
-    const auto node_dims = inferFusedStageNodeDims(stage.expr, stage_input_dims);
 
     std::map<std::vector<uint64_t>, std::vector<uint32_t>> outputs_by_dims;
     for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
         outputs_by_dims[resolveOutputDimsForStageOutput(stage, out_idx, stage_input_dims)].push_back(out_idx);
     }
 
+    auto effective_dims_maps_equal = [](const std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>& a,
+                                        const std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>& b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+
+        for (const auto& [slot, dims_set_a] : a) {
+            auto it = b.find(slot);
+            if (it == b.end()) {
+                return false;
+            }
+            if (dims_set_a != it->second) {
+                return false;
+            }
+        }
+
+        return true;
+    };
+
     std::vector<ResolvedBroadcastGroup> groups;
-    groups.reserve(outputs_by_dims.size());
 
     for (const auto& [output_dims, output_indices] : outputs_by_dims) {
-        std::unordered_set<uint32_t> used_slots_set;
+        struct OutputInfo {
+            uint32_t out_idx;
+            std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> effective_dims_by_slot;
+            std::unordered_set<uint32_t> used_slots_set;
+        };
+
+        std::vector<OutputInfo> infos;
+        infos.reserve(output_indices.size());
+
         for (uint32_t out_idx : output_indices) {
-            collectReferencedLocalInputSlots(stage.expr, stage.outputs[out_idx].local_node_idx, used_slots_set);
+            std::unordered_set<uint32_t> reachable_nodes;
+            collectReachableLocalNodes(stage.expr, stage.outputs[out_idx].local_node_idx, reachable_nodes);
+            const auto node_dims = inferFusedStageNodeDimsForReachable(stage.expr, stage_input_dims, reachable_nodes);
+
+            OutputInfo info;
+            info.out_idx = out_idx;
+            collectReferencedLocalInputSlots(stage.expr, stage.outputs[out_idx].local_node_idx, info.used_slots_set);
+            info.effective_dims_by_slot = collectEffectiveInputDimsForNode(stage.expr, node_dims, stage.outputs[out_idx].local_node_idx);
+
+            infos.push_back(std::move(info));
         }
 
-        std::vector<uint32_t> used_input_slots(used_slots_set.begin(), used_slots_set.end());
-        std::sort(used_input_slots.begin(), used_input_slots.end());
+        std::vector<std::vector<uint32_t>> compatible_subgroups;
+        std::vector<std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>> subgroup_effective_dims;
+        std::vector<std::unordered_set<uint32_t>> subgroup_used_slots;
 
-        SpecializedBroadcastGroup specialized;
-        specialized.output_indices = output_indices;
-        specialized.output_dims = output_dims;
-        specialized.numel = product(output_dims);
-        specialized.used_input_slots = used_input_slots;
-        specialized.used_input_load_kinds.assign(used_input_slots.size(), SpecializedInputLoadKind::ScalarPack);
-
-        const std::vector<uint64_t> output_strides = computePackedOutputStrides(output_dims);
-
-        const auto effective_dims_by_slot =
-            collectEffectiveInputDimsForNode(stage.expr, node_dims, stage.outputs[output_indices.front()].local_node_idx);
-
-        std::vector<std::vector<uint64_t>> input_strides_by_used;
-        input_strides_by_used.reserve(used_input_slots.size());
-        for (uint32_t slot : used_input_slots) {
-            if (slot >= stage_inputs.size()) {
-                throw std::runtime_error("Broadcast group input slot out of range.");
+        for (const auto& info : infos) {
+            bool placed = false;
+            for (size_t group_i = 0; group_i < compatible_subgroups.size(); ++group_i) {
+                if (effective_dims_maps_equal(subgroup_effective_dims[group_i], info.effective_dims_by_slot)) {
+                    compatible_subgroups[group_i].push_back(info.out_idx);
+                    subgroup_used_slots[group_i].insert(info.used_slots_set.begin(), info.used_slots_set.end());
+                    placed = true;
+                    break;
+                }
             }
-            std::vector<uint64_t> effective_dims = runtimeInputDims(stage_inputs[slot]);
-            auto dims_it = effective_dims_by_slot.find(slot);
-            if (dims_it != effective_dims_by_slot.end()) {
-                if (dims_it->second.size() > 1) {
-                    std::ostringstream oss;
-                    oss << "Broadcast group input slot " << slot << " is used with multiple logical shapes in one fused stage. shapes=";
-                    bool first = true;
-                    for (const auto& dims : dims_it->second) {
-                        if (!first) {
-                            oss << ", ";
+
+            if (!placed) {
+                compatible_subgroups.push_back({info.out_idx});
+                subgroup_effective_dims.push_back(info.effective_dims_by_slot);
+                subgroup_used_slots.push_back(info.used_slots_set);
+            }
+        }
+
+        for (size_t subgroup_i = 0; subgroup_i < compatible_subgroups.size(); ++subgroup_i) {
+            const auto& subgroup_output_indices = compatible_subgroups[subgroup_i];
+            const auto& effective_dims_by_slot = subgroup_effective_dims[subgroup_i];
+            const auto& used_slots_set = subgroup_used_slots[subgroup_i];
+
+            std::vector<uint32_t> used_input_slots(used_slots_set.begin(), used_slots_set.end());
+            std::sort(used_input_slots.begin(), used_input_slots.end());
+
+            SpecializedBroadcastGroup specialized;
+            specialized.output_indices = subgroup_output_indices;
+            specialized.output_dims = output_dims;
+            specialized.numel = product(output_dims);
+            specialized.used_input_slots = used_input_slots;
+            specialized.used_input_load_kinds.assign(used_input_slots.size(), SpecializedInputLoadKind::ScalarPack);
+
+            const std::vector<uint64_t> output_strides = computePackedOutputStrides(output_dims);
+
+            std::vector<std::vector<uint64_t>> input_strides_by_used;
+            input_strides_by_used.reserve(used_input_slots.size());
+            for (uint32_t slot : used_input_slots) {
+                if (slot >= stage_inputs.size()) {
+                    throw std::runtime_error("Broadcast group input slot out of range.");
+                }
+
+                std::vector<uint64_t> effective_dims = runtimeInputDims(stage_inputs[slot]);
+                auto dims_it = effective_dims_by_slot.find(slot);
+                if (dims_it != effective_dims_by_slot.end()) {
+                    if (dims_it->second.size() > 1) {
+                        std::ostringstream oss;
+                        oss << "Broadcast group input slot " << slot << " is used with multiple logical shapes in one fused stage. shapes=";
+                        bool first = true;
+                        for (const auto& dims : dims_it->second) {
+                            if (!first) {
+                                oss << ", ";
+                            }
+                            first = false;
+                            oss << dimsToString(dims);
                         }
-                        first = false;
-                        oss << dimsToString(dims);
+                        throw std::runtime_error(oss.str());
                     }
-                    throw std::runtime_error(oss.str());
+                    if (!dims_it->second.empty()) {
+                        effective_dims = *dims_it->second.begin();
+                    }
                 }
-                if (!dims_it->second.empty()) {
-                    effective_dims = *dims_it->second.begin();
+
+                input_strides_by_used.push_back(computeInputPackedStridesForBroadcast(effective_dims, output_dims));
+            }
+
+            for (size_t axis = 0; axis < output_dims.size(); ++axis) {
+                if (output_dims[axis] == 1ULL) {
+                    continue;
+                }
+
+                SpecializedBroadcastAxis axis_desc;
+                axis_desc.dim = output_dims[axis];
+                axis_desc.output_stride = output_strides[axis];
+                axis_desc.input_strides.resize(used_input_slots.size(), 0ULL);
+
+                bool any_nonzero = false;
+                for (size_t used_i = 0; used_i < used_input_slots.size(); ++used_i) {
+                    axis_desc.input_strides[used_i] = input_strides_by_used[used_i][axis];
+                    if (axis_desc.input_strides[used_i] != 0ULL) {
+                        any_nonzero = true;
+                    }
+                }
+
+                if (any_nonzero) {
+                    specialized.active_axes.push_back(std::move(axis_desc));
                 }
             }
 
-            // std::cerr << "[FUSION] broadcast group input slot=" << slot << " raw_dims=" <<
-            // dimsToString(stage_inputs[slot].getDimensions())
-            //           << " effective_dims=" << dimsToString(effective_dims) << " output_dims=" << dimsToString(output_dims) << std::endl;
-
-            input_strides_by_used.push_back(computeInputPackedStridesForBroadcast(effective_dims, output_dims));
+            groups.push_back(ResolvedBroadcastGroup{std::move(specialized)});
         }
-
-        for (size_t axis = 0; axis < output_dims.size(); ++axis) {
-            if (output_dims[axis] == 1ULL) {
-                continue;
-            }
-
-            SpecializedBroadcastAxis axis_desc;
-            axis_desc.dim = output_dims[axis];
-            axis_desc.output_stride = output_strides[axis];
-            axis_desc.input_strides.resize(used_input_slots.size(), 0ULL);
-
-            bool any_nonzero = false;
-            for (size_t used_i = 0; used_i < used_input_slots.size(); ++used_i) {
-                axis_desc.input_strides[used_i] = input_strides_by_used[used_i][axis];
-                if (axis_desc.input_strides[used_i] != 0ULL) {
-                    any_nonzero = true;
-                }
-            }
-
-            if (any_nonzero) {
-                specialized.active_axes.push_back(std::move(axis_desc));
-            }
-        }
-
-        groups.push_back(ResolvedBroadcastGroup{std::move(specialized)});
     }
 
     std::sort(groups.begin(), groups.end(), [](const ResolvedBroadcastGroup& a, const ResolvedBroadcastGroup& b) {
@@ -2087,7 +2331,15 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
 
     PhysicalOutputs resolved_outputs = backward_config.has_value() ? buildShapeSpecializedOutputs(root_values) : outputs_template;
     resolved_outputs.expr = std::make_shared<PhysicalExpression>(*resolved_outputs.expr);
-    optimizeExpressionGemmPatternsInPlace(*resolved_outputs.expr, root_values);
+
+    // For backward equations, buildShapeSpecializedOutputs() already rebuilt the backward graph
+    // from a shape-specialized, GEMM-lowered forward expression. Running the generic whole-expression
+    // GEMM optimization pass again on the full multi-output backward graph can force unrelated output
+    // branches through one global shape-inference walk.
+    if (!backward_config.has_value()) {
+        optimizeExpressionGemmPatternsInPlace(*resolved_outputs.expr, root_values);
+    }
+
     resolveOutputsDTypesInPlace(resolved_outputs, dtype_cache_key.root_input_dtypes);
 
     std::shared_ptr<CompiledOutputs> compiled_outputs = EquationCompiler::compile(resolved_outputs, base_signature, true);
@@ -2782,8 +3034,28 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
 
     Tensor adaptedLhs = adaptMatmulInputDTypeIfNeeded(lhs, compiledStage->input_dtype, stream);
     Tensor adaptedRhs = adaptMatmulInputDTypeIfNeeded(rhs, compiledStage->input_dtype, stream);
-    const std::vector<uint64_t> output_dims =
-        resolveMatmulOutputDimsFromInputs(*compiledStage, {adaptedLhs.getDimensions(), adaptedRhs.getDimensions()});
+
+    std::vector<std::vector<uint64_t>> stage_input_dims(2);
+    stage_input_dims[0] = adaptedLhs.getDimensions();
+    stage_input_dims[1] = adaptedRhs.getDimensions();
+
+    auto assign_scale_dims = [&](uint32_t slot, const Optional<RuntimeInputValue>& input, const char* label) {
+        if (slot == UINT32_MAX) {
+            return;
+        }
+        if (!input.isPresent()) {
+            throw std::runtime_error(std::string("Matmul stage missing bound ") + label + " scale input.");
+        }
+        if (stage_input_dims.size() <= slot) {
+            stage_input_dims.resize(slot + 1);
+        }
+        stage_input_dims[slot] = runtimeInputDims(input.get());
+    };
+
+    assign_scale_dims(compiledStage->alpha_input_slot, alpha_input, "alpha");
+    assign_scale_dims(compiledStage->beta_input_slot, beta_input, "beta");
+
+    const std::vector<uint64_t> output_dims = resolveMatmulOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
     Tensor output;
     if (preallocatedOutput.isPresent()) {
@@ -2849,8 +3121,29 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     Tensor adaptedLhs = adaptMatmulInputDTypeIfNeeded(lhs, compiledStage->input_dtype, stream);
     Tensor adaptedRhs = adaptMatmulInputDTypeIfNeeded(rhs, compiledStage->input_dtype, stream);
     Tensor adaptedAddend = adaptMatmulInputDTypeIfNeeded(addend, compiledStage->input_dtype, stream);
-    const std::vector<uint64_t> output_dims = resolveMatmulOutputDimsFromInputs(
-        *compiledStage, {adaptedLhs.getDimensions(), adaptedRhs.getDimensions(), adaptedAddend.getDimensions()});
+
+    std::vector<std::vector<uint64_t>> stage_input_dims(3);
+    stage_input_dims[0] = adaptedLhs.getDimensions();
+    stage_input_dims[1] = adaptedRhs.getDimensions();
+    stage_input_dims[2] = adaptedAddend.getDimensions();
+
+    auto assign_scale_dims = [&](uint32_t slot, const Optional<RuntimeInputValue>& input, const char* label) {
+        if (slot == UINT32_MAX) {
+            return;
+        }
+        if (!input.isPresent()) {
+            throw std::runtime_error(std::string("Matmul stage missing bound ") + label + " scale input.");
+        }
+        if (stage_input_dims.size() <= slot) {
+            stage_input_dims.resize(slot + 1);
+        }
+        stage_input_dims[slot] = runtimeInputDims(input.get());
+    };
+
+    assign_scale_dims(compiledStage->alpha_input_slot, alpha_input, "alpha");
+    assign_scale_dims(compiledStage->beta_input_slot, beta_input, "beta");
+
+    const std::vector<uint64_t> output_dims = resolveMatmulOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
     Tensor output;
     if (preallocatedOutput.isPresent()) {
@@ -2882,8 +3175,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     Optional<Tensor> beta_device_scratch = Optional<Tensor>::empty();
     Optional<Tensor> alpha_host_scratch = Optional<Tensor>::empty();
     Optional<Tensor> beta_host_scratch = Optional<Tensor>::empty();
-    const bool any_tensor_backed_scale =
-        optionalRuntimeInputIsTensorScalarBinding(alpha_input) || optionalRuntimeInputIsTensorScalarBinding(beta_input);
+    const bool any_tensor_backed_scale = optionalRuntimeInputIsTensorLike(alpha_input) || optionalRuntimeInputIsTensorLike(beta_input);
     if (any_tensor_backed_scale) {
         TensorDescriptor scalarDescriptor(TensorDescriptor::DataType::FP32, {1});
         alpha_device_scratch = Tensor(adaptedLhs.getPlacement(), scalarDescriptor);
