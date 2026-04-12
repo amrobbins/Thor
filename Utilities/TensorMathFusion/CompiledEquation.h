@@ -178,6 +178,33 @@ struct CompiledReduceMinMaxBackward {
     }
 };
 
+struct CompiledConvolution {
+    const int32_t stride_h;
+    const int32_t stride_w;
+    const int32_t pad_h;
+    const int32_t pad_w;
+    const TensorDescriptor::DataType input_dtype;
+    const TensorDescriptor::DataType output_dtype;
+    const TensorDescriptor::DataType compute_dtype;
+
+    bool operator==(const CompiledConvolution& other) const = default;
+
+    CompiledConvolution(int32_t stride_h,
+                        int32_t stride_w,
+                        int32_t pad_h,
+                        int32_t pad_w,
+                        TensorDescriptor::DataType input_dtype,
+                        TensorDescriptor::DataType output_dtype,
+                        Optional<TensorDescriptor::DataType> compute_dtype)
+        : stride_h(stride_h),
+          stride_w(stride_w),
+          pad_h(pad_h),
+          pad_w(pad_w),
+          input_dtype(input_dtype),
+          output_dtype(output_dtype),
+          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : output_dtype) {}
+};
+
 struct CompiledMatmul {
     const ExprOp op;
     const bool transpose_lhs;

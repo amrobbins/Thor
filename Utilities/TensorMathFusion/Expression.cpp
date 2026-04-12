@@ -141,6 +141,8 @@ std::string opName(ExprOp op) {
             return "MATMUL";
         case ExprOp::GEMM:
             return "GEMM";
+        case ExprOp::CONV2D:
+            return "CONV2D";
         case ExprOp::REDUCE_SUM:
             return "RSUM";
         case ExprOp::REDUCE_PROD:
@@ -286,7 +288,8 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::MIN_GRAD_RIGHT:
         case ExprOp::MAX_GRAD_LEFT:
         case ExprOp::MAX_GRAD_RIGHT:
-        case ExprOp::MATMUL: {
+        case ExprOp::MATMUL:
+        case ExprOp::CONV2D: {
             std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
             std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
 
@@ -297,6 +300,11 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             if (n.op == ExprOp::MATMUL) {
                 out += ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0);
                 out += ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0);
+            } else if (n.op == ExprOp::CONV2D) {
+                out += ";sH=" + std::to_string(n.conv_stride_h);
+                out += ";sW=" + std::to_string(n.conv_stride_w);
+                out += ";pH=" + std::to_string(n.conv_pad_h);
+                out += ";pW=" + std::to_string(n.conv_pad_w);
             }
             out += ")";
             break;
@@ -355,6 +363,9 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
             break;
         case PhysicalExecutionStage::Kind::Matmul:
             ss << "matmul";
+            break;
+        case PhysicalExecutionStage::Kind::Convolution:
+            ss << "convolution";
             break;
         case PhysicalExecutionStage::Kind::ReduceMinMaxBackward:
             ss << "reduce_minmax_backward";
@@ -454,6 +465,7 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::MAX_GRAD_LEFT:
         case ExprOp::MAX_GRAD_RIGHT:
         case ExprOp::MATMUL:
+        case ExprOp::CONV2D:
         case ExprOp::REDUCE_MIN_BACKWARD:
         case ExprOp::REDUCE_MAX_BACKWARD:
             return true;
@@ -1049,6 +1061,36 @@ Expression Expression::gemm(const Expression& lhs,
     out->nodes.push_back(node);
     out->output_node = new_index;
     return Expression(out, new_index);
+}
+
+Expression Expression::conv2d(const Expression& input,
+                              const Expression& filter,
+                              int32_t stride_h,
+                              int32_t stride_w,
+                              int32_t pad_h,
+                              int32_t pad_w,
+                              Optional<DataType> compute_dtype,
+                              Optional<DataType> output_dtype) {
+    if (stride_h <= 0 || stride_w <= 0) {
+        throw std::runtime_error("conv2d stride must be positive.");
+    }
+    if (pad_h < 0 || pad_w < 0) {
+        throw std::runtime_error("conv2d padding must be non-negative.");
+    }
+
+    Expression out = binaryOp(input, filter, ExprOp::CONV2D);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.conv_stride_h = stride_h;
+    node.conv_stride_w = stride_w;
+    node.conv_pad_h = pad_h;
+    node.conv_pad_w = pad_w;
+    if (compute_dtype.isPresent()) {
+        node.compute_dtype = compute_dtype.get();
+    }
+    if (output_dtype.isPresent()) {
+        node.output_dtype = output_dtype.get();
+    }
+    return out;
 }
 
 // Reductions

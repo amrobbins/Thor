@@ -48,6 +48,7 @@ enum class ExprOp : uint16_t {
     MAX_GRAD_RIGHT,
     MATMUL,
     GEMM,
+    CONV2D,
     REDUCE_SUM,
     REDUCE_PROD,
     REDUCE_MIN,
@@ -104,6 +105,10 @@ struct ExprNode {
     bool transpose_lhs = false;
     bool transpose_rhs = false;
     bool transpose_aux = false;
+    int32_t conv_stride_h = 1;
+    int32_t conv_stride_w = 1;
+    int32_t conv_pad_h = 0;
+    int32_t conv_pad_w = 0;
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     Optional<TensorDescriptor::DataType> input_tensor_dtype = Optional<TensorDescriptor::DataType>::empty();
@@ -261,6 +266,15 @@ class Expression {
                                          bool transpose_addend = false,
                                          Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
                                          Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+    [[nodiscard]] static Expression conv2d(
+        const Expression& input,
+        const Expression& filter,
+        int32_t stride_h = 1,
+        int32_t stride_w = 1,
+        int32_t pad_h = 0,
+        int32_t pad_w = 0,
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
+        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
 
     [[nodiscard]] Expression reduction(ExprOp op,
                                        const std::vector<uint64_t>& reduction_axes,

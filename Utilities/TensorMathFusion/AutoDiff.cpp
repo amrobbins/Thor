@@ -219,6 +219,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                 reaches[i] = reaches.at(node.lhs);
                 break;
             case ExprOp::MATMUL:
+            case ExprOp::CONV2D:
                 reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs);
                 break;
             case ExprOp::GEMM:
@@ -999,6 +1000,31 @@ std::vector<uint64_t> inferMatmulOutputDims(const ExprNode& node,
     return out_dims;
 }
 
+static std::vector<uint64_t> inferConvolutionOutputDims(const ExprNode& node,
+                                                        const std::vector<uint64_t>& input_dims,
+                                                        const std::vector<uint64_t>& filter_dims) {
+    if (input_dims.size() != 4 || filter_dims.size() != 4) {
+        throw std::runtime_error("Autodiff CONV2D shape inference currently requires rank-4 tensors.");
+    }
+    const uint64_t n = input_dims[0];
+    const uint64_t c = input_dims[1];
+    const uint64_t h = input_dims[2];
+    const uint64_t w = input_dims[3];
+    const uint64_t k = filter_dims[0];
+    const uint64_t c_filter = filter_dims[1];
+    const uint64_t r = filter_dims[2];
+    const uint64_t s = filter_dims[3];
+    if (c != c_filter) {
+        throw std::runtime_error("Autodiff CONV2D shape inference found mismatched input/filter channels.");
+    }
+    const int64_t numer_h = static_cast<int64_t>(h) + 2LL * node.conv_pad_h - static_cast<int64_t>(r);
+    const int64_t numer_w = static_cast<int64_t>(w) + 2LL * node.conv_pad_w - static_cast<int64_t>(s);
+    if (numer_h < 0 || numer_w < 0) {
+        throw std::runtime_error("Autodiff CONV2D shape inference produced negative output extent.");
+    }
+    return {n, k, static_cast<uint64_t>(numer_h / node.conv_stride_h + 1), static_cast<uint64_t>(numer_w / node.conv_stride_w + 1)};
+}
+
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims) {
     if (input_dims.size() != 2) {
         throw std::runtime_error("Autodiff transpose shape inference currently only supports rank-2 tensors.");
@@ -1128,6 +1154,9 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 break;
             case ExprOp::GEMM:
                 node_dims[i] = inferMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs], &node_dims[node.aux]);
+                break;
+            case ExprOp::CONV2D:
+                node_dims[i] = inferConvolutionOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
             default:
                 throw std::runtime_error("inferForwardNodeDims encountered unknown ExprOp.");
@@ -1841,6 +1870,9 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 }
                 break;
             }
+
+            case ExprOp::CONV2D:
+                throw std::runtime_error("Thor expressions autodiff does not yet support backward for CONV2D.");
 
             case ExprOp::GEMM: {
                 const uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);

@@ -166,6 +166,32 @@ void StampedArgMinMax::runOn(Stream& run_stream) const {
                                   (void*)reduction_value_output.getMemPtr()));
 }
 
+StampedConvolution::StampedConvolution(std::shared_ptr<CompiledConvolution> compiled,
+                                       std::shared_ptr<BuiltConvolution> built,
+                                       const Tensor& input,
+                                       const Tensor& filter,
+                                       const Tensor& output,
+                                       const Stream& stream,
+                                       Optional<Tensor> workspace)
+    : compiled_convolution(std::move(compiled)),
+      built_convolution(std::move(built)),
+      input(input),
+      filter(filter),
+      output(output),
+      stream(stream),
+      workspace(std::move(workspace)) {}
+
+void StampedConvolution::run() { runOn(stream); }
+
+void StampedConvolution::runOn(Stream& run_stream) const {
+    if (!built_convolution || !built_convolution->requirement.isPresent()) {
+        throw std::runtime_error("StampedConvolution missing built convolution requirement.");
+    }
+
+    GpuConvolution::instance().convolutionForward(
+        built_convolution->requirement.get(), input, filter, Optional<Tensor>::empty(), output, workspace, run_stream);
+}
+
 StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                              std::shared_ptr<BuiltMatmul> built,
                              const Tensor& lhs,
@@ -955,6 +981,43 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     }
 
     builtMatmulCache.put(key, built);
+    return built;
+}
+
+std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::shared_ptr<CompiledConvolution>& compiled_convolution,
+                                                                    const Tensor& input,
+                                                                    const Tensor& filter,
+                                                                    const Tensor& output,
+                                                                    const Stream& stream,
+                                                                    int device_num) {
+    if (!compiled_convolution) {
+        throw std::runtime_error("buildConvolution requires non-null compiled payload.");
+    }
+    if (input.getDimensions().size() != 4 || filter.getDimensions().size() != 4 || output.getDimensions().size() != 4) {
+        throw std::runtime_error("buildConvolution currently only supports rank-4 tensors.");
+    }
+
+    const std::vector<uint64_t> input_dims = input.getDimensions();
+    const std::vector<uint64_t> filter_dims = filter.getDimensions();
+
+    auto built = std::make_shared<BuiltConvolution>();
+
+    const std::string gpuType = MachineEvaluator::instance().getGpuType(device_num);
+    built->requirement = ConvolutionKernelRequirement(gpuType,
+                                                      static_cast<int>(filter_dims[3]),
+                                                      static_cast<int>(filter_dims[2]),
+                                                      compiled_convolution->stride_w,
+                                                      compiled_convolution->stride_h,
+                                                      compiled_convolution->pad_w,
+                                                      compiled_convolution->pad_h,
+                                                      static_cast<int>(input_dims[1]),
+                                                      static_cast<int>(filter_dims[0]),
+                                                      static_cast<int>(input_dims[0]),
+                                                      static_cast<int>(input_dims[3]),
+                                                      static_cast<int>(input_dims[2]));
+
+    GpuConvolution::instance().chooseOptimalKernelForward(built->requirement.get(), stream);
+    built->workspace_bytes = GpuConvolution::instance().getForwardWorkspaceSizeInBytes(built->requirement.get());
     return built;
 }
 

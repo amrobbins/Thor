@@ -4,6 +4,7 @@
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/unordered_map.h>
+#include <nanobind/stl/unordered_set.h>
 #include <nanobind/stl/vector.h>
 
 #include <sstream>
@@ -30,6 +31,17 @@ using DynamicExpressionBuild = ThorImplementation::DynamicExpressionBuild;
 using DynamicTensorMap = std::unordered_map<std::string, Tensor>;
 using DynamicTensorScalarMap = std::unordered_map<std::string, TensorScalarBinding>;
 using DynamicShapeMap = std::unordered_map<std::string, std::vector<uint64_t>>;
+
+static nb::dict parameterFanOverridesToPython(const FusedEquation::ParameterFanOverrideMap& overrides) {
+    nb::dict result;
+    for (const auto& [name, hint] : overrides) {
+        nb::dict entry;
+        entry["fan_in"] = nb::int_(hint.fan_in);
+        entry["fan_out"] = nb::int_(hint.fan_out);
+        result[nb::str(name.c_str())] = std::move(entry);
+    }
+    return result;
+}
 
 void bind_physical_expression(nb::module_& physical) {
     auto expr = nb::class_<Expression>(physical, "Expression");
@@ -223,6 +235,35 @@ Transpose is lowered as its own staged operation.
         R"nbdoc(
 Shorthand for ``self.transpose()``.
 )nbdoc");
+
+    expr.def_static(
+        "conv2d",
+        [](const Expression& x,
+           const Expression& w,
+           int32_t stride_h,
+           int32_t stride_w,
+           int32_t pad_h,
+           int32_t pad_w,
+           nb::object output_dtype_obj,
+           nb::object compute_dtype_obj) {
+            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            if (!output_dtype_obj.is_none()) {
+                output_dtype = nb::cast<DataType>(output_dtype_obj);
+            }
+            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            if (!compute_dtype_obj.is_none()) {
+                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
+            }
+            return Expression::conv2d(x, w, stride_h, stride_w, pad_h, pad_w, compute_dtype, output_dtype);
+        },
+        "x"_a,
+        "w"_a,
+        "stride_h"_a = 1,
+        "stride_w"_a = 1,
+        "pad_h"_a = 0,
+        "pad_w"_a = 0,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none());
 
     expr.def_static(
         "matmul",
@@ -840,6 +881,31 @@ output: PhysicalTensor
 )nbdoc");
 
     fused_equation.def(
+        "get_parameter_fan_overrides",
+        [](const FusedEquation& self,
+           const std::unordered_map<std::string, Tensor>& inputs,
+           const std::vector<std::string>& parameter_names,
+           const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+           const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes) {
+            const std::unordered_set<std::string> parameter_name_set(parameter_names.begin(), parameter_names.end());
+            return parameterFanOverridesToPython(
+                self.getParameterFanOverrides(inputs, parameter_name_set, tensor_scalar_inputs, requested_output_shapes));
+        },
+        "inputs"_a,
+        "parameter_names"_a,
+        nb::kw_only(),
+        "tensor_scalar_inputs"_a = std::unordered_map<std::string, TensorScalarBinding>{},
+        "requested_output_shapes"_a = std::unordered_map<std::string, std::vector<uint64_t>>{},
+        R"nbdoc(
+Infer parameter initializer fan-in/fan-out overrides for the named parameter inputs.
+
+Returns
+-------
+dict[str, dict[str, int]]
+    Mapping from parameter name to {"fan_in": int, "fan_out": int}.
+)nbdoc");
+
+    fused_equation.def(
         "run",
         nb::overload_cast<const std::unordered_map<std::string, Tensor>&, const std::unordered_map<std::string, float>&, Tensor&, Stream&>(
             &FusedEquation::run, nb::const_),
@@ -1251,6 +1317,17 @@ Prepare a backward dynamic expression for a single-output forward expression.
         "requested_grad_output_shapes"_a = DynamicShapeMap{},
         R"nbdoc(
 Prepare a backward dynamic expression for a multi-output forward expression.
+)nbdoc");
+
+    prepared_dynamic_expression.def(
+        "get_parameter_fan_overrides",
+        [](const PreparedDynamicExpression& self, const std::vector<std::string>& parameter_names) {
+            const std::unordered_set<std::string> parameter_name_set(parameter_names.begin(), parameter_names.end());
+            return parameterFanOverridesToPython(self.getParameterFanOverrides(parameter_name_set));
+        },
+        "parameter_names"_a,
+        R"nbdoc(
+Infer parameter initializer fan-in/fan-out overrides for the prepared dynamic expression.
 )nbdoc");
 
     prepared_dynamic_expression.def(

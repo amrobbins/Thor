@@ -286,6 +286,37 @@ static std::vector<uint64_t> inferExpressionMatmulOutputDims(const ExprNode& nod
     return out_dims;
 }
 
+static std::vector<uint64_t> inferExpressionConvolutionOutputDims(const ExprNode& node,
+                                                                  const std::vector<uint64_t>& input_dims,
+                                                                  const std::vector<uint64_t>& filter_dims) {
+    if (input_dims.size() != 4 || filter_dims.size() != 4) {
+        throw std::runtime_error("CONV2D shape inference currently requires rank-4 NCHW input and KCRS filter tensors.");
+    }
+
+    const uint64_t n = input_dims[0];
+    const uint64_t c = input_dims[1];
+    const uint64_t h = input_dims[2];
+    const uint64_t w = input_dims[3];
+    const uint64_t k = filter_dims[0];
+    const uint64_t c_filter = filter_dims[1];
+    const uint64_t r = filter_dims[2];
+    const uint64_t s = filter_dims[3];
+
+    if (c != c_filter) {
+        throw std::runtime_error("CONV2D shape inference found mismatched input/filter channels.");
+    }
+
+    const int64_t numer_h = static_cast<int64_t>(h) + 2LL * node.conv_pad_h - static_cast<int64_t>(r);
+    const int64_t numer_w = static_cast<int64_t>(w) + 2LL * node.conv_pad_w - static_cast<int64_t>(s);
+    if (numer_h < 0 || numer_w < 0) {
+        throw std::runtime_error("CONV2D shape inference produced negative output extent.");
+    }
+
+    const uint64_t out_h = static_cast<uint64_t>(numer_h / node.conv_stride_h + 1);
+    const uint64_t out_w = static_cast<uint64_t>(numer_w / node.conv_stride_w + 1);
+    return {n, k, out_h, out_w};
+}
+
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims) {
     if (input_dims.size() != 2) {
         throw std::runtime_error("Transpose shape inference currently only supports rank-2 tensors.");
@@ -382,6 +413,9 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 break;
             case ExprOp::GEMM:
                 node_dims[i] = inferExpressionMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs], &node_dims[node.aux]);
+                break;
+            case ExprOp::CONV2D:
+                node_dims[i] = inferExpressionConvolutionOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
             case ExprOp::REDUCE_MIN_BACKWARD:
             case ExprOp::REDUCE_MAX_BACKWARD:
@@ -738,6 +772,21 @@ static std::vector<uint64_t> resolveMatmulOutputDimsFromInputs(const CompiledMat
     return out_dims;
 }
 
+static std::vector<uint64_t> resolveConvolutionOutputDimsFromInputs(const CompiledConvolution& compiled_stage,
+                                                                    const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    if (stage_input_dims.size() < 2) {
+        throw std::runtime_error("Convolution stage expected at least two input shapes.");
+    }
+
+    ExprNode node{};
+    node.op = ExprOp::CONV2D;
+    node.conv_stride_h = compiled_stage.stride_h;
+    node.conv_stride_w = compiled_stage.stride_w;
+    node.conv_pad_h = compiled_stage.pad_h;
+    node.conv_pad_w = compiled_stage.pad_w;
+    return inferExpressionConvolutionOutputDims(node, stage_input_dims[0], stage_input_dims[1]);
+}
+
 static void mergeParameterFanOverride(FusedEquation::ParameterFanOverrideMap& result, const ParameterFanOverride& hint) {
     auto [it, inserted] = result.emplace(hint.input_name, hint);
     if (!inserted) {
@@ -801,6 +850,67 @@ static void addMatmulParameterFanOverrides(const CompiledExecutionStage& stage,
     //  - rhs parameter: fan_in = k, fan_out = n
     maybe_add(0, lhs_cols, lhs_rows);
     maybe_add(1, rhs_rows, rhs_cols);
+}
+
+static void addConvolutionParameterFanOverrides(const CompiledExecutionStage& stage,
+                                                const std::vector<std::vector<uint64_t>>& stage_input_dims,
+                                                const std::unordered_map<uint32_t, std::string>& root_input_name_by_slot,
+                                                const std::unordered_set<std::string>& parameter_names,
+                                                FusedEquation::ParameterFanOverrideMap& result) {
+    if (stage.kind != CompiledExecutionStage::Kind::Convolution || !stage.convolution) {
+        return;
+    }
+    if (stage_input_dims.size() < 2 || stage.input_value_ids.size() < 2) {
+        throw std::runtime_error("Convolution stage expected at least two inputs for parameter fan override inference.");
+    }
+
+    const std::vector<uint64_t>& input_dims = stage_input_dims[0];
+    const std::vector<uint64_t>& filter_dims = stage_input_dims[1];
+    if (input_dims.size() != 4 || filter_dims.size() != 4) {
+        throw std::runtime_error(
+            "Convolution parameter fan override inference currently only supports rank-4 NCHW input and KCRS filter tensors.");
+    }
+
+    const uint64_t input_channels = input_dims[1];
+    const uint64_t filter_out_channels = filter_dims[0];
+    const uint64_t filter_in_channels = filter_dims[1];
+    const uint64_t filter_rows = filter_dims[2];
+    const uint64_t filter_cols = filter_dims[3];
+
+    if (input_channels != filter_in_channels) {
+        throw std::runtime_error("Convolution parameter fan override inference found mismatched input/filter channels.");
+    }
+
+    auto maybe_add = [&](size_t operand_idx, uint64_t fan_in, uint64_t fan_out) {
+        if (operand_idx >= stage.input_value_ids.size()) {
+            return;
+        }
+
+        auto name_it = root_input_name_by_slot.find(stage.input_value_ids[operand_idx]);
+        if (name_it == root_input_name_by_slot.end()) {
+            return;
+        }
+        if (!parameter_names.contains(name_it->second)) {
+            return;
+        }
+
+        mergeParameterFanOverride(result,
+                                  ParameterFanOverride{
+                                      .input_name = name_it->second,
+                                      .fan_in = std::max<uint64_t>(1, fan_in),
+                                      .fan_out = std::max<uint64_t>(1, fan_out),
+                                  });
+    };
+
+    const uint64_t receptive_field = std::max<uint64_t>(1, filter_rows * filter_cols);
+
+    // For filter[K, C, R, S], convolution initializer semantics match standard conv kernels:
+    //  - filter parameter: fan_in = C * R * S
+    //  - filter parameter: fan_out = K * R * S
+    // If someone intentionally makes the activation tensor itself a parameterized stage input,
+    // give it the symmetric swapped interpretation.
+    maybe_add(0, filter_out_channels * receptive_field, filter_in_channels * receptive_field);
+    maybe_add(1, filter_in_channels * receptive_field, filter_out_channels * receptive_field);
 }
 
 static RuntimeDTypeKey makeRuntimeDTypeKey(const std::vector<NamedInput>& root_inputs,
@@ -1083,6 +1193,11 @@ static DataType compiledStageOutputDType(const CompiledExecutionStage& stage, si
                 throw std::runtime_error("compiledStageOutputDType missing matmul/gemm stage.");
             }
             return stage.matmul->output_dtype;
+        case CompiledExecutionStage::Kind::Convolution:
+            if (!stage.convolution) {
+                throw std::runtime_error("compiledStageOutputDType missing convolution stage.");
+            }
+            return stage.convolution->output_dtype;
         case CompiledExecutionStage::Kind::Transpose:
             if (!stage.transpose) {
                 throw std::runtime_error("compiledStageOutputDType missing transpose stage.");
@@ -1517,6 +1632,8 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::MATMUL:
             case ExprOp::GEMM:
                 throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unexpected matmul/gemm op in fused stage.");
+            case ExprOp::CONV2D:
+                throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unexpected convolution op in fused stage.");
             default:
                 throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unknown ExprOp.");
         }
@@ -1572,6 +1689,13 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 throw std::runtime_error("resolveOutputDimsForStageOutput matmul stage missing payload.");
             }
             return resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+        }
+
+        case CompiledExecutionStage::Kind::Convolution: {
+            if (!stage.convolution) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput convolution stage missing payload.");
+            }
+            return resolveConvolutionOutputDimsFromInputs(*stage.convolution, stage_input_dims);
         }
 
         case CompiledExecutionStage::Kind::Transpose: {
@@ -2207,6 +2331,14 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("Matmul/gemm stage expected exactly one output.");
             }
             value_dims[stage.outputs[0].value_id] = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Convolution) {
+            if (!stage.convolution) {
+                throw std::runtime_error("Missing compiled convolution stage.");
+            }
+            if (stage.outputs.size() != 1) {
+                throw std::runtime_error("Convolution stage expected exactly one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = resolveConvolutionOutputDimsFromInputs(*stage.convolution, stage_input_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::Transpose) {
             if (!stage.transpose) {
                 throw std::runtime_error("Missing compiled transpose stage.");
@@ -3055,6 +3187,50 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
     return make_shared<StampedArgMinMax>(std::move(built), adaptedInput, output, reductionValueOutput, stream, workspace);
 }
 
+std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::shared_ptr<CompiledConvolution>& compiledStage,
+                                                                    Tensor& input,
+                                                                    Tensor& filter,
+                                                                    const Optional<Tensor>& preallocatedOutput,
+                                                                    const Stream& stream) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampConvolution requires non-null compiled stage.");
+    }
+
+    Tensor adaptedInput = adaptMatmulInputDTypeIfNeeded(input, compiledStage->input_dtype, stream);
+    Tensor adaptedFilter = adaptMatmulInputDTypeIfNeeded(filter, compiledStage->input_dtype, stream);
+
+    const std::vector<std::vector<uint64_t>> stage_input_dims = {adaptedInput.getDimensions(), adaptedFilter.getDimensions()};
+    const std::vector<uint64_t> output_dims = resolveConvolutionOutputDimsFromInputs(*compiledStage, stage_input_dims);
+
+    Tensor output;
+    if (preallocatedOutput.isPresent()) {
+        output = preallocatedOutput.get();
+        if (output.getPlacement() != adaptedInput.getPlacement()) {
+            throw std::runtime_error("Preallocated convolution output tensor placement does not match input placement.");
+        }
+        if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
+            throw std::runtime_error("Preallocated convolution output tensor dtype does not match compiled output dtype.");
+        }
+        if (output.getDimensions() != output_dims) {
+            throw std::runtime_error(
+                "Preallocated convolution output tensor dimensions are incompatible with the convolution output shape.");
+        }
+    } else {
+        TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dims);
+        output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
+    }
+
+    std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolution(
+        compiledStage, adaptedInput, adaptedFilter, output, stream, adaptedInput.getPlacement().getDeviceNum());
+
+    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    if (built->workspace_bytes > 0) {
+        workspace = Tensor(adaptedInput.getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes}));
+    }
+
+    return std::make_shared<StampedConvolution>(compiledStage, built, adaptedInput, adaptedFilter, output, stream, workspace);
+}
+
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
                                                           Tensor& lhs,
                                                           Tensor& rhs,
@@ -3678,6 +3854,36 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedMatmul, std::move(dependency_stage_indices));
                 break;
             }
+            case CompiledExecutionStage::Kind::Convolution: {
+                if (!stage.convolution) {
+                    throw std::runtime_error("Convolution stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 2) {
+                    throw std::runtime_error("Convolution stage expects exactly two inputs.");
+                }
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Convolution stage expects exactly one output.");
+                }
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                Tensor filterTensor = runtimeInputTensor(stageInputs[1]);
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Optional<Tensor> preallocated = Optional<Tensor>::empty();
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    preallocated = preallocated_it->second;
+                }
+                std::shared_ptr<StampedConvolution> stampedConvolution =
+                    stampConvolution(stage.convolution, inputTensor, filterTensor, preallocated, stream);
+                Tensor outputTensor = stampedConvolution->getOutputTensor();
+                if (outputTensor.getDimensions() != output_dims) {
+                    throw std::runtime_error("Stamped convolution output tensor dimensions are incompatible with the staged output shape.");
+                }
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedConvolution, std::move(dependency_stage_indices));
+                break;
+            }
             case CompiledExecutionStage::Kind::Transpose: {
                 if (!stage.transpose) {
                     throw std::runtime_error("Transpose stage missing compiled payload.");
@@ -3991,6 +4197,8 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
 
         if (stage.kind == CompiledExecutionStage::Kind::Matmul) {
             addMatmulParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Convolution) {
+            addConvolutionParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
         }
 
         for (const ParameterFanOverride& hint : stage.parameter_fan_overrides) {
@@ -4038,6 +4246,14 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                 throw std::runtime_error("Matmul/gemm stage expected exactly one output.");
             }
             value_dims[stage.outputs[0].value_id] = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Convolution) {
+            if (!stage.convolution) {
+                throw std::runtime_error("Missing compiled convolution stage.");
+            }
+            if (stage.outputs.size() != 1) {
+                throw std::runtime_error("Convolution stage expected exactly one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = resolveConvolutionOutputDimsFromInputs(*stage.convolution, stage_input_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::Transpose) {
             if (!stage.transpose) {
                 throw std::runtime_error("Missing compiled transpose stage.");
