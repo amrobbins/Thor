@@ -6,6 +6,8 @@
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
+#include <sstream>
+
 #include "Utilities/TensorMathFusion/DynamicExpression.h"
 #include "Utilities/TensorMathFusion/FusedEquation.h"
 #include "Utilities/TensorMathFusion/StampedEquation.h"
@@ -902,6 +904,26 @@ inputs: dict[str, PhysicalTensor]
 outputs: dict[str, PhysicalTensor]
     A dict mapping output names to tensors
 )nbdoc");
+
+    fused_equation.def(
+        "_debug_stage_kinds",
+        [](const FusedEquation& self, const std::unordered_map<std::string, Tensor>& inputs) {
+            std::shared_ptr<ThorImplementation::CompiledOutputs> compiled = self.compileForInputs(inputs);
+            std::vector<std::string> result;
+            result.reserve(compiled->stages.size());
+            for (const auto& stage : compiled->stages) {
+                std::string label = ThorImplementation::CompiledExecutionStage::kindToString(stage.kind);
+                if (stage.kind == ThorImplementation::CompiledExecutionStage::Kind::Matmul && stage.matmul) {
+                    std::ostringstream oss;
+                    oss << label << "(lhsT=" << (stage.matmul->transpose_lhs ? 1 : 0) << ",rhsT=" << (stage.matmul->transpose_rhs ? 1 : 0)
+                        << ",auxT=" << (stage.matmul->transpose_aux ? 1 : 0) << ")";
+                    label = oss.str();
+                }
+                result.push_back(std::move(label));
+            }
+            return result;
+        },
+        "inputs"_a);
 
     fused_equation.def(
         "compile_backward",

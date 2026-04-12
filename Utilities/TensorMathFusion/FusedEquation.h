@@ -255,6 +255,9 @@ class FusedEquation {
         const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs = {},
         const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes = {}) const;
 
+    [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs,
+                                                                    const std::unordered_map<std::string, float>& scalarInputs = {}) const;
+
    private:
     explicit FusedEquation(PhysicalOutputs outputs_template,
                            int device_num,
@@ -335,8 +338,6 @@ class FusedEquation {
     [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
         const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const;
 
-    [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs,
-                                                                    const std::unordered_map<std::string, float>& scalarInputs = {}) const;
     [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForRootValues(
         const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const;
     [[nodiscard]] PhysicalOutputs buildShapeSpecializedOutputs(const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const;
