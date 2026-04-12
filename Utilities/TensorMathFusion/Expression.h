@@ -49,6 +49,8 @@ enum class ExprOp : uint16_t {
     MATMUL,
     GEMM,
     CONV2D,
+    CONV2D_BACKWARD_DATA,
+    CONV2D_BACKWARD_FILTER,
     REDUCE_SUM,
     REDUCE_PROD,
     REDUCE_MIN,

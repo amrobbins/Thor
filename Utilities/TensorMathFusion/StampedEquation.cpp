@@ -192,6 +192,42 @@ void StampedConvolution::runOn(Stream& run_stream) const {
         built_convolution->requirement.get(), input, filter, Optional<Tensor>::empty(), output, workspace, run_stream);
 }
 
+StampedConvolutionBackward::StampedConvolutionBackward(std::shared_ptr<CompiledConvolutionBackward> compiled,
+                                                       std::shared_ptr<BuiltConvolution> built,
+                                                       const Tensor& input,
+                                                       const Tensor& grad_output,
+                                                       const Tensor& output,
+                                                       const Stream& stream,
+                                                       Optional<Tensor> workspace)
+    : compiled_convolution_backward(std::move(compiled)),
+      built_convolution(std::move(built)),
+      input(input),
+      grad_output(grad_output),
+      output(output),
+      stream(stream),
+      workspace(std::move(workspace)) {}
+
+void StampedConvolutionBackward::run() { runOn(stream); }
+
+void StampedConvolutionBackward::runOn(Stream& run_stream) const {
+    if (!built_convolution || !built_convolution->requirement.isPresent()) {
+        throw std::runtime_error("StampedConvolutionBackward missing built convolution requirement.");
+    }
+    if (!compiled_convolution_backward) {
+        throw std::runtime_error("StampedConvolutionBackward missing compiled convolution payload.");
+    }
+
+    if (compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_DATA) {
+        GpuConvolution::instance().convolutionBackwardData(
+            built_convolution->requirement.get(), grad_output, input, output, workspace, run_stream);
+    } else if (compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_FILTER) {
+        GpuConvolution::instance().convolutionBackwardFilter(
+            built_convolution->requirement.get(), input, grad_output, output, workspace, run_stream, false);
+    } else {
+        throw std::runtime_error("StampedConvolutionBackward received unsupported convolution backward op.");
+    }
+}
+
 StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                              std::shared_ptr<BuiltMatmul> built,
                              const Tensor& lhs,
@@ -1018,6 +1054,64 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
 
     GpuConvolution::instance().chooseOptimalKernelForward(built->requirement.get(), stream);
     built->workspace_bytes = GpuConvolution::instance().getForwardWorkspaceSizeInBytes(built->requirement.get());
+    return built;
+}
+
+std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
+    const std::shared_ptr<CompiledConvolutionBackward>& compiled_convolution_backward,
+    const Tensor& input,
+    const Tensor& grad_output,
+    const Tensor& output,
+    const Stream& stream,
+    int device_num) {
+    if (!compiled_convolution_backward) {
+        throw std::runtime_error("buildConvolutionBackward requires non-null compiled payload.");
+    }
+    if (input.getDimensions().size() != 4 || grad_output.getDimensions().size() != 4 || output.getDimensions().size() != 4) {
+        throw std::runtime_error("buildConvolutionBackward currently only supports rank-4 tensors.");
+    }
+
+    const std::vector<uint64_t> input_dims = input.getDimensions();
+    const std::vector<uint64_t> grad_output_dims = grad_output.getDimensions();
+    const std::vector<uint64_t> output_dims = output.getDimensions();
+
+    auto built = std::make_shared<BuiltConvolution>();
+
+    const std::string gpuType = MachineEvaluator::instance().getGpuType(device_num);
+    if (compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_DATA) {
+        built->requirement = ConvolutionKernelRequirement(gpuType,
+                                                          static_cast<int>(input_dims[3]),
+                                                          static_cast<int>(input_dims[2]),
+                                                          compiled_convolution_backward->stride_w,
+                                                          compiled_convolution_backward->stride_h,
+                                                          compiled_convolution_backward->pad_w,
+                                                          compiled_convolution_backward->pad_h,
+                                                          static_cast<int>(output_dims[1]),
+                                                          static_cast<int>(grad_output_dims[1]),
+                                                          static_cast<int>(output_dims[0]),
+                                                          static_cast<int>(output_dims[3]),
+                                                          static_cast<int>(output_dims[2]));
+    } else if (compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_FILTER) {
+        built->requirement = ConvolutionKernelRequirement(gpuType,
+                                                          static_cast<int>(output_dims[3]),
+                                                          static_cast<int>(output_dims[2]),
+                                                          compiled_convolution_backward->stride_w,
+                                                          compiled_convolution_backward->stride_h,
+                                                          compiled_convolution_backward->pad_w,
+                                                          compiled_convolution_backward->pad_h,
+                                                          static_cast<int>(input_dims[1]),
+                                                          static_cast<int>(grad_output_dims[1]),
+                                                          static_cast<int>(input_dims[0]),
+                                                          static_cast<int>(input_dims[3]),
+                                                          static_cast<int>(input_dims[2]));
+    } else {
+        throw std::runtime_error("buildConvolutionBackward received unsupported convolution backward op.");
+    }
+
+    GpuConvolution::instance().chooseOptimalKernelBackward(built->requirement.get(), stream);
+    built->workspace_bytes = compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_DATA
+                                 ? GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(built->requirement.get())
+                                 : GpuConvolution::instance().getBackwardFilterWorkspaceSizeInBytes(built->requirement.get());
     return built;
 }
 

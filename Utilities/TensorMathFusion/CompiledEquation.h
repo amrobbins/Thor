@@ -205,6 +205,42 @@ struct CompiledConvolution {
           compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : output_dtype) {}
 };
 
+struct CompiledConvolutionBackward {
+    const ExprOp op;
+    const int32_t stride_h;
+    const int32_t stride_w;
+    const int32_t pad_h;
+    const int32_t pad_w;
+    const TensorDescriptor::DataType input_dtype;
+    const TensorDescriptor::DataType grad_output_dtype;
+    const TensorDescriptor::DataType output_dtype;
+    const TensorDescriptor::DataType compute_dtype;
+    const std::vector<uint64_t> explicit_output_dims;
+
+    bool operator==(const CompiledConvolutionBackward& other) const = default;
+
+    CompiledConvolutionBackward(ExprOp op,
+                                int32_t stride_h,
+                                int32_t stride_w,
+                                int32_t pad_h,
+                                int32_t pad_w,
+                                TensorDescriptor::DataType input_dtype,
+                                TensorDescriptor::DataType grad_output_dtype,
+                                TensorDescriptor::DataType output_dtype,
+                                Optional<TensorDescriptor::DataType> compute_dtype,
+                                std::vector<uint64_t> explicit_output_dims = {})
+        : op(op),
+          stride_h(stride_h),
+          stride_w(stride_w),
+          pad_h(pad_h),
+          pad_w(pad_w),
+          input_dtype(input_dtype),
+          grad_output_dtype(grad_output_dtype),
+          output_dtype(output_dtype),
+          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : output_dtype),
+          explicit_output_dims(std::move(explicit_output_dims)) {}
+};
+
 struct CompiledMatmul {
     const ExprOp op;
     const bool transpose_lhs;

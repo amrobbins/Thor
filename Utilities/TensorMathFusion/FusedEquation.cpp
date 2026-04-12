@@ -317,6 +317,84 @@ static std::vector<uint64_t> inferExpressionConvolutionOutputDims(const ExprNode
     return {n, k, out_h, out_w};
 }
 
+static std::vector<uint64_t> inferExpressionConvolutionBackwardDataOutputDims(const ExprNode& node,
+                                                                              const std::vector<uint64_t>& filter_dims,
+                                                                              const std::vector<uint64_t>& grad_output_dims) {
+    if (filter_dims.size() != 4 || grad_output_dims.size() != 4) {
+        throw std::runtime_error("CONV2D_BACKWARD_DATA shape inference currently requires rank-4 filter/output-grad tensors.");
+    }
+
+    const uint64_t k = filter_dims[0];
+    const uint64_t c = filter_dims[1];
+    const uint64_t n = grad_output_dims[0];
+    const uint64_t grad_k = grad_output_dims[1];
+
+    if (k != grad_k) {
+        throw std::runtime_error("CONV2D_BACKWARD_DATA shape inference found mismatched filter/output channels.");
+    }
+    if (!node.fill_dims.empty()) {
+        if (node.fill_dims.size() != 4) {
+            throw std::runtime_error("CONV2D_BACKWARD_DATA explicit output shape must be rank-4.");
+        }
+        if (node.fill_dims[0] != n || node.fill_dims[1] != c) {
+            throw std::runtime_error("CONV2D_BACKWARD_DATA explicit output shape is incompatible with batch/channels.");
+        }
+        return node.fill_dims;
+    }
+
+    const uint64_t r = filter_dims[2];
+    const uint64_t s = filter_dims[3];
+    const uint64_t oh = grad_output_dims[2];
+    const uint64_t ow = grad_output_dims[3];
+
+    const int64_t h = static_cast<int64_t>(oh - 1) * node.conv_stride_h - 2LL * node.conv_pad_h + static_cast<int64_t>(r);
+    const int64_t w = static_cast<int64_t>(ow - 1) * node.conv_stride_w - 2LL * node.conv_pad_w + static_cast<int64_t>(s);
+    if (h <= 0 || w <= 0) {
+        throw std::runtime_error("CONV2D_BACKWARD_DATA shape inference produced non-positive output extent.");
+    }
+
+    return {n, c, static_cast<uint64_t>(h), static_cast<uint64_t>(w)};
+}
+
+static std::vector<uint64_t> inferExpressionConvolutionBackwardFilterOutputDims(const ExprNode& node,
+                                                                                const std::vector<uint64_t>& input_dims,
+                                                                                const std::vector<uint64_t>& grad_output_dims) {
+    if (input_dims.size() != 4 || grad_output_dims.size() != 4) {
+        throw std::runtime_error("CONV2D_BACKWARD_FILTER shape inference currently requires rank-4 input/output-grad tensors.");
+    }
+
+    const uint64_t n = input_dims[0];
+    const uint64_t c = input_dims[1];
+    const uint64_t grad_n = grad_output_dims[0];
+    const uint64_t k = grad_output_dims[1];
+
+    if (n != grad_n) {
+        throw std::runtime_error("CONV2D_BACKWARD_FILTER shape inference found mismatched batch sizes.");
+    }
+    if (!node.fill_dims.empty()) {
+        if (node.fill_dims.size() != 4) {
+            throw std::runtime_error("CONV2D_BACKWARD_FILTER explicit output shape must be rank-4.");
+        }
+        if (node.fill_dims[0] != k || node.fill_dims[1] != c) {
+            throw std::runtime_error("CONV2D_BACKWARD_FILTER explicit output shape is incompatible with channels.");
+        }
+        return node.fill_dims;
+    }
+
+    const uint64_t h = input_dims[2];
+    const uint64_t w = input_dims[3];
+    const uint64_t oh = grad_output_dims[2];
+    const uint64_t ow = grad_output_dims[3];
+
+    const int64_t r = static_cast<int64_t>(h) + 2LL * node.conv_pad_h - static_cast<int64_t>(oh - 1) * node.conv_stride_h;
+    const int64_t s = static_cast<int64_t>(w) + 2LL * node.conv_pad_w - static_cast<int64_t>(ow - 1) * node.conv_stride_w;
+    if (r <= 0 || s <= 0) {
+        throw std::runtime_error("CONV2D_BACKWARD_FILTER shape inference produced non-positive filter extent.");
+    }
+
+    return {k, c, static_cast<uint64_t>(r), static_cast<uint64_t>(s)};
+}
+
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims) {
     if (input_dims.size() != 2) {
         throw std::runtime_error("Transpose shape inference currently only supports rank-2 tensors.");
@@ -416,6 +494,12 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 break;
             case ExprOp::CONV2D:
                 node_dims[i] = inferExpressionConvolutionOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                break;
+            case ExprOp::CONV2D_BACKWARD_DATA:
+                node_dims[i] = inferExpressionConvolutionBackwardDataOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                break;
+            case ExprOp::CONV2D_BACKWARD_FILTER:
+                node_dims[i] = inferExpressionConvolutionBackwardFilterOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
             case ExprOp::REDUCE_MIN_BACKWARD:
             case ExprOp::REDUCE_MAX_BACKWARD:
@@ -785,6 +869,28 @@ static std::vector<uint64_t> resolveConvolutionOutputDimsFromInputs(const Compil
     node.conv_pad_h = compiled_stage.pad_h;
     node.conv_pad_w = compiled_stage.pad_w;
     return inferExpressionConvolutionOutputDims(node, stage_input_dims[0], stage_input_dims[1]);
+}
+
+static std::vector<uint64_t> resolveConvolutionBackwardOutputDimsFromInputs(const CompiledConvolutionBackward& compiled_stage,
+                                                                            const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    if (stage_input_dims.size() < 2) {
+        throw std::runtime_error("Convolution backward stage expected at least two input shapes.");
+    }
+
+    ExprNode node{};
+    node.op = compiled_stage.op;
+    node.conv_stride_h = compiled_stage.stride_h;
+    node.conv_stride_w = compiled_stage.stride_w;
+    node.conv_pad_h = compiled_stage.pad_h;
+    node.conv_pad_w = compiled_stage.pad_w;
+    node.fill_dims = compiled_stage.explicit_output_dims;
+    if (compiled_stage.op == ExprOp::CONV2D_BACKWARD_DATA) {
+        return inferExpressionConvolutionBackwardDataOutputDims(node, stage_input_dims[0], stage_input_dims[1]);
+    }
+    if (compiled_stage.op == ExprOp::CONV2D_BACKWARD_FILTER) {
+        return inferExpressionConvolutionBackwardFilterOutputDims(node, stage_input_dims[0], stage_input_dims[1]);
+    }
+    throw std::runtime_error("resolveConvolutionBackwardOutputDimsFromInputs received unsupported op.");
 }
 
 static void mergeParameterFanOverride(FusedEquation::ParameterFanOverrideMap& result, const ParameterFanOverride& hint) {
@@ -1198,6 +1304,11 @@ static DataType compiledStageOutputDType(const CompiledExecutionStage& stage, si
                 throw std::runtime_error("compiledStageOutputDType missing convolution stage.");
             }
             return stage.convolution->output_dtype;
+        case CompiledExecutionStage::Kind::ConvolutionBackward:
+            if (!stage.convolution_backward) {
+                throw std::runtime_error("compiledStageOutputDType missing convolution-backward stage.");
+            }
+            return stage.convolution_backward->output_dtype;
         case CompiledExecutionStage::Kind::Transpose:
             if (!stage.transpose) {
                 throw std::runtime_error("compiledStageOutputDType missing transpose stage.");
@@ -1633,6 +1744,8 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::GEMM:
                 throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unexpected matmul/gemm op in fused stage.");
             case ExprOp::CONV2D:
+            case ExprOp::CONV2D_BACKWARD_DATA:
+            case ExprOp::CONV2D_BACKWARD_FILTER:
                 throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unexpected convolution op in fused stage.");
             default:
                 throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unknown ExprOp.");
@@ -1696,6 +1809,13 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 throw std::runtime_error("resolveOutputDimsForStageOutput convolution stage missing payload.");
             }
             return resolveConvolutionOutputDimsFromInputs(*stage.convolution, stage_input_dims);
+        }
+
+        case CompiledExecutionStage::Kind::ConvolutionBackward: {
+            if (!stage.convolution_backward) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput convolution-backward stage missing payload.");
+            }
+            return resolveConvolutionBackwardOutputDimsFromInputs(*stage.convolution_backward, stage_input_dims);
         }
 
         case CompiledExecutionStage::Kind::Transpose: {
@@ -2339,6 +2459,15 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("Convolution stage expected exactly one output.");
             }
             value_dims[stage.outputs[0].value_id] = resolveConvolutionOutputDimsFromInputs(*stage.convolution, stage_input_dims);
+        } else if (stage.kind == CompiledExecutionStage::Kind::ConvolutionBackward) {
+            if (!stage.convolution_backward) {
+                throw std::runtime_error("Missing compiled convolution-backward stage.");
+            }
+            if (stage.outputs.size() != 1) {
+                throw std::runtime_error("Convolution-backward stage expected exactly one output.");
+            }
+            value_dims[stage.outputs[0].value_id] =
+                resolveConvolutionBackwardOutputDimsFromInputs(*stage.convolution_backward, stage_input_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::Transpose) {
             if (!stage.transpose) {
                 throw std::runtime_error("Missing compiled transpose stage.");
@@ -3231,6 +3360,51 @@ std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::s
     return std::make_shared<StampedConvolution>(compiledStage, built, adaptedInput, adaptedFilter, output, stream, workspace);
 }
 
+std::shared_ptr<StampedConvolutionBackward> FusedEquation::stampConvolutionBackward(
+    const std::shared_ptr<CompiledConvolutionBackward>& compiledStage,
+    Tensor& input,
+    Tensor& grad_output,
+    const Optional<Tensor>& preallocatedOutput,
+    const Stream& stream) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampConvolutionBackward requires non-null compiled stage.");
+    }
+
+    Tensor adaptedInput = adaptMatmulInputDTypeIfNeeded(input, compiledStage->input_dtype, stream);
+    Tensor adaptedGradOutput = adaptMatmulInputDTypeIfNeeded(grad_output, compiledStage->grad_output_dtype, stream);
+
+    const std::vector<std::vector<uint64_t>> stage_input_dims = {adaptedInput.getDimensions(), adaptedGradOutput.getDimensions()};
+    const std::vector<uint64_t> output_dims = resolveConvolutionBackwardOutputDimsFromInputs(*compiledStage, stage_input_dims);
+
+    Tensor output;
+    if (preallocatedOutput.isPresent()) {
+        output = preallocatedOutput.get();
+        if (output.getPlacement() != adaptedInput.getPlacement()) {
+            throw std::runtime_error("Preallocated convolution-backward output tensor placement does not match input placement.");
+        }
+        if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
+            throw std::runtime_error("Preallocated convolution-backward output tensor dtype does not match compiled output dtype.");
+        }
+        if (output.getDimensions() != output_dims) {
+            throw std::runtime_error(
+                "Preallocated convolution-backward output tensor dimensions are incompatible with the convolution-backward output shape.");
+        }
+    } else {
+        TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dims);
+        output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
+    }
+
+    std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolutionBackward(
+        compiledStage, adaptedInput, adaptedGradOutput, output, stream, adaptedInput.getPlacement().getDeviceNum());
+
+    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    if (built->workspace_bytes > 0) {
+        workspace = Tensor(adaptedInput.getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes}));
+    }
+
+    return std::make_shared<StampedConvolutionBackward>(compiledStage, built, adaptedInput, adaptedGradOutput, output, stream, workspace);
+}
+
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
                                                           Tensor& lhs,
                                                           Tensor& rhs,
@@ -3884,6 +4058,37 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedConvolution, std::move(dependency_stage_indices));
                 break;
             }
+            case CompiledExecutionStage::Kind::ConvolutionBackward: {
+                if (!stage.convolution_backward) {
+                    throw std::runtime_error("Convolution-backward stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 2) {
+                    throw std::runtime_error("Convolution-backward stage expects exactly two inputs.");
+                }
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Convolution-backward stage expects exactly one output.");
+                }
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                Tensor gradOutputTensor = runtimeInputTensor(stageInputs[1]);
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Optional<Tensor> preallocated = Optional<Tensor>::empty();
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    preallocated = preallocated_it->second;
+                }
+                std::shared_ptr<StampedConvolutionBackward> stampedConvolutionBackward =
+                    stampConvolutionBackward(stage.convolution_backward, inputTensor, gradOutputTensor, preallocated, stream);
+                Tensor outputTensor = stampedConvolutionBackward->getOutputTensor();
+                if (outputTensor.getDimensions() != output_dims) {
+                    throw std::runtime_error(
+                        "Stamped convolution-backward output tensor dimensions are incompatible with the staged output shape.");
+                }
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedConvolutionBackward, std::move(dependency_stage_indices));
+                break;
+            }
             case CompiledExecutionStage::Kind::Transpose: {
                 if (!stage.transpose) {
                     throw std::runtime_error("Transpose stage missing compiled payload.");
@@ -4199,6 +4404,8 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             addMatmulParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
         } else if (stage.kind == CompiledExecutionStage::Kind::Convolution) {
             addConvolutionParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
+        } else if (stage.kind == CompiledExecutionStage::Kind::ConvolutionBackward) {
+            // No parameter fan overrides are inferred from backward convolution stages.
         }
 
         for (const ParameterFanOverride& hint : stage.parameter_fan_overrides) {
@@ -4254,6 +4461,15 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                 throw std::runtime_error("Convolution stage expected exactly one output.");
             }
             value_dims[stage.outputs[0].value_id] = resolveConvolutionOutputDimsFromInputs(*stage.convolution, stage_input_dims);
+        } else if (stage.kind == CompiledExecutionStage::Kind::ConvolutionBackward) {
+            if (!stage.convolution_backward) {
+                throw std::runtime_error("Missing compiled convolution-backward stage.");
+            }
+            if (stage.outputs.size() != 1) {
+                throw std::runtime_error("Convolution-backward stage expected exactly one output.");
+            }
+            value_dims[stage.outputs[0].value_id] =
+                resolveConvolutionBackwardOutputDimsFromInputs(*stage.convolution_backward, stage_input_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::Transpose) {
             if (!stage.transpose) {
                 throw std::runtime_error("Missing compiled transpose stage.");

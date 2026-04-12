@@ -15,6 +15,8 @@ BACKWARD_DTYPES = [
     thor.DataType.fp16,
     thor.DataType.bf16,
     thor.DataType.fp32,
+    thor.DataType.fp8_e4m3,
+    thor.DataType.fp8_e5m2,
 ]
 
 
