@@ -207,7 +207,20 @@ Create a floating-point scalar constant expression.
     expr.def("__imatmul__", [](const Expression& a, const Expression& b) { return Expression::matmul(a, b); }, "other"_a);
 
     expr.def("__neg__", [](const Expression& a) { return -a; });
-    expr.def("transpose", [](const Expression& a) { return a.transpose(); });
+    expr.def(
+        "transpose",
+        [](const Expression& a) { return a.transpose(); },
+        R"nbdoc(
+Return the rank-2 transpose of this expression.
+
+Transpose is lowered as its own staged operation.
+)nbdoc");
+    expr.def_prop_ro(
+        "T",
+        [](const Expression& a) { return a.transpose(); },
+        R"nbdoc(
+Shorthand for ``self.transpose()``.
+)nbdoc");
 
     expr.def_static(
         "matmul",

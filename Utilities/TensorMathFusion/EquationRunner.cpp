@@ -1,6 +1,8 @@
 #include "Utilities/TensorMathFusion/EquationRunner.h"
 #include <limits>
 
+#include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
+
 namespace ThorImplementation {
 
 static size_t runtimeInputScalarSizeBytes(TensorDescriptor::DataType dtype) {
@@ -184,13 +186,13 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         }
         uint32_t numRows = static_cast<uint32_t>(input_dims[0]);
         uint32_t numCols = static_cast<uint32_t>(input_dims[1]);
-        args.push_back((void*)&numRows);
-        args.push_back((void*)&numCols);
-        constexpr uint32_t block_x = 32;
-        constexpr uint32_t block_y = 8;
-        const uint32_t grid_x = (numCols + block_x - 1U) / block_x;
-        const uint32_t grid_y = (numRows + block_x - 1U) / block_x;
-        CU_CHECK(cuLaunchKernel(compiledEquation->kernel, grid_x, grid_y, 1, block_x, block_y, 1, 0, stream, args.data(), nullptr));
+        launchMatrixTransposeByType(const_cast<void*>(output_ptrs[0]),
+                                    input_ptrs[0],
+                                    numRows,
+                                    numCols,
+                                    compiledEquation->input_dtypes[0],
+                                    compiledEquation->output_dtypes[0],
+                                    stream);
         return;
     }
 

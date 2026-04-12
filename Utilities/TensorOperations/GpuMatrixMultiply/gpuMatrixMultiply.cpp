@@ -46,17 +46,17 @@ cublasStatus_t matrixMultiply(cublasLtHandle_t cublasLtHandle,
                                   stream);
     if (kernelInfo.CElementOrder == ElementOrder::CPP_ROW_MAJOR) {
         if (kernelInfo.dataType == DataType::FP32) {
-            matrixTranspose((float *)C_d,
-                            (float *)transposeBuffer_d,
-                            kernelInfo.CCols,
-                            kernelInfo.CRows,
-                            stream);  // The source matrix is the transpose of C, so rows and cols are switched
+            ThorImplementation::matrixTranspose((float *)C_d,
+                                                (float *)transposeBuffer_d,
+                                                kernelInfo.CCols,
+                                                kernelInfo.CRows,
+                                                stream);  // The source matrix is the transpose of C, so rows and cols are switched
         } else {
-            matrixTranspose((half *)C_d,
-                            (half *)transposeBuffer_d,
-                            kernelInfo.CCols,
-                            kernelInfo.CRows,
-                            stream);  // The source matrix is the transpose of C, so rows and cols are switched
+            ThorImplementation::matrixTranspose((half *)C_d,
+                                                (half *)transposeBuffer_d,
+                                                kernelInfo.CCols,
+                                                kernelInfo.CRows,
+                                                stream);  // The source matrix is the transpose of C, so rows and cols are switched
         }
     }
     return cublasStatus;
