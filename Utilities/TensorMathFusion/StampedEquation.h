@@ -15,6 +15,7 @@
 
 #include "Utilities/Cache/LruCache.h"
 #include "Utilities/TensorMathFusion/CompiledEquation.h"
+#include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
 namespace ThorImplementation {
 
@@ -144,6 +145,11 @@ struct BuiltMatmul {
     BuiltMatmul& operator=(const BuiltMatmul&) = delete;
 };
 
+struct BuiltConvolution {
+    Optional<ConvolutionKernelRequirement> requirement = Optional<ConvolutionKernelRequirement>::empty();
+    size_t workspace_bytes = 0;
+};
+
 class StampedEquation {
    public:
     StampedEquation(std::shared_ptr<CompiledEquation> compiledEquation,
@@ -202,6 +208,13 @@ class StampedEquation {
                                                     const Optional<Tensor>& addend,
                                                     const Tensor& output,
                                                     int device_num);
+
+    static std::shared_ptr<BuiltConvolution> buildConvolution(const std::shared_ptr<CompiledConvolution>& compiled_convolution,
+                                                              const Tensor& input,
+                                                              const Tensor& filter,
+                                                              const Tensor& output,
+                                                              const Stream& stream,
+                                                              int device_num);
 
     [[nodiscard]] bool requiresRuntimeScalars() const;
     [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
@@ -317,6 +330,33 @@ class StampedMatmul {
     const Optional<Tensor> beta_host_scratch;
 };
 
+class StampedConvolution {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+    Tensor getOutputTensor() const { return output; }
+
+    StampedConvolution(std::shared_ptr<CompiledConvolution> compiled,
+                       std::shared_ptr<BuiltConvolution> built,
+                       const Tensor& input,
+                       const Tensor& filter,
+                       const Tensor& output,
+                       const Stream& stream,
+                       Optional<Tensor> workspace);
+
+   private:
+    const std::shared_ptr<CompiledConvolution> compiled_convolution;
+    const std::shared_ptr<BuiltConvolution> built_convolution;
+    const Tensor input;
+    const Tensor filter;
+    Tensor output;
+    Stream stream;
+    const Optional<Tensor> workspace;
+};
+
 class StampedReduceMinMaxBackward {
    public:
     void run();
@@ -352,7 +392,7 @@ class StampedReduceMinMaxBackward {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, Convolution, ReduceMinMaxBackward };
     const Kind kind;
 
     const std::vector<uint32_t> dependency_stage_indices;
@@ -362,6 +402,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedReduction> reduction = nullptr;
     const std::shared_ptr<StampedArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<StampedMatmul> matmul = nullptr;
+    const std::shared_ptr<StampedConvolution> convolution = nullptr;
     const std::shared_ptr<StampedReduceMinMaxBackward> reduce_minmax_backward = nullptr;
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused, std::vector<uint32_t> dependency_stage_indices = {})
@@ -381,6 +422,13 @@ struct StampedExecutionStage {
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedMatmul>& matmul, std::vector<uint32_t> dependency_stage_indices = {})
         : kind(Kind::Matmul), dependency_stage_indices(std::move(dependency_stage_indices)), gpu_num(matmul->gpuNum()), matmul(matmul) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedConvolution>& convolution,
+                                   std::vector<uint32_t> dependency_stage_indices = {})
+        : kind(Kind::Convolution),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(convolution->gpuNum()),
+          convolution(convolution) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedReduceMinMaxBackward>& reduce_minmax_backward,
                                    std::vector<uint32_t> dependency_stage_indices = {})
@@ -410,6 +458,9 @@ struct StampedExecutionStage {
                 matmul->runOn(run_stream);
             else
                 matmul->runOn(run_stream, runtime_scalars);
+        } else if (kind == Kind::Convolution) {
+            assert(convolution != nullptr);
+            convolution->runOn(run_stream);
         } else if (kind == Kind::ReduceMinMaxBackward) {
             assert(reduce_minmax_backward != nullptr);
             reduce_minmax_backward->runOn(run_stream);
