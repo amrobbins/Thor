@@ -278,7 +278,9 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
 
 static bool isArgMinMaxOp(ExprOp op) { return op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX; }
 static bool isMatmulOp(ExprOp op) { return op == ExprOp::MATMUL || op == ExprOp::GEMM; }
-static bool isConvolutionOp(ExprOp op) { return op == ExprOp::CONV2D; }
+static bool isConvolutionForwardOp(ExprOp op) { return op == ExprOp::CONV2D; }
+static bool isConvolutionBackwardOp(ExprOp op) { return op == ExprOp::CONV2D_BACKWARD_DATA || op == ExprOp::CONV2D_BACKWARD_FILTER; }
+static bool isConvolutionOp(ExprOp op) { return isConvolutionForwardOp(op) || isConvolutionBackwardOp(op); }
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
@@ -459,6 +461,10 @@ static const char* fusedOpTag(ExprOp op) {
             return "GEMM";
         case ExprOp::CONV2D:
             return "CONV2D";
+        case ExprOp::CONV2D_BACKWARD_DATA:
+            return "CONV2D_BWD_DATA";
+        case ExprOp::CONV2D_BACKWARD_FILTER:
+            return "CONV2D_BWD_FILTER";
         default:
             throw std::runtime_error("Unsupported op in fusedRegionSignature, value: " + to_string((int)op));
     }
@@ -1127,6 +1133,63 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
                                             supported_input_dtype,
                                             node.output_dtype.get(),
                                             node.compute_dtype);
+}
+
+shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBackward(const PhysicalExpression& expr) {
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("Convolution-backward stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isConvolutionBackwardOp(node.op)) {
+        throw std::runtime_error("Convolution-backward stage output node is not a supported convolution backward op.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX) {
+        throw std::runtime_error("Convolution backward node is missing required inputs.");
+    }
+    if (expr.numInputs() != 2) {
+        throw std::runtime_error("Convolution backward stage must have exactly two inputs.");
+    }
+
+    auto validate_local_input = [&](uint32_t local_idx, const char* label) -> const ExprNode& {
+        if (local_idx >= expr.nodes.size()) {
+            throw std::runtime_error(std::string("Convolution backward stage ") + label + " input index is out of range.");
+        }
+        const ExprNode& input_node = expr.nodes[local_idx];
+        if (input_node.op != ExprOp::INPUT) {
+            throw std::runtime_error(std::string("Convolution backward stage ") + label + " input must be a local INPUT node.");
+        }
+        if (!input_node.input_tensor_dtype.isPresent()) {
+            throw std::runtime_error(std::string("Convolution backward stage ") + label + " input missing resolved input_tensor_dtype.");
+        }
+        return input_node;
+    };
+
+    const ExprNode& input_node = validate_local_input(node.lhs, "lhs");
+    const ExprNode& grad_node = validate_local_input(node.rhs, "rhs");
+
+    if (!node.output_dtype.isPresent()) {
+        throw std::runtime_error("Convolution backward node missing resolved output_dtype.");
+    }
+
+    const DataType logical_input_dtype =
+        promoteTensorValueDTypes(std::vector<DataType>{input_node.input_tensor_dtype.get(), grad_node.input_tensor_dtype.get()});
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, logical_input_dtype);
+
+    if (supported_input_dtype != DataType::FP16 || node.output_dtype.get() != DataType::FP16) {
+        throw std::runtime_error("Convolution backward staged path currently supports FP16 input/grad/output tensors only.");
+    }
+
+    return make_shared<CompiledConvolutionBackward>(node.op,
+                                                    node.conv_stride_h,
+                                                    node.conv_stride_w,
+                                                    node.conv_pad_h,
+                                                    node.conv_pad_w,
+                                                    supported_input_dtype,
+                                                    grad_node.input_tensor_dtype.get(),
+                                                    node.output_dtype.get(),
+                                                    node.compute_dtype,
+                                                    node.fill_dims);
 }
 
 shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBackward(const PhysicalExpression& expr) {
@@ -1812,6 +1875,87 @@ static PhysicalExecutionStage buildConvolutionStage(const PhysicalExpression& ex
                                   .outputs = std::move(stage_outputs)};
 }
 
+static PhysicalExecutionStage buildConvolutionBackwardStage(const PhysicalExpression& expr,
+                                                            uint32_t node_idx,
+                                                            uint32_t output_value_id,
+                                                            const std::string& output_name,
+                                                            const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isConvolutionBackwardOp(node.op)) {
+        throw std::runtime_error("buildConvolutionBackwardStage called on unsupported node.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX) {
+        throw std::runtime_error("ConvolutionBackward node missing lhs or rhs input.");
+    }
+
+    PhysicalExpression stage_expr;
+    stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
+    stage_expr.inputs.push_back(NamedInput{"__arg1", 1});
+
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(2);
+
+    auto bind_parent_to_local_input = [&](uint32_t parent_idx, uint32_t local_slot) {
+        if (parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("ConvolutionBackward input node index out of range.");
+        }
+
+        const ExprNode& parent = expr.nodes[parent_idx];
+        Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            input_value_ids.push_back(out_it->second);
+            actual_input_dtype = parent.output_dtype;
+        } else if (parent.op == ExprOp::INPUT) {
+            input_value_ids.push_back(parent.input_slot);
+            actual_input_dtype = parent.input_tensor_dtype;
+        } else {
+            throw std::runtime_error("Missing value id for ConvolutionBackward input.");
+        }
+
+        if (!parent.output_dtype.isPresent()) {
+            throw std::runtime_error("ConvolutionBackward parent node missing resolved output_dtype.");
+        }
+        if (!actual_input_dtype.isPresent()) {
+            throw std::runtime_error("ConvolutionBackward parent node missing resolved actual input dtype.");
+        }
+
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = actual_input_dtype.get();
+        input_node.output_dtype = parent.output_dtype;
+        input_node.compute_dtype = parent.compute_dtype;
+        input_node.backward_output_dtype = parent.backward_output_dtype;
+        input_node.backward_compute_dtype = parent.backward_compute_dtype;
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+
+    bind_parent_to_local_input(node.lhs, 0);
+    bind_parent_to_local_input(node.rhs, 1);
+
+    ExprNode route = node;
+    route.lhs = 0;
+    route.rhs = 1;
+    stage_expr.nodes.push_back(std::move(route));
+    stage_expr.output_node = 2;
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{
+        .name = output_name,
+        .local_node_idx = 2,
+        .value_id = output_value_id,
+    });
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::ConvolutionBackward,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = std::move(stage_outputs),
+    };
+}
+
 static PhysicalExecutionStage buildReduceMinMaxBackwardStage(const PhysicalExpression& expr,
                                                              uint32_t node_idx,
                                                              uint32_t output_value_id,
@@ -2037,7 +2181,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 planned.stages.push_back(buildReduceMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isMatmulOp(root.op)) {
                 planned.stages.push_back(buildMatmulStage(expr, root_idx, stage_out_id, "", node_output_value_id));
-            } else if (isConvolutionOp(root.op)) {
+            } else if (isConvolutionBackwardOp(root.op)) {
+                planned.stages.push_back(buildConvolutionBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isConvolutionForwardOp(root.op)) {
                 planned.stages.push_back(buildConvolutionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isTransposeOp(root.op)) {
                 planned.stages.push_back(buildTransposeStage(expr, root_idx, stage_out_id, "", node_output_value_id));
@@ -2205,7 +2351,10 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isMatmulOp(root.op)) {
                 planned.stages.push_back(
                     buildMatmulStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
-            } else if (isConvolutionOp(root.op)) {
+            } else if (isConvolutionBackwardOp(root.op)) {
+                planned.stages.push_back(
+                    buildConvolutionBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isConvolutionForwardOp(root.op)) {
                 planned.stages.push_back(
                     buildConvolutionStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isTransposeOp(root.op)) {
@@ -2344,6 +2493,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::Convolution: {
                 std::shared_ptr<CompiledConvolution> convolution = compileConvolution(stage.expr);
                 compiled->stages.emplace_back(convolution, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::ConvolutionBackward: {
+                std::shared_ptr<CompiledConvolutionBackward> convolution_backward = compileConvolutionBackward(stage.expr);
+                compiled->stages.emplace_back(convolution_backward, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::ReduceMinMaxBackward: {

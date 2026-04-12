@@ -143,6 +143,10 @@ std::string opName(ExprOp op) {
             return "GEMM";
         case ExprOp::CONV2D:
             return "CONV2D";
+        case ExprOp::CONV2D_BACKWARD_DATA:
+            return "CONV2D_BWD_DATA";
+        case ExprOp::CONV2D_BACKWARD_FILTER:
+            return "CONV2D_BWD_FILTER";
         case ExprOp::REDUCE_SUM:
             return "RSUM";
         case ExprOp::REDUCE_PROD:
@@ -289,7 +293,9 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::MAX_GRAD_LEFT:
         case ExprOp::MAX_GRAD_RIGHT:
         case ExprOp::MATMUL:
-        case ExprOp::CONV2D: {
+        case ExprOp::CONV2D:
+        case ExprOp::CONV2D_BACKWARD_DATA:
+        case ExprOp::CONV2D_BACKWARD_FILTER: {
             std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
             std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
 
@@ -300,11 +306,19 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             if (n.op == ExprOp::MATMUL) {
                 out += ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0);
                 out += ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0);
-            } else if (n.op == ExprOp::CONV2D) {
+            } else if (n.op == ExprOp::CONV2D || n.op == ExprOp::CONV2D_BACKWARD_DATA || n.op == ExprOp::CONV2D_BACKWARD_FILTER) {
                 out += ";sH=" + std::to_string(n.conv_stride_h);
                 out += ";sW=" + std::to_string(n.conv_stride_w);
                 out += ";pH=" + std::to_string(n.conv_pad_h);
                 out += ";pW=" + std::to_string(n.conv_pad_w);
+                if (!n.fill_dims.empty()) {
+                    out += ";shape=";
+                    for (size_t i = 0; i < n.fill_dims.size(); ++i) {
+                        if (i != 0)
+                            out += "x";
+                        out += std::to_string(n.fill_dims[i]);
+                    }
+                }
             }
             out += ")";
             break;
@@ -366,6 +380,9 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
             break;
         case PhysicalExecutionStage::Kind::Convolution:
             ss << "convolution";
+            break;
+        case PhysicalExecutionStage::Kind::ConvolutionBackward:
+            ss << "convolution_backward";
             break;
         case PhysicalExecutionStage::Kind::ReduceMinMaxBackward:
             ss << "reduce_minmax_backward";
@@ -466,6 +483,8 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::MAX_GRAD_RIGHT:
         case ExprOp::MATMUL:
         case ExprOp::CONV2D:
+        case ExprOp::CONV2D_BACKWARD_DATA:
+        case ExprOp::CONV2D_BACKWARD_FILTER:
         case ExprOp::REDUCE_MIN_BACKWARD:
         case ExprOp::REDUCE_MAX_BACKWARD:
             return true;

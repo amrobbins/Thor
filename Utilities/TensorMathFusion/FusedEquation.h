@@ -27,7 +27,7 @@ struct ParameterFanOverride {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, Convolution, ReduceMinMaxBackward, Transpose };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, Convolution, ConvolutionBackward, ReduceMinMaxBackward, Transpose };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -40,6 +40,8 @@ struct CompiledExecutionStage {
                 return "Matmul";
             case Kind::Convolution:
                 return "Convolution";
+            case Kind::ConvolutionBackward:
+                return "ConvolutionBackward";
             case Kind::ReduceMinMaxBackward:
                 return "ReduceMinMaxBackward";
             case Kind::Transpose:
@@ -57,6 +59,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<CompiledMatmul> matmul = nullptr;
     const std::shared_ptr<CompiledConvolution> convolution = nullptr;
+    const std::shared_ptr<CompiledConvolutionBackward> convolution_backward = nullptr;
     const std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = nullptr;
     const std::shared_ptr<CompiledEquation> transpose = nullptr;
 
@@ -113,6 +116,16 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::Convolution),
           convolution(convolution),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledConvolutionBackward>& convolution_backward,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::ConvolutionBackward),
+          convolution_backward(convolution_backward),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
@@ -334,6 +347,13 @@ class FusedEquation {
                                                                        Tensor& filter,
                                                                        const Optional<Tensor>& preallocatedOutput,
                                                                        const Stream& stream) const;
+
+    [[nodiscard]] std::shared_ptr<StampedConvolutionBackward> stampConvolutionBackward(
+        const std::shared_ptr<CompiledConvolutionBackward>& compiledStage,
+        Tensor& input,
+        Tensor& grad_output,
+        const Optional<Tensor>& preallocatedOutput,
+        const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(
         const std::shared_ptr<CompiledMatmul>& compiledStage,

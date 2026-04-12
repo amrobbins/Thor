@@ -215,6 +215,13 @@ class StampedEquation {
                                                               const Tensor& output,
                                                               const Stream& stream,
                                                               int device_num);
+    static std::shared_ptr<BuiltConvolution> buildConvolutionBackward(
+        const std::shared_ptr<CompiledConvolutionBackward>& compiled_convolution_backward,
+        const Tensor& input,
+        const Tensor& grad_output,
+        const Tensor& output,
+        const Stream& stream,
+        int device_num);
 
     [[nodiscard]] bool requiresRuntimeScalars() const;
     [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
@@ -357,6 +364,33 @@ class StampedConvolution {
     const Optional<Tensor> workspace;
 };
 
+class StampedConvolutionBackward {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+    Tensor getOutputTensor() const { return output; }
+
+    StampedConvolutionBackward(std::shared_ptr<CompiledConvolutionBackward> compiled,
+                               std::shared_ptr<BuiltConvolution> built,
+                               const Tensor& input,
+                               const Tensor& grad_output,
+                               const Tensor& output,
+                               const Stream& stream,
+                               Optional<Tensor> workspace);
+
+   private:
+    const std::shared_ptr<CompiledConvolutionBackward> compiled_convolution_backward;
+    const std::shared_ptr<BuiltConvolution> built_convolution;
+    const Tensor input;
+    const Tensor grad_output;
+    Tensor output;
+    Stream stream;
+    const Optional<Tensor> workspace;
+};
+
 class StampedReduceMinMaxBackward {
    public:
     void run();
@@ -392,7 +426,7 @@ class StampedReduceMinMaxBackward {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, Convolution, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     const Kind kind;
 
     const std::vector<uint32_t> dependency_stage_indices;
@@ -403,6 +437,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<StampedMatmul> matmul = nullptr;
     const std::shared_ptr<StampedConvolution> convolution = nullptr;
+    const std::shared_ptr<StampedConvolutionBackward> convolution_backward = nullptr;
     const std::shared_ptr<StampedReduceMinMaxBackward> reduce_minmax_backward = nullptr;
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused, std::vector<uint32_t> dependency_stage_indices = {})
@@ -429,6 +464,13 @@ struct StampedExecutionStage {
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(convolution->gpuNum()),
           convolution(convolution) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedConvolutionBackward>& convolution_backward,
+                                   std::vector<uint32_t> dependency_stage_indices = {})
+        : kind(Kind::ConvolutionBackward),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(convolution_backward->gpuNum()),
+          convolution_backward(convolution_backward) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedReduceMinMaxBackward>& reduce_minmax_backward,
                                    std::vector<uint32_t> dependency_stage_indices = {})
@@ -461,6 +503,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::Convolution) {
             assert(convolution != nullptr);
             convolution->runOn(run_stream);
+        } else if (kind == Kind::ConvolutionBackward) {
+            assert(convolution_backward != nullptr);
+            convolution_backward->runOn(run_stream);
         } else if (kind == Kind::ReduceMinMaxBackward) {
             assert(reduce_minmax_backward != nullptr);
             reduce_minmax_backward->runOn(run_stream);

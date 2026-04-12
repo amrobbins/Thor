@@ -220,6 +220,8 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                 break;
             case ExprOp::MATMUL:
             case ExprOp::CONV2D:
+            case ExprOp::CONV2D_BACKWARD_DATA:
+            case ExprOp::CONV2D_BACKWARD_FILTER:
                 reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs);
                 break;
             case ExprOp::GEMM:
@@ -596,6 +598,60 @@ class BackwardGraphBuilder {
         node.transpose_lhs = transpose_lhs;
         node.transpose_rhs = transpose_rhs;
         node.transpose_aux = transpose_addend;
+        if (output_dtype.isPresent()) {
+            node.output_dtype = output_dtype.get();
+        }
+        if (compute_dtype.isPresent()) {
+            node.compute_dtype = compute_dtype.get();
+        }
+        return push(std::move(node));
+    }
+
+    uint32_t conv2dBackwardData(uint32_t filter,
+                                uint32_t grad_output,
+                                int32_t stride_h,
+                                int32_t stride_w,
+                                int32_t pad_h,
+                                int32_t pad_w,
+                                const std::vector<uint64_t>& target_output_dims = {},
+                                Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
+                                Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+        ExprNode node{};
+        node.op = ExprOp::CONV2D_BACKWARD_DATA;
+        node.lhs = filter;
+        node.rhs = grad_output;
+        node.conv_stride_h = stride_h;
+        node.conv_stride_w = stride_w;
+        node.conv_pad_h = pad_h;
+        node.conv_pad_w = pad_w;
+        node.fill_dims = target_output_dims;
+        if (output_dtype.isPresent()) {
+            node.output_dtype = output_dtype.get();
+        }
+        if (compute_dtype.isPresent()) {
+            node.compute_dtype = compute_dtype.get();
+        }
+        return push(std::move(node));
+    }
+
+    uint32_t conv2dBackwardFilter(uint32_t input,
+                                  uint32_t grad_output,
+                                  int32_t stride_h,
+                                  int32_t stride_w,
+                                  int32_t pad_h,
+                                  int32_t pad_w,
+                                  const std::vector<uint64_t>& target_output_dims = {},
+                                  Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
+                                  Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+        ExprNode node{};
+        node.op = ExprOp::CONV2D_BACKWARD_FILTER;
+        node.lhs = input;
+        node.rhs = grad_output;
+        node.conv_stride_h = stride_h;
+        node.conv_stride_w = stride_w;
+        node.conv_pad_h = pad_h;
+        node.conv_pad_w = pad_w;
+        node.fill_dims = target_output_dims;
         if (output_dtype.isPresent()) {
             node.output_dtype = output_dtype.get();
         }
@@ -1025,6 +1081,74 @@ static std::vector<uint64_t> inferConvolutionOutputDims(const ExprNode& node,
     return {n, k, static_cast<uint64_t>(numer_h / node.conv_stride_h + 1), static_cast<uint64_t>(numer_w / node.conv_stride_w + 1)};
 }
 
+static std::vector<uint64_t> inferConvolutionBackwardDataOutputDims(const ExprNode& node,
+                                                                    const std::vector<uint64_t>& filter_dims,
+                                                                    const std::vector<uint64_t>& grad_output_dims) {
+    if (filter_dims.size() != 4 || grad_output_dims.size() != 4) {
+        throw std::runtime_error("Autodiff CONV2D_BACKWARD_DATA shape inference currently requires rank-4 tensors.");
+    }
+    const uint64_t k = filter_dims[0];
+    const uint64_t c = filter_dims[1];
+    const uint64_t grad_k = grad_output_dims[1];
+    const uint64_t n = grad_output_dims[0];
+    if (k != grad_k) {
+        throw std::runtime_error("Autodiff CONV2D_BACKWARD_DATA shape inference found mismatched filter/output channels.");
+    }
+    if (!node.fill_dims.empty()) {
+        if (node.fill_dims.size() != 4) {
+            throw std::runtime_error("Autodiff CONV2D_BACKWARD_DATA explicit output shape must be rank-4.");
+        }
+        if (node.fill_dims[0] != n || node.fill_dims[1] != c) {
+            throw std::runtime_error("Autodiff CONV2D_BACKWARD_DATA explicit output shape is incompatible with batch/channels.");
+        }
+        return node.fill_dims;
+    }
+    const uint64_t r = filter_dims[2];
+    const uint64_t s = filter_dims[3];
+    const uint64_t oh = grad_output_dims[2];
+    const uint64_t ow = grad_output_dims[3];
+    const int64_t h = static_cast<int64_t>(oh - 1) * node.conv_stride_h - 2LL * node.conv_pad_h + static_cast<int64_t>(r);
+    const int64_t w = static_cast<int64_t>(ow - 1) * node.conv_stride_w - 2LL * node.conv_pad_w + static_cast<int64_t>(s);
+    if (h <= 0 || w <= 0) {
+        throw std::runtime_error("Autodiff CONV2D_BACKWARD_DATA shape inference produced non-positive output extent.");
+    }
+    return {n, c, static_cast<uint64_t>(h), static_cast<uint64_t>(w)};
+}
+
+static std::vector<uint64_t> inferConvolutionBackwardFilterOutputDims(const ExprNode& node,
+                                                                      const std::vector<uint64_t>& input_dims,
+                                                                      const std::vector<uint64_t>& grad_output_dims) {
+    if (input_dims.size() != 4 || grad_output_dims.size() != 4) {
+        throw std::runtime_error("Autodiff CONV2D_BACKWARD_FILTER shape inference currently requires rank-4 tensors.");
+    }
+    const uint64_t n = input_dims[0];
+    const uint64_t c = input_dims[1];
+    const uint64_t grad_n = grad_output_dims[0];
+    const uint64_t k = grad_output_dims[1];
+    if (n != grad_n) {
+        throw std::runtime_error("Autodiff CONV2D_BACKWARD_FILTER shape inference found mismatched batch sizes.");
+    }
+    if (!node.fill_dims.empty()) {
+        if (node.fill_dims.size() != 4) {
+            throw std::runtime_error("Autodiff CONV2D_BACKWARD_FILTER explicit output shape must be rank-4.");
+        }
+        if (node.fill_dims[0] != k || node.fill_dims[1] != c) {
+            throw std::runtime_error("Autodiff CONV2D_BACKWARD_FILTER explicit output shape is incompatible with channels.");
+        }
+        return node.fill_dims;
+    }
+    const uint64_t h = input_dims[2];
+    const uint64_t w = input_dims[3];
+    const uint64_t oh = grad_output_dims[2];
+    const uint64_t ow = grad_output_dims[3];
+    const int64_t r = static_cast<int64_t>(h) + 2LL * node.conv_pad_h - static_cast<int64_t>(oh - 1) * node.conv_stride_h;
+    const int64_t s = static_cast<int64_t>(w) + 2LL * node.conv_pad_w - static_cast<int64_t>(ow - 1) * node.conv_stride_w;
+    if (r <= 0 || s <= 0) {
+        throw std::runtime_error("Autodiff CONV2D_BACKWARD_FILTER shape inference produced non-positive filter extent.");
+    }
+    return {k, c, static_cast<uint64_t>(r), static_cast<uint64_t>(s)};
+}
+
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims) {
     if (input_dims.size() != 2) {
         throw std::runtime_error("Autodiff transpose shape inference currently only supports rank-2 tensors.");
@@ -1157,6 +1281,12 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 break;
             case ExprOp::CONV2D:
                 node_dims[i] = inferConvolutionOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                break;
+            case ExprOp::CONV2D_BACKWARD_DATA:
+                node_dims[i] = inferConvolutionBackwardDataOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                break;
+            case ExprOp::CONV2D_BACKWARD_FILTER:
+                node_dims[i] = inferConvolutionBackwardFilterOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
             default:
                 throw std::runtime_error("inferForwardNodeDims encountered unknown ExprOp.");
@@ -1871,8 +2001,42 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 break;
             }
 
-            case ExprOp::CONV2D:
-                throw std::runtime_error("Thor expressions autodiff does not yet support backward for CONV2D.");
+            case ExprOp::CONV2D: {
+                const uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : std::vector<uint64_t>{};
+                const std::vector<uint64_t> rhs_dims = has_forward_dims ? forward_node_dims.at(node.rhs) : std::vector<uint64_t>{};
+                const auto lhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
+                const auto rhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.rhs));
+
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t filter = builder.cloneForward(node.rhs);
+                    uint32_t lhs_grad = builder.conv2dBackwardData(filter,
+                                                                   grad_like_output,
+                                                                   node.conv_stride_h,
+                                                                   node.conv_stride_w,
+                                                                   node.conv_pad_h,
+                                                                   node.conv_pad_w,
+                                                                   lhs_dims,
+                                                                   lhs_grad_dtype,
+                                                                   node.compute_dtype);
+                    addContributionToChild(node.lhs, lhs_grad, lhs_dims);
+                }
+
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    const uint32_t input = builder.cloneForward(node.lhs);
+                    uint32_t rhs_grad = builder.conv2dBackwardFilter(input,
+                                                                     grad_like_output,
+                                                                     node.conv_stride_h,
+                                                                     node.conv_stride_w,
+                                                                     node.conv_pad_h,
+                                                                     node.conv_pad_w,
+                                                                     rhs_dims,
+                                                                     rhs_grad_dtype,
+                                                                     node.compute_dtype);
+                    addContributionToChild(node.rhs, rhs_grad, rhs_dims);
+                }
+                break;
+            }
 
             case ExprOp::GEMM: {
                 const uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
