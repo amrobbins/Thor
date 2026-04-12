@@ -1691,21 +1691,21 @@ Tensor Tensor::transposeMatrix(Stream stream) {
     return transposedTensor;
 }
 
-void Tensor::transposeSquareMatrixInPlace(Stream stream) {
-    vector<uint64_t> dimensions = getDimensions();
-    // Generally the transpose of a higher order tensor would be any permutation of the tensor's dimensions, in that case the particular
-    // permutation would also need to be specified. I'm not doing that now and unless some need arises I probably won't implement that.
-    assert(dimensions.size() == 2);
-    assert(dimensions[0] == dimensions[1]);
-
-    if (getDataType() == TensorDescriptor::DataType::FP16) {
-        matrixTransposeSquare((half *)getMemPtr(), (half *)getMemPtr(), dimensions[0], stream);
-    } else if (getDataType() == TensorDescriptor::DataType::FP32) {
-        matrixTransposeSquare((float *)getMemPtr(), (float *)getMemPtr(), dimensions[0], stream);
-    } else {
-        assert(false);  // TODO
-    }
-}
+// void Tensor::transposeSquareMatrixInPlace(Stream stream) {
+//     vector<uint64_t> dimensions = getDimensions();
+//     // Generally the transpose of a higher order tensor would be any permutation of the tensor's dimensions, in that case the particular
+//     // permutation would also need to be specified. I'm not doing that now and unless some need arises I probably won't implement that.
+//     assert(dimensions.size() == 2);
+//     assert(dimensions[0] == dimensions[1]);
+//
+//     if (getDataType() == TensorDescriptor::DataType::FP16) {
+//         matrixTransposeSquare((half *)getMemPtr(), (half *)getMemPtr(), dimensions[0], stream);
+//     } else if (getDataType() == TensorDescriptor::DataType::FP32) {
+//         matrixTransposeSquare((float *)getMemPtr(), (float *)getMemPtr(), dimensions[0], stream);
+//     } else {
+//         assert(false);  // TODO
+//     }
+// }
 
 template void *Tensor::getMemPtr();
 template half *Tensor::getMemPtr();

@@ -830,8 +830,6 @@ shared_ptr<CompiledEquation> EquationCompiler::compileTransposeStage(const Physi
         throw runtime_error("Transpose stage expects exactly one input and one output.");
     }
 
-    ensureCudaContextCurrent(sig.device_num);
-
     EquationCacheKey key(canonicalize(stage), sig, false);
     shared_ptr<CompiledEquation> hit = cacheLookup(key);
     if (hit) {
@@ -843,12 +841,6 @@ shared_ptr<CompiledEquation> EquationCompiler::compileTransposeStage(const Physi
     if (input_dtypes.size() != 1 || output_dtypes.size() != 1) {
         throw runtime_error("Transpose stage expects exactly one compiled input dtype and one compiled output dtype.");
     }
-    if (input_dtypes[0] != output_dtypes[0]) {
-        throw runtime_error("Transpose stage currently requires matching input/output dtypes.");
-    }
-
-    string kernel_name = "transpose_kernel";
-    const std::string cuda_src = CudaSourceEmitter::emitTranspose(stage, kernel_name);
 
     vector<string> input_names;
     std::vector<NamedInput::Kind> input_kinds;
@@ -859,10 +851,15 @@ shared_ptr<CompiledEquation> EquationCompiler::compileTransposeStage(const Physi
         input_kinds.push_back(input.kind);
     }
 
-    vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
-    vector<char> cubin = linkToCubin(ltoir, sig);
-    auto compiled = loadCubin(key, cubin, kernel_name, input_names, input_kinds, input_dtypes, output_dtypes, sig.device_num);
+    auto compiled = std::make_shared<CompiledEquation>();
+    compiled->key = key;
+    compiled->kernel_name = "precompiled_transpose";
     compiled->launch_kind = CompiledEquation::LaunchKind::Transpose;
+    compiled->deviceNum = sig.device_num;
+    compiled->input_names = std::move(input_names);
+    compiled->input_kinds = std::move(input_kinds);
+    compiled->input_dtypes = input_dtypes;
+    compiled->output_dtypes = output_dtypes;
     compiled->elements_per_thread = 1;
     compiled->uses_uint32_numel_arg = false;
 

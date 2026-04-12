@@ -750,7 +750,7 @@ class Tensor : private ReferenceCounted {
      *
      * FIXME: Currently only supported for tensors of type FP16 and FP32
      */
-    void transposeSquareMatrixInPlace(Stream stream);
+    // void transposeSquareMatrixInPlace(Stream stream);
 
     bool operator==(const Tensor &other) const;
     bool operator!=(const Tensor &other) const;
