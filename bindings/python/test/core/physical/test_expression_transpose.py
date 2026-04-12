@@ -219,3 +219,100 @@ def test_transpose_rejects_non_rank2_tensor_at_stamp_time():
 
     with pytest.raises(RuntimeError, match="rank-2"):
         eq.stamp(inputs_gpu, stream)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.fp32])
+def test_explicit_transpose_is_absorbed_into_matmul_stage(dtype: thor.DataType):
+    a = ex.input("a")
+    b = ex.input("b")
+    eq = ex.compile(a.transpose() @ b, device_num=0)
+
+    a_np = _make_matrix((3, 2), dtype, scale=0.125, bias=-0.5)
+    b_np = _make_matrix((3, 4), dtype, scale=0.1, bias=0.25)
+    expected = _cast_reference_to_storage_dtype_with_saturation(
+        a_np.astype(np.float32).T @ b_np.astype(np.float32), dtype)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+    }
+
+    stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+    assert stage_kinds == ["Matmul(lhsT=1,rhsT=0,auxT=0)"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.fp32])
+def test_explicit_transpose_is_absorbed_into_operator_lowered_gemm_stage(dtype: thor.DataType):
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    eq = ex.compile(a @ b.transpose() + c, device_num=0)
+
+    a_np = _make_matrix((2, 3), dtype, scale=0.125, bias=-0.5)
+    b_np = _make_matrix((4, 3), dtype, scale=0.1, bias=0.25)
+    c_np = _make_matrix((2, 4), dtype, scale=0.05, bias=-0.125)
+    expected = _cast_reference_to_storage_dtype_with_saturation(
+        a_np.astype(np.float32) @ b_np.astype(np.float32).T + c_np.astype(np.float32),
+        dtype,
+    )
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "c": _host_to_gpu(c_np, dtype, stream),
+    }
+
+    stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+    assert stage_kinds == ["Matmul(lhsT=0,rhsT=1,auxT=0)"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.fp32])
+def test_explicit_transpose_is_absorbed_into_explicit_gemm_stage(dtype: thor.DataType):
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    eq = ex.compile(ex.gemm(a.transpose(), b, c, alpha=1.25, beta=-0.5), device_num=0)
+
+    a_np = _make_matrix((3, 2), dtype, scale=0.125, bias=-0.5)
+    b_np = _make_matrix((3, 4), dtype, scale=0.1, bias=0.25)
+    c_np = _make_matrix((2, 4), dtype, scale=0.05, bias=-0.125)
+    expected = _cast_reference_to_storage_dtype_with_saturation(
+        1.25 * (a_np.astype(np.float32).T @ b_np.astype(np.float32)) - 0.5 * c_np.astype(np.float32),
+        dtype,
+    )
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "c": _host_to_gpu(c_np, dtype, stream),
+    }
+
+    stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+    assert stage_kinds == ["Matmul(lhsT=1,rhsT=0,auxT=0)"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)

@@ -273,6 +273,20 @@ static bool isStageBoundaryOp(ExprOp op) {
     return isCudnnReduceOp(op) || isMatmulOp(op) || isReduceMinMaxBackwardOp(op) || isTransposeOp(op);
 }
 
+static uint32_t peelExplicitTransposeChain(const PhysicalExpression& expr, uint32_t node_idx, bool& transpose_toggled) {
+    transpose_toggled = false;
+    uint32_t current = node_idx;
+    while (current != UINT32_MAX && current < expr.nodes.size() && expr.nodes[current].op == ExprOp::TRANSPOSE) {
+        const ExprNode& transpose = expr.nodes[current];
+        if (transpose.lhs == UINT32_MAX || transpose.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("Transpose node missing valid lhs input while peeling matmul/gemm transpose dependency.");
+        }
+        transpose_toggled = !transpose_toggled;
+        current = transpose.lhs;
+    }
+    return current;
+}
+
 static void collectExternalValueIds(const PhysicalExpression& expr,
                                     const std::unordered_set<uint32_t>& region_nodes,
                                     const std::unordered_map<uint32_t, uint32_t>& node_output_value_id,
@@ -1590,9 +1604,14 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
         bind_parent_to_local_tensor_input(parent_idx, local_slot);
     };
 
-    bind_parent_to_local_tensor_input(node.lhs, static_cast<uint32_t>(stage_expr.inputs.size()));
+    bool absorbed_lhs_transpose = false;
+    bool absorbed_rhs_transpose = false;
+    const uint32_t effective_lhs_parent = peelExplicitTransposeChain(expr, node.lhs, absorbed_lhs_transpose);
+    const uint32_t effective_rhs_parent = peelExplicitTransposeChain(expr, node.rhs, absorbed_rhs_transpose);
+
+    bind_parent_to_local_tensor_input(effective_lhs_parent, static_cast<uint32_t>(stage_expr.inputs.size()));
     const uint32_t lhs_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
-    bind_parent_to_local_tensor_input(node.rhs, static_cast<uint32_t>(stage_expr.inputs.size()));
+    bind_parent_to_local_tensor_input(effective_rhs_parent, static_cast<uint32_t>(stage_expr.inputs.size()));
     const uint32_t rhs_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
     uint32_t aux_local = UINT32_MAX;
     if (node.op == ExprOp::GEMM) {
@@ -1617,6 +1636,8 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
     route.aux = aux_local;
     route.alpha_node = alpha_local;
     route.beta_node = beta_local;
+    route.transpose_lhs = node.transpose_lhs ^ absorbed_lhs_transpose;
+    route.transpose_rhs = node.transpose_rhs ^ absorbed_rhs_transpose;
     stage_expr.nodes.push_back(std::move(route));
     stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
 
@@ -1836,9 +1857,17 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 emitForDependency(parent_idx);
             };
 
-            ensureBoundaryParentEmitted(root.lhs, "lhs", isCudnnReduceOp(root.op));
+            uint32_t lhs_dependency_idx = root.lhs;
+            uint32_t rhs_dependency_idx = root.rhs;
+            if (isMatmulOp(root.op)) {
+                bool ignored = false;
+                lhs_dependency_idx = peelExplicitTransposeChain(expr, root.lhs, ignored);
+                rhs_dependency_idx = peelExplicitTransposeChain(expr, root.rhs, ignored);
+            }
+
+            ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op)) {
-                ensureBoundaryParentEmitted(root.rhs, "rhs", false);
+                ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
             }
             if (root.op == ExprOp::GEMM) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);
@@ -1992,9 +2021,17 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 emitForDependency(parent_idx);
             };
 
-            ensureBoundaryParentEmitted(root.lhs, "lhs", isCudnnReduceOp(root.op));
+            uint32_t lhs_dependency_idx = root.lhs;
+            uint32_t rhs_dependency_idx = root.rhs;
+            if (isMatmulOp(root.op)) {
+                bool ignored = false;
+                lhs_dependency_idx = peelExplicitTransposeChain(expr, root.lhs, ignored);
+                rhs_dependency_idx = peelExplicitTransposeChain(expr, root.rhs, ignored);
+            }
+
+            ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op)) {
-                ensureBoundaryParentEmitted(root.rhs, "rhs", false);
+                ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
             }
             if (root.op == ExprOp::GEMM) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);
