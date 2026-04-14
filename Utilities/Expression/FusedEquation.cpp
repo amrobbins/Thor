@@ -1,11 +1,11 @@
-#include "Utilities/TensorMathFusion/FusedEquation.h"
+#include "Utilities/Expression/FusedEquation.h"
 
-#include "Utilities/TensorMathFusion/AutoDiff.h"
-#include "Utilities/TensorMathFusion/CudaSourceEmitter.h"
-#include "Utilities/TensorMathFusion/EquationCompiler.h"
-#include "Utilities/TensorMathFusion/Expression.h"
-#include "Utilities/TensorMathFusion/ExpressionDTypeResolution.h"
-#include "Utilities/TensorMathFusion/StampedEquation.h"
+#include "Utilities/Expression/AutoDiff.h"
+#include "Utilities/Expression/CudaSourceEmitter.h"
+#include "Utilities/Expression/EquationCompiler.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/ExpressionDTypeResolution.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 #include <cuda_runtime.h>
 

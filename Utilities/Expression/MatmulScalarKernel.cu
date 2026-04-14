@@ -1,4 +1,4 @@
-#include "Utilities/TensorMathFusion/MatmulScalarKernel.h"
+#include "Utilities/Expression/MatmulScalarKernel.h"
 
 #include <stdexcept>
 

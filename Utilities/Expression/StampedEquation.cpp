@@ -1,9 +1,9 @@
-#include "Utilities/TensorMathFusion/StampedEquation.h"
-#include "Utilities/TensorMathFusion/CudaHelpers.h"
-#include "Utilities/TensorMathFusion/EquationRunner.h"
-#include "Utilities/TensorMathFusion/FusedEquation.h"
-#include "Utilities/TensorMathFusion/MatmulScalarKernel.h"
-#include "Utilities/TensorMathFusion/ReduceMinMaxBackwardKernel.h"
+#include "Utilities/Expression/StampedEquation.h"
+#include "Utilities/Expression/CudaHelpers.h"
+#include "Utilities/Expression/EquationRunner.h"
+#include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/MatmulScalarKernel.h"
+#include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include <cstring>

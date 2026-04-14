@@ -15,10 +15,10 @@
 #include <unordered_set>
 #include <vector>
 
-#include "Utilities/TensorMathFusion/CudaHelpers.h"
-#include "Utilities/TensorMathFusion/Expression.h"
-#include "Utilities/TensorMathFusion/FusedEquation.h"
-#include "Utilities/TensorMathFusion/StampedEquation.h"
+#include "Utilities/Expression/CudaHelpers.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 namespace ThorImplementation {
 

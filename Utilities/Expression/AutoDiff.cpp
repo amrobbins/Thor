@@ -1,4 +1,4 @@
-#include "Utilities/TensorMathFusion/AutoDiff.h"
+#include "Utilities/Expression/AutoDiff.h"
 
 #include <cmath>
 #include <optional>
@@ -6,7 +6,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "Utilities/TensorMathFusion/StampedEquation.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 namespace ThorImplementation {
 namespace {

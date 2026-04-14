@@ -7,10 +7,10 @@
 #include <vector>
 
 #include "Utilities/Cache/LruCache.h"
-#include "Utilities/TensorMathFusion/EquationRunner.h"
-#include "Utilities/TensorMathFusion/Expression.h"
-#include "Utilities/TensorMathFusion/SqueezeAxes.h"
-#include "Utilities/TensorMathFusion/StampedEquation.h"
+#include "Utilities/Expression/EquationRunner.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/SqueezeAxes.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 namespace ThorImplementation {
 

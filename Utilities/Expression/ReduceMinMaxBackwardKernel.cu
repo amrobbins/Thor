@@ -1,4 +1,4 @@
-#include "Utilities/TensorMathFusion/ReduceMinMaxBackwardKernel.h"
+#include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>

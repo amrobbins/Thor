@@ -4,9 +4,9 @@
 #include <string>
 
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
-#include "Utilities/TensorMathFusion/Expression.h"
-#include "Utilities/TensorMathFusion/FusedEquation.h"
-#include "Utilities/TensorMathFusion/StampedEquation.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>

@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "Utilities/TensorMathFusion/Expression.h"
+#include "Utilities/Expression/Expression.h"
 
 namespace ThorImplementation {
 

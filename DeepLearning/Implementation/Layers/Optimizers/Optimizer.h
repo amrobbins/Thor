@@ -4,8 +4,8 @@
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/CudnnHelper.h"
-#include "Utilities/TensorMathFusion/DynamicExpression.h"
-#include "Utilities/TensorMathFusion/StampedEquation.h"
+#include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 // New Shape: an optimizer optimizes exactly 1 tensor.
 //            The layer owns the weights gradient memory and materializes it as needed. Layer manages lifetime of gradient memory.

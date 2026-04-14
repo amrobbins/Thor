@@ -1,4 +1,4 @@
-#include "Utilities/TensorMathFusion/EquationRunner.h"
+#include "Utilities/Expression/EquationRunner.h"
 #include <limits>
 
 #include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
