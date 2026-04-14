@@ -1,6 +1,6 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
-#include "Utilities/TensorMathFusion/Expression.h"
-#include "Utilities/TensorMathFusion/FusedEquation.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/FusedEquation.h"
 
 using namespace std;
 

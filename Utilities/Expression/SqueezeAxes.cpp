@@ -1,6 +1,6 @@
-#include "Utilities/TensorMathFusion/SqueezeAxes.h"
+#include "Utilities/Expression/SqueezeAxes.h"
 
-#include "Utilities/TensorMathFusion/StampedEquation.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 #include <algorithm>
 #include <stdexcept>

@@ -5,8 +5,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "Utilities/TensorMathFusion/Expression.h"
-#include "Utilities/TensorMathFusion/SqueezeAxes.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/SqueezeAxes.h"
 
 namespace ThorImplementation {
 

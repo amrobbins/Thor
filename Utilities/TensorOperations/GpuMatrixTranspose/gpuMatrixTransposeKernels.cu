@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <type_traits>
 
-#include "Utilities/TensorMathFusion/CudaHelpers.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 namespace ThorImplementation {
 namespace {

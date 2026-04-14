@@ -1,6 +1,6 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
-#include "Utilities/TensorMathFusion/Expression.h"
-#include "Utilities/TensorMathFusion/FusedEquation.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/FusedEquation.h"
 
 using namespace ThorImplementation;
 using namespace std;

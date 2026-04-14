@@ -1,6 +1,6 @@
-#include "Utilities/TensorMathFusion/EquationCompiler.h"
+#include "Utilities/Expression/EquationCompiler.h"
 
-#include "Utilities/TensorMathFusion/ExpressionDTypeResolution.h"
+#include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "gtest/gtest.h"
 
 using namespace ThorImplementation;

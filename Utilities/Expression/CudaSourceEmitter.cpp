@@ -1,6 +1,6 @@
-#include "Utilities/TensorMathFusion/CudaSourceEmitter.h"
-#include "Utilities/TensorMathFusion/EquationCompiler.h"
-#include "Utilities/TensorMathFusion/ExpressionDTypeResolution.h"
+#include "Utilities/Expression/CudaSourceEmitter.h"
+#include "Utilities/Expression/EquationCompiler.h"
+#include "Utilities/Expression/ExpressionDTypeResolution.h"
 
 #include <algorithm>
 #include <iomanip>

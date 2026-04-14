@@ -9,9 +9,9 @@
 #include <utility>
 #include <vector>
 
-#include "Utilities/TensorMathFusion/CompiledEquation.h"
-#include "Utilities/TensorMathFusion/FusedEquation.h"
-#include "Utilities/TensorMathFusion/StampedEquation.h"
+#include "Utilities/Expression/CompiledEquation.h"
+#include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 namespace ThorImplementation {
 

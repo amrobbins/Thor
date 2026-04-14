@@ -46,23 +46,6 @@ FullyConnected2::FullyConnected2(const uint32_t numOutputFeatures,
                                  int64_t stampedId)
     : CustomLayer(
           buildExpression(hasBias, placement), placement, defineParameters(numOutputFeatures, hasBias), inferenceOnly, stampedId, false) {}
-// numOutputFeatures(numOutputFeatures),
-// weightsDataType(weightsDataType.isPresent() ? weightsDataType.get() : DataType::FP16),
-// hasBias(hasBias) {}
-
-// Optional<Tensor> FullyConnected2::createFeatureOutputTensor() {
-//     assert(!featureInputs.empty());
-//     assert(featureInputs.back().isPresent());
-//
-//     return Tensor(featureInputs.back().get().getPlacement(),
-//                   TensorDescriptor(weightsDataType, {featureInputs[0].get().getDescriptor().getDimensions()[0], numOutputFeatures}));
-// }
-
-// void FullyConnected2::compileImpl() {
-//     CustomLayer::compileImpl();
-//     batchSize = getFirstPresentTensor(featureInputs).get().getDescriptor().getDimensions()[0];
-//     numInputFeatures = getFirstPresentTensor(featureInputs).get().getDescriptor().getDimensions()[1];
-// }
 
 DynamicExpression FullyConnected2::buildExpression(bool hasBias, TensorPlacement placement) {
     return DynamicExpression([hasBias, placement](const DynamicExpression::TensorMap& inputs,

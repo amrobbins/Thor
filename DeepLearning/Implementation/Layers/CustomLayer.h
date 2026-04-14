@@ -3,9 +3,9 @@
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/Parameter.h"
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
-#include "Utilities/TensorMathFusion/Expression.h"
-#include "Utilities/TensorMathFusion/FusedEquation.h"
-#include "Utilities/TensorMathFusion/StampedEquation.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 namespace ThorImplementation {
 class CustomLayer : public TrainableLayer {

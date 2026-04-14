@@ -9,9 +9,9 @@
 
 #include <sstream>
 
-#include "Utilities/TensorMathFusion/DynamicExpression.h"
-#include "Utilities/TensorMathFusion/FusedEquation.h"
-#include "Utilities/TensorMathFusion/StampedEquation.h"
+#include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
