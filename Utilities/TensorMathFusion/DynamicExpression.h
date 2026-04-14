@@ -221,7 +221,7 @@ class PreparedDynamicExpression {
 class DynamicExpression {
    public:
     using TensorMap = std::unordered_map<std::string, Tensor>;
-    using BuilderFn = std::function<DynamicExpressionBuild(const TensorMap& inputs, Stream& stream)>;
+    using BuilderFn = std::function<DynamicExpressionBuild(const TensorMap& inputs, const TensorMap& outputs, Stream& stream)>;
 
     explicit DynamicExpression(BuilderFn builder) : builder_(std::move(builder)) {
         if (!builder_) {
@@ -229,23 +229,27 @@ class DynamicExpression {
         }
     }
 
-    [[nodiscard]] PreparedDynamicExpression prepare(const TensorMap& inputs, Stream& stream) const {
+    [[nodiscard]] PreparedDynamicExpression prepare(const TensorMap& inputs, const TensorMap& outputs, Stream& stream) const {
         validateInputs(inputs, stream);
-        return PreparedDynamicExpression(builder_(inputs, stream), stream);
+        return PreparedDynamicExpression(builder_(inputs, outputs, stream), stream);
     }
 
-    [[nodiscard]] StampedExecutionPlan stamp(const TensorMap& inputs, Stream& stream) const { return prepare(inputs, stream).stamp(); }
+    [[nodiscard]] StampedExecutionPlan stamp(const TensorMap& inputs, const TensorMap& outputs, Stream& stream) const {
+        return prepare(inputs, outputs, stream).stamp();
+    }
 
     [[nodiscard]] StampedExecutionPlan stamp(
         const TensorMap& inputs,
+        const TensorMap& outputs,
         Stream& stream,
         const TensorMap& preallocated_outputs,
         const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes = {}) const {
-        return prepare(inputs, stream).stamp(preallocated_outputs, requested_output_shapes);
+        return prepare(inputs, outputs, stream).stamp(preallocated_outputs, requested_output_shapes);
     }
 
     [[nodiscard]] StampedExecutionPlan stampBackward(
         const TensorMap& inputs,
+        const TensorMap& outputs,
         Stream& stream,
         const std::vector<std::string>& wrt_names = {},
         const std::optional<std::string>& upstream_input_name = std::nullopt,
@@ -254,7 +258,7 @@ class DynamicExpression {
         const std::unordered_map<std::string, TensorScalarBinding>& additional_tensor_scalar_inputs = {},
         const TensorMap& preallocated_grad_outputs = {},
         const std::unordered_map<std::string, std::vector<uint64_t>>& requested_grad_output_shapes = {}) const {
-        return prepare(inputs, stream)
+        return prepare(inputs, outputs, stream)
             .stampBackward(wrt_names,
                            upstream_input_name,
                            accumulate_grad_outputs,
@@ -266,6 +270,7 @@ class DynamicExpression {
 
     [[nodiscard]] StampedExecutionPlan stampBackward(
         const TensorMap& inputs,
+        const TensorMap& outputs,
         Stream& stream,
         const std::vector<std::string>& wrt_names,
         const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
@@ -274,7 +279,7 @@ class DynamicExpression {
         const std::unordered_map<std::string, TensorScalarBinding>& additional_tensor_scalar_inputs = {},
         const TensorMap& preallocated_grad_outputs = {},
         const std::unordered_map<std::string, std::vector<uint64_t>>& requested_grad_output_shapes = {}) const {
-        return prepare(inputs, stream)
+        return prepare(inputs, outputs, stream)
             .stampBackward(wrt_names,
                            upstream_input_names_by_output,
                            accumulate_grad_outputs,

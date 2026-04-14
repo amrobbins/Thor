@@ -1431,28 +1431,33 @@ The callable is invoked from C++ when ``prepare(...)``, ``stamp(...)``, or
     dynamic_expression.def("prepare",
                            &DynamicExpression::prepare,
                            "inputs"_a,
+                           "outputs"_a,
                            "stream"_a,
                            R"nbdoc(
 Validate the provided tensors and stream, then invoke the stored builder and
 return a PreparedDynamicExpression.
 )nbdoc");
 
-    dynamic_expression.def("stamp",
-                           nb::overload_cast<const DynamicTensorMap&, Stream&>(&DynamicExpression::stamp, nb::const_),
-                           "inputs"_a,
-                           "stream"_a,
-                           R"nbdoc(
+    dynamic_expression.def(
+        "stamp",
+        nb::overload_cast<const DynamicTensorMap&, const DynamicTensorMap&, Stream&>(&DynamicExpression::stamp, nb::const_),
+        "inputs"_a,
+        "outputs"_a,
+        "stream"_a,
+        R"nbdoc(
 Validate the provided tensors and stream, then stamp the dynamic expression.
 )nbdoc");
 
-    dynamic_expression.def("stamp",
-                           nb::overload_cast<const DynamicTensorMap&, Stream&, const DynamicTensorMap&, const DynamicShapeMap&>(
-                               &DynamicExpression::stamp, nb::const_),
-                           "inputs"_a,
-                           "stream"_a,
-                           "preallocated_outputs"_a,
-                           "requested_output_shapes"_a = DynamicShapeMap{},
-                           R"nbdoc(
+    dynamic_expression.def(
+        "stamp",
+        nb::overload_cast<const DynamicTensorMap&, const DynamicTensorMap&, Stream&, const DynamicTensorMap&, const DynamicShapeMap&>(
+            &DynamicExpression::stamp, nb::const_),
+        "inputs"_a,
+        "outputs"_a,
+        "stream"_a,
+        "preallocated_outputs"_a,
+        "requested_output_shapes"_a = DynamicShapeMap{},
+        R"nbdoc(
 Validate the provided tensors and stream, then stamp the dynamic expression
 with output overrides.
 )nbdoc");
@@ -1461,6 +1466,7 @@ with output overrides.
         "stamp_backward",
         [](const DynamicExpression& self,
            const DynamicTensorMap& inputs,
+           const DynamicTensorMap& outputs,
            Stream& stream,
            const std::vector<std::string>& wrt_names,
            std::optional<std::string> upstream_input_name,
@@ -1470,6 +1476,7 @@ with output overrides.
            const DynamicTensorMap& preallocated_grad_outputs,
            const DynamicShapeMap& requested_grad_output_shapes) {
             return self.stampBackward(inputs,
+                                      outputs,
                                       stream,
                                       wrt_names,
                                       upstream_input_name,
@@ -1480,6 +1487,7 @@ with output overrides.
                                       requested_grad_output_shapes);
         },
         "inputs"_a,
+        "outputs"_a,
         "stream"_a,
         "wrt_names"_a = std::vector<std::string>{},
         "upstream_input_name"_a.none() = nb::none(),
@@ -1496,6 +1504,7 @@ Prepare and stamp a backward execution plan for a single-output forward expressi
         "stamp_backward",
         [](const DynamicExpression& self,
            const DynamicTensorMap& inputs,
+           const DynamicTensorMap& outputs,
            Stream& stream,
            const std::vector<std::string>& wrt_names,
            const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
@@ -1505,6 +1514,7 @@ Prepare and stamp a backward execution plan for a single-output forward expressi
            const DynamicTensorMap& preallocated_grad_outputs,
            const DynamicShapeMap& requested_grad_output_shapes) {
             return self.stampBackward(inputs,
+                                      outputs,
                                       stream,
                                       wrt_names,
                                       upstream_input_names_by_output,
@@ -1515,6 +1525,7 @@ Prepare and stamp a backward execution plan for a single-output forward expressi
                                       requested_grad_output_shapes);
         },
         "inputs"_a,
+        "outputs"_a,
         "stream"_a,
         "wrt_names"_a,
         "upstream_input_names_by_output"_a,
