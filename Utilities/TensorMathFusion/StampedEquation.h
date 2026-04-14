@@ -431,6 +431,7 @@ struct StampedExecutionStage {
 
     const std::vector<uint32_t> dependency_stage_indices;
     const uint32_t gpu_num;
+    const uint64_t flop_count = 0;
 
     const std::shared_ptr<StampedEquation> kernel = nullptr;
     const std::shared_ptr<StampedReduction> reduction = nullptr;
@@ -440,44 +441,70 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedConvolutionBackward> convolution_backward = nullptr;
     const std::shared_ptr<StampedReduceMinMaxBackward> reduce_minmax_backward = nullptr;
 
-    explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused, std::vector<uint32_t> dependency_stage_indices = {})
-        : kind(Kind::FusedKernel), dependency_stage_indices(std::move(dependency_stage_indices)), gpu_num(fused->gpuNum()), kernel(fused) {}
+    explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::FusedKernel),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(fused->gpuNum()),
+          flop_count(flop_count),
+          kernel(fused) {}
 
-    explicit StampedExecutionStage(const std::shared_ptr<StampedReduction>& reduction, std::vector<uint32_t> dependency_stage_indices = {})
+    explicit StampedExecutionStage(const std::shared_ptr<StampedReduction>& reduction,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
         : kind(Kind::Reduction),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(reduction->gpuNum()),
+          flop_count(flop_count),
           reduction(reduction) {}
 
-    explicit StampedExecutionStage(const std::shared_ptr<StampedArgMinMax>& arg_minmax, std::vector<uint32_t> dependency_stage_indices = {})
+    explicit StampedExecutionStage(const std::shared_ptr<StampedArgMinMax>& arg_minmax,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
         : kind(Kind::ArgMinMax),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(arg_minmax->gpuNum()),
+          flop_count(flop_count),
           arg_minmax(arg_minmax) {}
 
-    explicit StampedExecutionStage(const std::shared_ptr<StampedMatmul>& matmul, std::vector<uint32_t> dependency_stage_indices = {})
-        : kind(Kind::Matmul), dependency_stage_indices(std::move(dependency_stage_indices)), gpu_num(matmul->gpuNum()), matmul(matmul) {}
+    explicit StampedExecutionStage(const std::shared_ptr<StampedMatmul>& matmul,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::Matmul),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(matmul->gpuNum()),
+          flop_count(flop_count),
+          matmul(matmul) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedConvolution>& convolution,
-                                   std::vector<uint32_t> dependency_stage_indices = {})
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
         : kind(Kind::Convolution),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(convolution->gpuNum()),
+          flop_count(flop_count),
           convolution(convolution) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedConvolutionBackward>& convolution_backward,
-                                   std::vector<uint32_t> dependency_stage_indices = {})
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
         : kind(Kind::ConvolutionBackward),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(convolution_backward->gpuNum()),
+          flop_count(flop_count),
           convolution_backward(convolution_backward) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedReduceMinMaxBackward>& reduce_minmax_backward,
-                                   std::vector<uint32_t> dependency_stage_indices = {})
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
         : kind(Kind::ReduceMinMaxBackward),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(reduce_minmax_backward->gpuNum()),
+          flop_count(flop_count),
           reduce_minmax_backward(reduce_minmax_backward) {}
+
+    [[nodiscard]] uint64_t flopCount() const { return flop_count; }
 
     void runOn(Stream& run_stream) const { runOn(run_stream, {}); }
 
@@ -524,6 +551,27 @@ class StampedExecutionPlan {
 
     void run();
     void run(const std::unordered_map<std::string, float>& runtime_scalars);
+
+    [[nodiscard]] uint64_t flopCount() const {
+        uint64_t total = 0;
+        for (const StampedExecutionStage& step : steps) {
+            const uint64_t f = step.flopCount();
+            if (std::numeric_limits<uint64_t>::max() - total < f) {
+                throw std::runtime_error("StampedExecutionPlan::flopCount overflow.");
+            }
+            total += f;
+        }
+        return total;
+    }
+
+    [[nodiscard]] std::vector<uint64_t> stageFlopCounts() const {
+        std::vector<uint64_t> out;
+        out.reserve(steps.size());
+        for (const StampedExecutionStage& step : steps) {
+            out.push_back(step.flopCount());
+        }
+        return out;
+    }
 
     Tensor output(const std::string& name) const {
         auto it = final_outputs.find(name);

@@ -1637,6 +1637,113 @@ static std::vector<uint64_t> resolveReductionAxesForInputRank(const std::vector<
     return reduction_axes;
 }
 
+static uint64_t checkedAddU64(uint64_t a, uint64_t b, const char* what) {
+    unsigned __int128 s = static_cast<unsigned __int128>(a) + static_cast<unsigned __int128>(b);
+    if (s > std::numeric_limits<uint64_t>::max()) {
+        throw std::runtime_error(std::string("FLOP count overflow in ") + what + ".");
+    }
+    return static_cast<uint64_t>(s);
+}
+
+static uint64_t checkedMulU64(uint64_t a, uint64_t b, const char* what) {
+    unsigned __int128 p = static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b);
+    if (p > std::numeric_limits<uint64_t>::max()) {
+        throw std::runtime_error(std::string("FLOP count overflow in ") + what + ".");
+    }
+    return static_cast<uint64_t>(p);
+}
+
+static uint64_t numelFromDims(const std::vector<uint64_t>& dims) {
+    uint64_t n = 1;
+    for (uint64_t d : dims) {
+        n = checkedMulU64(n, d, "numelFromDims");
+    }
+    return n;
+}
+
+static uint64_t reductionExtent(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& reduction_axes) {
+    const std::vector<uint64_t> axes = resolveReductionAxesForInputRank(reduction_axes, input_dims.size());
+    uint64_t n = 1;
+    for (uint64_t axis : axes) {
+        if (axis >= input_dims.size()) {
+            throw std::runtime_error("Reduction axis out of range while computing FLOPs.");
+        }
+        n = checkedMulU64(n, input_dims[axis], "reductionExtent");
+    }
+    return n;
+}
+
+static uint64_t reductionSemanticFlops(ExprOp op, uint64_t output_numel, uint64_t reduce_extent) {
+    if (output_numel == 0 || reduce_extent == 0) {
+        return 0;
+    }
+
+    switch (op) {
+        case ExprOp::REDUCE_SUM:
+        case ExprOp::REDUCE_PROD:
+        case ExprOp::REDUCE_MIN:
+        case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_ARGMIN:
+        case ExprOp::REDUCE_ARGMAX:
+            return checkedMulU64(output_numel, reduce_extent - 1, "reductionSemanticFlops");
+
+        case ExprOp::REDUCE_AVG:
+            return checkedMulU64(output_numel, reduce_extent, "reductionSemanticFlops");
+
+        case ExprOp::REDUCE_NORM1: {
+            const uint64_t per_output =
+                checkedAddU64(checkedMulU64(2, reduce_extent, "reductionSemanticFlops"), 0, "reductionSemanticFlops") - 1;
+            return checkedMulU64(output_numel, per_output, "reductionSemanticFlops");
+        }
+
+        case ExprOp::REDUCE_NORM2: {
+            const uint64_t per_output = checkedMulU64(2, reduce_extent, "reductionSemanticFlops");
+            return checkedMulU64(output_numel, per_output, "reductionSemanticFlops");
+        }
+
+        default:
+            throw std::runtime_error("Unsupported reduction op while computing FLOPs.");
+    }
+}
+
+static uint64_t perElementSemanticFlops(ExprOp op) {
+    switch (op) {
+        case ExprOp::ADD:
+        case ExprOp::SUB:
+        case ExprOp::MUL:
+        case ExprOp::DIV:
+        case ExprOp::POW:
+        case ExprOp::NEG:
+        case ExprOp::ABS:
+        case ExprOp::EXP:
+        case ExprOp::EXP2:
+        case ExprOp::EXP10:
+        case ExprOp::LN:
+        case ExprOp::LOG2:
+        case ExprOp::LOG10:
+        case ExprOp::SQRT:
+        case ExprOp::MIN:
+        case ExprOp::MAX:
+        case ExprOp::MIN_GRAD_LEFT:
+        case ExprOp::MIN_GRAD_RIGHT:
+        case ExprOp::MAX_GRAD_LEFT:
+        case ExprOp::MAX_GRAD_RIGHT:
+            return 1;
+
+        case ExprOp::INPUT:
+        case ExprOp::RUNTIME_SCALAR:
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
+        case ExprOp::SCALAR_FP:
+        case ExprOp::FILL:
+        case ExprOp::UNSQUEEZE:
+        case ExprOp::SQUEEZE:
+            return 0;
+
+        default:
+            throw std::runtime_error("Unsupported per-element op while computing FLOPs.");
+    }
+}
+
 static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(const PhysicalExpression& expr,
                                                                               const std::vector<std::vector<uint64_t>>& stage_input_dims,
                                                                               const std::unordered_set<uint32_t>& reachable_nodes) {
@@ -1753,6 +1860,286 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
     }
 
     return node_dims;
+}
+
+static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
+                                       const std::vector<std::vector<uint64_t>>& stage_input_dims,
+                                       const std::vector<CompiledStageOutput>& outputs) {
+    std::unordered_set<uint32_t> reachable_nodes;
+    for (const CompiledStageOutput& out : outputs) {
+        collectReachableLocalNodes(expr, out.local_node_idx, reachable_nodes);
+    }
+
+    const std::vector<std::vector<uint64_t>> node_dims = inferFusedStageNodeDimsForReachable(expr, stage_input_dims, reachable_nodes);
+
+    uint64_t total = 0;
+
+    for (size_t i = 0; i < expr.nodes.size(); ++i) {
+        const uint32_t node_idx = static_cast<uint32_t>(i);
+        if (!reachable_nodes.contains(node_idx)) {
+            continue;
+        }
+
+        const ExprNode& node = expr.nodes[i];
+        switch (node.op) {
+            case ExprOp::INPUT:
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+            case ExprOp::SCALAR_FP:
+            case ExprOp::FILL:
+            case ExprOp::UNSQUEEZE:
+            case ExprOp::SQUEEZE:
+                break;
+
+            case ExprOp::ADD:
+            case ExprOp::SUB:
+            case ExprOp::MUL:
+            case ExprOp::DIV:
+            case ExprOp::POW:
+            case ExprOp::NEG:
+            case ExprOp::ABS:
+            case ExprOp::EXP:
+            case ExprOp::EXP2:
+            case ExprOp::EXP10:
+            case ExprOp::LN:
+            case ExprOp::LOG2:
+            case ExprOp::LOG10:
+            case ExprOp::SQRT:
+            case ExprOp::MIN:
+            case ExprOp::MAX:
+            case ExprOp::MIN_GRAD_LEFT:
+            case ExprOp::MIN_GRAD_RIGHT:
+            case ExprOp::MAX_GRAD_LEFT:
+            case ExprOp::MAX_GRAD_RIGHT: {
+                const uint64_t n = numelFromDims(node_dims[i]);
+                total = checkedAddU64(
+                    total, checkedMulU64(n, perElementSemanticFlops(node.op), "computeFusedStageFlops"), "computeFusedStageFlops");
+                break;
+            }
+
+            case ExprOp::REDUCE_SUM:
+            case ExprOp::REDUCE_PROD:
+            case ExprOp::REDUCE_MIN:
+            case ExprOp::REDUCE_MAX:
+            case ExprOp::REDUCE_ARGMIN:
+            case ExprOp::REDUCE_ARGMAX:
+            case ExprOp::REDUCE_AVG:
+            case ExprOp::REDUCE_NORM1:
+            case ExprOp::REDUCE_NORM2: {
+                const uint64_t out_numel = numelFromDims(node_dims[i]);
+                const uint64_t red_extent = reductionExtent(node_dims[node.lhs], node.reduction_axes);
+                total = checkedAddU64(total, reductionSemanticFlops(node.op, out_numel, red_extent), "computeFusedStageFlops");
+                break;
+            }
+
+            case ExprOp::TRANSPOSE:
+            case ExprOp::MATMUL:
+            case ExprOp::GEMM:
+            case ExprOp::CONV2D:
+            case ExprOp::CONV2D_BACKWARD_DATA:
+            case ExprOp::CONV2D_BACKWARD_FILTER:
+            case ExprOp::REDUCE_MIN_BACKWARD:
+            case ExprOp::REDUCE_MAX_BACKWARD:
+                throw std::runtime_error("Unexpected staged op inside fused kernel while computing FLOPs.");
+        }
+    }
+
+    return total;
+}
+
+static uint64_t computeReductionStageFlops(const CompiledReduction& reduction, const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    if (stage_input_dims.empty()) {
+        throw std::runtime_error("Reduction stage missing input dims while computing FLOPs.");
+    }
+
+    const std::vector<uint64_t> axes = resolveReductionAxesForInputRank(reduction.reduction_axes, stage_input_dims[0].size());
+    const std::vector<uint64_t> out_dims = StampedEquation::computeReductionOutputDims(stage_input_dims[0], axes, reduction.squeeze_axes);
+
+    return reductionSemanticFlops(reduction.op, numelFromDims(out_dims), reductionExtent(stage_input_dims[0], axes));
+}
+
+static uint64_t computeArgMinMaxStageFlops(const CompiledArgMinMax& argminmax, const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    if (stage_input_dims.empty()) {
+        throw std::runtime_error("ArgMinMax stage missing input dims while computing FLOPs.");
+    }
+
+    const std::vector<uint64_t> axes = resolveReductionAxesForInputRank(argminmax.reduction_axes, stage_input_dims[0].size());
+    const std::vector<uint64_t> out_dims = StampedEquation::computeReductionOutputDims(stage_input_dims[0], axes, argminmax.squeeze_axes);
+
+    return reductionSemanticFlops(argminmax.op, numelFromDims(out_dims), reductionExtent(stage_input_dims[0], axes));
+}
+
+static uint64_t computeMatmulStageFlops(const CompiledMatmul& matmul, const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    const std::vector<uint64_t> out_dims = resolveMatmulOutputDimsFromInputs(matmul, stage_input_dims);
+    const uint64_t out_numel = numelFromDims(out_dims);
+
+    const auto& a_dims = stage_input_dims.at(0);
+    const uint64_t k = matmul.transpose_lhs ? a_dims.at(0) : a_dims.at(1);
+
+    const bool alpha_dynamic = (matmul.alpha_input_slot != UINT32_MAX);
+    const bool beta_dynamic = (matmul.beta_input_slot != UINT32_MAX);
+
+    const bool has_matmul_term = alpha_dynamic || (matmul.alpha != 0.0);
+    const bool has_beta_term = (matmul.op == ExprOp::GEMM) && (beta_dynamic || (matmul.beta != 0.0));
+
+    uint64_t total = 0;
+
+    if (has_matmul_term) {
+        total = checkedAddU64(total,
+                              checkedMulU64(checkedMulU64(out_numel, k, "computeMatmulStageFlops"), 2, "computeMatmulStageFlops"),
+                              "computeMatmulStageFlops");
+
+        if (alpha_dynamic || (matmul.alpha != 1.0)) {
+            total = checkedAddU64(total, out_numel, "computeMatmulStageFlops");
+        }
+    }
+
+    if (has_beta_term) {
+        if (beta_dynamic || (matmul.beta != 1.0)) {
+            total = checkedAddU64(total, out_numel, "computeMatmulStageFlops");
+        }
+        if (has_matmul_term) {
+            total = checkedAddU64(total, out_numel, "computeMatmulStageFlops");
+        }
+    }
+
+    return total;
+}
+
+static uint64_t computeConvolutionStageFlops(const CompiledConvolution& convolution,
+                                             const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    const std::vector<uint64_t> out_dims = resolveConvolutionOutputDimsFromInputs(convolution, stage_input_dims);
+
+    const auto& filter_dims = stage_input_dims.at(1);
+    const uint64_t n = out_dims.at(0);
+    const uint64_t k = out_dims.at(1);
+    const uint64_t oh = out_dims.at(2);
+    const uint64_t ow = out_dims.at(3);
+    const uint64_t c = filter_dims.at(1);
+    const uint64_t r = filter_dims.at(2);
+    const uint64_t s = filter_dims.at(3);
+
+    uint64_t macs = 1;
+    macs = checkedMulU64(macs, n, "computeConvolutionStageFlops");
+    macs = checkedMulU64(macs, k, "computeConvolutionStageFlops");
+    macs = checkedMulU64(macs, oh, "computeConvolutionStageFlops");
+    macs = checkedMulU64(macs, ow, "computeConvolutionStageFlops");
+    macs = checkedMulU64(macs, c, "computeConvolutionStageFlops");
+    macs = checkedMulU64(macs, r, "computeConvolutionStageFlops");
+    macs = checkedMulU64(macs, s, "computeConvolutionStageFlops");
+
+    return checkedMulU64(macs, 2, "computeConvolutionStageFlops");
+}
+
+static uint64_t computeConvolutionBackwardStageFlops(const CompiledConvolutionBackward& convolution_backward,
+                                                     const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    if (convolution_backward.op == ExprOp::CONV2D_BACKWARD_DATA) {
+        const auto& filter_dims = stage_input_dims.at(0);
+        const auto& grad_dims = stage_input_dims.at(1);
+
+        const uint64_t n = grad_dims.at(0);
+        const uint64_t k = grad_dims.at(1);
+        const uint64_t oh = grad_dims.at(2);
+        const uint64_t ow = grad_dims.at(3);
+        const uint64_t c = filter_dims.at(1);
+        const uint64_t r = filter_dims.at(2);
+        const uint64_t s = filter_dims.at(3);
+
+        uint64_t macs = 1;
+        macs = checkedMulU64(macs, n, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, k, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, oh, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, ow, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, c, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, r, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, s, "computeConvolutionBackwardStageFlops");
+
+        return checkedMulU64(macs, 2, "computeConvolutionBackwardStageFlops");
+    }
+
+    if (convolution_backward.op == ExprOp::CONV2D_BACKWARD_FILTER) {
+        const auto& input_dims = stage_input_dims.at(0);
+        const auto& grad_dims = stage_input_dims.at(1);
+        const std::vector<uint64_t> filter_dims = resolveConvolutionBackwardOutputDimsFromInputs(convolution_backward, stage_input_dims);
+
+        const uint64_t n = input_dims.at(0);
+        const uint64_t c = input_dims.at(1);
+        const uint64_t k = grad_dims.at(1);
+        const uint64_t oh = grad_dims.at(2);
+        const uint64_t ow = grad_dims.at(3);
+        const uint64_t r = filter_dims.at(2);
+        const uint64_t s = filter_dims.at(3);
+
+        uint64_t macs = 1;
+        macs = checkedMulU64(macs, n, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, k, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, oh, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, ow, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, c, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, r, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, s, "computeConvolutionBackwardStageFlops");
+
+        return checkedMulU64(macs, 2, "computeConvolutionBackwardStageFlops");
+    }
+
+    throw std::runtime_error("Unsupported convolution backward op while computing FLOPs.");
+}
+
+static uint64_t computeReduceMinMaxBackwardStageFlops(const CompiledReduceMinMaxBackward& backward,
+                                                      const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    if (stage_input_dims.size() < 2) {
+        throw std::runtime_error("ReduceMinMaxBackward stage missing input dims while computing FLOPs.");
+    }
+
+    const ExprOp forward_reduce = backward.op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX;
+    const uint64_t grad_out_numel = numelFromDims(stage_input_dims[1]);
+    const uint64_t red_extent = reductionExtent(stage_input_dims[0], backward.reduction_axes);
+
+    return reductionSemanticFlops(forward_reduce, grad_out_numel, red_extent);
+}
+
+static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    switch (stage.kind) {
+        case CompiledExecutionStage::Kind::FusedKernel:
+            return computeFusedStageFlops(stage.expr, stage_input_dims, stage.outputs);
+
+        case CompiledExecutionStage::Kind::Reduction:
+            if (!stage.reduction)
+                throw std::runtime_error("Reduction stage missing payload while computing FLOPs.");
+            return computeReductionStageFlops(*stage.reduction, stage_input_dims);
+
+        case CompiledExecutionStage::Kind::ArgMinMax:
+            if (!stage.arg_minmax)
+                throw std::runtime_error("ArgMinMax stage missing payload while computing FLOPs.");
+            return computeArgMinMaxStageFlops(*stage.arg_minmax, stage_input_dims);
+
+        case CompiledExecutionStage::Kind::Matmul:
+            if (!stage.matmul)
+                throw std::runtime_error("Matmul stage missing payload while computing FLOPs.");
+            return computeMatmulStageFlops(*stage.matmul, stage_input_dims);
+
+        case CompiledExecutionStage::Kind::Convolution:
+            if (!stage.convolution)
+                throw std::runtime_error("Convolution stage missing payload while computing FLOPs.");
+            return computeConvolutionStageFlops(*stage.convolution, stage_input_dims);
+
+        case CompiledExecutionStage::Kind::ConvolutionBackward:
+            if (!stage.convolution_backward) {
+                throw std::runtime_error("ConvolutionBackward stage missing payload while computing FLOPs.");
+            }
+            return computeConvolutionBackwardStageFlops(*stage.convolution_backward, stage_input_dims);
+
+        case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
+            if (!stage.reduce_minmax_backward) {
+                throw std::runtime_error("ReduceMinMaxBackward stage missing payload while computing FLOPs.");
+            }
+            return computeReduceMinMaxBackwardStageFlops(*stage.reduce_minmax_backward, stage_input_dims);
+
+        case CompiledExecutionStage::Kind::Transpose:
+            return 0;
+    }
+
+    throw std::runtime_error("Unknown stage kind while computing FLOPs.");
 }
 
 static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecutionStage& stage,
@@ -3760,6 +4147,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             }
         }
 
+        std::vector<std::vector<uint64_t>> stage_input_dims;
+        stage_input_dims.reserve(stageInputs.size());
+        for (const RuntimeInputValue& input : stageInputs) {
+            stage_input_dims.push_back(runtimeInputDims(input));
+        }
+        const uint64_t stage_flops = computeStageFlops(stage, stage_input_dims);
+
         switch (stage.kind) {
             case CompiledExecutionStage::Kind::FusedKernel: {
                 if (stage.outputs.empty()) {
@@ -3852,7 +4246,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
 
                 std::shared_ptr<StampedEquation> stampedKernel = stampEquation(compiledEq, stageInputs, stageOutputs, stream);
-                stampedStages.emplace_back(stampedKernel, std::move(dependency_stage_indices));
+                stampedStages.emplace_back(stampedKernel, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
             case CompiledExecutionStage::Kind::Reduction: {
@@ -3889,7 +4283,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedReduction, std::move(dependency_stage_indices));
+                stampedStages.emplace_back(stampedReduction, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
             case CompiledExecutionStage::Kind::ArgMinMax: {
@@ -3926,7 +4320,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedArgMinMax, std::move(dependency_stage_indices));
+                stampedStages.emplace_back(stampedArgMinMax, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
             case CompiledExecutionStage::Kind::Matmul: {
@@ -4025,7 +4419,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedMatmul, std::move(dependency_stage_indices));
+                stampedStages.emplace_back(stampedMatmul, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
             case CompiledExecutionStage::Kind::Convolution: {
@@ -4055,7 +4449,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedConvolution, std::move(dependency_stage_indices));
+                stampedStages.emplace_back(stampedConvolution, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
             case CompiledExecutionStage::Kind::ConvolutionBackward: {
@@ -4086,7 +4480,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedConvolutionBackward, std::move(dependency_stage_indices));
+                stampedStages.emplace_back(stampedConvolutionBackward, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
             case CompiledExecutionStage::Kind::Transpose: {
@@ -4124,7 +4518,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     stampEquation(stage.transpose, transposeInputs, transposeOutputs, stream);
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedTranspose, std::move(dependency_stage_indices));
+                stampedStages.emplace_back(stampedTranspose, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
             case CompiledExecutionStage::Kind::ReduceMinMaxBackward: {
@@ -4153,7 +4547,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     stampReduceMinMaxBackward(stage.reduce_minmax_backward, inputTensor, gradOutputTensor, outputTensor, stream);
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedReduceMinMaxBackward, std::move(dependency_stage_indices));
+                stampedStages.emplace_back(stampedReduceMinMaxBackward, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
         }
