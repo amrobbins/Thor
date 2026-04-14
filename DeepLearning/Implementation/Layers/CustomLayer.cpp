@@ -1,4 +1,4 @@
-#include "DeepLearning/Implementation/Layers/NeuralNetwork/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/CustomLayer.h"
 
 #include <stdexcept>
 
@@ -7,18 +7,14 @@ using namespace std;
 namespace ThorImplementation {
 
 CustomLayer::CustomLayer(DynamicExpression expr,
-                         const string& inputName,
-                         const vector<shared_ptr<Parameter>>& parameters,
-                         int deviceNum,
-                         bool useFastMath,
-                         int64_t stampedId)
-    : TrainableLayer(stampedId),
-      layerDefinitionExpression(std::move(expr)),
-      inputName(inputName),
-      deviceNum(deviceNum),
-      useFastMath(useFastMath),
-      featureInName(inputName),
-      errorOutName(inputName + "_grad") {
+                         const TensorPlacement& placement,
+                         const std::vector<std::shared_ptr<Parameter>>& parameters,
+                         bool inferenceOnly,
+                         int64_t stampedId,
+                         bool useFastMath)
+    : TrainableLayer(placement, inferenceOnly, stampedId), layerDefinitionExpression(std::move(expr)), useFastMath(useFastMath) {
+    inputName = "feature_input";
+
     if (inputName.empty())
         throw runtime_error("Custom layer input sent empty name");
 
@@ -40,6 +36,8 @@ CustomLayer::CustomLayer(DynamicExpression expr,
 
 void CustomLayer::compileImpl() {
     TrainableLayer::compileImpl();
+
+    assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     // This layer always fuses eout grad and w grad
     wGradFusedWithEOutGrad = true;
