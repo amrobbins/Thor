@@ -466,4 +466,16 @@ void CustomLayer::validatePreparedExpressionInputs(const PreparedDynamicExpressi
     }
 }
 
+uint64_t CustomLayer::flopCountForward() {
+    if (forwardStamped.empty())
+        return 0;
+    return forwardStamped[0]->flopCount();
+}
+
+uint64_t CustomLayer::flopCountBackward() {
+    if (backwardAccumulateStamped.empty())
+        return 0;
+    return backwardAccumulateStamped[0]->flopCount();
+}
+
 }  // namespace ThorImplementation

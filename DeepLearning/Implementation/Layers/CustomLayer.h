@@ -42,6 +42,9 @@ class CustomLayer : public TrainableLayer {
     virtual Optional<Tensor> createFeatureOutputTensor();
     Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
 
+    uint64_t flopCountForward() override;
+    uint64_t flopCountBackward() override;
+
     std::string getLayerType() override { return "CustomLayer"; }
 
    protected:

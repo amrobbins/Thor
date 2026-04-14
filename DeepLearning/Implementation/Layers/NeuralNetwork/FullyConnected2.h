@@ -21,29 +21,21 @@ class FullyConnected2 : public CustomLayer {
                     bool inferenceOnly,
                     int64_t stampedId = -1);
 
-    virtual Optional<Tensor> createFeatureOutputTensor();
+    // void compileImpl() override;
 
-    virtual void compileImpl();
-
-    virtual std::string getLayerType();
+    std::string getLayerType() override { return "FullyConnected"; }
 
    private:
     static DynamicExpression buildExpression(bool hasBias, TensorPlacement placement);
 
     std::vector<std::shared_ptr<Parameter>> defineParameters(uint32_t numOutputFeatures, bool hasBias);
 
-    const uint32_t numOutputFeatures;
-    const DataType weightsDataType;
-    const bool hasBias;
+    // const uint32_t numOutputFeatures;
+    // const DataType weightsDataType;
+    // const bool hasBias;
 
-    uint32_t numInputFeatures = 0;
-    uint32_t batchSize = 0;
-
-   public:
-    uint64_t flopsPerConnectionPerExample();
-    uint64_t flopsPerGradientUpdatePerExample();
-    virtual uint64_t floatingPointOperationsPerExampleForward();
-    virtual uint64_t floatingPointOperationsPerExampleBackward();
+    // uint32_t numInputFeatures = 0;
+    // uint32_t batchSize = 0;
 };
 
 }  // namespace ThorImplementation

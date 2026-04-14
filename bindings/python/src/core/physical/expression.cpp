@@ -1191,6 +1191,24 @@ Return a dict of named output tensor from a stamped multi-output execution plan.
 )nbdoc");
 
     stamped_equation.def("output_names", [](const StampedExecutionPlan& self) { return self.outputNames(); });
+
+    stamped_equation.def("flop_count",
+                         &StampedExecutionPlan::flopCount,
+                         R"nbdoc(
+Return the semantic floating-point operation count represented by this stamped execution plan.
+
+Conventions:
+- elementwise arithmetic/transcendentals count as 1 op per output element
+- GEMM / matmul / convolution use 2 FLOPs per multiply-accumulate
+- shape-only ops and transpose count as 0
+- this is a semantic model FLOP count, not a backend-instruction count
+)nbdoc");
+
+    stamped_equation.def("stage_flop_counts",
+                         &StampedExecutionPlan::stageFlopCounts,
+                         R"nbdoc(
+Return the per-stage semantic FLOP counts for this stamped execution plan.
+)nbdoc");
 }
 
 void bind_dynamic_expression(nb::module_& physical) {

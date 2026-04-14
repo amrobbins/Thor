@@ -45,26 +45,24 @@ FullyConnected2::FullyConnected2(const uint32_t numOutputFeatures,
                                  bool inferenceOnly,
                                  int64_t stampedId)
     : CustomLayer(
-          buildExpression(hasBias, placement), placement, defineParameters(numOutputFeatures, hasBias), inferenceOnly, stampedId, false),
-      numOutputFeatures(numOutputFeatures),
-      weightsDataType(weightsDataType.isPresent() ? weightsDataType.get() : DataType::FP16),
-      hasBias(hasBias) {}
+          buildExpression(hasBias, placement), placement, defineParameters(numOutputFeatures, hasBias), inferenceOnly, stampedId, false) {}
+// numOutputFeatures(numOutputFeatures),
+// weightsDataType(weightsDataType.isPresent() ? weightsDataType.get() : DataType::FP16),
+// hasBias(hasBias) {}
 
-Optional<Tensor> FullyConnected2::createFeatureOutputTensor() {
-    assert(!featureInputs.empty());
-    assert(featureInputs.back().isPresent());
+// Optional<Tensor> FullyConnected2::createFeatureOutputTensor() {
+//     assert(!featureInputs.empty());
+//     assert(featureInputs.back().isPresent());
+//
+//     return Tensor(featureInputs.back().get().getPlacement(),
+//                   TensorDescriptor(weightsDataType, {featureInputs[0].get().getDescriptor().getDimensions()[0], numOutputFeatures}));
+// }
 
-    return Tensor(featureInputs.back().get().getPlacement(),
-                  TensorDescriptor(weightsDataType, {featureInputs[0].get().getDescriptor().getDimensions()[0], numOutputFeatures}));
-}
-
-void FullyConnected2::compileImpl() {
-    CustomLayer::compileImpl();
-    batchSize = getFirstPresentTensor(featureInputs).get().getDescriptor().getDimensions()[0];
-    numInputFeatures = getFirstPresentTensor(featureInputs).get().getDescriptor().getDimensions()[1];
-}
-
-std::string FullyConnected2::getLayerType() { return "FullyConnected"; }
+// void FullyConnected2::compileImpl() {
+//     CustomLayer::compileImpl();
+//     batchSize = getFirstPresentTensor(featureInputs).get().getDescriptor().getDimensions()[0];
+//     numInputFeatures = getFirstPresentTensor(featureInputs).get().getDescriptor().getDimensions()[1];
+// }
 
 DynamicExpression FullyConnected2::buildExpression(bool hasBias, TensorPlacement placement) {
     return DynamicExpression([hasBias, placement](const DynamicExpression::TensorMap& inputs,
@@ -122,64 +120,6 @@ std::vector<std::shared_ptr<Parameter>> FullyConnected2::defineParameters(uint32
     if (hasBias)
         parameters.push_back(std::make_shared<FCBiasesParameter>("biases", true, true, numOutputFeatures));
     return parameters;
-}
-
-uint64_t FullyConnected2::flopsPerConnectionPerExample() {
-    Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
-    Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-    assert(anyFeatureInput.isPresent());
-    assert(anyFeatureOutput.isPresent());
-    uint64_t flops = 2 * numInputFeatures * numOutputFeatures;
-    if (hasBias)
-        flops += numOutputFeatures;
-    return flops;
-}
-
-uint64_t FullyConnected2::flopsPerGradientUpdatePerExample() {
-    Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
-    Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-    assert(anyFeatureInput.isPresent());
-    assert(anyFeatureOutput.isPresent());
-    uint64_t flops = numInputFeatures * numOutputFeatures;
-    if (hasBias)
-        flops += numOutputFeatures;
-    return flops;
-}
-
-uint64_t FullyConnected2::floatingPointOperationsPerExampleForward() {
-    uint32_t connectionMultiplier = 0;
-    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        if (featureInputs[i].isPresent())
-            connectionMultiplier += 1;
-    }
-
-    return connectionMultiplier * flopsPerConnectionPerExample();
-}
-
-uint64_t FullyConnected2::floatingPointOperationsPerExampleBackward() {
-    if (!isInferenceOnly())
-        return 0;
-
-    uint32_t connectionMultiplier = 0;
-    uint32_t sums = 0;
-    for (uint32_t i = 0; i < errorInputs.size(); ++i) {
-        if (errorInputs[i].isPresent()) {
-            if (connectionMultiplier == 0)
-                connectionMultiplier += 1;
-            else
-                sums += 1;
-        }
-    }
-    for (uint32_t i = 0; i < errorOutputs.size(); ++i) {
-        if (errorOutputs[i].isPresent())
-            connectionMultiplier += 1;
-    }
-
-    Optional<Tensor> anyErrorInput = getFirstPresentTensor(errorInputs);
-    assert(anyErrorInput.isPresent());
-
-    return connectionMultiplier * flopsPerConnectionPerExample() +
-           (sums * anyErrorInput.get().getDescriptor().getTotalNumElements()) / batchSize + flopsPerGradientUpdatePerExample();
 }
 
 }  // namespace ThorImplementation

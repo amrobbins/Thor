@@ -69,6 +69,9 @@ class TrainableLayer : public Parameterizable {
         }
     }
 
+    virtual uint64_t flopCountForward() = 0;
+    virtual uint64_t flopCountBackward() = 0;
+
    public:
     // FIXME: Temporarily moved here from layer
     bool inferenceOnly = false;
