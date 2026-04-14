@@ -121,6 +121,7 @@ Optional<Tensor> CustomLayer::stampForward(uint32_t connectionNumber) {
     Optional<Tensor> featureOutput;
     Stream stream;
 
+    PreparedDynamicExpression::TensorMap forwardOutputs;
     if (connectionNumber == UINT32_MAX) {
         featureInput = getFirstPresentTensor(featureInputs);
         assert(featureInput.isPresent());
@@ -135,14 +136,15 @@ Optional<Tensor> CustomLayer::stampForward(uint32_t connectionNumber) {
 
         featureInput = featureInputs[connectionNumber];
         featureOutput = featureOutputs[connectionNumber];
+        forwardOutputs[featureOutName] = featureOutput;
         stream = streams[connectionNumber];
     }
 
     if (featureOutput.isPresent()) {
         forwardInputsByConnection.push_back(buildForwardInputs(featureInput.get()));
 
-        forwardPreparedByConnection.push_back(
-            std::make_shared<PreparedDynamicExpression>(layerDefinitionExpression.prepare(forwardInputsByConnection.back(), stream)));
+        forwardPreparedByConnection.push_back(std::make_shared<PreparedDynamicExpression>(
+            layerDefinitionExpression.prepare(forwardInputsByConnection.back(), forwardOutputs, stream)));
 
         std::unordered_set<std::string> parameterNames;
         for (const auto& parameter : parameters) {
@@ -171,7 +173,7 @@ Optional<Tensor> CustomLayer::stampForward(uint32_t connectionNumber) {
         return Optional<Tensor>::empty();
     } else {
         std::unordered_map<std::string, Tensor> forwardInputs = buildForwardInputs(featureInput.get());
-        PreparedDynamicExpression forwardPrepared = layerDefinitionExpression.prepare(forwardInputs, stream);
+        PreparedDynamicExpression forwardPrepared = layerDefinitionExpression.prepare(forwardInputs, forwardOutputs, stream);
         validatePreparedExpressionInputs(forwardPrepared);
         StampedExecutionPlan forwardStamped = forwardPrepared.stamp();
         return forwardStamped.output(featureOutName);
@@ -187,6 +189,11 @@ Optional<Tensor> CustomLayer::stampBackward(uint32_t connectionNumber) {
     PreparedDynamicExpression* preparedBackwardSource = nullptr;
     std::optional<PreparedDynamicExpression> transientPrepared;
 
+    PreparedDynamicExpression::TensorMap forwardOutputs;
+    Optional<Tensor> featureOutput = featureOutputs[connectionNumber];
+    assert(featureOutput.isPresent());
+    forwardOutputs[featureOutName] = featureOutput;
+
     if (connectionNumber == UINT32_MAX) {
         Optional<Tensor> featureInput = getFirstPresentTensor(featureInputs);
         errorInput = getFirstPresentTensor(errorInputs);
@@ -195,7 +202,7 @@ Optional<Tensor> CustomLayer::stampBackward(uint32_t connectionNumber) {
         assert(!streams.empty());
 
         std::unordered_map<std::string, Tensor> forwardInputs = buildForwardInputs(featureInput.get());
-        transientPrepared.emplace(layerDefinitionExpression.prepare(forwardInputs, streams[0]));
+        transientPrepared.emplace(layerDefinitionExpression.prepare(forwardInputs, forwardOutputs, streams[0]));
         validatePreparedExpressionInputs(*transientPrepared);
         preparedBackwardSource = &(*transientPrepared);
     } else {

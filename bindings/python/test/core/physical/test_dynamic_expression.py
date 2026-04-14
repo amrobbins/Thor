@@ -99,7 +99,7 @@ def test_dynamic_expression_single_output_numerical(dtype: thor.DataType):
     _, x_gpu = _copy_numpy_to_gpu(x_init, dtype, gpu_num, stream)
     _, y_gpu = _copy_numpy_to_gpu(y_init, dtype, gpu_num, stream)
 
-    def builder(inputs, stream):
+    def builder(inputs, outputs, stream):
         x = ex.input("x")
         y = ex.input("y")
         expr = ex.sqrt((x + 1.5) * (y + 2.0))
@@ -116,6 +116,7 @@ def test_dynamic_expression_single_output_numerical(dtype: thor.DataType):
             "x": x_gpu,
             "y": y_gpu,
         },
+        {},
         stream,
     )
     stamped.run()
@@ -149,7 +150,7 @@ def test_dynamic_expression_runtime_scalar_override_numerical(dtype: thor.DataTy
     _, x_gpu = _copy_numpy_to_gpu(x_init, dtype, gpu_num, stream)
     _, y_gpu = _copy_numpy_to_gpu(y_init, dtype, gpu_num, stream)
 
-    def builder(inputs, stream):
+    def builder(inputs, outputs, stream):
         x = ex.input("x")
         y = ex.input("y")
         scale = ex.runtime_scalar("scale")
@@ -166,6 +167,7 @@ def test_dynamic_expression_runtime_scalar_override_numerical(dtype: thor.DataTy
             "x": x_gpu,
             "y": y_gpu,
         },
+        {},
         stream,
     )
 
@@ -212,7 +214,7 @@ def test_dynamic_expression_multi_output_numerical(dtype: thor.DataType):
     _, x_gpu = _copy_numpy_to_gpu(x_init, dtype, gpu_num, stream)
     _, y_gpu = _copy_numpy_to_gpu(y_init, dtype, gpu_num, stream)
 
-    def builder(inputs, stream):
+    def builder(inputs, outputs, stream):
         x = ex.input("x")
         y = ex.input("y")
         outs = ex.outputs({
@@ -231,6 +233,7 @@ def test_dynamic_expression_multi_output_numerical(dtype: thor.DataType):
             "x": x_gpu,
             "y": y_gpu,
         },
+        {},
         stream,
     )
     stamped.run()
@@ -270,7 +273,7 @@ def test_dynamic_expression_builder_receives_validated_inputs(dtype: thor.DataTy
         "gpu_num": None,
     }
 
-    def builder(inputs, stream):
+    def builder(inputs, outputs, stream):
         seen["called"] = True
         seen["keys"] = sorted(inputs.keys())
         seen["gpu_num"] = stream.get_gpu_num()
@@ -288,6 +291,7 @@ def test_dynamic_expression_builder_receives_validated_inputs(dtype: thor.DataTy
             "x": x_gpu,
             "y": y_gpu,
         },
+        {},
         stream,
     )
     stamped.run()
@@ -308,4 +312,4 @@ def test_dynamic_expression_empty_inputs_raises():
     dyn = DynamicExpression(builder)
 
     with pytest.raises(ValueError, match="at least one input tensor"):
-        dyn.stamp({}, stream)
+        dyn.stamp({}, {}, stream)
