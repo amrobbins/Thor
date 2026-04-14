@@ -19,12 +19,11 @@ class CustomLayer : public TrainableLayer {
     //   Also start with just 1 input
     //   So version 1 support: 1 input, 1 output, N parameters.
     CustomLayer(DynamicExpression expr,
-                // V1 Assumption: Exactly 1 input. V2 could be multiple or none even. feature inputs would need to be a map string->tensor.
-                const std::string& inputName,
+                const TensorPlacement& placement,
                 const std::vector<std::shared_ptr<Parameter>>& parameters,
-                int deviceNum,
-                bool useFastMath,
-                int64_t stampedId = -1);
+                bool inferenceOnly,
+                int64_t stampedId = -1,
+                bool useFastMath = false);
 
     // TrainableLayer
     // void createWeights(Tensor featureInput) override { /*NOP*/ } - part of parameter now.
@@ -41,12 +40,14 @@ class CustomLayer : public TrainableLayer {
     Optional<Event> computeErrorOut(uint32_t connectionNumber) override;
 
     virtual Optional<Tensor> createFeatureOutputTensor();
-    virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber);
+    Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
 
     std::string getLayerType() override { return "CustomLayer"; }
 
-   private:
+   protected:
     void compileImpl() override;
+
+   private:
     virtual Optional<Tensor> stampForward(uint32_t connectionNumber);
     virtual Optional<Tensor> stampBackward(uint32_t connectionNumber);
     std::unordered_map<std::string, Tensor> buildForwardInputs(const Tensor& dataIn);
@@ -56,7 +57,7 @@ class CustomLayer : public TrainableLayer {
     DynamicExpression layerDefinitionExpression;
     std::string inputName;
 
-    int deviceNum = 0;
+    TensorPlacement placement{};
     bool useFastMath = false;
 
     std::vector<std::shared_ptr<FusedEquation>> forwardEq;
@@ -82,10 +83,10 @@ class CustomLayer : public TrainableLayer {
     std::vector<std::unordered_map<std::string, Tensor>> backwardOutputsByConnection;
 
     const std::string RESERVED_GRAD_PREFIX = "__grad_";
-    const std::string featureInName;
-    const std::string featureOutName = "output";
+    const std::string featureInName = "feature_input";
+    const std::string featureOutName = "feature_output";
     const std::string errorInName = RESERVED_GRAD_PREFIX + featureOutName;
-    const std::string errorOutName;
+    const std::string errorOutName = inputName + "_grad";
     std::vector<Event> gradientAccumAvailableEvents;
 };
 

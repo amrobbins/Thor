@@ -20,7 +20,8 @@ class TrainableLayer : public Parameterizable {
     virtual ~TrainableLayer() = default;
 
     // All real stamped id's will have positive values
-    TrainableLayer(int64_t stampedId = -1) : stampedId(stampedId) {}
+    TrainableLayer(const TensorPlacement &placement, bool inferenceOnly, int64_t stampedId = -1)
+        : inferenceOnly(inferenceOnly), placement(placement), stampedId(stampedId) {}
 
     virtual void compileImpl() {
         // MultiConnectionLayer::compileImpl();
@@ -36,7 +37,7 @@ class TrainableLayer : public Parameterizable {
 
         std::unordered_set<uint64_t> dataStreamsSet;
         uniqueDataStreams.clear();
-        for (Stream dataStream : streams) {
+        for (Stream &dataStream : streams) {
             uint64_t dataStreamId = dataStream.getId();
             auto [it, inserted] = dataStreamsSet.insert(dataStreamId);
             if (inserted) {
@@ -47,20 +48,19 @@ class TrainableLayer : public Parameterizable {
 
         Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
         assert(aFeatureInput.isPresent());
+        assert(aFeatureInput.get().getPlacement() == placement);
         Optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureOutputs);
         assert(aFeatureOutput.isPresent());
+        assert(aFeatureOutput.get().getPlacement() == placement);
 
         for (const auto &parameter : parameters) {
             if (!parameter->isTrainable())
                 continue;
             if (gradientUpdateStream.isEmpty()) {
-                gradientUpdateStream = Stream::getNextGradientUpdateStream(aFeatureInput.get().getPlacement().getDeviceNum());
+                gradientUpdateStream = Stream::getNextGradientUpdateStream(placement.getDeviceNum());
                 break;
             }
         }
-        // for (const auto &parameter : parameters) {
-        //     parameter->compile(aFeatureInput, aFeatureOutput, gradientUpdateStream, isInferenceOnly(), getFanIn(), getFanOut());
-        // }
 
         numBackwardConnections = 0;
         for (const auto &errorInput : errorInputs) {
@@ -169,97 +169,6 @@ class TrainableLayer : public Parameterizable {
         return errorOutputs.back();
     }
     // FIXME: Temporarily moved here from layer
-
-    // compute the fan in for one element of a batch
-    // FIXME: These fan in/out calculations are the special case for fully connected. Convolution (kernel aware fan) and broadcast is
-    // different. virtual uint64_t getFanIn() {
-    //     Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
-    //     assert(anyFeatureInput.isPresent());
-    //     std::vector<uint64_t> inputDimensions = anyFeatureInput.get().getDescriptor().getDimensions();
-    //     uint64_t fanIn = 1;
-    //     for (uint32_t i = 1; i < inputDimensions.size(); ++i) {
-    //         fanIn *= inputDimensions[i];
-    //     }
-    //     return fanIn;
-    // }
-    // // compute the fan out for one element of a batch
-    // virtual uint64_t getFanOut() {
-    //     Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-    //     assert(anyFeatureOutput.isPresent());
-    //     std::vector<uint64_t> outputDimensions = anyFeatureOutput.get().getDescriptor().getDimensions();
-    //     uint64_t fanOut = 1;
-    //     for (uint32_t i = 1; i < outputDimensions.size(); ++i) {
-    //         fanOut *= outputDimensions[i];
-    //     }
-    //     return fanOut;
-    // }
-    // Default applies to elementwise operations. It doesn't apply to fully connected or convolutions.
-    // I also have parameters[] as shared pointers that have p->getStorage() that can give dimensions
-    // compute the fan in for one element of a batch
-    virtual uint64_t getFanIn() { return 1; }
-    virtual uint64_t getAverageBroadcastFanOut() {
-        Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-        assert(anyFeatureOutput.isPresent());
-
-        const std::vector<uint64_t> outputDims = anyFeatureOutput.get().getDescriptor().getDimensions();
-        assert(!outputDims.empty());
-
-        uint64_t outputNumelPerExample = 1;
-        for (uint32_t i = 1; i < outputDims.size(); ++i) {
-            outputNumelPerExample *= outputDims[i];
-        }
-
-        uint64_t totalReuse = 0;
-        uint64_t numTrainableParams = 0;
-
-        for (const auto &param : parameters) {
-            if (!param->isTrainable())
-                continue;
-
-            const uint64_t paramNumel = param->getStorage().getTotalNumElements();
-            if (paramNumel == 0)
-                continue;
-
-            ++numTrainableParams;
-            totalReuse += std::max<uint64_t>(1, outputNumelPerExample / paramNumel);
-        }
-
-        if (numTrainableParams == 0)
-            return 1;
-
-        return std::max<uint64_t>(1, totalReuse / numTrainableParams);
-    }
-    // compute the fan out for one element of a batch, for pointwise or broadcast.
-    // Uses the max fanout of any parameter.
-    virtual uint64_t getFanOut() {
-        Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-        assert(anyFeatureOutput.isPresent());
-
-        const std::vector<uint64_t> outputDims = anyFeatureOutput.get().getDescriptor().getDimensions();
-        assert(!outputDims.empty());
-
-        uint64_t outputNumelPerExample = 1;
-        for (uint32_t i = 1; i < outputDims.size(); ++i) {
-            outputNumelPerExample *= outputDims[i];
-        }
-
-        uint64_t fanOut = 1;
-        for (const auto &param : parameters) {
-            if (!param->isTrainable())
-                continue;
-
-            const uint64_t paramNumel = param->getStorage().getTotalNumElements();
-            if (paramNumel == 0)
-                continue;
-
-            fanOut = std::max(fanOut, std::max<uint64_t>(1, outputNumelPerExample / paramNumel));
-        }
-
-        return fanOut;
-    }
-    // FIXME: fan in/out now computed at the parameter level. Need to override for specific layers, but this is meant to handle
-    //        pointwise and broadcast.
-    // FIXME: Fanout needs to be computed at the parameter level, how many params vs how many outpts.
 
    protected:
     virtual void forward(uint32_t connectionNumber, bool isValidation) {
@@ -404,6 +313,7 @@ class TrainableLayer : public Parameterizable {
 
     bool wGradFusedWithEOutGrad = false;
     bool compiled = false;
+    TensorPlacement placement;
 
    private:
     // stampedId is used to identify which layers correspond to which other layers across multiple stamps of the same network.
