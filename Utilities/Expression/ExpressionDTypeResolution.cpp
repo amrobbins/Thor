@@ -4,6 +4,8 @@
 
 namespace ThorImplementation {
 
+using DataType = TensorDescriptor::DataType;
+
 bool isSupportedFusionFloatingType(DataType dtype) {
     switch (dtype) {
         case DataType::FP8_E4M3:

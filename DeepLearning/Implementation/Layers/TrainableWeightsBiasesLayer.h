@@ -84,7 +84,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         return sharedWeightsPackage;
     }
 
-    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
         assert(running);
 
         // Forward direction must wait for weights update to finish before inference is called
@@ -136,7 +136,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         nextLayers[connectionNumber].get()->forward(featureOutputs[connectionNumber], validationPass);
     }
 
-    virtual void backward(Optional<Tensor> errorInput) {
+    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {
         assert(running);
 
         // Experimental - back propagation stops at empty error input

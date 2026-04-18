@@ -65,14 +65,14 @@ class NetworkInput : public Layer {
     // Only called for input endpoints
     // When the source tensor that will be sent to the input is loaded via a stream,
     // then this version of forward is used which causes the loader stream to wait till copy is finished.
-    virtual void forward(Optional<Tensor> featureInput, bool validationPass, Event copyToSourceTensorFinished) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass, Event copyToSourceTensorFinished, uint32_t batchSize = 0) {
         loadStream.waitEvent(copyToSourceTensorFinished);
         forward(featureInput, validationPass);
     }
 
     // Only called for input endpoints
     // This version of forward expects that the memory in featureInput has already been populated before forward is called.
-    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
         assert(contentDimensions.isPresent() == featureInput.isPresent());
 
         if (contentDimensions.isPresent())
@@ -100,7 +100,7 @@ class NetworkInput : public Layer {
         nextLayer.get()->forward(featureOutput, validationPass);
     }
 
-    virtual void backward(Optional<Tensor> errorInput) {}
+    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {}
 
    protected:
     Optional<std::vector<unsigned long>> contentDimensions;

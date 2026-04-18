@@ -17,6 +17,8 @@ using namespace std;
 
 namespace ThorImplementation {
 
+using DataType = TensorDescriptor::DataType;
+
 // static unordered_map<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache;
 static LruCacheThreadSafe<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache(10'000);
 
@@ -175,6 +177,8 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
 
     switch (n.op) {
         case ExprOp::INPUT:
+        case ExprOp::RUNTIME_SCALAR:
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
             key.input_slot = n.input_slot;
             break;
 
@@ -274,6 +278,74 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
 
     stage_expr.nodes = std::move(dedup_nodes);
     stage_expr.output_node = stage_outputs.front().local_node_idx;
+}
+
+static void compactFusedStageInputs(PhysicalExpression& stage_expr, std::vector<uint32_t>& stage_input_value_ids) {
+    if (stage_expr.inputs.size() != stage_input_value_ids.size()) {
+        throw std::runtime_error("Fused stage input metadata mismatch while compacting deduplicated stage inputs.");
+    }
+
+    std::vector<uint8_t> slot_used(stage_expr.inputs.size(), 0);
+    for (const ExprNode& node : stage_expr.nodes) {
+        if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR && node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+            continue;
+        }
+
+        if (node.input_slot >= slot_used.size()) {
+            throw std::runtime_error("Leaf input slot out of range while compacting deduplicated fused stage inputs.");
+        }
+
+        slot_used[node.input_slot] = 1;
+    }
+
+    bool needs_compaction = false;
+    for (uint32_t slot = 0; slot < slot_used.size(); ++slot) {
+        if (!slot_used[slot]) {
+            needs_compaction = true;
+            break;
+        }
+    }
+
+    if (!needs_compaction) {
+        return;
+    }
+
+    std::vector<uint32_t> old_to_new_slot(stage_expr.inputs.size(), UINT32_MAX);
+
+    std::vector<NamedInput> compacted_inputs;
+    compacted_inputs.reserve(stage_expr.inputs.size());
+
+    std::vector<uint32_t> compacted_input_value_ids;
+    compacted_input_value_ids.reserve(stage_input_value_ids.size());
+
+    for (uint32_t old_slot = 0; old_slot < stage_expr.inputs.size(); ++old_slot) {
+        if (!slot_used[old_slot]) {
+            continue;
+        }
+
+        uint32_t new_slot = static_cast<uint32_t>(compacted_inputs.size());
+        old_to_new_slot[old_slot] = new_slot;
+
+        NamedInput input = stage_expr.inputs[old_slot];
+        input.slot = new_slot;
+        compacted_inputs.push_back(std::move(input));
+        compacted_input_value_ids.push_back(stage_input_value_ids[old_slot]);
+    }
+
+    for (ExprNode& node : stage_expr.nodes) {
+        if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR && node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+            continue;
+        }
+
+        if (node.input_slot >= old_to_new_slot.size() || old_to_new_slot[node.input_slot] == UINT32_MAX) {
+            throw std::runtime_error("Encountered unresolved leaf input slot while compacting deduplicated fused stage inputs.");
+        }
+
+        node.input_slot = old_to_new_slot[node.input_slot];
+    }
+
+    stage_expr.inputs = std::move(compacted_inputs);
+    stage_input_value_ids = std::move(compacted_input_value_ids);
 }
 
 static bool isArgMinMaxOp(ExprOp op) { return op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX; }
@@ -516,6 +588,18 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
     switch (node.op) {
         case ExprOp::INPUT: {
             std::string s = std::string("IN(") + std::to_string(node.input_slot) + ")";
+            appendNodeDTypeSignature(s, node);
+            return s;
+        }
+
+        case ExprOp::RUNTIME_SCALAR: {
+            std::string s = std::string("RIN(") + std::to_string(node.input_slot) + ")";
+            appendNodeDTypeSignature(s, node);
+            return s;
+        }
+
+        case ExprOp::TENSOR_RUNTIME_SCALAR: {
+            std::string s = std::string("TRIN(") + std::to_string(node.input_slot) + ")";
             appendNodeDTypeSignature(s, node);
             return s;
         }
@@ -1465,6 +1549,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
     }
 
     deduplicateFusedStageExpr(stage_expr, stage_outputs);
+    compactFusedStageInputs(stage_expr, stage_input_value_ids);
 
     return PhysicalExecutionStage{
         .kind = PhysicalExecutionStage::Kind::FusedKernel,

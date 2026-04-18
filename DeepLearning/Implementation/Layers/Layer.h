@@ -106,7 +106,7 @@ class Layer {
         return featureInput.get().clone();
     }
 
-    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
         assert(running);
 
         infer(featureInput, featureOutput, stream);
@@ -115,10 +115,10 @@ class Layer {
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        nextLayer.get()->forward(featureOutput, validationPass);
+        nextLayer.get()->forward(featureOutput, batchSize, validationPass);
     }
 
-    virtual void backward(Optional<Tensor> errorInput) {
+    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {
         assert(running);
 
         // Experimental - back propagation stops at empty error input
@@ -133,7 +133,7 @@ class Layer {
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        previousLayer.get()->backward(errorOutput);
+        previousLayer.get()->backward(errorOutput, batchSize);
     }
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {

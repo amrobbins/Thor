@@ -893,12 +893,118 @@ static std::vector<uint64_t> resolveConvolutionBackwardOutputDimsFromInputs(cons
     throw std::runtime_error("resolveConvolutionBackwardOutputDimsFromInputs received unsupported op.");
 }
 
+static void collectReachableLocalNodes(const PhysicalExpression& expr, uint32_t node_idx, std::unordered_set<uint32_t>& nodes);
+
 static void mergeParameterFanOverride(FusedEquation::ParameterFanOverrideMap& result, const ParameterFanOverride& hint) {
     auto [it, inserted] = result.emplace(hint.input_name, hint);
     if (!inserted) {
         it->second.input_name = hint.input_name;
         it->second.fan_in = std::max(it->second.fan_in, hint.fan_in);
         it->second.fan_out = std::max(it->second.fan_out, hint.fan_out);
+    }
+}
+
+static uint64_t computeDimsNumel(const std::vector<uint64_t>& dims) {
+    uint64_t numel = 1;
+    for (uint64_t dim : dims) {
+        numel *= dim;
+    }
+    return numel;
+}
+
+static uint64_t computeNumelPerExample(const std::vector<uint64_t>& dims) {
+    uint64_t numel = 1;
+    for (size_t i = 1; i < dims.size(); ++i) {
+        numel *= dims[i];
+    }
+    return numel;
+}
+
+static void addFusedKernelParameterFanOverrides(const CompiledExecutionStage& stage,
+                                                const std::vector<std::vector<uint64_t>>& stage_input_dims,
+                                                const std::vector<std::vector<uint64_t>>& stage_output_dims,
+                                                const std::unordered_map<uint32_t, std::string>& root_input_name_by_slot,
+                                                const std::unordered_set<std::string>& parameter_names,
+                                                FusedEquation::ParameterFanOverrideMap& result) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        return;
+    }
+    if (stage_input_dims.size() != stage.input_value_ids.size()) {
+        throw std::runtime_error("Fused-kernel parameter fan override inference stage input count mismatch.");
+    }
+    if (stage_output_dims.size() != stage.outputs.size()) {
+        throw std::runtime_error("Fused-kernel parameter fan override inference stage output count mismatch.");
+    }
+
+    std::unordered_map<std::string, uint64_t> param_numel_by_name;
+    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+        const ExprNode& node = stage.expr.nodes[node_idx];
+        if (node.op != ExprOp::INPUT) {
+            continue;
+        }
+        if (node.input_slot >= stage.input_value_ids.size()) {
+            throw std::runtime_error("Fused-kernel parameter fan override inference input slot out of range.");
+        }
+
+        auto name_it = root_input_name_by_slot.find(stage.input_value_ids[node.input_slot]);
+        if (name_it == root_input_name_by_slot.end()) {
+            continue;
+        }
+        if (!parameter_names.contains(name_it->second)) {
+            continue;
+        }
+
+        param_numel_by_name.emplace(name_it->second, computeDimsNumel(stage_input_dims[node.input_slot]));
+    }
+
+    std::unordered_map<std::string, uint64_t> max_output_numel_per_example_by_name;
+    for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+        const uint64_t output_numel_per_example = computeNumelPerExample(stage_output_dims[output_idx]);
+
+        std::unordered_set<uint32_t> reachable_nodes;
+        collectReachableLocalNodes(stage.expr, stage.outputs[output_idx].local_node_idx, reachable_nodes);
+
+        for (uint32_t node_idx : reachable_nodes) {
+            if (node_idx >= stage.expr.nodes.size()) {
+                throw std::runtime_error("Fused-kernel parameter fan override inference reachable node out of range.");
+            }
+
+            const ExprNode& node = stage.expr.nodes[node_idx];
+            if (node.op != ExprOp::INPUT) {
+                continue;
+            }
+            if (node.input_slot >= stage.input_value_ids.size()) {
+                throw std::runtime_error("Fused-kernel parameter fan override inference reachable input slot out of range.");
+            }
+
+            auto name_it = root_input_name_by_slot.find(stage.input_value_ids[node.input_slot]);
+            if (name_it == root_input_name_by_slot.end()) {
+                continue;
+            }
+            if (!parameter_names.contains(name_it->second)) {
+                continue;
+            }
+
+            uint64_t& tracked = max_output_numel_per_example_by_name[name_it->second];
+            tracked = std::max(tracked, output_numel_per_example);
+        }
+    }
+
+    for (const auto& [input_name, output_numel_per_example] : max_output_numel_per_example_by_name) {
+        auto param_numel_it = param_numel_by_name.find(input_name);
+        if (param_numel_it == param_numel_by_name.end()) {
+            continue;
+        }
+
+        const uint64_t param_numel = param_numel_it->second;
+        const uint64_t fan_out = (param_numel == 0) ? 1 : std::max<uint64_t>(1, output_numel_per_example / param_numel);
+
+        mergeParameterFanOverride(result,
+                                  ParameterFanOverride{
+                                      .input_name = input_name,
+                                      .fan_in = 1,
+                                      .fan_out = fan_out,
+                                  });
     }
 }
 
@@ -2974,9 +3080,12 @@ PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered
         resolved_forward_outputs, backward_config->wrt_names, std::nullopt, forward_input_dims, backward_config->accumulate_grad_outputs);
 }
 
-std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs,
-                                                                 const std::unordered_map<std::string, float>& scalarInputs) const {
-    std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputsForCompilation(namedInputs, scalarInputs);
+std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(
+    const std::unordered_map<std::string, Tensor>& namedInputs,
+    const std::unordered_map<std::string, float>& scalarInputs,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) const {
+    std::unordered_map<uint32_t, RuntimeInputValue> root_values =
+        bindRootInputsForCompilation(namedInputs, scalarInputs, tensor_scalar_inputs);
 
     if (root_values.empty()) {
         throw std::runtime_error("FusedEquation::compileForInputs requires at least one bound root input.");
@@ -4794,7 +4903,15 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             stage_input_dims.push_back(it->second);
         }
 
-        if (stage.kind == CompiledExecutionStage::Kind::Matmul) {
+        std::vector<std::vector<uint64_t>> resolved_stage_output_dims;
+        if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
+            resolved_stage_output_dims.reserve(stage.outputs.size());
+            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                resolved_stage_output_dims.push_back(resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims));
+            }
+            addFusedKernelParameterFanOverrides(
+                stage, stage_input_dims, resolved_stage_output_dims, root_input_name_by_slot, parameter_names, result);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Matmul) {
             addMatmulParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
         } else if (stage.kind == CompiledExecutionStage::Kind::Convolution) {
             addConvolutionParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
@@ -4811,7 +4928,7 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
 
         if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
             for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
-                value_dims[stage.outputs[output_idx].value_id] = resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
+                value_dims[stage.outputs[output_idx].value_id] = resolved_stage_output_dims[output_idx];
             }
         } else if (stage.kind == CompiledExecutionStage::Kind::Reduction) {
             if (!stage.reduction) {

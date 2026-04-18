@@ -170,6 +170,29 @@ def _gemm_backward_reference(
 
 
 @pytest.mark.cuda
+@pytest.mark.parametrize("transpose_a,transpose_b", TRANSPOSE_CASES)
+def test_matmul_parameter_fan_overrides_all_transpose_combinations(transpose_a: bool, transpose_b: bool):
+    dtype = thor.DataType.fp16
+    a = ex.input("a")
+    b = ex.input("b")
+    eq = ex.compile(ex.matmul(a, b, transpose_a=transpose_a, transpose_b=transpose_b), device_num=0)
+
+    a_np, b_np, _, _ = _matmul_case_arrays(transpose_a, transpose_b, dtype)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+    }
+
+    fan = eq.get_parameter_fan_overrides(inputs_gpu, ["a", "b"])
+    assert fan["a"]["fan_in"] == 3
+    assert fan["a"]["fan_out"] == 2
+    assert fan["b"]["fan_in"] == 3
+    assert fan["b"]["fan_out"] == 4
+
+
+@pytest.mark.cuda
 @pytest.mark.parametrize("dtype", MATMUL_DTYPES)
 @pytest.mark.parametrize("transpose_a,transpose_b", TRANSPOSE_CASES)
 def test_matmul_forward_all_transpose_combinations_numerical(

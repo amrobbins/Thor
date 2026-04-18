@@ -11,42 +11,22 @@ Parameter::Parameter(string name, bool trainable, bool trainingEnabled)
     assert(!(trainable == false && trainingEnabled));
 }
 
-void Parameter::compileStorageAndOptimizer(const std::vector<uint64_t>& inputDims,
-                                           const std::vector<uint64_t>& outputDims,
-                                           const TensorDescriptor::DataType& outputDataType,
-                                           const TensorPlacement& placement,
-                                           const Optional<Stream>& gradientUpdateStream,
-                                           bool inferenceOnly) {
-    this->outputDims = outputDims;
+void Parameter::compileStorageAndOptimizer(const Tensor& inputTensor, const Optional<Stream>& gradientUpdateStream, bool inferenceOnly) {
     this->gradientUpdateStream = gradientUpdateStream;
 
-    createStorage(inputDims, outputDims, outputDataType, placement);
+    createStorage(inputTensor);
 
     if (isTrainable() && !inferenceOnly) {
         assert(hasOptimizer());
         assert(gradientUpdateStream.isPresent());
         optimizer->compile(storage, gradientUpdateStream.get());
     }
+    storageInitialized = true;
 }
 
-void Parameter::compileInitializer() { compileInitializer(0, 0); }
-
-void Parameter::compileInitializer(uint64_t explicitFanIn, uint64_t explicitFanOut) {
+void Parameter::compileInitializer(uint64_t fanIn, uint64_t fanOut) {
     if (!hasInitializer()) {
         return;
-    }
-
-    const uint64_t fanIn = (explicitFanIn == 0) ? 1 : explicitFanIn;
-
-    uint64_t fanOut = explicitFanOut;
-    if (fanOut == 0) {
-        uint64_t outputNumelPerExample = 1;
-        for (uint32_t i = 1; i < outputDims.size(); ++i) {
-            outputNumelPerExample *= outputDims[i];
-        }
-
-        const uint64_t paramNumel = storage.get().getTotalNumElements();
-        fanOut = (paramNumel == 0) ? 1 : std::max<uint64_t>(1, outputNumelPerExample / paramNumel);
     }
 
     Stream initStream = gradientUpdateStream.isPresent()
@@ -82,7 +62,7 @@ shared_ptr<Initializer> Parameter::getInitializer() { return initializer; }
 void Parameter::clearInitializer() { initializer = nullptr; }
 
 string Parameter::getName() { return name; }
-Tensor Parameter::getStorage() { return storage; }
+Optional<Tensor> Parameter::getStorage() { return storage; }
 
 bool Parameter::isTrainable() const { return trainable; }
 bool Parameter::isTrainingEnabled() const { return isTrainable() && trainingEnabled; }
@@ -93,5 +73,7 @@ void Parameter::setTrainingEnabled(bool enabled) {
     // Will need to ensure that the gradients are not computed for this parameter when trainability is off.
     trainingEnabled = enabled;
 }
+
+bool Parameter::isStorageInitialized() const { return storageInitialized; }
 
 }  // namespace ThorImplementation

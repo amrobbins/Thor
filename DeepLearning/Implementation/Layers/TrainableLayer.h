@@ -15,15 +15,32 @@ namespace ThorImplementation {
  *         If there were more than one stamp, I would have to accumulate into a master gradient and then distribute the weights.
  */
 // : public MultiConnectionLayer
-class TrainableLayer : public Parameterizable {
+class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
    public:
-    virtual ~TrainableLayer() = default;
+    ~TrainableLayer() override = default;
 
     // All real stamped id's will have positive values
     TrainableLayer(const TensorPlacement &placement, bool inferenceOnly, int64_t stampedId = -1)
-        : inferenceOnly(inferenceOnly), placement(placement), stampedId(stampedId) {}
+        : placement(placement), inferenceOnly(inferenceOnly), stampedId(stampedId) {}
 
-    virtual void compileImpl() {
+    void attachGradientUpdateStream() {
+        if (gradientUpdateStream.isPresent())
+            return;
+        for (const auto &parameter : parameters) {
+            if (!parameter->isTrainable())
+                continue;
+            if (gradientUpdateStream.isEmpty()) {
+                gradientUpdateStream = Stream::getNextGradientUpdateStream(placement.getDeviceNum());
+                break;
+            }
+        }
+    }
+
+    void setOptimizer(const std::string &parameterName, const std::shared_ptr<Optimizer> &optimizer) {
+        assert(parameterIndexByName.contains(parameterName));
+        parameters[parameterIndexByName[parameterName]]->setOptimizer(optimizer);
+    }
+    void compileImpl() override {
         // MultiConnectionLayer::compileImpl();
 
         // Ensure state is clear
@@ -46,21 +63,17 @@ class TrainableLayer : public Parameterizable {
             }
         }
 
+        // Compile happens after all inputs are connected, and before any output is connected.
+        //  FIXME: That won't work because I need to associate the output tensors with the equation.
+        //  FIXME: but right now, create feature output depends on storage being there, maybe I need to remove that dependency.
+        //         I could compile the parameters when the first feature output is requested
+        //         (or right after the first FIN is attached - earliest point at which have enough info) instead of during compile.
         Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
         assert(aFeatureInput.isPresent());
         assert(aFeatureInput.get().getPlacement() == placement);
-        Optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureOutputs);
-        assert(aFeatureOutput.isPresent());
-        assert(aFeatureOutput.get().getPlacement() == placement);
-
-        for (const auto &parameter : parameters) {
-            if (!parameter->isTrainable())
-                continue;
-            if (gradientUpdateStream.isEmpty()) {
-                gradientUpdateStream = Stream::getNextGradientUpdateStream(placement.getDeviceNum());
-                break;
-            }
-        }
+        // Optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureOutputs);
+        // assert(aFeatureOutput.isPresent());
+        // assert(aFeatureOutput.get().getPlacement() == placement);
 
         numBackwardConnections = 0;
         for (const auto &errorInput : errorInputs) {
@@ -74,108 +87,115 @@ class TrainableLayer : public Parameterizable {
 
    public:
     // FIXME: Temporarily moved here from layer
-    bool inferenceOnly = false;
-    virtual bool isInferenceOnly() { return inferenceOnly; }
-    bool running = true;
-    virtual bool isBackPropStub() { return false; }
-    std::vector<Optional<Tensor>> featureInputs;
-    std::vector<Optional<Tensor>> featureOutputs;
-    std::vector<Optional<Tensor>> errorInputs;
-    std::vector<Optional<Tensor>> errorOutputs;
-    std::vector<Stream> streams;
-    std::vector<Optional<TrainableLayer *>> nextLayers;
-    std::vector<Optional<TrainableLayer *>> previousLayers;
-    static Optional<Tensor> getFirstPresentTensor(const std::vector<Optional<Tensor>> &tensors) {
-        for (auto it = tensors.begin(); it != tensors.end(); ++it) {
-            if (it->isPresent())
-                return *it;
-        }
-        return Optional<Tensor>::empty();
-    }
-    static unsigned int numPresentTensors(const std::vector<Optional<Tensor>> &tensors) {
-        unsigned int numPresent = 0;
-        for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
-            if (it->isPresent())
-                numPresent += 1;
-        }
-        return numPresent;
-    }
-    static Optional<Tensor> getLastPresentTensor(std::vector<Optional<Tensor>> tensors) {
-        for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
-            if (it->isPresent())
-                return *it;
-        }
-        return Optional<Tensor>::empty();
-    }
-    virtual void ensureNoDeviceCrossing() {
-        Optional<Tensor> lastFeatureInput = getLastPresentTensor(featureInputs);
-        Optional<Tensor> lastErrorOutput = getLastPresentTensor(errorOutputs);
-        Optional<Tensor> lastErrorInput = getLastPresentTensor(errorInputs);
-        Optional<Tensor> lastFeatureOutput = getLastPresentTensor(featureOutputs);
-
-        if (lastFeatureInput.isPresent() && lastFeatureOutput.isPresent())
-            assert(lastFeatureInput.get().getPlacement() == lastFeatureOutput.get().getPlacement());
-        if (lastFeatureInput.isPresent() && lastErrorInput.isPresent())
-            assert(lastFeatureInput.get().getPlacement() == lastErrorInput.get().getPlacement());
-        if (lastFeatureInput.isPresent() && lastErrorOutput.isPresent())
-            assert(lastFeatureInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
-
-        if (lastFeatureOutput.isPresent() && lastErrorInput.isPresent())
-            assert(lastFeatureOutput.get().getPlacement() == lastErrorInput.get().getPlacement());
-        if (lastFeatureOutput.isPresent() && lastErrorOutput.isPresent())
-            assert(lastFeatureOutput.get().getPlacement() == lastErrorOutput.get().getPlacement());
-
-        if (lastErrorInput.isPresent() && lastErrorOutput.isPresent())
-            assert(lastErrorInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
-    }
-    virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) {
-        // backPropagateError allows the previous layer to specify that it does not support back propagation,
-        // inferenceOnly means that even though back propagation may be supported, we are not using it since we are not training.
-        if (backPropagateError && !isInferenceOnly())
-            return getFirstPresentTensor(featureInputs).get().clone();
-        else
-            return Optional<Tensor>::empty();
-    }
-    virtual Optional<Tensor> connectToPreviousLayer(
-        TrainableLayer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
-        assert(!compiled);
-
-        Optional<Tensor> previouslyConnectedFeatureInput = getFirstPresentTensor(featureInputs);
-        if (previouslyConnectedFeatureInput.isPresent() && featureInput.isPresent()) {
-            assert(featureInput.get().getDescriptor() == previouslyConnectedFeatureInput.get().getDescriptor());
-            assert(featureInput.get().getPlacement() == previouslyConnectedFeatureInput.get().getPlacement());
-        }
-
-        streams.push_back(stream);
-
-        previousLayers.push_back(previousLayer);
-        featureInputs.emplace_back(featureInput);
-        errorOutputs.emplace_back(createErrorOutputTensor(backPropagateError, errorOutputs.size()));
-
-        Optional<Tensor> lastFeatureInput = getLastPresentTensor(featureInputs);
-        Optional<Tensor> firstFeatureInput = getFirstPresentTensor(featureInputs);
-        Optional<Tensor> lastErrorOutput = getLastPresentTensor(errorOutputs);
-        if (firstFeatureInput.isPresent()) {
-            assert(lastFeatureInput.get().getDescriptor() == firstFeatureInput.get().getDescriptor());
-            assert(lastFeatureInput.get().getPlacement() == firstFeatureInput.get().getPlacement());
-            if (lastErrorOutput.isPresent()) {
-                assert(lastFeatureInput.get().getDescriptor() == lastErrorOutput.get().getDescriptor());
-                assert(lastFeatureInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
-            }
-        } else if (lastErrorOutput.isPresent()) {
-            Optional<Tensor> firstErrorOutput = getFirstPresentTensor(errorOutputs);
-            assert(lastErrorOutput.get().getDescriptor() == firstErrorOutput.get().getDescriptor());
-            assert(lastErrorOutput.get().getPlacement() == firstErrorOutput.get().getPlacement());
-        }
-        ensureNoDeviceCrossing();
-
-        return errorOutputs.back();
-    }
+    // bool inferenceOnly = false;
+    // virtual bool isInferenceOnly() { return inferenceOnly; }
+    // bool running = true;
+    // virtual bool isBackPropStub() { return false; }
+    // std::vector<Optional<Tensor>> featureInputs;
+    // std::vector<Optional<Tensor>> featureOutputs;
+    // std::vector<Optional<Tensor>> errorInputs;
+    // std::vector<Optional<Tensor>> errorOutputs;
+    // std::vector<Stream> streams;
+    // std::vector<Optional<TrainableLayer *>> nextLayers;
+    // std::vector<Optional<TrainableLayer *>> previousLayers;
+    // static Optional<Tensor> getFirstPresentTensor(const std::vector<Optional<Tensor>> &tensors) {
+    //     for (auto it = tensors.begin(); it != tensors.end(); ++it) {
+    //         if (it->isPresent())
+    //             return *it;
+    //     }
+    //     return Optional<Tensor>::empty();
+    // }
+    // static unsigned int numPresentTensors(const std::vector<Optional<Tensor>> &tensors) {
+    //     unsigned int numPresent = 0;
+    //     for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
+    //         if (it->isPresent())
+    //             numPresent += 1;
+    //     }
+    //     return numPresent;
+    // }
+    // static Optional<Tensor> getLastPresentTensor(std::vector<Optional<Tensor>> tensors) {
+    //     for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
+    //         if (it->isPresent())
+    //             return *it;
+    //     }
+    //     return Optional<Tensor>::empty();
+    // }
+    // virtual void ensureNoDeviceCrossing() {
+    //     Optional<Tensor> lastFeatureInput = getLastPresentTensor(featureInputs);
+    //     Optional<Tensor> lastErrorOutput = getLastPresentTensor(errorOutputs);
+    //     Optional<Tensor> lastErrorInput = getLastPresentTensor(errorInputs);
+    //     Optional<Tensor> lastFeatureOutput = getLastPresentTensor(featureOutputs);
+    //
+    //     if (lastFeatureInput.isPresent() && lastFeatureOutput.isPresent())
+    //         assert(lastFeatureInput.get().getPlacement() == lastFeatureOutput.get().getPlacement());
+    //     if (lastFeatureInput.isPresent() && lastErrorInput.isPresent())
+    //         assert(lastFeatureInput.get().getPlacement() == lastErrorInput.get().getPlacement());
+    //     if (lastFeatureInput.isPresent() && lastErrorOutput.isPresent())
+    //         assert(lastFeatureInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+    //
+    //     if (lastFeatureOutput.isPresent() && lastErrorInput.isPresent())
+    //         assert(lastFeatureOutput.get().getPlacement() == lastErrorInput.get().getPlacement());
+    //     if (lastFeatureOutput.isPresent() && lastErrorOutput.isPresent())
+    //         assert(lastFeatureOutput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+    //
+    //     if (lastErrorInput.isPresent() && lastErrorOutput.isPresent())
+    //         assert(lastErrorInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+    // }
+    // virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) {
+    //     // backPropagateError allows the previous layer to specify that it does not support back propagation,
+    //     // inferenceOnly means that even though back propagation may be supported, we are not using it since we are not training.
+    //     if (backPropagateError && !isInferenceOnly())
+    //         return getFirstPresentTensor(featureInputs).get().clone();
+    //     else
+    //         return Optional<Tensor>::empty();
+    // }
+    // virtual Optional<Tensor> connectToPreviousLayer(
+    //     TrainableLayer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
+    //     assert(!compiled);
+    //
+    //     Optional<Tensor> previouslyConnectedFeatureInput = getFirstPresentTensor(featureInputs);
+    //     if (previouslyConnectedFeatureInput.isPresent() && featureInput.isPresent()) {
+    //         assert(featureInput.get().getDescriptor() == previouslyConnectedFeatureInput.get().getDescriptor());
+    //         assert(featureInput.get().getPlacement() == previouslyConnectedFeatureInput.get().getPlacement());
+    //     }
+    //
+    //     streams.push_back(stream);
+    //
+    //     previousLayers.push_back(previousLayer);
+    //     featureInputs.emplace_back(featureInput);
+    //     errorOutputs.emplace_back(createErrorOutputTensor(backPropagateError, errorOutputs.size()));
+    //
+    //     Optional<Tensor> lastFeatureInput = getLastPresentTensor(featureInputs);
+    //     Optional<Tensor> firstFeatureInput = getFirstPresentTensor(featureInputs);
+    //     Optional<Tensor> lastErrorOutput = getLastPresentTensor(errorOutputs);
+    //     if (firstFeatureInput.isPresent()) {
+    //         assert(lastFeatureInput.get().getDescriptor() == firstFeatureInput.get().getDescriptor());
+    //         assert(lastFeatureInput.get().getPlacement() == firstFeatureInput.get().getPlacement());
+    //         if (lastErrorOutput.isPresent()) {
+    //             assert(lastFeatureInput.get().getDescriptor() == lastErrorOutput.get().getDescriptor());
+    //             assert(lastFeatureInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+    //         }
+    //     } else if (lastErrorOutput.isPresent()) {
+    //         Optional<Tensor> firstErrorOutput = getFirstPresentTensor(errorOutputs);
+    //         assert(lastErrorOutput.get().getDescriptor() == firstErrorOutput.get().getDescriptor());
+    //         assert(lastErrorOutput.get().getPlacement() == firstErrorOutput.get().getPlacement());
+    //     }
+    //     ensureNoDeviceCrossing();
+    //
+    //     return errorOutputs.back();
+    // }
     // FIXME: Temporarily moved here from layer
 
    protected:
-    virtual void forward(uint32_t connectionNumber, bool isValidation) {
+    void forward(Optional<Tensor> featureInput, bool isValidation, uint32_t batchSize = 0) override {
         assert(running);
+
+        unsigned int connectionNumber = 0;
+        for (; connectionNumber < featureInputs.size(); ++connectionNumber) {
+            if (featureInputs[connectionNumber].isPresent() && featureInput.get() == featureInputs[connectionNumber].get())
+                break;
+        }
+        assert(connectionNumber != featureInputs.size());
 
         if (isStartOfForward) {
             if (weightsAreUpToDateEvent.isPresent()) {
@@ -196,14 +216,21 @@ class TrainableLayer : public Parameterizable {
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        nextLayers[connectionNumber].get()->forward(connectionNumber, isValidation);
+        nextLayers[connectionNumber].get()->forward(featureOutputs[connectionNumber], batchSize, isValidation);
     }
 
     // Weights are up-to-date by end of data stream
     virtual void computeFeatureOut(uint32_t connectionNumber) = 0;
 
-    virtual void backward(uint32_t connectionNumber, uint32_t batchSize) {
+    void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {
         assert(running);
+
+        unsigned int connectionNumber = 0;
+        for (; connectionNumber < errorInputs.size(); ++connectionNumber) {
+            if (errorInputs[connectionNumber].isPresent() && errorInput.get() == errorInputs[connectionNumber].get())
+                break;
+        }
+        assert(connectionNumber != errorInputs.size());
 
         bool clearGradientFirst = false;
         if (isStartOfBackward) {
@@ -267,7 +294,7 @@ class TrainableLayer : public Parameterizable {
 
         // Propagate output error gradient to the previous layer, on the data stream.
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        previousLayers[connectionNumber].get()->backward(connectionNumber, batchSize);
+        previousLayers[connectionNumber].get()->backward(errorOutputs[connectionNumber], batchSize);
     }
 
     // Error in is up-to-date by the end of the data stream.
@@ -279,7 +306,7 @@ class TrainableLayer : public Parameterizable {
 
    public:
     // Setters/Getters
-    uint64_t getStampedId() { return stampedId; }
+    uint64_t getStampedId() const { return stampedId; }  // FIXME: Move to layer
 
     virtual std::string getLayerType() = 0;
 
@@ -317,6 +344,8 @@ class TrainableLayer : public Parameterizable {
     bool wGradFusedWithEOutGrad = false;
     bool compiled = false;
     TensorPlacement placement;
+
+    bool inferenceOnly;
 
    private:
     // stampedId is used to identify which layers correspond to which other layers across multiple stamps of the same network.

@@ -13,7 +13,7 @@ class MultiConnectionLayer : public Layer {
    public:
     virtual ~MultiConnectionLayer() {}
 
-    virtual void compileImpl() {
+    void compileImpl() override {
         Layer::compileImpl();
 
         numEmptyErrorInputConnections = 0;
@@ -25,7 +25,7 @@ class MultiConnectionLayer : public Layer {
         }
     }
 
-    virtual void initialize() {
+    void initialize() override {
         Layer::initialize();
         stillWaitingForErrorInputTensors = allErrorInputTensorIds;
     }
@@ -33,7 +33,7 @@ class MultiConnectionLayer : public Layer {
     // For situations where the error input should just pass through to the error output of the next layer,
     // this method is used to avoid duplicating the tensor and unnecessary data movement.
     // They may not have the same number of error inputs and error outputs, consider tensorFanout.
-    virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
+    void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) override {
         assert(oldErrorInput.isPresent());
         bool replacementHappend = false;
         for (unsigned int i = 0; i < errorInputs.size(); ++i) {
@@ -58,7 +58,7 @@ class MultiConnectionLayer : public Layer {
         assert(replacementHappend);
     }
 
-    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
+    void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
         assert(running);
 
         unsigned int connectionNumber = 0;
@@ -83,10 +83,10 @@ class MultiConnectionLayer : public Layer {
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        nextLayers[connectionNumber].get()->forward(featureOutputs[connectionNumber], validationPass);
+        nextLayers[connectionNumber].get()->forward(featureOutputs[connectionNumber], batchSize, validationPass);
     }
 
-    virtual void backward(Optional<Tensor> errorInput) {
+    void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {
         assert(running);
 
         // Experimental - back propagation stops at empty error input
@@ -117,11 +117,11 @@ class MultiConnectionLayer : public Layer {
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        previousLayers[connectionNumber].get()->backward(errorOutputs[connectionNumber]);
+        previousLayers[connectionNumber].get()->backward(errorOutputs[connectionNumber], batchSize);
     }
 
     // Note: A featureInput is guaranteed to be connected before createFeatureOutputTensor() is called.
-    virtual Optional<Tensor> createFeatureOutputTensor() {
+    Optional<Tensor> createFeatureOutputTensor() override {
         // The default implementation just creates a clone of the corresponding feature input tensor,
         // this is the behavior of math layers etc that apply a function to the input tensor but do not reshape it.
         Optional<Tensor> previouslyConnectedFeatureInput = getFirstPresentTensor(featureInputs);
@@ -129,7 +129,7 @@ class MultiConnectionLayer : public Layer {
         return previouslyConnectedFeatureInput.get().clone();
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
+    void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
         assert(!compiled);
 
         nextLayers.push_back(nextLayer);

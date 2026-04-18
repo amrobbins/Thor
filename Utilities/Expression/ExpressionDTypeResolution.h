@@ -6,21 +6,19 @@
 
 namespace ThorImplementation {
 
-using DataType = TensorDescriptor::DataType;
+bool isSupportedFusionFloatingType(TensorDescriptor::DataType dtype);
+bool isFp8Type(TensorDescriptor::DataType dtype);
 
-bool isSupportedFusionFloatingType(DataType dtype);
-bool isFp8Type(DataType dtype);
+TensorDescriptor::DataType toSupportedComputeDType(ExprOp op, TensorDescriptor::DataType requested_compute_dtype);
+TensorDescriptor::DataType toSupportedInputDType(ExprOp op, TensorDescriptor::DataType dtype);
 
-DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype);
-DataType toSupportedInputDType(ExprOp op, DataType dtype);
+TensorDescriptor::DataType defaultComputeDType(TensorDescriptor::DataType value_dtype);
+TensorDescriptor::DataType defaultComputeDType(TensorDescriptor::DataType input_dtype, TensorDescriptor::DataType output_dtype);
+TensorDescriptor::DataType promoteTensorValueDTypes(TensorDescriptor::DataType a, TensorDescriptor::DataType b);
+TensorDescriptor::DataType promoteTensorValueDTypes(const std::vector<TensorDescriptor::DataType>& dtypes);
 
-DataType defaultComputeDType(DataType value_dtype);
-DataType defaultComputeDType(DataType input_dtype, DataType output_dtype);
-DataType promoteTensorValueDTypes(DataType a, DataType b);
-DataType promoteTensorValueDTypes(const std::vector<DataType>& dtypes);
+void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<TensorDescriptor::DataType>& root_input_dtypes);
 
-void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<DataType>& root_input_dtypes);
-
-void resolveOutputsDTypesInPlace(PhysicalOutputs& outputs, const std::vector<DataType>& root_input_dtypes);
+void resolveOutputsDTypesInPlace(PhysicalOutputs& outputs, const std::vector<TensorDescriptor::DataType>& root_input_dtypes);
 
 }  // namespace ThorImplementation

@@ -281,8 +281,10 @@ class FusedEquation {
         const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs = {},
         const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes = {}) const;
 
-    [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs,
-                                                                    const std::unordered_map<std::string, float>& scalarInputs = {}) const;
+    [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForInputs(
+        const std::unordered_map<std::string, Tensor>& namedInputs,
+        const std::unordered_map<std::string, float>& scalarInputs = {},
+        const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs = {}) const;
 
    private:
     explicit FusedEquation(PhysicalOutputs outputs_template,

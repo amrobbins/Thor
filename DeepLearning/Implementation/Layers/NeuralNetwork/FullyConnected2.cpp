@@ -8,12 +8,10 @@ class FCWeightsParameter : public Parameter {
     FCWeightsParameter(std::string name, bool trainable, bool trainingEnabled, uint32_t numOutputFeatures)
         : Parameter(name, trainable, trainingEnabled), numOutputFeatures(numOutputFeatures) {}
 
-    void createStorage(const std::vector<uint64_t>& inputDims,
-                       const std::vector<uint64_t>& outputDims,
-                       const TensorDescriptor::DataType& outputDataType,
-                       const TensorPlacement& placement) override {
-        TensorDescriptor descriptor(outputDataType, {numOutputFeatures});
-        storage = Tensor(placement, descriptor);
+    void createStorage(const Tensor& inputTensor) override {
+        const uint64_t batchSize = inputTensor.getDimensions()[0];
+        TensorDescriptor descriptor(inputTensor.getDataType(), {inputTensor.getTotalNumElements() / batchSize, numOutputFeatures});
+        storage = Tensor(inputTensor.getPlacement(), descriptor);
     }
 
    private:
@@ -25,12 +23,9 @@ class FCBiasesParameter : public Parameter {
     FCBiasesParameter(std::string name, bool trainable, bool trainingEnabled, uint32_t numOutputFeatures)
         : Parameter(name, trainable, trainingEnabled), numOutputFeatures(numOutputFeatures) {}
 
-    void createStorage(const std::vector<uint64_t>& inputDims,
-                       const std::vector<uint64_t>& outputDims,
-                       const TensorDescriptor::DataType& outputDataType,
-                       const TensorPlacement& placement) override {
-        TensorDescriptor descriptor(outputDataType, {numOutputFeatures});
-        storage = Tensor(placement, descriptor);
+    void createStorage(const Tensor& inputTensor) override {
+        TensorDescriptor descriptor(inputTensor.getDataType(), {numOutputFeatures});
+        storage = Tensor(inputTensor.getPlacement(), descriptor);
     }
 
    private:
@@ -45,7 +40,9 @@ FullyConnected2::FullyConnected2(const uint32_t numOutputFeatures,
                                  bool inferenceOnly,
                                  int64_t stampedId)
     : CustomLayer(
-          buildExpression(hasBias, placement), placement, defineParameters(numOutputFeatures, hasBias), inferenceOnly, stampedId, false) {}
+          buildExpression(hasBias, placement), placement, defineParameters(numOutputFeatures, hasBias), inferenceOnly, stampedId, false) {
+    printf("%d", placement.getDeviceNum());
+}
 
 DynamicExpression FullyConnected2::buildExpression(bool hasBias, TensorPlacement placement) {
     return DynamicExpression([hasBias, placement](const DynamicExpression::TensorMap& inputs,

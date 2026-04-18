@@ -32,6 +32,15 @@ class CustomLayer : public TrainableLayer {
     // Compute feature output on the data stream
     void computeFeatureOut(uint32_t connectionNumber) override;
 
+    // FIXME: computeFeatureOut and backwards may need to instead take the input tensor and look up the connection number
+    //         - to keep accounting internal to the layer.
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) override {}
+    void backProp(Optional<Tensor> dataIn,
+                  Optional<Tensor> errorIn,
+                  Optional<Tensor> errorOut,
+                  Stream stream,
+                  unsigned int connectionNumber) override {}
+
     // Error in is up-to-date by the end of the data stream.
     // Gradient update stream must wait for that.
     void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
@@ -39,7 +48,7 @@ class CustomLayer : public TrainableLayer {
     // Error in is up-to-date by the end of the data stream.
     Optional<Event> computeErrorOut(uint32_t connectionNumber) override;
 
-    virtual Optional<Tensor> createFeatureOutputTensor();
+    Optional<Tensor> createFeatureOutputTensor() override;
     Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
 
     uint64_t flopCountForward() override;
@@ -60,7 +69,6 @@ class CustomLayer : public TrainableLayer {
     DynamicExpression layerDefinitionExpression;
     std::string inputName;
 
-    TensorPlacement placement{};
     bool useFastMath = false;
 
     std::vector<std::shared_ptr<FusedEquation>> forwardEq;

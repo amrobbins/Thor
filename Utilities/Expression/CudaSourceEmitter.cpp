@@ -385,7 +385,26 @@ static std::vector<DataType> collectInputSlotDTypes(const PhysicalExpression& ex
 
     for (uint32_t slot = 0; slot < input_dtypes.size(); ++slot) {
         if (!seen[slot]) {
-            throw runtime_error("Unused or unresolved input slot encountered in fused stage.");
+            std::ostringstream ss;
+            ss << "Unused or unresolved input slot encountered in fused stage: slot=" << slot;
+            if (slot < expr.inputs.size()) {
+                ss << ", name='" << expr.inputs[slot].name << "'";
+                ss << ", kind=";
+                switch (expr.inputs[slot].kind) {
+                    case NamedInput::Kind::Tensor:
+                        ss << "Tensor";
+                        break;
+                    case NamedInput::Kind::RuntimeScalarFp32:
+                        ss << "RuntimeScalar";
+                        break;
+                    case NamedInput::Kind::TensorRuntimeScalar:
+                        ss << "TensorRuntimeScalar";
+                        break;
+                }
+            }
+            ss << ". This usually means the fused stage declared an input in expr.inputs "
+                  "that no INPUT/RUNTIME_SCALAR/TENSOR_RUNTIME_SCALAR node actually referenced.";
+            throw runtime_error(ss.str());
         }
     }
 
