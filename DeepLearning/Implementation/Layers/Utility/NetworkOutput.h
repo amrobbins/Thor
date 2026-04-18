@@ -77,7 +77,7 @@ class NetworkOutput : public Layer {
 
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {}
 
-    virtual void backward(Optional<Tensor> errorInput) {}
+    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {}
 
    protected:
     Event outputReadyEvent;

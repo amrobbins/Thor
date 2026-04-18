@@ -336,8 +336,9 @@
 //     half *weightsGpuMem = (half *)weightsGpu_h.getMemPtr();
 //     half *weightsGradientMem = (half *)weightsGradientGpu_h.getMemPtr();
 //     for (int i = 0; i < numWeights; ++i) {
-//         half expected = (float)weightsMem[i] - (learningRate * (float)weightsGradientMem[i]) / (Loss::getLossScalingFactor() *
-//         batchSize); maxDiff = abs((float)expected / 1000.0f); if (maxDiff < 0.016)
+//         half expected = (float)weightsMem[i] - (learningRate * (float)weightsGradientMem[i]) / (Loss::getLossScalingFactor() * batchSize);
+//         maxDiff = abs((float)expected / 1000.0f);
+//         if (maxDiff < 0.016)
 //             maxDiff = 0.016;
 //         if (abs((float)expected - (float)weightsGpuMem[i]) >= maxDiff) {
 //             printf("%d  cpu %f  gpu %f     weight %f   gradient %f  learningRate %f maxDiff %f\n",
@@ -358,8 +359,9 @@
 //         half *biasesGpuMem = (half *)biasesGpu_h.getMemPtr();
 //         half *biasesGradientMem = (half *)biasesGradientGpu_h.getMemPtr();
 //         for (int i = 0; i < numBiases; ++i) {
-//             half expected = (float)biasesMem[i] - (learningRate * (float)biasesGradientMem[i]) / (Loss::getLossScalingFactor() *
-//             batchSize); maxDiff = abs((float)expected / 1000.0f); if (maxDiff < 0.01)
+//             half expected = (float)biasesMem[i] - (learningRate * (float)biasesGradientMem[i]) / (Loss::getLossScalingFactor() * batchSize);
+//             maxDiff = abs((float)expected / 1000.0f);
+//             if (maxDiff < 0.01)
 //                 maxDiff = 0.01;
 //             ASSERT_LT(abs((float)expected - (float)biasesGpuMem[i]), maxDiff);
 //             if (abs((float)expected - (float)biasesGpuMem[i]) >= maxDiff) {

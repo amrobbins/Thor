@@ -973,8 +973,12 @@ outputs: dict[str, PhysicalTensor]
 
     fused_equation.def(
         "_debug_stage_kinds",
-        [](const FusedEquation& self, const std::unordered_map<std::string, Tensor>& inputs) {
-            std::shared_ptr<ThorImplementation::CompiledOutputs> compiled = self.compileForInputs(inputs);
+        [](const FusedEquation& self,
+           const std::unordered_map<std::string, Tensor>& inputs,
+           const std::unordered_map<std::string, float>& scalar_inputs,
+           const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) {
+            std::shared_ptr<ThorImplementation::CompiledOutputs> compiled =
+                self.compileForInputs(inputs, scalar_inputs, tensor_scalar_inputs);
             std::vector<std::string> result;
             result.reserve(compiled->stages.size());
             for (const auto& stage : compiled->stages) {
@@ -989,7 +993,10 @@ outputs: dict[str, PhysicalTensor]
             }
             return result;
         },
-        "inputs"_a);
+        "inputs"_a,
+        nb::kw_only(),
+        "scalar_inputs"_a = std::unordered_map<std::string, float>{},
+        "tensor_scalar_inputs"_a = std::unordered_map<std::string, TensorScalarBinding>{});
 
     fused_equation.def(
         "compile_backward",

@@ -15,20 +15,11 @@ class Parameter {
 
     // Remember this is called by API layer so that will hand over the optimizer
     // 1. Create storage given featureInput 2. Compile the optimizer
-    virtual void compileStorageAndOptimizer(const std::vector<uint64_t>& inputDims,
-                                            const std::vector<uint64_t>& outputDims,
-                                            const TensorDescriptor::DataType& outputDataType,
-                                            const TensorPlacement& placement,
-                                            const Optional<Stream>& gradientUpdateStream,
-                                            bool inferenceOnly);
+    virtual void compileStorageAndOptimizer(const Tensor &inputTensor, const Optional<Stream> &gradientUpdateStream, bool inferenceOnly);
 
-    virtual void compileInitializer();
-    virtual void compileInitializer(uint64_t explicitFanIn, uint64_t explicitFanOut);
+    void compileInitializer(uint64_t fanIn = 0, uint64_t fanOut = 0);
 
-    virtual void createStorage(const std::vector<uint64_t>& inputDims,
-                               const std::vector<uint64_t>& outputDims,
-                               const TensorDescriptor::DataType& outputDataType,
-                               const TensorPlacement& placement) = 0;
+    virtual void createStorage(const Tensor &inputTensor) = 0;
     void clearStorage();
 
     Event initialize();
@@ -47,11 +38,13 @@ class Parameter {
     void clearInitializer();
 
     std::string getName();
-    Tensor getStorage();
+    Optional<Tensor> getStorage();
 
     [[nodiscard]] bool isTrainable() const;
     [[nodiscard]] bool isTrainingEnabled() const;
     void setTrainingEnabled(bool enabled);
+
+    bool isStorageInitialized() const;
 
    protected:
     const std::string name;
@@ -62,8 +55,9 @@ class Parameter {
     std::shared_ptr<Optimizer> optimizer;
     std::shared_ptr<Initializer> initializer;
 
-    std::vector<uint64_t> outputDims;
     Optional<Stream> gradientUpdateStream;
+
+    bool storageInitialized = false;
 };
 
 }  // namespace ThorImplementation

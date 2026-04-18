@@ -93,7 +93,7 @@ class Metric : public Layer {
         labelsReceived = false;
     }
 
-    virtual void forward(Optional<Tensor> inputTensor, bool validationPass) {
+    virtual void forward(Optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) {
         assert(running);
         if (isInferenceOnly())
             return;
@@ -132,7 +132,7 @@ class Metric : public Layer {
         advanceDataIfReady(validationPass);
     }
 
-    virtual void backward(Optional<Tensor> errorInput) { assert(false); }
+    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) { assert(false); }
 
     virtual void ensureNoDeviceCrossing() {
         if (featureInput.isPresent()) {

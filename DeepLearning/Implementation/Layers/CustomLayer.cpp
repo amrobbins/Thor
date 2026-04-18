@@ -32,6 +32,7 @@ CustomLayer::CustomLayer(DynamicExpression expr,
 
         addParam(param);  // verifies name uniqueness
     }
+    attachGradientUpdateStream();
 }
 
 void CustomLayer::compileImpl() {
@@ -63,15 +64,20 @@ void CustomLayer::compileImpl() {
         assert(gradientUpdateStream.isPresent());
     }
 
-    for (const auto& parameter : parameters) {
-        const std::vector<uint64_t> inputDims = aFeatureInput.isPresent() ? aFeatureInput.get().getDimensions() : std::vector<uint64_t>();
-        parameter->compileStorageAndOptimizer(inputDims,
-                                              aFeatureOutput.get().getDimensions(),
-                                              aFeatureOutput.get().getDataType(),
-                                              aFeatureOutput.get().getPlacement(),
-                                              gradientUpdateStream,
-                                              isInferenceOnly());
-    }
+    // for (const auto& parameter : parameters) {
+    //     const std::vector<uint64_t> inputDims = aFeatureInput.isPresent() ? aFeatureInput.get().getDimensions() :
+    //     std::vector<uint64_t>();
+    //     // independent variables: inputDims, data type, placement, stream, inference only
+    //     // decided by layer: output tensor
+    //     // so can do this before creating output tensor
+    //     // FIXME: This gets moved from here
+    //     parameter->compileStorageAndOptimizer(inputDims,
+    //                                           aFeatureOutput.get().getDimensions(),
+    //                                           aFeatureOutput.get().getDataType(),
+    //                                           aFeatureOutput.get().getPlacement(),
+    //                                           gradientUpdateStream,
+    //                                           isInferenceOnly());
+    // }
 
     // Forward stamps: require both input and output tensors for the connection.
     const uint32_t numForwardConnections = static_cast<uint32_t>(featureInputs.size());
@@ -109,7 +115,13 @@ std::unordered_map<std::string, Tensor> CustomLayer::buildForwardInputs(const Te
     inputs[inputName] = dataIn;
 
     for (const auto& param : parameters) {
-        inputs[param->getName()] = param->getStorage();
+        if (!param->isStorageInitialized()) {
+            param->compileStorageAndOptimizer(dataIn, gradientUpdateStream, isInferenceOnly());
+        }
+
+        Optional<Tensor> paramStorage = param->getStorage();
+        assert(paramStorage.isPresent());
+        inputs[param->getName()] = paramStorage.get();
     }
 
     return inputs;

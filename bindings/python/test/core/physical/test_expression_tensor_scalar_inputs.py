@@ -67,6 +67,13 @@ def _assert_close(got: np.ndarray, expected: np.ndarray, dtype: thor.DataType):
         raise AssertionError(f"Unhandled dtype: {dtype}")
 
 
+def _gpu_to_numpy(src: PhysicalTensor, dtype: thor.DataType, stream: Stream) -> np.ndarray:
+    host = _cpu_tensor(list(src.dimensions), dtype)
+    host.copy_from_async(src, stream)
+    stream.synchronize()
+    return host.numpy().copy()
+
+
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_tensor_runtime_scalar_single_output_stamped_reads_gpu_buffer_and_byte_offset_numerical(dtype: thor.DataType):
@@ -173,6 +180,163 @@ def test_tensor_runtime_scalar_multi_output_stamped_with_preallocated_outputs_nu
         stream.synchronize()
         got = out_host.numpy().copy()
 
+        assert got.shape == expected[name].shape
+        _assert_close(got, expected[name], dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.fp32])
+def test_runtime_scalars_remain_distinct_in_shared_fused_stage_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    alpha = ex.runtime_scalar("alpha")
+    beta = ex.runtime_scalar("beta")
+
+    outs = ex.outputs({
+        "affine": x * alpha + beta,
+        "swapped": x * beta + alpha,
+        "combo": (x + alpha) * (x + beta),
+    })
+    eq = ex.compile(outs, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array([[1.0, -2.0, 3.5], [4.0, 0.5, -6.0]], dtype=np.float32).astype(storage_dtype)
+    alpha_value = 0.25
+    beta_value = -1.5
+
+    stream = Stream(gpu_num=0)
+    x_gpu = _host_to_gpu(x_np, dtype, stream)
+
+    assert eq._debug_stage_kinds({
+        "x": x_gpu
+    }) == ["FusedKernel"]
+
+    stamped = eq.stamp({
+        "x": x_gpu
+    }, stream)
+    stamped.run({
+        "alpha": alpha_value,
+        "beta": beta_value
+    })
+
+    expected = {
+        "affine": (x_np.astype(np.float32) * alpha_value + beta_value).astype(storage_dtype),
+        "swapped": (x_np.astype(np.float32) * beta_value + alpha_value).astype(storage_dtype),
+        "combo":
+            ((x_np.astype(np.float32) + alpha_value) * (x_np.astype(np.float32) + beta_value)).astype(storage_dtype),
+    }
+
+    for name in stamped.output_names():
+        got = _gpu_to_numpy(stamped.output(name), dtype, stream)
+        assert got.shape == expected[name].shape
+        _assert_close(got, expected[name], dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.fp32])
+def test_tensor_runtime_scalars_remain_distinct_in_shared_fused_stage_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    alpha = ex.tensor_runtime_scalar("alpha")
+    beta = ex.tensor_runtime_scalar("beta")
+
+    outs = ex.outputs({
+        "affine": x * alpha + beta,
+        "swapped": x * beta + alpha,
+        "combo": (x + alpha) * (x + beta),
+    })
+    eq = ex.compile(outs, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array([[1.5, -2.0, 3.0], [4.25, 0.5, -6.5]], dtype=np.float32).astype(storage_dtype)
+    alpha_value = 0.75
+    beta_value = -0.5
+
+    stream = Stream(gpu_num=0)
+    x_gpu = _host_to_gpu(x_np, dtype, stream)
+    alpha_buffer_gpu = _host_to_gpu(np.array([111.0, alpha_value], dtype=np.float32), thor.DataType.fp32, stream)
+    beta_buffer_gpu = _host_to_gpu(np.array([beta_value], dtype=np.float32), thor.DataType.fp32, stream)
+
+    tensor_scalar_inputs = {
+        "alpha": _tensor_scalar_binding(alpha_buffer_gpu, thor.DataType.fp32, byte_offset=4),
+        "beta": _tensor_scalar_binding(beta_buffer_gpu, thor.DataType.fp32),
+    }
+
+    assert eq._debug_stage_kinds({
+        "x": x_gpu
+    }, tensor_scalar_inputs=tensor_scalar_inputs) == ["FusedKernel"]
+
+    stamped = eq.stamp(
+        {
+            "x": x_gpu
+        },
+        stream,
+        tensor_scalar_inputs=tensor_scalar_inputs,
+    )
+    stamped.run()
+
+    expected = {
+        "affine": (x_np.astype(np.float32) * alpha_value + beta_value).astype(storage_dtype),
+        "swapped": (x_np.astype(np.float32) * beta_value + alpha_value).astype(storage_dtype),
+        "combo":
+            ((x_np.astype(np.float32) + alpha_value) * (x_np.astype(np.float32) + beta_value)).astype(storage_dtype),
+    }
+
+    for name in stamped.output_names():
+        got = _gpu_to_numpy(stamped.output(name), dtype, stream)
+        assert got.shape == expected[name].shape
+        _assert_close(got, expected[name], dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.fp32])
+def test_mixed_runtime_scalar_kinds_share_single_fused_stage_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    alpha = ex.runtime_scalar("alpha")
+    beta = ex.tensor_runtime_scalar("beta")
+    gamma = ex.runtime_scalar("gamma")
+
+    outs = ex.outputs({
+        "main": (x * alpha) + beta + gamma,
+        "mirror": (x * beta) + alpha - gamma,
+    })
+    eq = ex.compile(outs, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array([[2.0, -1.0, 0.5], [3.0, -4.0, 1.5]], dtype=np.float32).astype(storage_dtype)
+    alpha_value = 1.25
+    beta_value = -0.75
+    gamma_value = 0.5
+
+    stream = Stream(gpu_num=0)
+    x_gpu = _host_to_gpu(x_np, dtype, stream)
+    beta_buffer_gpu = _host_to_gpu(np.array([beta_value], dtype=np.float32), thor.DataType.fp32, stream)
+
+    tensor_scalar_inputs = {
+        "beta": _tensor_scalar_binding(beta_buffer_gpu, thor.DataType.fp32),
+    }
+
+    assert eq._debug_stage_kinds({
+        "x": x_gpu
+    }, tensor_scalar_inputs=tensor_scalar_inputs) == ["FusedKernel"]
+
+    stamped = eq.stamp(
+        {
+            "x": x_gpu
+        },
+        stream,
+        tensor_scalar_inputs=tensor_scalar_inputs,
+    )
+    stamped.run({
+        "alpha": alpha_value,
+        "gamma": gamma_value
+    })
+
+    expected = {
+        "main": (x_np.astype(np.float32) * alpha_value + beta_value + gamma_value).astype(storage_dtype),
+        "mirror": (x_np.astype(np.float32) * beta_value + alpha_value - gamma_value).astype(storage_dtype),
+    }
+
+    for name in stamped.output_names():
+        got = _gpu_to_numpy(stamped.output(name), dtype, stream)
         assert got.shape == expected[name].shape
         _assert_close(got, expected[name], dtype)
 

@@ -116,7 +116,7 @@ class Loss : public Layer {
         labelsReceived = false;
     }
 
-    virtual void forward(Optional<Tensor> inputTensor, bool validationPass) {
+    virtual void forward(Optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) {
         assert(running);
         if (!isInferenceOnly()) {
             assert(labelsStream.isInitialized());
@@ -172,7 +172,7 @@ class Loss : public Layer {
         advanceDataIfReady(validationPass);
     }
 
-    virtual void backward(Optional<Tensor> errorInput) {
+    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {
         assert(running);
         assert(labelsInput.isPresent());
         assert(labelsInput.get().isInitialized());

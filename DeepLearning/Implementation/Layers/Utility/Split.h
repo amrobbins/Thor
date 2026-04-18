@@ -172,7 +172,7 @@ class Split : public MultiConnectionLayer {
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) {}
 
-    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
         assert(featureInput.isPresent());
 
         launchSplit(splitTensorFeatureOutputMemoriesArray_d,
@@ -194,7 +194,7 @@ class Split : public MultiConnectionLayer {
         }
     }
 
-    virtual void backward(Optional<Tensor> errorInput) {
+    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {
         // Experimental - back propagation stops at empty error input
         if (errorInput.isEmpty())
             return;

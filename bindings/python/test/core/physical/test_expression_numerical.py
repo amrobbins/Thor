@@ -660,6 +660,46 @@ def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_reducti
         )
 
 
+@pytest.mark.cuda
+def test_pointwise_parameter_fan_override():
+    x = ex.input("x")
+    b = ex.input("b")
+    out = (x + b) * 1.5
+    eq = ex.compile(out, device_num=0)
+
+    stream = Stream(gpu_num=0)
+    x_np = np.zeros((2, 3, 4), dtype=np.float16)
+    b_np = np.zeros((3, 4), dtype=np.float16)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, thor.DataType.fp16, stream),
+        "b": _host_to_gpu(b_np, thor.DataType.fp16, stream),
+    }
+
+    fan = eq.get_parameter_fan_overrides(inputs_gpu, ["b"])
+    assert fan["b"]["fan_in"] == 1
+    assert fan["b"]["fan_out"] == 1
+
+
+@pytest.mark.cuda
+def test_broadcast_parameter_fan_override():
+    x = ex.input("x")
+    b = ex.input("b")
+    out = x + b
+    eq = ex.compile(out, device_num=0)
+
+    stream = Stream(gpu_num=0)
+    x_np = np.zeros((2, 5, 3, 4), dtype=np.float16)
+    b_np = np.zeros((4,), dtype=np.float16)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, thor.DataType.fp16, stream),
+        "b": _host_to_gpu(b_np, thor.DataType.fp16, stream),
+    }
+
+    fan = eq.get_parameter_fan_overrides(inputs_gpu, ["b"])
+    assert fan["b"]["fan_in"] == 1
+    assert fan["b"]["fan_out"] == 5 * 3
+
+
 def _host_to_gpu(arr: np.ndarray, dtype: thor.DataType, stream: Stream, gpu_num: int = 0) -> PhysicalTensor:
     cpu = Placement(DeviceType.cpu, 0)
     gpu = Placement(DeviceType.gpu, gpu_num)

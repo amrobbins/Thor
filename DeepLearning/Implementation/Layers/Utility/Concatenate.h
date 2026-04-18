@@ -175,7 +175,7 @@ class Concatenate : public MultiConnectionLayer {
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) {}
 
-    virtual void backward(Optional<Tensor> errorInput) {
+    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {
         if (errorInput.isPresent()) {
             launchSplit(splitTensorErrorOutputMemoriesArray_d,
                         (half *)errorInput.get().getMemPtr(),
@@ -197,7 +197,7 @@ class Concatenate : public MultiConnectionLayer {
         }
     }
 
-    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
         assert(featureInput.isPresent());
         auto it = stillWaitingForFeatureInputTensors.find(featureInput.get().getTensorId());
         assert(it != stillWaitingForFeatureInputTensors.end());
