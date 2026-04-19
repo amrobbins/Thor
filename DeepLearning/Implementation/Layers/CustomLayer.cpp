@@ -30,7 +30,7 @@ CustomLayer::CustomLayer(DynamicExpression expr,
             throw runtime_error("Custom layer parameter names cannot start with __ that is reserved. Parameter name " + paramName +
                                 " is illegal.");
 
-        addParam(param);  // verifies name uniqueness
+        addParameter(param);  // verifies name uniqueness
     }
     attachGradientUpdateStream();
 }
@@ -208,7 +208,7 @@ Optional<Tensor> CustomLayer::stampBackward(uint32_t connectionNumber) {
 
     if (connectionNumber == UINT32_MAX) {
         Optional<Tensor> featureInput = getFirstPresentTensor(featureInputs);
-        errorInput = getFirstPresentTensor(errorInputs);
+        errorInput = getFirstPresentTensor(errorOutputs);
         assert(featureInput.isPresent());
         assert(errorInput.isPresent());
         assert(!streams.empty());
@@ -356,26 +356,13 @@ Optional<Tensor> CustomLayer::createFeatureOutputTensor() {
 }
 
 Optional<Tensor> CustomLayer::createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) {
-    if (!backPropagateError || isInferenceOnly() || isBackPropStub()) {
+    if (!backPropagateError || isInferenceOnly()) {
         return Optional<Tensor>::empty();
     }
 
     assert(featureInputs.size() > connectionNumber);
     assert(featureInputs[connectionNumber].isPresent());
-    assert(errorInputs.size() > connectionNumber);
-
-    if (errorInputs[connectionNumber].isEmpty()) {
-        return Optional<Tensor>::empty();
-    }
-
-    assert(errorInputs[connectionNumber].isPresent());
-
-    Optional<Tensor> errorOutput = getFirstPresentTensor(errorOutputs);
-    if (errorOutput.isPresent()) {
-        return errorOutput.get().clone();
-    } else {
-        return stampBackward(UINT32_MAX);
-    }
+    return featureInputs[connectionNumber].get().clone();
 }
 
 void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {

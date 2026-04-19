@@ -10,8 +10,6 @@
 namespace ThorImplementation {
 class CustomLayer : public TrainableLayer {
    public:
-    using DataType = TensorDescriptor::DataType;
-
     virtual ~CustomLayer() = default;
 
     // FIXME: Initially only supporting 1 output, I could support multiple via Outputs, but then how to connect layers?

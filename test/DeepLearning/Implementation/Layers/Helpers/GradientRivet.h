@@ -38,9 +38,17 @@ class GradientRivet : public Layer {
         ensureNoDeviceCrossing();
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {}
+    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
+        assert(inputTensor.isPresent());
+        assert(outputTensor.isPresent());
+        outputTensor.get().copyFromAsync(inputTensor.get(), stream);
+    }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {}
+    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
+        assert(errorIn.isPresent());
+        if (errorOut.isPresent())
+            errorOut.get().copyFromAsync(errorIn.get(), stream);
+    }
 };
 
 }  // namespace ThorImplementation
