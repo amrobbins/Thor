@@ -7,7 +7,7 @@
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
-#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
@@ -20,7 +20,7 @@ using namespace Thor;
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 void bind_fully_connected(nb::module_ &m) {
-    auto fully_connected = nb::class_<FullyConnected, TrainableWeightsBiasesLayer>(m, "FullyConnected");
+    auto fully_connected = nb::class_<FullyConnected, TrainableLayer>(m, "FullyConnected");
     fully_connected.attr("__module__") = "thor.layers";
 
     fully_connected.def(

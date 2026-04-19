@@ -4,17 +4,17 @@
 
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
-#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 
 #include <nlohmann/json.hpp>
 
 namespace Thor {
 
-class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
+class TrainableLayer : public MultiConnectionLayer {
    public:
     using Layer::initialize;  // So that compiler doesn't complain about override below.
 
-    virtual ~TrainableWeightsBiasesLayer() {}
+    virtual ~TrainableLayer() {}
 
     Tensor getWeights() const { return weights; }
     Optional<Tensor> getBiases() const { return biases; }
@@ -33,10 +33,12 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
     nlohmann::json architectureJson() const { /*FIXME*/ assert(false); }
 
-    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
+    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                           bool isFirstStamp,
-                                          std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
-                                          Optional<Event> sisterLayerLoadedEvent);
+                                          std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
+                                          Optional<Event> sisterLayerLoadedEvent) {
+        return MultiConnectionLayer::initialize(layer);
+    }
 
     void attachOptimizer(std::shared_ptr<Optimizer> optimizer) { this->optimizer = optimizer; }
     bool hasOptimizer() const { return optimizer != nullptr; }
@@ -46,7 +48,18 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
    protected:
     // Helper function to call stamp() on the optimizer and then associate it with the physical layer
-    virtual void stampOptimizer(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalTrainableLayer) const;
+    virtual void stampOptimizer(std::shared_ptr<ThorImplementation::TrainableLayer> physicalTrainableLayer) const {
+        // FIXME: when mutiple stamps are supported, optimizer and layer will need to know if there is already one stamped
+        //        for that layer on that GPU, to share things like weights, gradientUpdateStream's.
+        if (!physicalTrainableLayer->isInferenceOnly())
+            assert(hasOptimizer());
+        if (hasOptimizer()) {
+            for (const std::string &paramName : physicalTrainableLayer->listParameters()) {
+                std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = optimizer->stamp(physicalTrainableLayer);
+                physicalTrainableLayer->setOptimizer(paramName, physicalOptimizer);
+            }
+        }
+    }
 
     virtual void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) {
         if (!physicalLayer->isInferenceOnly())

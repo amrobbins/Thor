@@ -11,7 +11,6 @@
 //            The layer owns the weights gradient memory and materializes it as needed. Layer manages lifetime of gradient memory.
 
 namespace ThorImplementation {
-class TrainableWeightsBiasesLayer;
 
 class Optimizer {
    public:

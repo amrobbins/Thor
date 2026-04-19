@@ -63,17 +63,10 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
             }
         }
 
-        // Compile happens after all inputs are connected, and before any output is connected.
-        //  FIXME: That won't work because I need to associate the output tensors with the equation.
-        //  FIXME: but right now, create feature output depends on storage being there, maybe I need to remove that dependency.
-        //         I could compile the parameters when the first feature output is requested
-        //         (or right after the first FIN is attached - earliest point at which have enough info) instead of during compile.
+        // Compile happens after all inputs and outputs are connected
         Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
         assert(aFeatureInput.isPresent());
         assert(aFeatureInput.get().getPlacement() == placement);
-        // Optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureOutputs);
-        // assert(aFeatureOutput.isPresent());
-        // assert(aFeatureOutput.get().getPlacement() == placement);
 
         numBackwardConnections = 0;
         for (const auto &errorInput : errorInputs) {
@@ -364,6 +357,20 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
    private:
     // stampedId is used to identify which layers correspond to which other layers across multiple stamps of the same network.
     const int64_t stampedId;
+
+   private:
+    // Using a pattern that includes gradient updates, rather than this one that is wired through MultiConnectionLayer:
+    //     Also these could be updated to take only connection number, that would be provided by forward(...) or backward(...)
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) override {
+        assert(false);
+    }
+    void backProp(Optional<Tensor> dataIn,
+                  Optional<Tensor> errorIn,
+                  Optional<Tensor> errorOut,
+                  Stream stream,
+                  unsigned int connectionNumber) override {
+        assert(false);
+    }
 };
 
 }  // namespace ThorImplementation

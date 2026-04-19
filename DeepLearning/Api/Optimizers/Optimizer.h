@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "Utilities/TarFile/TarReader.h"
 #include "Utilities/TarFile/TarWriter.h"
 
@@ -18,14 +18,12 @@ namespace Thor {
 
 class Network;
 class PlacedNetwork;
-class TrainableWeightsBiasesLayer;
 
 class Optimizer {
    public:
     virtual ~Optimizer() = default;
 
-    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
-        std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) = 0;
+    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(std::shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) = 0;
     // FIXME: Update
     // virtual void compile(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer) { physicalOptimizer->compile(); }
     // virtual void compile(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer) { /*FIXME*/ }
