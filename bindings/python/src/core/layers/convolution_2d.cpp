@@ -8,7 +8,7 @@
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Learning/Convolution2d.h"
-#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
@@ -23,7 +23,7 @@ using namespace Thor;
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 void bind_convolution_2d(nb::module_ &m) {
-    auto convolution_2d = nb::class_<Convolution2d, TrainableWeightsBiasesLayer>(m, "Convolution2d");
+    auto convolution_2d = nb::class_<Convolution2d, TrainableLayer>(m, "Convolution2d");
     convolution_2d.attr("__module__") = "thor.layers";
 
     convolution_2d.def(

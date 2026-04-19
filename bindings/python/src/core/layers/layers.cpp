@@ -36,10 +36,8 @@ void bind_layers(nb::module_ &layers) {
     auto trainable_weights_biases_layer =
         nb::class_<TrainableWeightsBiasesLayer, MultiConnectionLayer>(layers, "TrainableWeightsBiasesLayer");
     trainable_weights_biases_layer.attr("__module__") = "thor.layers";
-    auto trainable_layer =
-        nb::class_<TrainableLayer, MultiConnectionLayer>(layers, "TrainableLayer");
+    auto trainable_layer = nb::class_<TrainableLayer, MultiConnectionLayer>(layers, "TrainableLayer");
     trainable_layer.attr("__module__") = "thor.layers";
-
 
     bind_batch_normalization(layers);
     bind_drop_out(layers);

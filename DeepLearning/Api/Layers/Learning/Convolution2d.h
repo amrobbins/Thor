@@ -6,7 +6,7 @@
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
 #include "DeepLearning/Api/Layers/Layer.h"
-#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
@@ -17,7 +17,7 @@
 
 namespace Thor {
 
-class Convolution2d : public TrainableWeightsBiasesLayer {
+class Convolution2d : public TrainableLayer {
    public:
     class Builder;
 
@@ -81,7 +81,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
-        // FIXME: It doesn't look like this would work for multiple input/output connections. Check this on all multi-connection
+        // FIXME: add support for data type and inference only.
+        Tensor::DataType weightsDataType = Tensor::DataType::FP16;
+        bool inferenceOnly = false;
         std::shared_ptr<ThorImplementation::Convolution2d> physicalConvolution2d =
             std::make_shared<ThorImplementation::Convolution2d>(filterWidth,
                                                                 filterHeight,
@@ -91,15 +93,18 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                                                                 verticalPadding,
                                                                 numOutputChannels,
                                                                 hasBias,
+                                                                weightsDataType,
+                                                                placement,
+                                                                inferenceOnly,
                                                                 getId());
         stampOptimizer(physicalConvolution2d);
 
         return physicalConvolution2d;
     }
 
-    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
+    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                   bool isFirstStamp,
-                                  std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
+                                  std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
                                   Optional<Event> sisterLayerLoadedEvent);
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
