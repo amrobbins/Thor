@@ -1,13 +1,14 @@
 #pragma once
 
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
+#include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h"
 
 namespace Thor {
 
-class BatchNormalization : public TrainableWeightsBiasesLayer {
+class BatchNormalization : public TrainableLayer {
    public:
     class Builder;
     BatchNormalization() {}
@@ -44,9 +45,9 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         return physicalBatchNormalization;
     }
 
-    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalLayer,
+    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> physicalLayer,
                                   bool isFirstStamp,
-                                  std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterPhysicalLayer,
+                                  std::shared_ptr<ThorImplementation::TrainableLayer> sisterPhysicalLayer,
                                   Optional<Event> sisterPhysicalLayerLoadedEvent);
 
     // mem requirements are the weights

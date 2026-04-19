@@ -15,7 +15,7 @@ using namespace std;
 using namespace Thor;
 
 void bind_batch_normalization(nb::module_ &m) {
-    auto batch_normalization = nb::class_<BatchNormalization, TrainableWeightsBiasesLayer>(m, "BatchNormalization");
+    auto batch_normalization = nb::class_<BatchNormalization, TrainableLayer>(m, "BatchNormalization");
     batch_normalization.attr("__module__") = "thor.layers";
 
     batch_normalization.def(
