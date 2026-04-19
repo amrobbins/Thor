@@ -93,8 +93,8 @@ void expectAllClose(
     const vector<float>& actual, const vector<float>& expected, float atol = 2e-2f, float rtol = 2e-2f, string paramName = "") {
     ASSERT_EQ(actual.size(), expected.size());
     for (uint64_t i = 0; i < actual.size(); ++i) {
-        const float diff = std::fabs(actual[i] - expected[i]);
-        const float tol = atol + rtol * std::fabs(expected[i]);
+        const float diff = fabs(actual[i] - expected[i]);
+        const float tol = atol + rtol * fabs(expected[i]);
         if (!paramName.empty())
             paramName += " ";
         EXPECT_LE(diff, tol) << paramName << "mismatch at index " << i << ": actual=" << actual[i] << ", expected=" << expected[i];
@@ -206,17 +206,149 @@ vector<float> adamFirstUpdatedWeightsReference(const vector<float>& initialWeigh
                                                float beta1,
                                                float beta2,
                                                float epsilon) {
-    const double alphaT = static_cast<double>(alpha) * std::sqrt(1.0 - static_cast<double>(beta2)) / (1.0 - static_cast<double>(beta1));
+    const double alphaT = static_cast<double>(alpha) * sqrt(1.0 - static_cast<double>(beta2)) / (1.0 - static_cast<double>(beta1));
     const float scale = 1.0f / (static_cast<float>(batchSize) * lossScalingFactor);
     vector<float> updated(initialWeights.size(), 0.0f);
     for (uint64_t i = 0; i < initialWeights.size(); ++i) {
         const float g = rawGradient[i] * scale;
         const float m = (1.0f - beta1) * g;
         const float v = (1.0f - beta2) * g * g;
-        updated[i] = initialWeights[i] - static_cast<float>(alphaT) * m / (std::sqrt(v) + epsilon);
+        updated[i] = initialWeights[i] - static_cast<float>(alphaT) * m / (sqrt(v) + epsilon);
     }
     return updated;
 }
+
+vector<float> randomFloatVector(mt19937& rng, uint64_t size, float low, float high) {
+    uniform_real_distribution<float> dist(low, high);
+    vector<float> values(size);
+    for (float& value : values)
+        value = dist(rng);
+    return values;
+}
+
+struct FullyConnectedDirectBackwardReference {
+    vector<float> featureOut;
+    vector<float> errorOut;
+    vector<float> weightsGrad;
+    vector<float> weightsM;
+    vector<float> weightsV;
+    vector<float> weightsAfter;
+    vector<float> biasesGrad;
+    vector<float> biasesM;
+    vector<float> biasesV;
+    vector<float> biasesAfter;
+};
+
+FullyConnectedDirectBackwardReference computeFullyConnectedDirectBackwardReference(const vector<float>& inputValues,
+                                                                                   const vector<float>& weightValues,
+                                                                                   const vector<float>& biasValues,
+                                                                                   const vector<float>& errorInputValues,
+                                                                                   uint64_t batchSize,
+                                                                                   uint64_t numInputFeatures,
+                                                                                   uint64_t numOutputFeatures,
+                                                                                   bool hasBias,
+                                                                                   float lossScalingFactor,
+                                                                                   float alpha,
+                                                                                   float beta1,
+                                                                                   float beta2,
+                                                                                   float epsilon) {
+    FullyConnectedDirectBackwardReference ref;
+    ref.featureOut =
+        fullyConnectedReference(inputValues, weightValues, biasValues, batchSize, numInputFeatures, numOutputFeatures, hasBias);
+    ref.errorOut = fullyConnectedBackwardErrorReference(errorInputValues, weightValues, batchSize, numInputFeatures, numOutputFeatures);
+    ref.weightsGrad = fullyConnectedWeightGradReference(inputValues, errorInputValues, batchSize, numInputFeatures, numOutputFeatures);
+    ref.weightsM = adamFirstMomentReference(ref.weightsGrad, batchSize, lossScalingFactor, beta1);
+    ref.weightsV = adamFirstVelocityReference(ref.weightsGrad, batchSize, lossScalingFactor, beta2);
+    ref.weightsAfter =
+        adamFirstUpdatedWeightsReference(weightValues, ref.weightsGrad, batchSize, lossScalingFactor, alpha, beta1, beta2, epsilon);
+
+    if (hasBias) {
+        ref.biasesGrad = fullyConnectedBiasGradReference(errorInputValues, batchSize, numOutputFeatures);
+        ref.biasesM = adamFirstMomentReference(ref.biasesGrad, batchSize, lossScalingFactor, beta1);
+        ref.biasesV = adamFirstVelocityReference(ref.biasesGrad, batchSize, lossScalingFactor, beta2);
+        ref.biasesAfter =
+            adamFirstUpdatedWeightsReference(biasValues, ref.biasesGrad, batchSize, lossScalingFactor, alpha, beta1, beta2, epsilon);
+    }
+
+    return ref;
+}
+
+vector<FullyConnectedDirectBackwardReference> computeFullyConnectedDirectBackwardReferenceSequence(
+    const vector<vector<float>>& inputValuesByPass,
+    const vector<vector<float>>& errorInputValuesByPass,
+    const vector<float>& initialWeightValues,
+    const vector<float>& initialBiasValues,
+    uint64_t batchSize,
+    uint64_t numInputFeatures,
+    uint64_t numOutputFeatures,
+    bool hasBias,
+    float lossScalingFactor,
+    float alpha,
+    float beta1,
+    float beta2,
+    float epsilon) {
+    EXPECT_EQ(inputValuesByPass.size(), errorInputValuesByPass.size());
+
+    vector<FullyConnectedDirectBackwardReference> refs;
+    refs.reserve(inputValuesByPass.size());
+
+    vector<float> weights = initialWeightValues;
+    vector<float> weightsM(weights.size(), 0.0f);
+    vector<float> weightsV(weights.size(), 0.0f);
+    vector<float> biases = initialBiasValues;
+    vector<float> biasesM(hasBias ? biases.size() : 0, 0.0f);
+    vector<float> biasesV(hasBias ? biases.size() : 0, 0.0f);
+    const float scale = 1.0f / (static_cast<float>(batchSize) * lossScalingFactor);
+
+    for (uint64_t pass = 0; pass < inputValuesByPass.size(); ++pass) {
+        FullyConnectedDirectBackwardReference ref;
+        ref.featureOut =
+            fullyConnectedReference(inputValuesByPass[pass], weights, biases, batchSize, numInputFeatures, numOutputFeatures, hasBias);
+        ref.errorOut =
+            fullyConnectedBackwardErrorReference(errorInputValuesByPass[pass], weights, batchSize, numInputFeatures, numOutputFeatures);
+        ref.weightsGrad = fullyConnectedWeightGradReference(
+            inputValuesByPass[pass], errorInputValuesByPass[pass], batchSize, numInputFeatures, numOutputFeatures);
+
+        const uint64_t t = pass + 1;
+        const double alphaT64 =
+            static_cast<double>(alpha) * sqrt(1.0 - pow(static_cast<double>(beta2), t)) / (1.0 - pow(static_cast<double>(beta1), t));
+        const float alphaT = static_cast<float>(alphaT64);
+
+        ref.weightsM.resize(weights.size());
+        ref.weightsV.resize(weights.size());
+        ref.weightsAfter.resize(weights.size());
+        for (uint64_t i = 0; i < weights.size(); ++i) {
+            const float g = ref.weightsGrad[i] * scale;
+            weightsM[i] = beta1 * weightsM[i] + (1.0f - beta1) * g;
+            weightsV[i] = beta2 * weightsV[i] + (1.0f - beta2) * g * g;
+            weights[i] = weights[i] - alphaT * weightsM[i] / (sqrt(weightsV[i]) + epsilon);
+            ref.weightsM[i] = weightsM[i];
+            ref.weightsV[i] = weightsV[i];
+            ref.weightsAfter[i] = weights[i];
+        }
+
+        if (hasBias) {
+            ref.biasesGrad = fullyConnectedBiasGradReference(errorInputValuesByPass[pass], batchSize, numOutputFeatures);
+            ref.biasesM.resize(biases.size());
+            ref.biasesV.resize(biases.size());
+            ref.biasesAfter.resize(biases.size());
+            for (uint64_t i = 0; i < biases.size(); ++i) {
+                const float g = ref.biasesGrad[i] * scale;
+                biasesM[i] = beta1 * biasesM[i] + (1.0f - beta1) * g;
+                biasesV[i] = beta2 * biasesV[i] + (1.0f - beta2) * g * g;
+                biases[i] = biases[i] - alphaT * biasesM[i] / (sqrt(biasesV[i]) + epsilon);
+                ref.biasesM[i] = biasesM[i];
+                ref.biasesV[i] = biasesV[i];
+                ref.biasesAfter[i] = biases[i];
+            }
+        }
+
+        refs.push_back(move(ref));
+    }
+
+    return refs;
+}
+
 void compileAndInitialize(NetworkInput& ni, FullyConnected2& fc, NetworkOutput& no) {
     ni.compile();
     fc.compile();
@@ -428,71 +560,40 @@ TEST(FullyConnected2, DirectForwardConnectionNumericalWithoutBias) {
     expectAllClose(actual, expected);
 }
 
-// #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
-// #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
-// #include "test/Utilities/TensorOperations/GpuMatrixMultiply/MatrixMultiplyTestHelper.h"
-//
-// #include "DeepLearning/Implementation/Initializers/UniformRandom.h"
-// #include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h"
-// #include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected2.h"
-// #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
-// #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
-// #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
-// #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
-// #include "Utilities/Expression/ExpressionDTypeResolution.h"
-// #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
-// #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
-//
-// #include <stdio.h>
-// #include <unistd.h>
-// #include "cuda.h"
-// #include "cuda_fp16.h"
-// #include "cuda_runtime.h"
-//
-// #include <cmath>
-// #include <memory>
-#include <random>
-// #include <vector>
-//
-// #include "gtest/gtest.h"
-//
-// using namespace std;
-//
-// using namespace ThorImplementation;
-// using DataType = TensorDescriptor::DataType;
-//
-// static void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases, bool accumulate);
-//
-TEST(FullyConnected2, DISABLED_DirectBackwardConnectionNumerical) {
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-
-    std::mt19937 rng(1234567);
-    const bool hasBias = std::bernoulli_distribution(0.5)(rng);
+TEST(FullyConnected2, DirectBackwardConnectionNumerical) {
+    mt19937 rng(time(nullptr));
+    const bool hasBias = bernoulli_distribution(0.5)(rng);
 
     const uint64_t batchSize = 32;
-    const DataType dataType = DataType::FP16;
     const uint32_t numInputFeatures = 5;
     const uint32_t numOutputFeatures = 10;
+    const DataType dataType = DataType::FP16;
+
     TensorDescriptor featureInDescriptor(dataType, {batchSize, numInputFeatures});
     Tensor featureIn_h(cpuPlacement, featureInDescriptor);
 
+    // Create layers.
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
+    // So that backprop occurs rather than being pruned during connection,
+    // since network input doesn't take an error in, and there is no loss in the network:
     GradientRivet gr1, gr2;
     FullyConnected2 fc(numOutputFeatures, hasBias, Optional<DataType>::empty(), gpuPlacement, false);
     NetworkOutput no(cpuPlacement);
 
+    // Create optimizers.
     shared_ptr<Adam> adamWeights = make_shared<Adam>(2000, 0.001f, 0.9f, 0.999f, 1e-7f);
     shared_ptr<Adam> adamBiases = hasBias ? make_shared<Adam>(2001, 0.001f, 0.9f, 0.999f, 1e-7f) : nullptr;
     fc.setOptimizer("weights", adamWeights);
     if (hasBias)
         fc.setOptimizer("biases", adamBiases);
 
+    // Connect layers.
     ni.connectToNextLayer(&gr1);
     gr1.connectToNextLayer(&fc);
     fc.connectToNextLayer(&gr2);
     gr2.connectToNextLayer(&no);
 
+    // Compile then initialize layers (just internal state, not weights).
     ni.compile();
     gr1.compile();
     fc.compile();
@@ -504,34 +605,54 @@ TEST(FullyConnected2, DISABLED_DirectBackwardConnectionNumerical) {
     gr2.initialize();
     no.initialize();
 
+    // Set weights and biases manually.
     const vector<string> parameterNames = fc.listParameters();
+    vector<string> expectedParameterNames{"weights"};
     if (hasBias)
-        ASSERT_EQ(parameterNames, (vector<string>{"weights", "biases"}));
-    else
-        ASSERT_EQ(parameterNames, (vector<string>{"weights"}));
-
+        expectedParameterNames.push_back("biases");
+    ASSERT_EQ(parameterNames, expectedParameterNames);
     ASSERT_TRUE(fc.getParameter("weights")->getStorage().isPresent());
+    if (hasBias)
+        ASSERT_TRUE(fc.getParameter("biases")->getStorage().isPresent());
+
     Tensor weights = fc.getParameter("weights")->getStorage();
     Optional<Tensor> biases;
-    if (hasBias) {
-        ASSERT_TRUE(fc.getParameter("biases")->getStorage().isPresent());
+    if (hasBias)
         biases = fc.getParameter("biases")->getStorage();
-    }
 
     Stream stream = fc.getStreams()[0];
     Tensor weightsCpu = weights.clone(cpuPlacement);
+    Optional<Tensor> biasesCpu;
+
+    featureIn_h.fillRandom(-5.0, 5.0, stream);
     weightsCpu.fillRandom(-3.0, 3.0, stream);
     weights.copyFromAsync(weightsCpu, stream);
 
-    Optional<Tensor> biasesCpu;
     if (hasBias) {
+        assert(biases.isPresent());
         biasesCpu = biases.get().clone(cpuPlacement);
         biasesCpu.get().fillRandom(-3.0, 3.0, stream);
         biases.get().copyFromAsync(biasesCpu.get(), stream);
     }
 
-    featureIn_h.fillRandom(-5.0, 5.0, stream);
+    // Make the randomized host-side reference inputs stable before reading them.
+    Event randomFillReady = stream.putEvent();
+    randomFillReady.synchronize();
 
+    const vector<float> inputValues = readCpuTensor(featureIn_h);
+    const vector<float> weightValues = readCpuTensor(weightsCpu);
+    const vector<float> biasValues = hasBias ? readCpuTensor(biasesCpu.get()) : vector<float>{};
+
+    // Call forward at the network input.
+    ni.forward(featureIn_h, false, batchSize);
+
+    // Check that the network output has the right values.
+    Event featureOutReadyEvent = no.getOutputReadyEvent();
+    featureOutReadyEvent.synchronize();
+    Tensor featureOut_h = no.getFeatureOutput();
+    const vector<float> actualFeatureOut = readCpuTensor(featureOut_h);
+
+    // Now the backward direction.
     ASSERT_GT(fc.getErrorInputs().size(), 0);
     ASSERT_TRUE(fc.getErrorInputs()[0].isPresent());
     Tensor fcErrorInput = fc.getErrorInputs()[0];
@@ -544,25 +665,9 @@ TEST(FullyConnected2, DISABLED_DirectBackwardConnectionNumerical) {
     Tensor fcErrorInput_h = fcErrorInput.clone(cpuPlacement);
     fcErrorInput_h.fillRandom(-3.0, 3.0, stream);
 
-    // FIXME: remove sync but need to stop copying mem to vectors then
-    Event randomFillReady = stream.putEvent();
-    randomFillReady.synchronize();
-
-    const vector<float> inputValues = readCpuTensor(featureIn_h);
-    const vector<float> weightValues = readCpuTensor(weightsCpu);
-    const vector<float> biasValues = hasBias ? readCpuTensor(biasesCpu.get()) : vector<float>{};
+    Event errorInputFillReady = stream.putEvent();
+    errorInputFillReady.synchronize();
     const vector<float> errorInputValues = readCpuTensor(fcErrorInput_h);
-
-    ni.forward(featureIn_h, false, batchSize);
-
-    Tensor featureOut_h = no.getFeatureOutput();
-    Event featureOutReadyEvent = no.getOutputReadyEvent();
-    featureOutReadyEvent.synchronize();
-
-    const vector<float> actualFeatureOut = readCpuTensor(featureOut_h);
-    const vector<float> expectedFeatureOut =
-        fullyConnectedReference(inputValues, weightValues, biasValues, batchSize, numInputFeatures, numOutputFeatures, hasBias);
-    expectAllClose(actualFeatureOut, expectedFeatureOut, 6e-2f, 6e-2f, "actualFeatureOut");
 
     fcErrorInput.copyFromAsync(fcErrorInput_h, stream);
     fc.backward(fcErrorInput, batchSize);
@@ -598,22 +703,27 @@ TEST(FullyConnected2, DISABLED_DirectBackwardConnectionNumerical) {
     const vector<float> actualWeightsM = readCpuTensor(weightsM_h);
     const vector<float> actualWeightsV = readCpuTensor(weightsV_h);
 
-    const vector<float> expectedErrorOut =
-        fullyConnectedBackwardErrorReference(errorInputValues, weightValues, batchSize, numInputFeatures, numOutputFeatures);
-    const vector<float> expectedWeightsGrad =
-        fullyConnectedWeightGradReference(inputValues, errorInputValues, batchSize, numInputFeatures, numOutputFeatures);
-
     const float lossScalingFactor = Loss::getLossScalingFactor();
-    const vector<float> expectedWeightsM = adamFirstMomentReference(expectedWeightsGrad, batchSize, lossScalingFactor, 0.9f);
-    const vector<float> expectedWeightsV = adamFirstVelocityReference(expectedWeightsGrad, batchSize, lossScalingFactor, 0.999f);
-    const vector<float> expectedWeightsAfter =
-        adamFirstUpdatedWeightsReference(weightValues, expectedWeightsGrad, batchSize, lossScalingFactor, 0.001f, 0.9f, 0.999f, 1e-7f);
+    const FullyConnectedDirectBackwardReference reference = computeFullyConnectedDirectBackwardReference(inputValues,
+                                                                                                         weightValues,
+                                                                                                         biasValues,
+                                                                                                         errorInputValues,
+                                                                                                         batchSize,
+                                                                                                         numInputFeatures,
+                                                                                                         numOutputFeatures,
+                                                                                                         hasBias,
+                                                                                                         lossScalingFactor,
+                                                                                                         0.001f,
+                                                                                                         0.9f,
+                                                                                                         0.999f,
+                                                                                                         1e-7f);
 
-    expectAllClose(actualErrorOut, expectedErrorOut, 8e-2f, 8e-2f, "actualErrorOut");
-    expectAllClose(actualWeightsGrad, expectedWeightsGrad, 8e-2f, 8e-2f, "actualWeightsGrad");
-    expectAllClose(actualWeightsM, expectedWeightsM, 8e-2f, 8e-2f, "actualWeightsM");
-    expectAllClose(actualWeightsV, expectedWeightsV, 8e-2f, 8e-2f, "actualWeightsV");
-    expectAllClose(actualWeightsAfter, expectedWeightsAfter, 8e-2f, 8e-2f, "actualWeightsAfter");
+    expectAllClose(actualFeatureOut, reference.featureOut, 6e-2f, 6e-2f, "actualFeatureOut");
+    expectAllClose(actualErrorOut, reference.errorOut, 8e-2f, 8e-2f, "actualErrorOut");
+    expectAllClose(actualWeightsGrad, reference.weightsGrad, 8e-2f, 8e-2f, "actualWeightsGrad");
+    expectAllClose(actualWeightsM, reference.weightsM, 8e-2f, 8e-2f, "actualWeightsM");
+    expectAllClose(actualWeightsV, reference.weightsV, 8e-2f, 8e-2f, "actualWeightsV");
+    expectAllClose(actualWeightsAfter, reference.weightsAfter, 8e-2f, 8e-2f, "actualWeightsAfter");
 
     if (hasBias) {
         const vector<float> actualBiasesGrad = readCpuTensor(biasesGrad_h.get());
@@ -621,139 +731,193 @@ TEST(FullyConnected2, DISABLED_DirectBackwardConnectionNumerical) {
         const vector<float> actualBiasesM = readCpuTensor(biasesM_h.get());
         const vector<float> actualBiasesV = readCpuTensor(biasesV_h.get());
 
-        const vector<float> expectedBiasesGrad = fullyConnectedBiasGradReference(errorInputValues, batchSize, numOutputFeatures);
-        const vector<float> expectedBiasesM = adamFirstMomentReference(expectedBiasesGrad, batchSize, lossScalingFactor, 0.9f);
-        const vector<float> expectedBiasesV = adamFirstVelocityReference(expectedBiasesGrad, batchSize, lossScalingFactor, 0.999f);
-        const vector<float> expectedBiasesAfter =
-            adamFirstUpdatedWeightsReference(biasValues, expectedBiasesGrad, batchSize, lossScalingFactor, 0.001f, 0.9f, 0.999f, 1e-7f);
-
-        expectAllClose(actualBiasesGrad, expectedBiasesGrad, 8e-2f, 8e-2f, "actualBiasesGrad");
-        expectAllClose(actualBiasesM, expectedBiasesM, 8e-2f, 8e-2f, "actualBiasesM");
-        expectAllClose(actualBiasesV, expectedBiasesV, 8e-2f, 8e-2f, "actualBiasesV");
-        expectAllClose(actualBiasesAfter, expectedBiasesAfter, 8e-2f, 8e-2f, "actualBiasesAfter");
+        expectAllClose(actualBiasesGrad, reference.biasesGrad, 8e-2f, 8e-2f, "actualBiasesGrad");
+        expectAllClose(actualBiasesM, reference.biasesM, 8e-2f, 8e-2f, "actualBiasesM");
+        expectAllClose(actualBiasesV, reference.biasesV, 8e-2f, 8e-2f, "actualBiasesV");
+        expectAllClose(actualBiasesAfter, reference.biasesAfter, 8e-2f, 8e-2f, "actualBiasesAfter");
     }
 }
 
-TEST(FullyConnected2, DirectBackwardConnectionNumerical) {
-    srand(time(nullptr));
+TEST(FullyConnected2, DirectBackwardConnectionNumericalThreePasses) {
+    mt19937 rng(time(nullptr));
 
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    uint32_t NUM_TESTS = 5;
+    for (uint32_t t = 0; t < NUM_TESTS; ++t) {
+        const bool hasBias = bernoulli_distribution(0.5)(rng);
+        const uint64_t batchSize = uniform_int_distribution<uint32_t>(1, 150)(rng);
+        const uint32_t numInputFeatures = uniform_int_distribution<uint32_t>(1, 300)(rng);
+        const uint32_t numOutputFeatures = uniform_int_distribution<uint32_t>(1, 300)(rng);
+        const DataType dataType = DataType::FP16;
+        const uint64_t numPasses = uniform_int_distribution<uint32_t>(3, 5)(rng);
 
-    const bool hasBias = rand() % 2;
-    const uint64_t batchSize = 32;
-    const uint32_t numInputFeatures = 5;
-    const uint32_t numOutputFeatures = 10;
-    const DataType dataType = DataType::FP16;
+        TensorDescriptor featureInDescriptor(dataType, {batchSize, numInputFeatures});
+        Tensor featureIn_h(cpuPlacement, featureInDescriptor);
 
-    TensorDescriptor featureInDescriptor(dataType, {batchSize, numInputFeatures});
-    Tensor featureIn_h(cpuPlacement, featureInDescriptor);
+        // Create layers.
+        NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
+        // So that backprop occurs rather than being pruned during connection,
+        // since network input doesn't take an error in, and there is no loss in the network:
+        GradientRivet gr1, gr2;
+        FullyConnected2 fc(numOutputFeatures, hasBias, Optional<DataType>::empty(), gpuPlacement, false);
+        NetworkOutput no(cpuPlacement);
 
-    // Create layers
-    NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    // So that backprop occurs rather than being pruned during connection,
-    // since network input doesn't take an error in, and there is no loss in the network:
-    GradientRivet gr1, gr2;
-    FullyConnected2 fc(numOutputFeatures, hasBias, Optional<DataType>::empty(), gpuPlacement, false);
-    NetworkOutput no(cpuPlacement);
+        // Create optimizers.
+        shared_ptr<Adam> adamWeights = make_shared<Adam>(2000, 0.001f, 0.9f, 0.999f, 1e-7f);
+        shared_ptr<Adam> adamBiases = hasBias ? make_shared<Adam>(2001, 0.001f, 0.9f, 0.999f, 1e-7f) : nullptr;
+        fc.setOptimizer("weights", adamWeights);
+        if (hasBias)
+            fc.setOptimizer("biases", adamBiases);
 
-    // Create optimizers
-    shared_ptr<Adam> adamWeights = make_shared<Adam>(2000, 0.001f, 0.9f, 0.999f, 1e-7f);
-    fc.setOptimizer("weights", adamWeights);
-    if (hasBias) {
-        shared_ptr<Adam> adamBiases = make_shared<Adam>(2000, 0.001f, 0.9f, 0.999f, 1e-7f);
-        fc.setOptimizer("biases", adamBiases);
+        // Connect layers.
+        ni.connectToNextLayer(&gr1);
+        gr1.connectToNextLayer(&fc);
+        fc.connectToNextLayer(&gr2);
+        gr2.connectToNextLayer(&no);
+
+        // Compile then initialize layers (just internal state, not weights).
+        ni.compile();
+        gr1.compile();
+        fc.compile();
+        gr2.compile();
+        no.compile();
+        ni.initialize();
+        gr1.initialize();
+        fc.initialize();
+        gr2.initialize();
+        no.initialize();
+
+        // Set weights and biases manually.
+        const vector<string> parameterNames = fc.listParameters();
+        vector<string> expectedParameterNames{"weights"};
+        if (hasBias)
+            expectedParameterNames.push_back("biases");
+        ASSERT_EQ(parameterNames, expectedParameterNames);
+        ASSERT_TRUE(fc.getParameter("weights")->getStorage().isPresent());
+        if (hasBias)
+            ASSERT_TRUE(fc.getParameter("biases")->getStorage().isPresent());
+
+        Tensor weights = fc.getParameter("weights")->getStorage();
+        Optional<Tensor> biases;
+        if (hasBias)
+            biases = fc.getParameter("biases")->getStorage();
+
+        Stream stream = fc.getStreams()[0];
+
+        const vector<float> initialWeightValues =
+            randomFloatVector(rng, static_cast<uint64_t>(numInputFeatures) * numOutputFeatures, -0.5f, 0.5f);
+        const vector<float> initialBiasValues = hasBias ? randomFloatVector(rng, numOutputFeatures, -0.25f, 0.25f) : vector<float>{};
+        setParameterTensor(fc.getParameter("weights"), initialWeightValues, stream);
+        if (hasBias) {
+            assert(biases.isPresent());
+            setParameterTensor(fc.getParameter("biases"), initialBiasValues, stream);
+        }
+
+        vector<vector<float>> inputValuesByPass(numPasses);
+        vector<vector<float>> errorInputValuesByPass(numPasses);
+        for (uint64_t pass = 0; pass < numPasses; ++pass) {
+            inputValuesByPass[pass] = randomFloatVector(rng, batchSize * numInputFeatures, -0.5f, 0.5f);
+            errorInputValuesByPass[pass] = randomFloatVector(rng, batchSize * numOutputFeatures, -0.5f, 0.5f);
+        }
+
+        const float lossScalingFactor = Loss::getLossScalingFactor();
+        const vector<FullyConnectedDirectBackwardReference> references =
+            computeFullyConnectedDirectBackwardReferenceSequence(inputValuesByPass,
+                                                                 errorInputValuesByPass,
+                                                                 initialWeightValues,
+                                                                 initialBiasValues,
+                                                                 batchSize,
+                                                                 numInputFeatures,
+                                                                 numOutputFeatures,
+                                                                 hasBias,
+                                                                 lossScalingFactor,
+                                                                 0.001f,
+                                                                 0.9f,
+                                                                 0.999f,
+                                                                 1e-7f);
+
+        ASSERT_EQ(references.size(), numPasses);
+
+        // Now run three forward/backward passes in sequence.
+        ASSERT_GT(fc.getErrorInputs().size(), 0);
+        ASSERT_TRUE(fc.getErrorInputs()[0].isPresent());
+        Tensor fcErrorInput = fc.getErrorInputs()[0];
+        ASSERT_GT(fc.getErrorOutputs().size(), 0);
+        ASSERT_TRUE(fc.getErrorOutputs()[0].isPresent());
+        Tensor fcErrorOutput = fc.getErrorOutputs()[0];
+        ASSERT_TRUE(fc.getGradientUpdateStream().isPresent());
+        Stream gradientUpdateStream = fc.getGradientUpdateStream();
+        Tensor fcErrorInput_h = fcErrorInput.clone(cpuPlacement);
+
+        for (uint64_t pass = 0; pass < numPasses; ++pass) {
+            SCOPED_TRACE(::testing::Message() << "pass=" << pass << " hasBias=" << hasBias << " batchSize=" << batchSize
+                                              << " numInputFeatures=" << numInputFeatures << " numOutputFeatures=" << numOutputFeatures);
+
+            writeCpuTensor(featureIn_h, inputValuesByPass[pass]);
+
+            // Call forward at the network input.
+            ni.forward(featureIn_h, false, batchSize);
+
+            // Check that the network output has the right values.
+            Event featureOutReadyEvent = no.getOutputReadyEvent();
+            featureOutReadyEvent.synchronize();
+            Tensor featureOut_h = no.getFeatureOutput();
+            const vector<float> actualFeatureOut = readCpuTensor(featureOut_h);
+
+            // Now the backward direction.
+            writeCpuTensor(fcErrorInput_h, errorInputValuesByPass[pass]);
+            fcErrorInput.copyFromAsync(fcErrorInput_h, stream);
+            fc.backward(fcErrorInput, batchSize);
+
+            Tensor fcErrorOutput_h = fcErrorOutput.clone(cpuPlacement);
+            fcErrorOutput_h.copyFromAsync(fcErrorOutput, stream);
+
+            ASSERT_TRUE(adamWeights->getWeightsGradient().isPresent());
+            Tensor weightsGrad_h = copyTensorToCpu(adamWeights->getWeightsGradient().get(), gradientUpdateStream);
+            Tensor weightsAfter_h = copyTensorToCpu(weights, gradientUpdateStream);
+            Tensor weightsM_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("m"), gradientUpdateStream);
+            Tensor weightsV_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("v"), gradientUpdateStream);
+
+            Optional<Tensor> biasesGrad_h;
+            Optional<Tensor> biasesAfter_h;
+            Optional<Tensor> biasesM_h;
+            Optional<Tensor> biasesV_h;
+            if (hasBias) {
+                ASSERT_TRUE(adamBiases != nullptr);
+                ASSERT_TRUE(adamBiases->getWeightsGradient().isPresent());
+                biasesGrad_h = copyTensorToCpu(adamBiases->getWeightsGradient().get(), gradientUpdateStream);
+                biasesAfter_h = copyTensorToCpu(biases.get(), gradientUpdateStream);
+                biasesM_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("m"), gradientUpdateStream);
+                biasesV_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("v"), gradientUpdateStream);
+            }
+
+            stream.synchronize();
+            gradientUpdateStream.synchronize();
+
+            const vector<float> actualErrorOut = readCpuTensor(fcErrorOutput_h);
+            const vector<float> actualWeightsGrad = readCpuTensor(weightsGrad_h);
+            const vector<float> actualWeightsAfter = readCpuTensor(weightsAfter_h);
+            const vector<float> actualWeightsM = readCpuTensor(weightsM_h);
+            const vector<float> actualWeightsV = readCpuTensor(weightsV_h);
+            const FullyConnectedDirectBackwardReference& reference = references[pass];
+
+            expectAllClose(actualFeatureOut, reference.featureOut, 9e-2f, 9e-2f, "actualFeatureOut");
+            expectAllClose(actualErrorOut, reference.errorOut, 1e-1f, 1e-1f, "actualErrorOut");
+            expectAllClose(actualWeightsGrad, reference.weightsGrad, 1e-1f, 1e-1f, "actualWeightsGrad");
+            expectAllClose(actualWeightsM, reference.weightsM, 1e-1f, 1e-1f, "actualWeightsM");
+            expectAllClose(actualWeightsV, reference.weightsV, 1e-1f, 1e-1f, "actualWeightsV");
+            expectAllClose(actualWeightsAfter, reference.weightsAfter, 1e-1f, 1e-1f, "actualWeightsAfter");
+
+            if (hasBias) {
+                const vector<float> actualBiasesGrad = readCpuTensor(biasesGrad_h.get());
+                const vector<float> actualBiasesAfter = readCpuTensor(biasesAfter_h.get());
+                const vector<float> actualBiasesM = readCpuTensor(biasesM_h.get());
+                const vector<float> actualBiasesV = readCpuTensor(biasesV_h.get());
+
+                expectAllClose(actualBiasesGrad, reference.biasesGrad, 1e-1f, 1e-1f, "actualBiasesGrad");
+                expectAllClose(actualBiasesM, reference.biasesM, 1e-1f, 1e-1f, "actualBiasesM");
+                expectAllClose(actualBiasesV, reference.biasesV, 1e-1f, 1e-1f, "actualBiasesV");
+                expectAllClose(actualBiasesAfter, reference.biasesAfter, 1e-1f, 1e-1f, "actualBiasesAfter");
+            }
+        }
     }
-
-    // Connect layers
-    ni.connectToNextLayer(&gr1);
-    gr1.connectToNextLayer(&fc);
-    fc.connectToNextLayer(&gr2);
-    gr2.connectToNextLayer(&no);
-
-    // Compile than initialize layers (just internal state, not weights)
-    ni.compile();
-    gr1.compile();
-    fc.compile();
-    gr2.compile();
-    no.compile();
-    ni.initialize();
-    gr1.initialize();
-    fc.initialize();
-    gr2.initialize();
-    no.initialize();
-
-    // Set weights and biases manually
-    const vector<string> parameterNames = fc.listParameters();
-    vector<string> expectedParameterNames{"weights"};
-    if (hasBias)
-        expectedParameterNames.push_back("biases");
-    ASSERT_EQ(parameterNames, expectedParameterNames);
-    ASSERT_TRUE(fc.getParameter("weights")->getStorage().isPresent());
-    if (hasBias)
-        ASSERT_TRUE(fc.getParameter("biases")->getStorage().isPresent());
-    Tensor weights = fc.getParameter("weights")->getStorage();
-    Optional<Tensor> biases;
-    if (hasBias)
-        biases = fc.getParameter("biases")->getStorage();
-    Tensor weightsCpu = weights.clone(cpuPlacement);
-    Stream stream = fc.getStreams()[0];
-
-    // Set the feature input values.
-    // Feature input tensor needs to be stable at NetworkInput.forward(...) invocation time.
-    featureIn_h.fillRandom(-5.0, 5.0, stream);
-    stream.synchronize();
-
-    weightsCpu.fillRandom(-3.0, 3.0, stream);
-    weights.copyFromAsync(weightsCpu, stream);
-
-    Optional<Tensor> biasesCpu;
-    if (hasBias) {
-        assert(biases.isPresent());
-        biasesCpu = biases.get().clone(cpuPlacement);
-        biasesCpu.get().fillRandom(-3.0, 3.0, stream);
-        biases.get().copyFromAsync(biasesCpu.get(), stream);
-    }
-
-    // Call forward at the network input
-    ni.forward(featureIn_h, false, batchSize);
-
-    // Check that the network output has the right values
-    Tensor featureOut_h = no.getFeatureOutput();
-    Event featureOutReadyEvent = no.getOutputReadyEvent();
-    featureOutReadyEvent.synchronize();
-    // Then check the math
-
-    const vector<float> actualFeatureOut = readCpuTensor(featureOut_h);
-
-    const vector<float> inputValues = readCpuTensor(featureIn_h);
-    const vector<float> weightValues = readCpuTensor(weightsCpu);
-    const vector<float> biasValues = hasBias ? readCpuTensor(biasesCpu.get()) : vector<float>{};
-    const vector<float> expectedFeatureOut =
-        fullyConnectedReference(inputValues, weightValues, biasValues, batchSize, numInputFeatures, numOutputFeatures, hasBias);
-    expectAllClose(actualFeatureOut, expectedFeatureOut, 6e-2f, 6e-2f, "actualFeatureOut");
-
-    // Now the backward direction
-
-    ASSERT_GT(fc.getErrorInputs().size(), 0);
-    ASSERT_TRUE(fc.getErrorInputs()[0].isPresent());
-    Tensor fcErrorInput = fc.getErrorInputs()[0];
-    ASSERT_GT(fc.getErrorOutputs().size(), 0);
-    ASSERT_TRUE(fc.getErrorOutputs()[0].isPresent());
-    Tensor fcErrorOutput = fc.getErrorOutputs()[0];
-    ASSERT_TRUE(fc.getGradientUpdateStream().isPresent());
-    Stream gradientUpdateStream = fc.getGradientUpdateStream();
- Tensor fcErrorOutput_h = fcErrorOutput.clone(cpuPlacement);
-    Tensor fcErrorInput_h = fcErrorInput.clone(cpuPlacement);
-    fcErrorInput_h.fillRandom(-3.0, 3.0, stream);
-    fcErrorInput.copyFromAsync(fcErrorInput_h, stream);
-
-    fc.backward(fcErrorInput, batchSize);
-    fcErrorOutput_h.copyFromAsync(fcErrorOutput, stream);
-    weightsCpu.copyFromAsync(weights, gradientUpdateStream);
-
-    stream.synchronize();
-    gradientUpdateStream.synchronize();
-
-    // Now the values in the host tensors are ready to check
 }
