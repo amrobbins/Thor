@@ -64,12 +64,12 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
     if (batchNorm != nullptr) {
         weightsFile = (layerName + "_weights.gds");
         j["weights_tensor"] = weightsFile;
-        weights = batchNorm->getWeights();
+        weights = batchNorm->getParameter("weights")->getStorage();
         archiveWriter.addArchiveFile(weightsFile, weights);
 
         biasesFile = (layerName + "_biases.gds");
         j["biases_tensor"] = biasesFile;
-        biases = batchNorm->getBiases().get();
+        biases = batchNorm->getParameter("biases")->getStorage().get();
         archiveWriter.addArchiveFile(biasesFile, biases);
 
         resultRunningMeanFile = (layerName + "_means.gds");
@@ -84,8 +84,17 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
     }
 
     if (hasOptimizer()) {
-        j["optimizer"] = optimizer->serialize(
-            archiveWriter, stream, batchNorm->getOptimizer(), string("layer") + to_string(getId()), saveOptimizerState);
+        j["weights_optimizer"] = optimizer->serialize(archiveWriter,
+                                                      stream,
+                                                      batchNorm->getParameter("weights")->getOptimizer(),
+                                                      string("layer") + to_string(getId()),
+                                                      saveOptimizerState);
+        j["biases_optimizer"] = optimizer->serialize(archiveWriter,
+                                                     stream,
+                                                     batchNorm->getParameter("biases")->getOptimizer(),
+                                                     string("layer") + to_string(getId()),
+                                                     saveOptimizerState);
+        // FIXME: Result running mean and variances as parameters with optimizers
     }
 
     return j;
@@ -138,12 +147,12 @@ void BatchNormalization::deserialize(shared_ptr<thor_file::TarReader> &archiveRe
     batchNormalization.addToNetwork(network);
 }
 
-vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalLayer,
+vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::TrainableLayer> physicalLayer,
                                              bool isFirstStamp,
-                                             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterPhysicalLayer,
+                                             shared_ptr<ThorImplementation::TrainableLayer> sisterPhysicalLayer,
                                              Optional<Event> sisterPhysicalLayerLoadedEvent) {
     vector<Event> initDoneEvents =
-        TrainableWeightsBiasesLayer::initialize(physicalLayer, isFirstStamp, sisterPhysicalLayer, sisterPhysicalLayerLoadedEvent);
+        TrainableLayer::initialize(physicalLayer, isFirstStamp, sisterPhysicalLayer, sisterPhysicalLayerLoadedEvent);
     shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNorm =
         dynamic_pointer_cast<ThorImplementation::BatchNormalization>(physicalLayer);
     shared_ptr<ThorImplementation::BatchNormalization> sisterPhysicalBatchNorm =
@@ -156,15 +165,15 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
     if (!isFirstStamp) {
         // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
         assert(sisterPhysicalLayer != nullptr);
-        ThorImplementation::Tensor weights = physicalLayer->getWeights();
+        ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
         Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
         if (sisterPhysicalLayerLoadedEvent.isPresent())
             stream.waitEvent(sisterPhysicalLayerLoadedEvent);
-        weights.copyFromAsync(sisterPhysicalLayer->getWeights(), stream);
+        weights.copyFromAsync(sisterPhysicalLayer->getParameter("weights")->getStorage(), stream);
 
-        assert(physicalLayer->getBiases().isPresent());
-        ThorImplementation::Tensor biases = physicalLayer->getBiases();
-        Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getBiases();
+        assert(physicalLayer->getParameter("biases")->getStorage().isPresent());
+        ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage();
+        Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getParameter("biases")->getStorage();
         assert(sisterLayerBiases.isPresent());
         biases.copyFromAsync(sisterLayerBiases.get(), stream);
 
@@ -182,13 +191,15 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
     } else if (weightsFile.isPresent()) {
         // 2. Copy from a file - when loading a saved network
         assert(archiveReader != nullptr);
-        assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
-        Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
+        assert(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getMemDevice() ==
+               ThorImplementation::TensorPlacement::MemDevices::GPU);
+        Stream stream =
+            Stream::getNextUploadStream(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getDeviceNum());
 
-        ThorImplementation::Tensor weights = physicalLayer->getWeights();
+        ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
         archiveReader->registerReadRequest(weightsFile.get(), weights);
         assert(biasesFile.isPresent());
-        ThorImplementation::Tensor biases = physicalLayer->getBiases().get();
+        ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().get();
         archiveReader->registerReadRequest(biasesFile.get(), biases);
 
         assert(runningVariancesFile.isPresent());
@@ -216,8 +227,8 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         //
         // shared_ptr<Initializer::Builder> weightsInitializerBuilder = onesInitializerBuilder.clone();
         // shared_ptr<Initializer> weightsInitializer = weightsInitializerBuilder->build();
-        // initDoneEvent = weightsInitializer->initialize(physicalBatchNorm->getWeights(), physicalBatchNorm.get());
-        // if (initDoneEvent.isPresent())
+        // initDoneEvent = weightsInitializer->initialize(physicalBatchNorm->getParameter("weights")->getStorage(),
+        // physicalBatchNorm.get()); if (initDoneEvent.isPresent())
         //     initDoneEvents.push_back(initDoneEvent);
         //
         // shared_ptr<Initializer::Builder> resultRunningVarianceBuilder = onesInitializerBuilder.clone();
@@ -229,10 +240,10 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         //
         // UniformRandom::Builder zerosInitializerBuilder = UniformRandom::Builder().minValue(0.0).maxValue(0.0);
         //
-        // assert(physicalBatchNorm->getBiases().isPresent());
+        // assert(physicalBatchNorm->getParameter("biases")->getStorage().isPresent());
         // shared_ptr<Initializer::Builder> biasInitializerBuilder = zerosInitializerBuilder.clone();
         // shared_ptr<Initializer> biasInitializer = biasInitializerBuilder->build();
-        // initDoneEvent = biasInitializer->initialize(physicalBatchNorm->getBiases(), physicalBatchNorm.get());
+        // initDoneEvent = biasInitializer->initialize(physicalBatchNorm->getParameter("biases")->getStorage(), physicalBatchNorm.get());
         // if (initDoneEvent.isPresent())
         //     initDoneEvents.push_back(initDoneEvent);
         //
@@ -265,7 +276,7 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
 
 namespace {
 static const bool registered = [] {
-    Thor::TrainableWeightsBiasesLayer::register_layer("batch_normalization", &Thor::BatchNormalization::deserialize);
+    Thor::TrainableLayer::register_layer("batch_normalization", &Thor::BatchNormalization::deserialize);
     return true;
 }();
 }  // namespace
