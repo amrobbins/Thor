@@ -39,11 +39,10 @@ class CustomLayer : public TrainableLayer {
                   Stream stream,
                   unsigned int connectionNumber) override {}
 
-    // Error in is up-to-date by the end of the data stream.
-    // Gradient update stream must wait for that.
+    // Gradient-update stream synchronization is handled by TrainableLayer::backward().
     void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
 
-    // Error in is up-to-date by the end of the data stream.
+    // Error-output backward work runs on the regular data stream.
     Optional<Event> computeErrorOut(uint32_t connectionNumber) override;
 
     Optional<Tensor> createFeatureOutputTensor() override;
@@ -95,7 +94,7 @@ class CustomLayer : public TrainableLayer {
     const std::string featureInName = "feature_input";
     const std::string featureOutName = "feature_output";
     const std::string errorInName = RESERVED_GRAD_PREFIX + featureOutName;
-    const std::string errorOutName = inputName + "_grad";
+    std::string errorOutName() const { return inputName + "_grad"; }
     std::vector<Event> gradientAccumAvailableEvents;
 };
 

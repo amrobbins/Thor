@@ -238,7 +238,15 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
             isStartOfBackward = false;
         }
 
-        // Compute output error gradient using current weights, on the data stream
+        // Record the point at which the incoming error tensor is ready on the data stream.
+        // The gradient-update stream can wait on this and then run parameter-gradient work
+        // without waiting for the later error-out backward kernel to finish.
+        Optional<Event> errorInputReadyEvent = Optional<Event>::empty();
+        if (gradientUpdateStream.isPresent() && errorInputs[connectionNumber].isPresent()) {
+            errorInputReadyEvent = streams[connectionNumber].putEvent();
+        }
+
+        // Compute output error gradient using current weights, on the data stream.
         if ((!isBackPropStub() && previousLayers[connectionNumber].isPresent()) || wGradFusedWithEOutGrad) {
             Optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(connectionNumber);
             if (errorOutHasBeenComputedEvent.isPresent())
@@ -248,7 +256,11 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         if (!errorInputs[connectionNumber].isPresent())
             return;
 
-        // Accumulate gradient for the weights per this connection
+        if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
+            gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
+        }
+
+        // Accumulate gradient for the weights per this connection.
         accumulateWeightsGradient(connectionNumber, clearGradientFirst);
 
         numBackwardConnectionsMade += 1;
