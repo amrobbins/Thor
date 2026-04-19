@@ -18,8 +18,7 @@ class Adam : public Optimizer {
     Adam(uint64_t originalId);
     virtual ~Adam() = default;
 
-    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
-        std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer);
+    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(std::shared_ptr<ThorImplementation::TrainableLayer> trainableLayer);
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,

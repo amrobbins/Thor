@@ -6,7 +6,6 @@
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
 #include "DeepLearning/Api/Layers/Layer.h"
-#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Layers/Utility/Flatten.h"
@@ -26,9 +25,11 @@
 
 #include <assert.h>
 
+#include "TrainableLayer.h"
+
 namespace Thor {
 
-class FullyConnected : public TrainableWeightsBiasesLayer {
+class FullyConnected : public TrainableLayer {
    public:
     class Builder;
 
@@ -105,18 +106,19 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         // Note: Network notes when a layer has already been stamped and only adds a connection, does not re-stamp the layer
-        //  It would be better (and fix an DAG requirement) if instead every layer had one connection, and to create a layer
-        //  with multiple connections, it would just share weights, etc.
-        std::shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected =
-            std::make_shared<ThorImplementation::FullyConnected>(numOutputFeatures, hasBias, getId());
+        // FIXME: add support for data type and inference only.
+        Tensor::DataType weightsDataType = Tensor::DataType::FP16;
+        bool inferenceOnly = false;
+        std::shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected = std::make_shared<ThorImplementation::FullyConnected>(
+            numOutputFeatures, hasBias, weightsDataType, placement, inferenceOnly, getId());
         stampOptimizer(physicalFullyConnected);
 
         return physicalFullyConnected;
     }
 
-    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
+    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                   bool isFirstStamp,
-                                  std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
+                                  std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
                                   Optional<Event> sisterLayerLoadedEvent);
 
     // mem requirements are the weights

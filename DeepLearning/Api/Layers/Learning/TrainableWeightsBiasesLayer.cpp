@@ -27,4 +27,24 @@ void TrainableWeightsBiasesLayer::deserialize(shared_ptr<thor_file::TarReader> &
 
 void TrainableWeightsBiasesLayer::removeOptimizer() { this->optimizer.reset(); }
 
+void TrainableWeightsBiasesLayer::stampOptimizer(
+    std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalTrainableLayer) const {
+    // FIXME: when mutiple stamps are supported, optimizer and layer will need to know if there is already one stamped
+    //        for that layer on that GPU, to share things like weights, gradientUpdateStream's.
+    // if (!physicalTrainableLayer->isInferenceOnly())
+    //     assert(hasOptimizer());
+    // if (hasOptimizer()) {
+    //     std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = optimizer->stamp(physicalTrainableLayer);
+    //     physicalTrainableLayer->setOptimizer(physicalOptimizer);
+    // }
+}
+
+std::vector<Event> TrainableWeightsBiasesLayer::initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
+                                                           bool isFirstStamp,
+                                                           std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
+                                                           Optional<Event> sisterLayerLoadedEvent) {
+    // return MultiConnectionLayer::initialize(dynamic_pointer_cast<Layer>(layer));
+    return vector<Event>{};
+}
+
 }  // namespace Thor

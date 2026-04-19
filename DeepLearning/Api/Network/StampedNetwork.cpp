@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Network/StampedNetwork.h"
+#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 
 namespace ThorImplementation {
 

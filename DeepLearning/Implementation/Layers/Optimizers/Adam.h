@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
-#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 #include "Utilities/TensorOperations/Optimizers/Adam.h"
 
 #include <unordered_map>

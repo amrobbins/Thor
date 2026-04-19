@@ -147,9 +147,9 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter,
     string layerName = string("layer") + to_string(getId());
 
     // Dump the weights to a file and record its name
-    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer = nullptr;
+    shared_ptr<ThorImplementation::TrainableLayer> twbLayer = nullptr;
     shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-    twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
+    twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
     assert(twbLayer != nullptr);
 
     ThorImplementation::Tensor weights;
@@ -160,19 +160,29 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter,
         if (hasBias) {
             biasesFile = (layerName + "_biases.gds");
             j["biases_tensor"] = biasesFile;
-            biases = twbLayer->getBiases().get();
+            biases = twbLayer->getParameter("biases")->getStorage().get();
             archiveWriter.addArchiveFile(biasesFile, biases);
         }
 
         weightsFile = (layerName + "_weights.gds");
         j["weights_tensor"] = weightsFile;
-        weights = twbLayer->getWeights();
+        weights = twbLayer->getParameter("weights")->getStorage();
         archiveWriter.addArchiveFile(weightsFile, weights);
     }
 
     if (hasOptimizer()) {
-        j["optimizer"] =
-            optimizer->serialize(archiveWriter, stream, twbLayer->getOptimizer(), string("layer") + to_string(getId()), saveOptimizerState);
+        j["weights_optimizer"] = optimizer->serialize(archiveWriter,
+                                                      stream,
+                                                      twbLayer->getParameter("weights")->getOptimizer(),
+                                                      string("layer") + to_string(getId()),
+                                                      saveOptimizerState);
+        if (hasBias) {
+            j["biases_optimizer"] = optimizer->serialize(archiveWriter,
+                                                         stream,
+                                                         twbLayer->getParameter("biases")->getOptimizer(),
+                                                         string("layer") + to_string(getId()),
+                                                         saveOptimizerState);
+        }
     }
 
     return j;
@@ -232,12 +242,12 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader> &archiveReader
     fullyConnected.addToNetwork(network);
 }
 
-vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalLayer,
+vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::TrainableLayer> physicalLayer,
                                          bool isFirstStamp,
-                                         shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterPhysicalLayer,
+                                         shared_ptr<ThorImplementation::TrainableLayer> sisterPhysicalLayer,
                                          Optional<Event> sisterPhysicalLayerLoadedEvent) {
     vector<Event> initDoneEvents =
-        TrainableWeightsBiasesLayer::initialize(physicalLayer, isFirstStamp, sisterPhysicalLayer, sisterPhysicalLayerLoadedEvent);
+        TrainableLayer::initialize(physicalLayer, isFirstStamp, sisterPhysicalLayer, sisterPhysicalLayerLoadedEvent);
 
     // Weights are set right now, based on 1 of 3 methods:
     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
@@ -247,14 +257,14 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
     if (!isFirstStamp) {
         // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
         assert(sisterPhysicalLayer != nullptr);
-        ThorImplementation::Tensor weights = physicalLayer->getWeights();
+        ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
         Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
         if (sisterPhysicalLayerLoadedEvent.isPresent())
             stream.waitEvent(sisterPhysicalLayerLoadedEvent);
-        weights.copyFromAsync(sisterPhysicalLayer->getWeights(), stream);
+        weights.copyFromAsync(sisterPhysicalLayer->getParameter("weights")->getStorage(), stream);
         if (hasBias) {
-            ThorImplementation::Tensor biases = physicalLayer->getBiases();
-            Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getBiases();
+            ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage();
+            Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getParameter("biases")->getStorage();
             assert(sisterLayerBiases.isPresent());
             biases.copyFromAsync(sisterLayerBiases.get(), stream);
         }
@@ -263,14 +273,16 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
     } else if (weightsFile.isPresent()) {
         // 2. Copy from a file - when loading a saved network
         assert(archiveReader != nullptr);
-        assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
-        Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
+        assert(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getMemDevice() ==
+               ThorImplementation::TensorPlacement::MemDevices::GPU);
+        Stream stream =
+            Stream::getNextUploadStream(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getDeviceNum());
 
-        ThorImplementation::Tensor weights = physicalLayer->getWeights();
+        ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
         archiveReader->registerReadRequest(weightsFile.get(), weights);
         if (hasBias) {
             assert(biasesFile.isPresent());
-            ThorImplementation::Tensor biases = physicalLayer->getBiases().get();
+            ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().get();
             archiveReader->registerReadRequest(biasesFile.get(), biases);
         }
 
@@ -287,12 +299,12 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
         //
         // Optional<Event> initDoneEvent;
         //
-        // initDoneEvent = weightsInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
+        // initDoneEvent = weightsInitializer->initialize(physicalLayer->getParameter("weights")->getStorage(), physicalLayer.get());
         // if (initDoneEvent.isPresent())
         //     initDoneEvents.push_back(initDoneEvent);
         //
-        // if (physicalLayer->getBiases().isPresent()) {
-        //     initDoneEvent = biasInitializer->initialize(physicalLayer->getBiases().get(), physicalLayer.get());
+        // if (physicalLayer->getParameter("biases")->getStorage().isPresent()) {
+        //     initDoneEvent = biasInitializer->initialize(physicalLayer->getParameter("biases")->getStorage().get(), physicalLayer.get());
         //     if (initDoneEvent.isPresent())
         //         initDoneEvents.push_back(initDoneEvent);
         // }
@@ -317,7 +329,7 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
 
 namespace {
 static const bool registered = [] {
-    Thor::TrainableWeightsBiasesLayer::register_layer("fully_connected", &Thor::FullyConnected::deserialize);
+    Thor::TrainableLayer::register_layer("fully_connected", &Thor::FullyConnected::deserialize);
     return true;
 }();
 }  // namespace

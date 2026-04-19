@@ -20,8 +20,7 @@ class Sgd : public Optimizer {
 
     virtual ~Sgd() = default;
 
-    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
-        std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer);
+    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(std::shared_ptr<ThorImplementation::TrainableLayer> trainableLayer);
 
     virtual void setConstantLearningRate(float newCurrentLearningRate, PlacedNetwork *placedNetwork);
     virtual void setInitialLearningRate(float newInitialLearningRate, PlacedNetwork *placedNetwork);

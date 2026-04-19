@@ -30,15 +30,6 @@ class CustomLayer : public TrainableLayer {
     // Compute feature output on the data stream
     void computeFeatureOut(uint32_t connectionNumber) override;
 
-    // FIXME: computeFeatureOut and backwards may need to instead take the input tensor and look up the connection number
-    //         - to keep accounting internal to the layer.
-    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) override {}
-    void backProp(Optional<Tensor> dataIn,
-                  Optional<Tensor> errorIn,
-                  Optional<Tensor> errorOut,
-                  Stream stream,
-                  unsigned int connectionNumber) override {}
-
     // Gradient-update stream synchronization is handled by TrainableLayer::backward().
     void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
 

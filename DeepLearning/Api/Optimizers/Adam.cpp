@@ -10,7 +10,7 @@
 //
 // Adam::Adam(uint64_t originalId) : Optimizer(originalId) {}
 //
-// shared_ptr<ThorImplementation::Optimizer> Adam::stamp(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) {
+// shared_ptr<ThorImplementation::Optimizer> Adam::stamp(shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) {
 //     return make_shared<ThorImplementation::Adam>(getId(), trainableLayer, alpha, beta1, beta2, epsilon);
 // }
 //
@@ -55,7 +55,7 @@
 //         ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
 //         uint32_t numTrainableLayers = stampedNetwork.getNumTrainableLayers();
 //         for (uint32_t j = 0; j < numTrainableLayers; ++j) {
-//             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> &trainableLayer = stampedNetwork.getTrainableLayer(j);
+//             shared_ptr<ThorImplementation::TrainableLayer> &trainableLayer = stampedNetwork.getTrainableLayer(j);
 //             Optional<shared_ptr<ThorImplementation::Optimizer>> maybePhysicalOptimizer = trainableLayer->getOptimizer();
 //             assert(maybePhysicalOptimizer.isPresent());
 //             shared_ptr<ThorImplementation::Optimizer> optimizer = maybePhysicalOptimizer.get();
