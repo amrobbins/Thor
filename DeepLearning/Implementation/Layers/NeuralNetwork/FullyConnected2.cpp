@@ -5,33 +5,57 @@ namespace ThorImplementation {
 namespace {
 class FCWeightsParameter : public Parameter {
    public:
-    FCWeightsParameter(std::string name, bool trainable, bool trainingEnabled, uint32_t numOutputFeatures)
-        : Parameter(name, trainable, trainingEnabled), numOutputFeatures(numOutputFeatures) {}
+    FCWeightsParameter(std::string name,
+                       Optional<TensorDescriptor::DataType> storageDataType,
+                       bool trainable,
+                       bool trainingEnabled,
+                       uint32_t numOutputFeatures)
+        : Parameter(name, trainable, trainingEnabled), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
 
     void createStorage(const Tensor& inputTensor) override {
+        TensorDescriptor::DataType resolvedDataType;
+        if (storageDataType.isPresent())
+            resolvedDataType = storageDataType.get();
+        else
+            resolvedDataType = inputTensor.getDataType();
+
         const uint64_t batchSize = inputTensor.getDimensions()[0];
-        TensorDescriptor descriptor(inputTensor.getDataType(), {inputTensor.getTotalNumElements() / batchSize, numOutputFeatures});
+        TensorDescriptor descriptor(resolvedDataType, {inputTensor.getTotalNumElements() / batchSize, numOutputFeatures});
         storage = Tensor(inputTensor.getPlacement(), descriptor);
     }
 
    private:
     const uint32_t numOutputFeatures;
+    const Optional<TensorDescriptor::DataType> storageDataType;
 };
 
 class FCBiasesParameter : public Parameter {
    public:
-    FCBiasesParameter(std::string name, bool trainable, bool trainingEnabled, uint32_t numOutputFeatures)
-        : Parameter(name, trainable, trainingEnabled), numOutputFeatures(numOutputFeatures) {}
+    FCBiasesParameter(std::string name,
+                      Optional<TensorDescriptor::DataType> storageDataType,
+                      bool trainable,
+                      bool trainingEnabled,
+                      uint32_t numOutputFeatures)
+        : Parameter(name, trainable, trainingEnabled), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
 
     void createStorage(const Tensor& inputTensor) override {
-        TensorDescriptor descriptor(inputTensor.getDataType(), {numOutputFeatures});
+        TensorDescriptor::DataType resolvedDataType;
+        if (storageDataType.isPresent())
+            resolvedDataType = storageDataType.get();
+        else
+            resolvedDataType = inputTensor.getDataType();
+
+        TensorDescriptor descriptor(resolvedDataType, {numOutputFeatures});
         storage = Tensor(inputTensor.getPlacement(), descriptor);
     }
 
    private:
     const uint32_t numOutputFeatures;
+    const Optional<TensorDescriptor::DataType> storageDataType;
 };
 }  // namespace
+
+using DataType = TensorDescriptor::DataType;
 
 FullyConnected2::FullyConnected2(const uint32_t numOutputFeatures,
                                  const bool hasBias,
@@ -39,10 +63,12 @@ FullyConnected2::FullyConnected2(const uint32_t numOutputFeatures,
                                  const TensorPlacement& placement,
                                  bool inferenceOnly,
                                  int64_t stampedId)
-    : CustomLayer(
-          buildExpression(hasBias, placement), placement, defineParameters(numOutputFeatures, hasBias), inferenceOnly, stampedId, false) {
-    printf("%d", placement.getDeviceNum());
-}
+    : CustomLayer(buildExpression(hasBias, placement),
+                  placement,
+                  defineParameters(numOutputFeatures, hasBias, weightsDataType),
+                  inferenceOnly,
+                  stampedId,
+                  false) {}
 
 DynamicExpression FullyConnected2::buildExpression(bool hasBias, TensorPlacement placement) {
     return DynamicExpression([hasBias, placement](const DynamicExpression::TensorMap& inputs,
@@ -94,11 +120,13 @@ DynamicExpression FullyConnected2::buildExpression(bool hasBias, TensorPlacement
     });
 }
 
-std::vector<std::shared_ptr<Parameter>> FullyConnected2::defineParameters(uint32_t numOutputFeatures, bool hasBias) {
+std::vector<std::shared_ptr<Parameter>> FullyConnected2::defineParameters(uint32_t numOutputFeatures,
+                                                                          bool hasBias,
+                                                                          Optional<TensorDescriptor::DataType> weightsDataType) {
     std::vector<std::shared_ptr<Parameter>> parameters;
-    parameters.push_back(std::make_shared<FCWeightsParameter>("weights", true, true, numOutputFeatures));
+    parameters.push_back(std::make_shared<FCWeightsParameter>("weights", weightsDataType, true, true, numOutputFeatures));
     if (hasBias)
-        parameters.push_back(std::make_shared<FCBiasesParameter>("biases", true, true, numOutputFeatures));
+        parameters.push_back(std::make_shared<FCBiasesParameter>("biases", weightsDataType, true, true, numOutputFeatures));
     return parameters;
 }
 

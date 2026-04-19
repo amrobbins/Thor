@@ -32,7 +32,7 @@ json Parameter::serialize(thor_file::TarWriter &archiveWriter,
 
     shared_ptr<ThorImplementation::Parameterizable> physicalParameterizable =
         stampedNetwork.getPhysicalParameterizableFromApiParameterizable(owner->getId());
-    shared_ptr<ThorImplementation::Parameter> physicalParameter = physicalParameterizable->getParam(name);
+    shared_ptr<ThorImplementation::Parameter> physicalParameter = physicalParameterizable->getParameter(name);
     ThorImplementation::Tensor physicalStorage = physicalParameter->getStorage();
 
     string storageFile = "FIXME filename";

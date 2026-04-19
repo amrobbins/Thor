@@ -15,7 +15,7 @@ class FullyConnected2 : public CustomLayer {
 
     FullyConnected2(const uint32_t numOutputFeatures,
                     const bool hasBias,
-                    Optional<DataType> weightsDataType,
+                    Optional<TensorDescriptor::DataType> weightsDataType,
                     const TensorPlacement& placement,
                     bool inferenceOnly,
                     int64_t stampedId = -1);
@@ -24,8 +24,9 @@ class FullyConnected2 : public CustomLayer {
 
    private:
     static DynamicExpression buildExpression(bool hasBias, TensorPlacement placement);
-
-    std::vector<std::shared_ptr<Parameter>> defineParameters(uint32_t numOutputFeatures, bool hasBias);
+    std::vector<std::shared_ptr<Parameter>> defineParameters(uint32_t numOutputFeatures,
+                                                             bool hasBias,
+                                                             Optional<TensorDescriptor::DataType> weightsDataType);
 };
 
 }  // namespace ThorImplementation

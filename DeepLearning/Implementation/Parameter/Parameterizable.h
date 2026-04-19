@@ -16,11 +16,12 @@ class Parameterizable {
     Parameterizable() = default;
     virtual ~Parameterizable() = default;
 
-    void addParam(const std::shared_ptr<Parameter> &parameter);
-    std::shared_ptr<Parameter> getParam(const std::string &name);
-    Tensor getParamStorage(const std::string &name);
+    void addParameter(const std::shared_ptr<Parameter> &parameter);
+    std::shared_ptr<Parameter> getParameter(const std::string &name);
+    Tensor getParameterStorage(const std::string &name);
+    std::unordered_map<std::string, std::shared_ptr<Parameter>> getParameters();
 
-    std::vector<std::string> listParams();
+    std::vector<std::string> listParameters();
 
    protected:
     std::vector<std::shared_ptr<Parameter>> parameters;

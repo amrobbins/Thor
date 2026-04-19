@@ -186,7 +186,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     // }
     // FIXME: Temporarily moved here from layer
 
-   protected:
+   public:
     void forward(Optional<Tensor> featureInput, bool isValidation, uint32_t batchSize = 0) override {
         assert(running);
 
@@ -309,25 +309,27 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     uint64_t getStampedId() const { return stampedId; }  // FIXME: Move to layer
 
     virtual std::string getLayerType() = 0;
+    Optional<Stream> getGradientUpdateStream() const { return gradientUpdateStream; }
 
-    virtual std::vector<std::string> getParameterNames() {
-        std::vector<std::string> parameterNames;
-        for (const auto &parameter : parameters) {
-            parameterNames.push_back(parameter->getName());
-        }
-        return parameterNames;
-    }
-    virtual std::unordered_map<std::string, std::shared_ptr<Parameter>> getParameters() {
-        std::unordered_map<std::string, std::shared_ptr<Parameter>> allParams;
-        for (const auto &parameter : parameters)
-            allParams[parameter->getName()] = parameter;
-        return allParams;
-    }
-    virtual std::shared_ptr<Parameter> getParameter(const std::string &parameterName) {
-        if (!parameterIndexByName.contains(parameterName))
-            throw std::runtime_error("Do not have a parameter by the name of " + parameterName);
-        return parameters[parameterIndexByName[parameterName]];
-    }
+    // The following functionality is handled by parameterizable.
+    // virtual std::vector<std::string> getParameterNames() {
+    //     std::vector<std::string> parameterNames;
+    //     for (const auto &parameter : parameters) {
+    //         parameterNames.push_back(parameter->getName());
+    //     }
+    //     return parameterNames;
+    // }
+    // virtual std::unordered_map<std::string, std::shared_ptr<Parameter>> getParameters() {
+    //     std::unordered_map<std::string, std::shared_ptr<Parameter>> allParams;
+    //     for (const auto &parameter : parameters)
+    //         allParams[parameter->getName()] = parameter;
+    //     return allParams;
+    // }
+    // virtual std::shared_ptr<Parameter> getParameter(const std::string &parameterName) {
+    //     if (!parameterIndexByName.contains(parameterName))
+    //         throw std::runtime_error("Do not have a parameter by the name of " + parameterName);
+    //     return parameters[parameterIndexByName[parameterName]];
+    // }
 
    protected:
     std::vector<Stream> uniqueDataStreams;
