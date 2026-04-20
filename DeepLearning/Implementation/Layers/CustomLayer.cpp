@@ -349,8 +349,12 @@ void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {
 }
 
 // Error-output backward work runs on the data stream.
-Optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
+Optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) {
     assert(connectionNumber < errorInputs.size());
+    // Custom layer currently never fuses wGrad and eOutGrad
+    // FIXME: As an optimization, when there is just 1 stage, then fuse them.
+    // Then will need two fused equations, one that clears gradient one that accumulates.
+    assert(!wGradFusedWithEOutGrad);
 
     if (errorInputs[connectionNumber].isEmpty()) {
         // No incoming gradient, potentially a StopGradientLayer was put there.

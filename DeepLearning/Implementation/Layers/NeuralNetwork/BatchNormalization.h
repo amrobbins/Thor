@@ -4,6 +4,8 @@
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/Parameter.h"
 
+// FIXME: More work to do on this, compare to old get it exact.
+
 namespace ThorImplementation {
 
 /**
@@ -23,13 +25,12 @@ class BatchNormalization : public TrainableLayer {
    public:
     ~BatchNormalization() override;
 
-    BatchNormalization(bool training,
-                       int64_t stampedId = -1,
+    BatchNormalization(const TensorPlacement& placement,
+                       bool inferenceOnly,
                        Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
-                       Optional<double> epsilon = Optional<double>::empty());
-
-    void setTrainingMode(bool training);
-    bool getTrainingMode() const { return training; }
+                       Optional<double> epsilon = Optional<double>::empty(),
+                       Optional<TensorDescriptor::DataType> storageDataType = Optional<TensorDescriptor::DataType>::empty(),
+                       int64_t stampedId = -1);
 
     double getExponentialRunningAverageFactor() const { return exponentialRunningAverageFactor; }
     void setExponentialRunningAverageFactor(double exponentialRunningAverageFactor) {
@@ -39,20 +40,7 @@ class BatchNormalization : public TrainableLayer {
     double getEpsilon() const { return epsilon; }
     void setEpsilon(double epsilon) { this->epsilon = epsilon; }
 
-    Tensor getWeights() { return getParameterStorage("weights"); }
-    Optional<Tensor> getBiases() { return Optional<Tensor>(getParameterStorage("biases")); }
-
-    Tensor getResultRunningMean() { return resultRunningMean; }
-    Tensor getResultRunningVariance() { return resultRunningVariance; }
-
-    void setCurrentExponentialRunningAverageFactor(double value);
-
-    void setInitializer(Tensor target, std::shared_ptr<ThorImplementation::Initializer> initializer) override;
-    bool hasInitializer(Tensor target) override;
-    Event initializeTensor(Tensor target) override;
-
     std::string getLayerType() override { return "BatchNormalization"; }
-    std::string getType() override { return getLayerType(); }
 
     Optional<Tensor> createFeatureOutputTensor() override;
     Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
@@ -70,7 +58,7 @@ class BatchNormalization : public TrainableLayer {
 
    private:
     void computeFeatureOut(uint32_t connectionNumber) override;
-    Optional<Event> computeErrorOut(uint32_t connectionNumber) override;
+    Optional<Event> computeErrorOut(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) override;
     void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
 
     void runForward(Optional<Tensor> inputTensor,
@@ -80,8 +68,11 @@ class BatchNormalization : public TrainableLayer {
                     Tensor weights,
                     Optional<Tensor> biases);
 
-    Optional<Stream> resolveStateStream(Optional<Stream> stream) const;
-    void compileRunningStatInitializer(const std::shared_ptr<Initializer>& initializer, const Tensor& tensor);
+   protected:
+    Tensor weights;
+    Tensor biases;
+    Tensor resultRunningMean;
+    Tensor resultRunningVariance;
 
    private:
     static const float ALPHA_NO_SCALE;
@@ -93,7 +84,6 @@ class BatchNormalization : public TrainableLayer {
     unsigned int height = 0;
     unsigned int width = 0;
 
-    bool training;
     double exponentialRunningAverageFactor;
     uint32_t itemsObserved = 0;
     std::vector<double> currentExponentialRunningAverageFactor;
@@ -103,11 +93,12 @@ class BatchNormalization : public TrainableLayer {
     Optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
     Optional<cudnnTensorDescriptor_t> derivedBnDescriptor;
 
-    Tensor resultRunningMean;
-    Tensor resultRunningVariance;
     std::vector<Tensor> resultSaveMean;
     std::vector<Tensor> resultSaveInvVariance;
-    std::vector<Optional<Tensor>> scratchErrorOutputs;
+
+    // Since weights gradients and error gradient is a fused operation, then when back prop is pruned
+    // we still need some valid chunk of memory to write values in, which we ignore.
+    Optional<Tensor> scratchErrorOutput = Optional<Tensor>::empty();
 };
 
 }  // namespace ThorImplementation

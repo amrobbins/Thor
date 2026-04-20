@@ -34,7 +34,7 @@ class CustomLayer : public TrainableLayer {
     void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
 
     // Error-output backward work runs on the regular data stream.
-    Optional<Event> computeErrorOut(uint32_t connectionNumber) override;
+    Optional<Event> computeErrorOut(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) override;
 
     Optional<Tensor> createFeatureOutputTensor() override;
     Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;

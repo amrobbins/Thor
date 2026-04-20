@@ -14,7 +14,7 @@ class ConvWeightsParameter : public Parameter {
                          uint32_t numOutputChannels,
                          uint32_t filterWidth,
                          uint32_t filterHeight)
-        : Parameter(name, trainable, trainingEnabled),
+        : Parameter(name, trainable),
           numOutputChannels(numOutputChannels),
           filterWidth(filterWidth),
           filterHeight(filterHeight),
@@ -46,7 +46,7 @@ class ConvBiasesParameter : public Parameter {
                         bool trainable,
                         bool trainingEnabled,
                         uint32_t numOutputChannels)
-        : Parameter(name, trainable, trainingEnabled), numOutputChannels(numOutputChannels), storageDataType(storageDataType) {}
+        : Parameter(name, trainable), numOutputChannels(numOutputChannels), storageDataType(storageDataType) {}
 
     void createStorage(const Tensor& inputTensor) override {
         TensorDescriptor::DataType resolvedDataType = storageDataType.isPresent() ? storageDataType.get() : inputTensor.getDataType();

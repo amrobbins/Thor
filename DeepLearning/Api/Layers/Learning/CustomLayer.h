@@ -1,11 +1,11 @@
 #pragma once
 
-#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Parameter/Parameter.h"
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 
 namespace Thor {
-class CustomLayer : public TrainableWeightsBiasesLayer, public Parameterizable {
+class CustomLayer : public TrainableLayer, public Parameterizable {
    public:
     virtual ~CustomLayer() = default;
 
