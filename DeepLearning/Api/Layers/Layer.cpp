@@ -49,7 +49,7 @@ void Layer::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const n
         Activation::deserialize(j, network);
         return;
     } else if (factory == Factory::Learning) {
-        TrainableWeightsBiasesLayer::deserialize(archiveReader, j, network);
+        TrainableLayer::deserialize(archiveReader, j, network);
         return;
     } else if (factory == Factory::Loss) {
         Loss::deserialize(j, network);

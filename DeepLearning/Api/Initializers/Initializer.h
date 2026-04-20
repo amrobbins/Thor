@@ -2,7 +2,6 @@
 
 #include "DeepLearning/Implementation/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
-#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 

@@ -34,16 +34,17 @@ unordered_map<string, float> Optimizer::getAllHyperParameters(PlacedNetwork *pla
     assert(placedNetwork->getNumStamps() >= 1);
     assert(placedNetwork->getNumTrainableLayers() >= 1);
 
-    // All optimizer instances must have the same parameters.
-    ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(0);
-
-    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(0);
-    if (trainableLayer->hasOptimizer()) {
-        shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = trainableLayer->getOptimizer();
-        return physicalOptimizer->getAllHyperParameters();
-    } else {
-        return {};
-    }
+    // // All optimizer instances must have the same parameters.
+    // ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(0);
+    //
+    // shared_ptr<ThorImplementation::TrainableLayer> trainableLayer = stampedNetwork.getTrainableLayer(0);
+    // if (trainableLayer->hasOptimizer()) {
+    //     shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = trainableLayer->getOptimizer();
+    //     return physicalOptimizer->getAllHyperParameters();
+    // } else {
+    //     return {};
+    // }
+    return {{"FIXME optimizer pattern changed to per parameter", 0.0f}};
 }
 
 // Update all optimizers in the network, each belonging to a trainable layer.
@@ -58,10 +59,11 @@ void Optimizer::updateHyperParameters(PlacedNetwork *placedNetwork, uint64_t epo
             updated.insert(gpuNum);
             uint64_t numTrainableLayers = stamp.getNumTrainableLayers();
             for (uint32_t j = 0; j < numTrainableLayers; ++j) {
-                std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> &trainableLayer = stamp.getTrainableLayer(j);
-                if (trainableLayer->hasOptimizer()) {
-                    shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = trainableLayer->getOptimizer();
-                    physicalOptimizer->updateHyperParameters(epoch, batch, batchesPerEpoch);
+                std::shared_ptr<ThorImplementation::TrainableLayer> &trainableLayer = stamp.getTrainableLayer(j);
+                for (auto &[name, param] : trainableLayer->getParameters()) {
+                    if (param->hasOptimizer()) {
+                        param->getOptimizer()->updateHyperParameters(epoch, batch, batchesPerEpoch);
+                    }
                 }
             }
         }

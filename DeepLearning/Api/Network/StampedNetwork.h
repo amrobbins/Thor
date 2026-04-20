@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Layer.h"
-#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
@@ -44,7 +44,7 @@ class StampedNetwork {
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> getOutputs() { return outputsShared; }
 
     uint64_t getNumTrainableLayers() { return trainableLayersShared.size(); }
-    std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> &getTrainableLayer(uint64_t i) { return trainableLayersShared[i]; }
+    std::shared_ptr<ThorImplementation::TrainableLayer> &getTrainableLayer(uint64_t i) { return trainableLayersShared[i]; }
     std::vector<std::shared_ptr<ThorImplementation::Layer>> getOtherLayers() { return otherLayersShared; }
 
     std::shared_ptr<ThorImplementation::Layer> getPhysicalLayerFromApiLayer(uint64_t apiLayerId) {
@@ -91,7 +91,7 @@ class StampedNetwork {
 
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputsShared;
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> outputsShared;
-    std::vector<std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayersShared;
+    std::vector<std::shared_ptr<ThorImplementation::TrainableLayer>> trainableLayersShared;
     std::vector<std::shared_ptr<ThorImplementation::Layer>> otherLayersShared;
     std::map<Thor::Tensor, std::shared_ptr<ThorImplementation::Layer>> apiTensorToPhysicalDrivingLayerShared;
     std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> apiLayerToPhysicalLayerShared;
@@ -101,11 +101,11 @@ class StampedNetwork {
     std::map<std::string, std::shared_ptr<ThorImplementation::NetworkOutput>> outputNamedShared;
 
     std::map<uint64_t, std::shared_ptr<ThorImplementation::Parameterizable>> apiParameterizableToPhysicalParameterizable;
- // FIXME: get rid of raw pointers
+    // FIXME: get rid of raw pointers
     // For performance, store and use the raw pointers
     std::vector<ThorImplementation::NetworkInput *> inputs;
     std::vector<ThorImplementation::NetworkOutput *> outputs;
-    std::vector<ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayers;
+    std::vector<ThorImplementation::TrainableLayer *> trainableLayers;
     std::vector<ThorImplementation::Layer *> otherLayers;
     std::map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
     std::map<uint64_t, ThorImplementation::Layer *> apiLayerToPhysicalLayer;

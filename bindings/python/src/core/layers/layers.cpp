@@ -2,7 +2,6 @@
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
-#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -33,9 +32,6 @@ void bind_layers(nb::module_ &layers) {
     layer.attr("__module__") = "thor.layers";
     auto multi_connection_layer = nb::class_<MultiConnectionLayer, Layer>(layers, "MultiConnectionLayer");
     multi_connection_layer.attr("__module__") = "thor.layers";
-    auto trainable_weights_biases_layer =
-        nb::class_<TrainableWeightsBiasesLayer, MultiConnectionLayer>(layers, "TrainableWeightsBiasesLayer");
-    trainable_weights_biases_layer.attr("__module__") = "thor.layers";
     auto trainable_layer = nb::class_<TrainableLayer, MultiConnectionLayer>(layers, "TrainableLayer");
     trainable_layer.attr("__module__") = "thor.layers";
 
