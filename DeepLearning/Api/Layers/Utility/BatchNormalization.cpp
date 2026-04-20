@@ -74,12 +74,14 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
 
         resultRunningMeanFile = (layerName + "_means.gds");
         j["means_tensor"] = resultRunningMeanFile;
-        means = batchNorm->getResultRunningMean();
+        means = batchNorm->getParameter("running_mean")->getStorage().get();
+        ;
         archiveWriter.addArchiveFile(resultRunningMeanFile, means);
 
         resultRunningVarianceFile = (layerName + "_variances.gds");
         j["variances_tensor"] = resultRunningVarianceFile;
-        variance = batchNorm->getResultRunningVariance();
+        variance = batchNorm->getParameter("running_variance")->getStorage().get();
+        ;
         archiveWriter.addArchiveFile(resultRunningVarianceFile, variance);
     }
 
@@ -177,15 +179,21 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         assert(sisterLayerBiases.isPresent());
         biases.copyFromAsync(sisterLayerBiases.get(), stream);
 
-        ThorImplementation::Tensor resultRunningVariance = physicalBatchNorm->getResultRunningVariance();
-        Optional<ThorImplementation::Tensor> sisterLayerResultRunningVariance = sisterPhysicalBatchNorm->getResultRunningVariance();
+        ThorImplementation::Tensor resultRunningVariance = physicalBatchNorm->getParameter("running_variance")->getStorage().get();
+        ;
+        Optional<ThorImplementation::Tensor> sisterLayerResultRunningVariance =
+            sisterPhysicalBatchNorm->getParameter("running_variance")->getStorage().get();
+        ;
         resultRunningVariance.copyFromAsync(sisterLayerResultRunningVariance, stream);
 
-        ThorImplementation::Tensor resultRunningMean = physicalBatchNorm->getResultRunningMean();
-        Optional<ThorImplementation::Tensor> sisterLayerResultRunningMean = sisterPhysicalBatchNorm->getResultRunningMean();
+        ThorImplementation::Tensor resultRunningMean = physicalBatchNorm->getParameter("running_mean")->getStorage().get();
+        ;
+        Optional<ThorImplementation::Tensor> sisterLayerResultRunningMean =
+            sisterPhysicalBatchNorm->getParameter("running_mean")->getStorage().get();
+        ;
         resultRunningMean.copyFromAsync(sisterLayerResultRunningMean, stream);
 
-        physicalBatchNorm->setCurrentExponentialRunningAverageFactor(exponentialRunningAverageFactor);
+        physicalBatchNorm->setExponentialRunningAverageFactor(exponentialRunningAverageFactor);
 
         initDoneEvents.emplace_back(false, true);
     } else if (weightsFile.isPresent()) {
@@ -203,11 +211,11 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         archiveReader->registerReadRequest(biasesFile.get(), biases);
 
         assert(runningVariancesFile.isPresent());
-        ThorImplementation::Tensor variances = physicalBatchNorm->getResultRunningVariance();
+        ThorImplementation::Tensor variances = physicalBatchNorm->getParameter("running_variance")->getStorage().get();
         archiveReader->registerReadRequest(runningVariancesFile.get(), variances);
 
         assert(runningMeansFile.isPresent());
-        ThorImplementation::Tensor means = physicalBatchNorm->getResultRunningMean();
+        ThorImplementation::Tensor means = physicalBatchNorm->getParameter("running_mean")->getStorage().get();
         archiveReader->registerReadRequest(runningMeansFile.get(), means);
 
         // Can't use the file later, it may not still be there
@@ -217,7 +225,7 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         runningVariancesFile = Optional<string>::empty();
         runningMeansFile = Optional<string>::empty();
 
-        physicalBatchNorm->setCurrentExponentialRunningAverageFactor(exponentialRunningAverageFactor);
+        physicalBatchNorm->setExponentialRunningAverageFactor(exponentialRunningAverageFactor);
     } else {
         // FIXME: This needs to be updated to use Parameter's. It needs be moved to API Thor::TrainableLayer
         // // 3. Run an initializer to set the weights - on an untrained network
@@ -234,7 +242,8 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         // shared_ptr<Initializer::Builder> resultRunningVarianceBuilder = onesInitializerBuilder.clone();
         // shared_ptr<Initializer> resultRunningVarianceInitializer = resultRunningVarianceBuilder->build();
         // initDoneEvent =
-        //     resultRunningVarianceInitializer->initialize(physicalBatchNorm->getResultRunningVariance(), physicalBatchNorm.get());
+        //     resultRunningVarianceInitializer->initialize(physicalBatchNorm->getParameter("running_variance")->getStorage().get();,
+        //     physicalBatchNorm.get());
         // if (initDoneEvent.isPresent())
         //     initDoneEvents.push_back(initDoneEvent);
         //
@@ -249,8 +258,8 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         //
         // shared_ptr<Initializer::Builder> resultRunningMeanBuilder = zerosInitializerBuilder.clone();
         // shared_ptr<Initializer> resultRunningMeanInitializer = resultRunningMeanBuilder->build();
-        // initDoneEvent = resultRunningMeanInitializer->initialize(physicalBatchNorm->getResultRunningMean(), physicalBatchNorm.get());
-        // if (initDoneEvent.isPresent())
+        // initDoneEvent = resultRunningMeanInitializer->initialize(physicalBatchNorm->getParameter("running_mean")->getStorage().get();,
+        // physicalBatchNorm.get()); if (initDoneEvent.isPresent())
         //     initDoneEvents.push_back(initDoneEvent);
         //
         // // Start with the actual average until there are enough elements observed so that the running average

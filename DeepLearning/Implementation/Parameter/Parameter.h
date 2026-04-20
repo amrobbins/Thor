@@ -11,7 +11,7 @@ class Parameter {
    public:
     virtual ~Parameter() = default;
 
-    Parameter(std::string name, bool trainable, bool trainingEnabled);  // Later constraint
+    Parameter(std::string name, bool trainable);  // Later constraint
 
     // Remember this is called by API layer so that will hand over the optimizer
     // 1. Create storage given featureInput 2. Compile the optimizer

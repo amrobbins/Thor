@@ -5,12 +5,8 @@ namespace ThorImplementation {
 namespace {
 class FCWeightsParameter : public Parameter {
    public:
-    FCWeightsParameter(std::string name,
-                       Optional<TensorDescriptor::DataType> storageDataType,
-                       bool trainable,
-                       bool trainingEnabled,
-                       uint32_t numOutputFeatures)
-        : Parameter(name, trainable, trainingEnabled), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
+    FCWeightsParameter(Optional<TensorDescriptor::DataType> storageDataType, uint32_t numOutputFeatures)
+        : Parameter("weights", true), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
 
     void createStorage(const Tensor& inputTensor) override {
         TensorDescriptor::DataType resolvedDataType;
@@ -31,12 +27,8 @@ class FCWeightsParameter : public Parameter {
 
 class FCBiasesParameter : public Parameter {
    public:
-    FCBiasesParameter(std::string name,
-                      Optional<TensorDescriptor::DataType> storageDataType,
-                      bool trainable,
-                      bool trainingEnabled,
-                      uint32_t numOutputFeatures)
-        : Parameter(name, trainable, trainingEnabled), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
+    FCBiasesParameter(Optional<TensorDescriptor::DataType> storageDataType, uint32_t numOutputFeatures)
+        : Parameter("biases", true), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
 
     void createStorage(const Tensor& inputTensor) override {
         TensorDescriptor::DataType resolvedDataType;
@@ -124,9 +116,9 @@ std::vector<std::shared_ptr<Parameter>> FullyConnected::defineParameters(uint32_
                                                                          bool hasBias,
                                                                          Optional<TensorDescriptor::DataType> weightsDataType) {
     std::vector<std::shared_ptr<Parameter>> parameters;
-    parameters.push_back(std::make_shared<FCWeightsParameter>("weights", weightsDataType, true, true, numOutputFeatures));
+    parameters.push_back(std::make_shared<FCWeightsParameter>(weightsDataType, numOutputFeatures));
     if (hasBias)
-        parameters.push_back(std::make_shared<FCBiasesParameter>("biases", weightsDataType, true, true, numOutputFeatures));
+        parameters.push_back(std::make_shared<FCBiasesParameter>(weightsDataType, numOutputFeatures));
     return parameters;
 }
 

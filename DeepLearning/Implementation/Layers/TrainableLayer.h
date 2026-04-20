@@ -241,7 +241,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
         // Compute output error gradient using current weights, on the data stream.
         if ((!isBackPropStub() && previousLayers[connectionNumber].isPresent()) || wGradFusedWithEOutGrad) {
-            Optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(connectionNumber);
+            Optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(connectionNumber, clearGradientFirst);
             if (errorOutHasBeenComputedEvent.isPresent())
                 errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
         }
@@ -254,7 +254,9 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         }
 
         // Accumulate gradient for the weights per this connection.
-        accumulateWeightsGradient(connectionNumber, clearGradientFirst);
+        if (!wGradFusedWithEOutGrad) {
+            accumulateWeightsGradient(connectionNumber, clearGradientFirst);
+        }
 
         numBackwardConnectionsMade += 1;
         bool gradientComplete = false;
@@ -307,7 +309,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     virtual void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) = 0;
 
     // Error in is up-to-date by the end of the data stream.
-    virtual Optional<Event> computeErrorOut(uint32_t connectionNumber) = 0;
+    virtual Optional<Event> computeErrorOut(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) = 0;
 
    public:
     // Setters/Getters

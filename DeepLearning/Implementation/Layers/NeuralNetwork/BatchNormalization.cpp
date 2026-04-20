@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 #include <stdexcept>
 
@@ -11,22 +12,23 @@ using DataType = TensorDescriptor::DataType;
 
 class BNParameter final : public Parameter {
    public:
-    BNParameter(string name, Optional<Tensor> sharedStorage)
-        : Parameter(std::move(name), /*trainable=*/true, /*trainingEnabled=*/true), sharedStorage(sharedStorage) {}
+    BNParameter(const string& name, const Optional<TensorDescriptor::DataType>& storageDataType)
+        : Parameter(name, true), storageDataType(storageDataType) {}
 
     void createStorage(const Tensor& inputTensor) override {
-        if (sharedStorage.isPresent()) {
-            storage = sharedStorage.get();
-            return;
-        }
-
         assert(inputTensor.getDimensions().size() == 2 || inputTensor.getDimensions().size() == 4);
         const uint64_t channels = inputTensor.getDimensions()[1];
-        storage = Tensor(inputTensor.getPlacement(), TensorDescriptor(DataType::FP32, {channels}));
+        TensorDescriptor::DataType resolvedDataType;
+        if (storageDataType.isPresent())
+            resolvedDataType = storageDataType.get();
+        else
+            resolvedDataType = inputTensor.getDataType();
+
+        storage = Tensor(inputTensor.getPlacement(), TensorDescriptor(resolvedDataType, {channels}));
     }
 
    private:
-    Optional<Tensor> sharedStorage;
+    const Optional<TensorDescriptor::DataType> storageDataType;
 };
 
 }  // namespace
@@ -35,85 +37,22 @@ const float BatchNormalization::ALPHA_NO_SCALE = 1.0f;
 const float BatchNormalization::BETA_CLEAR = 0.0f;
 const float BatchNormalization::BETA_ACCUMULATE = 1.0f;
 
-BatchNormalization::BatchNormalization(bool training,
-                                       int64_t stampedId,
+BatchNormalization::BatchNormalization(const TensorPlacement& placement,
+                                       bool inferenceOnly,
                                        Optional<double> exponentialRunningAverageFactor,
-                                       Optional<double> epsilon)
-    : TrainableLayer(TensorPlacement(TensorPlacement::MemDevices::CPU), /*inferenceOnly=*/false, stampedId),
-      training(training),
+                                       Optional<double> epsilon,
+                                       Optional<TensorDescriptor::DataType> storageDataType,
+                                       int64_t stampedId)
+    : TrainableLayer(placement, inferenceOnly, stampedId),
       exponentialRunningAverageFactor(exponentialRunningAverageFactor.isPresent() ? exponentialRunningAverageFactor.get() : 0.05),
       epsilon(epsilon.isPresent() ? epsilon.get() : 0.0001) {
-    addParameter(make_shared<BNParameter>("weights", Optional<Tensor>::empty()));
-    addParameter(make_shared<BNParameter>("biases", Optional<Tensor>::empty()));
+    addParameter(make_shared<BNParameter>("weights", storageDataType));
+    addParameter(make_shared<BNParameter>("biases", storageDataType));
+    addParameter(make_shared<BNParameter>("running_mean", storageDataType));
+    addParameter(make_shared<BNParameter>("running_variance", storageDataType));
 }
 
 BatchNormalization::~BatchNormalization() { cleanup(); }
-
-void BatchNormalization::setTrainingMode(bool training) {
-    assert(running == false);
-    assert(isInferenceOnly() == false);
-    this->training = training;
-}
-
-Optional<Stream> BatchNormalization::resolveStateStream(Optional<Stream> stream) const {
-    if (stream.isPresent())
-        return stream;
-    if (gradientUpdateStream.isPresent())
-        return gradientUpdateStream;
-    if (!streams.empty())
-        return streams[0];
-    return Optional<Stream>::empty();
-}
-
-void BatchNormalization::setCurrentExponentialRunningAverageFactor(double value) {
-    currentExponentialRunningAverageFactor = vector<double>(featureInputs.size(), value);
-}
-
-void BatchNormalization::setInitializer(Tensor target, shared_ptr<Initializer> initializer) {
-    if (target == getWeights()) {
-        getParameter("weights")->setInitializer(initializer);
-    } else if (target == getBiases().get()) {
-        getParameter("biases")->setInitializer(initializer);
-    } else if (target == resultRunningMean) {
-        resultRunningMeanInitializer = initializer;
-    } else if (target == resultRunningVariance) {
-        resultRunningVarianceInitializer = initializer;
-    } else {
-        assert(false);
-    }
-}
-
-bool BatchNormalization::hasInitializer(Tensor target) {
-    if (target == getWeights()) {
-        return getParameter("weights")->hasInitializer();
-    } else if (target == getBiases().get()) {
-        return getParameter("biases")->hasInitializer();
-    } else if (target == resultRunningMean) {
-        return resultRunningMeanInitializer != nullptr;
-    } else if (target == resultRunningVariance) {
-        return resultRunningVarianceInitializer != nullptr;
-    } else {
-        assert(false);
-        return false;
-    }
-}
-
-Event BatchNormalization::initializeTensor(Tensor target) {
-    if (target == getWeights()) {
-        return getParameter("weights")->initialize();
-    } else if (target == getBiases().get()) {
-        return getParameter("biases")->initialize();
-    } else if (target == resultRunningMean) {
-        assert(resultRunningMeanInitializer != nullptr);
-        return resultRunningMeanInitializer->initialize();
-    } else if (target == resultRunningVariance) {
-        assert(resultRunningVarianceInitializer != nullptr);
-        return resultRunningVarianceInitializer->initialize();
-    } else {
-        assert(false);
-        return Event();
-    }
-}
 
 Optional<Tensor> BatchNormalization::createFeatureOutputTensor() {
     Optional<Tensor> maybeInput = getFirstPresentTensor(featureInputs);
@@ -144,15 +83,6 @@ uint64_t BatchNormalization::flopCountBackward() {
     return maybeInput.get().getTotalNumElements() * 16;
 }
 
-void BatchNormalization::compileRunningStatInitializer(const shared_ptr<Initializer>& initializer, const Tensor& tensor) {
-    if (initializer == nullptr)
-        return;
-
-    Stream initStream = gradientUpdateStream.isPresent() ? gradientUpdateStream.get()
-                                                         : Stream::getMostRecentGradientUpdateStream(tensor.getPlacement().getDeviceNum());
-    initializer->compile(tensor, initStream, getFanIn(), getFanOut());
-}
-
 void BatchNormalization::compileImpl() {
     TrainableLayer::compileImpl();
 
@@ -166,6 +96,7 @@ void BatchNormalization::compileImpl() {
 
     placement = input.getPlacement();
     assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    ensureNoDeviceCrossing(placement);  // FIXME: create variant to take expected placement.
 
     attachGradientUpdateStream();
     wGradFusedWithEOutGrad = true;
@@ -177,28 +108,18 @@ void BatchNormalization::compileImpl() {
         parameter->compileInitializer(getFanIn(), getFanOut());
     }
 
-    const Tensor weights = getWeights();
-    const Tensor biases = getBiases().get();
+    // FIXME: Check what cudnn batch norm supports, it may be only fp32
+    weights = getParameter("weights")->getStorage();
+    biases = getParameter("biases")->getStorage();
+    resultRunningMean = getParameter("running_mean")->getStorage();
+    resultRunningVariance = getParameter("running_variance")->getStorage();
     assert(weights.getDataType() == DataType::FP32);
     assert(biases.getDataType() == DataType::FP32);
-    assert(weights.getDimensions() == biases.getDimensions());
-
-    const uint64_t channels = input.getDimensions()[1];
-    if (!resultRunningMean.isInitialized()) {
-        resultRunningMean = Tensor(placement, TensorDescriptor(DataType::FP32, {channels}));
-    }
-    if (!resultRunningVariance.isInitialized()) {
-        resultRunningVariance = Tensor(placement, TensorDescriptor(DataType::FP32, {channels}));
-    }
-    assert(resultRunningMean.getDimensions() == vector<uint64_t>({channels}));
-    assert(resultRunningVariance.getDimensions() == vector<uint64_t>({channels}));
     assert(resultRunningMean.getDataType() == DataType::FP32);
     assert(resultRunningVariance.getDataType() == DataType::FP32);
-
-    compileRunningStatInitializer(resultRunningMeanInitializer, resultRunningMean);
-    compileRunningStatInitializer(resultRunningVarianceInitializer, resultRunningVariance);
-
-    cudnnStatus_t cudnnStatus;
+    assert(weights.getDimensions() == biases.getDimensions());
+    assert(weights.getDimensions() == resultRunningMean.getDimensions());
+    assert(weights.getDimensions() == resultRunningVariance.getDimensions());
 
     const vector<uint64_t> inputDimensions = input.getDescriptor().getDimensions();
     assert(inputDimensions.size() == 2 || inputDimensions.size() == 4);
@@ -223,41 +144,34 @@ void BatchNormalization::compileImpl() {
     cleanup();
 
     featureInputDescriptor = cudnnTensorDescriptor_t();
-    cudnnStatus = cudnnCreateTensorDescriptor(&featureInputDescriptor.get());
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-    cudnnStatus =
-        cudnnSetTensor4dDescriptor(featureInputDescriptor, CUDNN_TENSOR_NCHW, cudnnDataType, batchSize, numChannels, height, width);
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    CUDNN_CHECK(cudnnCreateTensorDescriptor(&featureInputDescriptor.get()));
+    CUDNN_CHECK(
+        cudnnSetTensor4dDescriptor(featureInputDescriptor, CUDNN_TENSOR_NCHW, cudnnDataType, batchSize, numChannels, height, width));
 
     featureOutputDescriptor = cudnnTensorDescriptor_t();
-    cudnnStatus = cudnnCreateTensorDescriptor(&featureOutputDescriptor.get());
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-    cudnnStatus =
-        cudnnSetTensor4dDescriptor(featureOutputDescriptor, CUDNN_TENSOR_NCHW, cudnnDataType, batchSize, numChannels, height, width);
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    CUDNN_CHECK(cudnnCreateTensorDescriptor(&featureOutputDescriptor.get()));
+    CUDNN_CHECK(
+        cudnnSetTensor4dDescriptor(featureOutputDescriptor, CUDNN_TENSOR_NCHW, cudnnDataType, batchSize, numChannels, height, width));
 
     derivedBnDescriptor = cudnnTensorDescriptor_t();
-    cudnnStatus = cudnnCreateTensorDescriptor(&derivedBnDescriptor.get());
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-    cudnnStatus = cudnnDeriveBNTensorDescriptor(derivedBnDescriptor,
-                                                featureInputDescriptor,
-                                                inputDimensions.size() == 2 ? CUDNN_BATCHNORM_PER_ACTIVATION : CUDNN_BATCHNORM_SPATIAL);
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    CUDNN_CHECK(cudnnCreateTensorDescriptor(&derivedBnDescriptor.get()));
+    CUDNN_CHECK(cudnnDeriveBNTensorDescriptor(derivedBnDescriptor,
+                                              featureInputDescriptor,
+                                              inputDimensions.size() == 2 ? CUDNN_BATCHNORM_PER_ACTIVATION : CUDNN_BATCHNORM_SPATIAL));
 
     resultSaveMean.clear();
     resultSaveInvVariance.clear();
-    scratchErrorOutputs.clear();
+    scratchErrorOutput.clear();
     resultSaveMean.reserve(featureInputs.size());
     resultSaveInvVariance.reserve(featureInputs.size());
-    scratchErrorOutputs.reserve(featureInputs.size());
     for (unsigned int i = 0; i < featureInputs.size(); ++i) {
         resultSaveMean.push_back(weights.clone());
         resultSaveInvVariance.push_back(weights.clone());
         if (errorInputs.size() > i && errorInputs[i].isPresent() && (errorOutputs.size() <= i || errorOutputs[i].isEmpty())) {
             assert(featureInputs[i].isPresent());
-            scratchErrorOutputs.push_back(featureInputs[i].get().clone());
-        } else {
-            scratchErrorOutputs.push_back(Optional<Tensor>::empty());
+            // We may need a single, right sized, chunk of scratch memory for back prop pruned paths.
+            if (scratchErrorOutput.isEmpty())
+                scratchErrorOutput = featureInputs[i].get().clone();
         }
     }
 
@@ -268,23 +182,18 @@ void BatchNormalization::compileImpl() {
 }
 
 void BatchNormalization::cleanup() {
-    cudnnStatus_t cudnnStatus;
-
     if (derivedBnDescriptor.isPresent()) {
-        cudnnStatus = cudnnDestroyTensorDescriptor(derivedBnDescriptor.get());
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        CUDNN_CHECK(cudnnDestroyTensorDescriptor(derivedBnDescriptor.get()));
         derivedBnDescriptor.clear();
     }
 
     if (featureInputDescriptor.isPresent()) {
-        cudnnStatus = cudnnDestroyTensorDescriptor(featureInputDescriptor.get());
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        CUDNN_CHECK(cudnnDestroyTensorDescriptor(featureInputDescriptor.get()));
         featureInputDescriptor.clear();
     }
 
     if (featureOutputDescriptor.isPresent()) {
-        cudnnStatus = cudnnDestroyTensorDescriptor(featureOutputDescriptor.get());
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        CUDNN_CHECK(cudnnDestroyTensorDescriptor(featureOutputDescriptor.get()));
         featureOutputDescriptor.clear();
     }
 
@@ -296,12 +205,14 @@ void BatchNormalization::runForward(Optional<Tensor> inputTensor,
                                     Stream stream,
                                     unsigned int connectionNumber,
                                     Tensor weights,
-                                    Optional<Tensor> biases) {
+                                    Optional<Tensor> biases) {}
+
+void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
+    Optional<Tensor> inputTensor = featureInputs[connectionNumber];
+    Optional<Tensor> outputTensor = featureOutputs[connectionNumber];
+    Stream stream = streams[connectionNumber];
     assert(inputTensor.isPresent());
     assert(outputTensor.isPresent());
-    assert(biases.isPresent());
-
-    cudnnStatus_t cudnnStatus;
 
     if (currentExponentialRunningAverageFactor[connectionNumber] != exponentialRunningAverageFactor) {
         ++itemsObserved;
@@ -310,8 +221,8 @@ void BatchNormalization::runForward(Optional<Tensor> inputTensor,
             currentExponentialRunningAverageFactor[connectionNumber] = exponentialRunningAverageFactor;
     }
 
-    if (training) {
-        cudnnStatus =
+    if (!isInferenceOnly()) {
+        CUDNN_CHECK(
             cudnnBatchNormalizationForwardTraining(stream.getCudnnHandle(),
                                                    height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
                                                    &ALPHA_NO_SCALE,
@@ -322,16 +233,16 @@ void BatchNormalization::runForward(Optional<Tensor> inputTensor,
                                                    outputTensor.get().getMemPtr(),
                                                    derivedBnDescriptor,
                                                    weights.getMemPtr(),
-                                                   biases.get().getMemPtr(),
+                                                   biases.getMemPtr(),
                                                    currentExponentialRunningAverageFactor[connectionNumber],
                                                    resultRunningMean.getMemPtr(),
                                                    resultRunningVariance.getMemPtr(),
                                                    epsilon,
                                                    resultSaveMean[connectionNumber].getMemPtr(),
-                                                   resultSaveInvVariance[connectionNumber].getMemPtr());
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+                                                   resultSaveInvVariance[connectionNumber].getMemPtr()));
+
     } else {
-        cudnnStatus =
+        CUDNN_CHECK(
             cudnnBatchNormalizationForwardInference(stream.getCudnnHandle(),
                                                     height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
                                                     &ALPHA_NO_SCALE,
@@ -342,25 +253,14 @@ void BatchNormalization::runForward(Optional<Tensor> inputTensor,
                                                     outputTensor.get().getMemPtr(),
                                                     derivedBnDescriptor,
                                                     weights.getMemPtr(),
-                                                    biases.get().getMemPtr(),
+                                                    biases.getMemPtr(),
                                                     resultRunningMean.getMemPtr(),
                                                     resultRunningVariance.getMemPtr(),
-                                                    epsilon);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+                                                    epsilon));
     }
 }
 
-void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
-    runForward(featureInputs[connectionNumber],
-               featureOutputs[connectionNumber],
-               streams[connectionNumber],
-               connectionNumber,
-               getWeights(),
-               getBiases());
-}
-
-// FIXME: Add accumulateWeightsIfFused: bool
-Optional<Event> BatchNormalization::computeErrorOut(uint32_t connectionNumber) {
+Optional<Event> BatchNormalization::computeErrorOut(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) {
     if (errorInputs[connectionNumber].isEmpty())
         return Optional<Event>::empty();
     if (isInferenceOnly())
@@ -381,34 +281,30 @@ Optional<Event> BatchNormalization::computeErrorOut(uint32_t connectionNumber) {
     Optional<Tensor> errorOut = Optional<Tensor>::empty();
     if (errorOutputs.size() > connectionNumber && errorOutputs[connectionNumber].isPresent()) {
         errorOut = errorOutputs[connectionNumber];
-    } else if (scratchErrorOutputs.size() > connectionNumber && scratchErrorOutputs[connectionNumber].isPresent()) {
-        errorOut = scratchErrorOutputs[connectionNumber];
+    } else {
+        errorOut = scratchErrorOutput;
     }
     assert(errorOut.isPresent());
 
-    const bool accumulateGradient = (numBackwardConnectionsMade != 0);
-
-    cudnnStatus_t cudnnStatus =
-        cudnnBatchNormalizationBackward(streams[connectionNumber].getCudnnHandle(),
-                                        height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
-                                        &ALPHA_NO_SCALE,
-                                        &BETA_CLEAR,
-                                        &ALPHA_NO_SCALE,
-                                        accumulateGradient ? &BETA_ACCUMULATE : &BETA_CLEAR,
-                                        featureInputDescriptor,
-                                        featureInputs[connectionNumber].get().getMemPtr(),
-                                        featureOutputDescriptor,
-                                        errorInputs[connectionNumber].get().getMemPtr(),
-                                        featureInputDescriptor,
-                                        errorOut.get().getMemPtr(),
-                                        derivedBnDescriptor,
-                                        getWeights().getMemPtr(),
-                                        weightsOptimizer->getWeightsGradient().get().getMemPtr(),
-                                        biasesOptimizer->getWeightsGradient().get().getMemPtr(),
-                                        epsilon,
-                                        resultSaveMean[connectionNumber].getMemPtr(),
-                                        resultSaveInvVariance[connectionNumber].getMemPtr());
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    CUDNN_CHECK(cudnnBatchNormalizationBackward(streams[connectionNumber].getCudnnHandle(),
+                                                height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
+                                                &ALPHA_NO_SCALE,
+                                                &BETA_CLEAR,
+                                                &ALPHA_NO_SCALE,
+                                                clearWeightsGradientFirstIfFused ? &BETA_CLEAR : &BETA_ACCUMULATE,
+                                                featureInputDescriptor,
+                                                featureInputs[connectionNumber].get().getMemPtr(),
+                                                featureOutputDescriptor,
+                                                errorInputs[connectionNumber].get().getMemPtr(),
+                                                featureInputDescriptor,
+                                                errorOut.get().getMemPtr(),
+                                                derivedBnDescriptor,
+                                                weights.getMemPtr(),
+                                                weightsOptimizer->getWeightsGradient().get().getMemPtr(),
+                                                biasesOptimizer->getWeightsGradient().get().getMemPtr(),
+                                                epsilon,
+                                                resultSaveMean[connectionNumber].getMemPtr(),
+                                                resultSaveInvVariance[connectionNumber].getMemPtr()));
 
     return streams[connectionNumber].putEvent();
 }

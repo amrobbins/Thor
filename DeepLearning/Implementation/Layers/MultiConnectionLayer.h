@@ -181,8 +181,8 @@ class MultiConnectionLayer : public Layer {
             return Optional<Tensor>::empty();
     }
 
-    virtual Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
+    Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override {
         assert(!compiled);
 
         Optional<Tensor> previouslyConnectedFeatureInput = getFirstPresentTensor(featureInputs);
@@ -217,7 +217,7 @@ class MultiConnectionLayer : public Layer {
         return errorOutputs.back();
     }
 
-    virtual void ensureNoDeviceCrossing() {
+    virtual void ensureNoDeviceCrossing(Optional<TensorPlacement> expectedPlacement = Optional<TensorPlacement>::empty()) {
         Optional<Tensor> lastFeatureInput = getLastPresentTensor(featureInputs);
         Optional<Tensor> lastErrorOutput = getLastPresentTensor(errorOutputs);
         Optional<Tensor> lastErrorInput = getLastPresentTensor(errorInputs);
@@ -237,9 +237,20 @@ class MultiConnectionLayer : public Layer {
 
         if (lastErrorInput.isPresent() && lastErrorOutput.isPresent())
             assert(lastErrorInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+
+        if (expectedPlacement.isPresent()) {
+            if (lastFeatureInput.isPresent())
+                assert(lastFeatureInput.get().getPlacement() == expectedPlacement.get());
+            if (lastFeatureOutput.isPresent())
+                assert(lastFeatureOutput.get().getPlacement() == expectedPlacement.get());
+            if (lastErrorInput.isPresent())
+                assert(lastErrorInput.get().getPlacement() == expectedPlacement.get());
+            if (lastErrorOutput.isPresent())
+                assert(lastErrorOutput.get().getPlacement() == expectedPlacement.get());
+        }
     }
 
-    virtual TensorPlacement getPlacement() {
+    TensorPlacement getPlacement() override {
         Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
         Optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureOutputs);
         Optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
@@ -258,7 +269,7 @@ class MultiConnectionLayer : public Layer {
         }
     }
 
-    virtual bool isBackPropStub() { return getFirstPresentTensor(errorOutputs).isEmpty(); }
+    bool isBackPropStub() override { return getFirstPresentTensor(errorOutputs).isEmpty(); }
 
     virtual std::vector<Optional<Tensor>> getFeatureInputs() { return featureInputs; }
     virtual std::vector<Optional<Tensor>> getFeatureOutputs() { return featureOutputs; }
@@ -268,55 +279,18 @@ class MultiConnectionLayer : public Layer {
     virtual std::vector<Stream> getStreams() { return streams; }
 
     // compute the fan in for one element of a batch
-    virtual uint64_t getFanIn() {
-        uint64_t totalFanIn = 0;
-        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            if (featureInputs[i].isPresent()) {
-                Tensor aFeatureInput = featureInputs[i];
-                std::vector<uint64_t> inputDimensions = aFeatureInput.getDescriptor().getDimensions();
-                uint64_t fanIn = 1;
-                for (uint32_t j = 1; j < inputDimensions.size(); ++j) {
-                    fanIn *= inputDimensions[j];
-                }
-                totalFanIn += fanIn;
-            }
-        }
-        if (totalFanIn == 0) {
-            // return a 1 to avoid possible divide by 0
-            totalFanIn = 1;
-        }
-        return totalFanIn;
-
-        Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
-        assert(anyFeatureInput.isPresent());
-        std::vector<uint64_t> inputDimensions = anyFeatureInput.get().getDescriptor().getDimensions();
-        uint64_t fanIn = 1;
-        for (uint32_t i = 1; i < inputDimensions.size(); ++i) {
-            fanIn *= inputDimensions[i];
-        }
-        return fanIn;
-    }
+    uint64_t getFanIn() override { return 1; }
 
     // compute the fan out for one element of a batch
-    virtual uint64_t getFanOut() {
-        uint64_t totalFanOut = 0;
-        for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
-            if (featureOutputs[i].isPresent()) {
-                Tensor aFeatureOutput = featureOutputs[i];
-                std::vector<uint64_t> outputDimensions = aFeatureOutput.getDescriptor().getDimensions();
-                uint64_t fanOut = 1;
-                for (uint32_t j = 1; j < outputDimensions.size(); ++j)
-                    fanOut *= outputDimensions[j];
-                if (nextLayers[i].isPresent())
-                    fanOut *= nextLayers[i].get()->getDownStreamFanoutMultiplier();
-                totalFanOut += fanOut;
-            }
-        }
-        if (totalFanOut == 0) {
-            // return a 1 to avoid possible divide by 0
-            totalFanOut = 1;
-        }
-        return totalFanOut;
+    uint64_t getFanOut() override {
+        Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
+        Optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureOutputs);
+        assert(aFeatureInput.isPresent());
+        assert(aFeatureOutput.isPresent());
+
+        uint64_t inElementsPerExample = aFeatureInput.get().getTotalNumElements() / aFeatureInput.get().getDimensions()[0];
+        uint64_t outElementsPerExample = aFeatureOutput.get().getTotalNumElements() / aFeatureOutput.get().getDimensions()[0];
+        return std::max<uint64_t>(1, outElementsPerExample / inElementsPerExample);
     }
 
     static Optional<Tensor> getFirstPresentTensor(std::vector<Optional<Tensor>> tensors) {

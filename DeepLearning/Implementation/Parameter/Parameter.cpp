@@ -5,14 +5,11 @@ using namespace std;
 
 namespace ThorImplementation {
 
-Parameter::Parameter(string name, bool trainable, bool trainingEnabled)
-    : name(name), trainable(trainable), trainingEnabled(trainingEnabled) {
-    assert(!name.empty());
-    assert(!(trainable == false && trainingEnabled));
-}
+Parameter::Parameter(string name, bool trainable) : name(name), trainable(trainable) { assert(!name.empty()); }
 
 void Parameter::compileStorageAndOptimizer(const Tensor& inputTensor, const Optional<Stream>& gradientUpdateStream, bool inferenceOnly) {
     this->gradientUpdateStream = gradientUpdateStream;
+    trainingEnabled = !inferenceOnly;
 
     createStorage(inputTensor);
 
