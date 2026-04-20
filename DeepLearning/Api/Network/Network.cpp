@@ -120,10 +120,10 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
         // (that in turn initialize their optimizers)
         for (shared_ptr<Layer> layer : allLayersInNetworkList) {
             shared_ptr<ThorImplementation::Layer> implementationLayer = stampedNetwork.apiLayerToPhysicalLayerShared[layer->getId()];
-            shared_ptr<TrainableWeightsBiasesLayer> trainableLayer = dynamic_pointer_cast<TrainableWeightsBiasesLayer>(layer);
+            shared_ptr<TrainableLayer> trainableLayer = dynamic_pointer_cast<TrainableLayer>(layer);
             if (trainableLayer != nullptr) {
-                shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> implementationTrainableLayer =
-                    dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(implementationLayer);
+                shared_ptr<ThorImplementation::TrainableLayer> implementationTrainableLayer =
+                    dynamic_pointer_cast<ThorImplementation::TrainableLayer>(implementationLayer);
                 vector<Event> layerEvents =
                     trainableLayer->initialize(implementationTrainableLayer, true, nullptr, Optional<Event>::empty());
                 initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
@@ -658,7 +658,7 @@ void Network::stampNetworkInput(const shared_ptr<Thor::NetworkInput> networkInpu
     stampedNetwork.apiLayerToPhysicalLayer[networkInput->getId()] = implementationNetworkInput.get();
     stampedNetwork.physicalLayerToApiLayerShared[implementationNetworkInput] = networkInput->getId();
     stampedNetwork.physicalLayerToApiLayer[implementationNetworkInput.get()] = networkInput->getId();
- stampedNetwork.recordIfParameterizable(networkInput, implementationNetworkInput);
+    stampedNetwork.recordIfParameterizable(networkInput, implementationNetworkInput);
 
     // Map the api tensor to its physical driving layer
     stampedNetwork.apiTensorToPhysicalDrivingLayerShared[outputTensor] = outputLayer;
@@ -679,9 +679,9 @@ void Network::addLayerToNetwork(const Layer *layer) {
         return;
     allLayersInNetwork.insert(layerClone);
     allLayersInNetworkList.push_back(layerClone);
-    shared_ptr<TrainableWeightsBiasesLayer> trainableWeightsBiasesLayer = dynamic_pointer_cast<TrainableWeightsBiasesLayer>(layerClone);
-    if (trainableWeightsBiasesLayer)
-        allTrainableLayersInNetwork.push_back(trainableWeightsBiasesLayer);
+    shared_ptr<TrainableLayer> TrainableLayerInstance = dynamic_pointer_cast<TrainableLayer>(layerClone);
+    if (TrainableLayerInstance)
+        allTrainableLayersInNetwork.push_back(TrainableLayerInstance);
     network.push_back(layerClone);
 
     auto networkInput = dynamic_cast<const NetworkInput *>(layer);
@@ -758,7 +758,7 @@ void Network::attachOptimizerToLayers(bool replaceIfExisting) {
     // If additional layers are added later on, attachOptimizerToLayers(false) will need to be called before training more.
     assert(defaultOptimizer != nullptr);
 
-    for (shared_ptr<TrainableWeightsBiasesLayer> &trainableLayer : allTrainableLayersInNetwork) {
+    for (shared_ptr<TrainableLayer> &trainableLayer : allTrainableLayersInNetwork) {
         if (replaceIfExisting or !trainableLayer->hasOptimizer())
             trainableLayer->attachOptimizer(defaultOptimizer);
     }
@@ -850,8 +850,8 @@ void Network::stampLayer(Tensor inputTensor,
     }
 
     if (!layerPreviouslyStamped) {
-        shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> implementationTrainableLayer =
-            dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(implementationLayer);
+        shared_ptr<ThorImplementation::TrainableLayer> implementationTrainableLayer =
+            dynamic_pointer_cast<ThorImplementation::TrainableLayer>(implementationLayer);
         if (implementationTrainableLayer != nullptr) {
             stampedNetwork.trainableLayersShared.push_back(implementationTrainableLayer);
             stampedNetwork.trainableLayers.push_back(implementationTrainableLayer.get());

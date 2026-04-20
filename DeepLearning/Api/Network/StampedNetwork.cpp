@@ -1,5 +1,5 @@
 #include "DeepLearning/Api/Network/StampedNetwork.h"
-#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 
 namespace ThorImplementation {
 
@@ -50,7 +50,7 @@ void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOthe
     //     // to the target GPU.
     //     assert(otherStamp != nullptr);
     //     // FIXME use trainable layer stamped ids to copy weights and when present biases from other stamp to this stamp
-    //     std::unordered_map<uint64_t, ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayerMap;
+    //     std::unordered_map<uint64_t, ThorImplementation::TrainableLayer *> trainableLayerMap;
     //     for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
     //         trainableLayerMap[trainableLayers[i]->getStampedId()] = trainableLayers[i];
     //     }
@@ -63,7 +63,7 @@ void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOthe
     //         }
     //         Tensor uninitializedWeights = trainableLayerMap[stampedId]->getWeights();
     //         Optional<Tensor> uninitializedBiases = trainableLayerMap[stampedId]->getBiases();
-    //         ThorImplementation::TrainableWeightsBiasesLayer *initializedLayer = otherStamp->trainableLayers[i];
+    //         ThorImplementation::TrainableLayer *initializedLayer = otherStamp->trainableLayers[i];
     //         Tensor initializedWeights = initializedLayer->getWeights();
     //         Optional<Tensor> initializedBiases = initializedLayer->getBiases();
     //         uninitializedWeights.copyFromAsync(initializedWeights, streams.back());

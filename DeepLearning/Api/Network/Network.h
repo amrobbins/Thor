@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Layer.h"
-#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
@@ -15,7 +15,7 @@
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Metric.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
-#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
@@ -94,7 +94,7 @@ class Network {
 
     // FIXME: I will need to support indexing layers by their name.
     uint32_t getNumTrainableLayers() { return allTrainableLayersInNetwork.size(); }
-    std::shared_ptr<TrainableWeightsBiasesLayer> getTrainableLayer(uint32_t i) { return allTrainableLayersInNetwork[i]; }
+    std::shared_ptr<TrainableLayer> getTrainableLayer(uint32_t i) { return allTrainableLayersInNetwork[i]; }
 
     uint32_t getNumLayers() { return allLayersInNetwork.size(); }
     std::shared_ptr<Layer> getLayer(uint32_t i) { return allLayersInNetworkList[i]; }
@@ -115,7 +115,7 @@ class Network {
    protected:
     std::set<std::shared_ptr<Layer>, Network::LayerComparator> allLayersInNetwork;
     std::vector<std::shared_ptr<Layer>> allLayersInNetworkList;
-    std::vector<std::shared_ptr<TrainableWeightsBiasesLayer>> allTrainableLayersInNetwork;
+    std::vector<std::shared_ptr<TrainableLayer>> allTrainableLayersInNetwork;
     std::vector<std::shared_ptr<Layer>> network;
     std::vector<std::pair<Optional<Tensor>, std::shared_ptr<Layer>>> orderedNetwork;
 
