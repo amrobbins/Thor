@@ -260,7 +260,10 @@ void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
     }
 }
 
-Optional<Event> BatchNormalization::computeErrorOut(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) {
+// Error in is up-to-date by the end of the data stream.
+// Gradient update stream must wait for that, and gradient accumulation must be performed on the gradient stream, for serialization.
+Optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
+                                                                                 bool clearWeightsGradientFirstIfFused) {
     if (errorInputs[connectionNumber].isEmpty())
         return Optional<Event>::empty();
     if (isInferenceOnly())
@@ -285,8 +288,9 @@ Optional<Event> BatchNormalization::computeErrorOut(uint32_t connectionNumber, b
         errorOut = scratchErrorOutput;
     }
     assert(errorOut.isPresent());
+    assert(gradientUpdateStream.isPresent());
 
-    CUDNN_CHECK(cudnnBatchNormalizationBackward(streams[connectionNumber].getCudnnHandle(),
+    CUDNN_CHECK(cudnnBatchNormalizationBackward(gradientUpdateStream.get().getCudnnHandle(),
                                                 height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
                                                 &ALPHA_NO_SCALE,
                                                 &BETA_CLEAR,
@@ -306,7 +310,7 @@ Optional<Event> BatchNormalization::computeErrorOut(uint32_t connectionNumber, b
                                                 resultSaveMean[connectionNumber].getMemPtr(),
                                                 resultSaveInvVariance[connectionNumber].getMemPtr()));
 
-    return streams[connectionNumber].putEvent();
+    return gradientUpdateStream.get().putEvent();
 }
 
 void BatchNormalization::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
