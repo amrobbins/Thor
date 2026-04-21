@@ -23,19 +23,6 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     TrainableLayer(const TensorPlacement &placement, bool inferenceOnly, int64_t stampedId = -1)
         : placement(placement), inferenceOnly(inferenceOnly), stampedId(stampedId) {}
 
-    void attachGradientUpdateStream() {
-        if (gradientUpdateStream.isPresent())
-            return;
-        for (const auto &parameter : parameters) {
-            if (!parameter->isTrainable())
-                continue;
-            if (gradientUpdateStream.isEmpty()) {
-                gradientUpdateStream = Stream::getNextGradientUpdateStream(placement.getDeviceNum());
-                break;
-            }
-        }
-    }
-
     void setOptimizer(const std::string &parameterName, const std::shared_ptr<Optimizer> &optimizer) {
         assert(parameterIndexByName.contains(parameterName));
         parameters[parameterIndexByName[parameterName]]->setOptimizer(optimizer);
@@ -75,109 +62,11 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         }
     }
 
-    virtual uint64_t flopCountForward() = 0;
-    virtual uint64_t flopCountBackward() = 0;
-
-   public:
-    // FIXME: Temporarily moved here from layer
-    // bool inferenceOnly = false;
-    // virtual bool isInferenceOnly() { return inferenceOnly; }
-    // bool running = true;
-    // virtual bool isBackPropStub() { return false; }
-    // std::vector<Optional<Tensor>> featureInputs;
-    // std::vector<Optional<Tensor>> featureOutputs;
-    // std::vector<Optional<Tensor>> errorInputs;
-    // std::vector<Optional<Tensor>> errorOutputs;
-    // std::vector<Stream> streams;
-    // std::vector<Optional<TrainableLayer *>> nextLayers;
-    // std::vector<Optional<TrainableLayer *>> previousLayers;
-    // static Optional<Tensor> getFirstPresentTensor(const std::vector<Optional<Tensor>> &tensors) {
-    //     for (auto it = tensors.begin(); it != tensors.end(); ++it) {
-    //         if (it->isPresent())
-    //             return *it;
-    //     }
-    //     return Optional<Tensor>::empty();
-    // }
-    // static unsigned int numPresentTensors(const std::vector<Optional<Tensor>> &tensors) {
-    //     unsigned int numPresent = 0;
-    //     for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
-    //         if (it->isPresent())
-    //             numPresent += 1;
-    //     }
-    //     return numPresent;
-    // }
-    // static Optional<Tensor> getLastPresentTensor(std::vector<Optional<Tensor>> tensors) {
-    //     for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
-    //         if (it->isPresent())
-    //             return *it;
-    //     }
-    //     return Optional<Tensor>::empty();
-    // }
-    // virtual void ensureNoDeviceCrossing() {
-    //     Optional<Tensor> lastFeatureInput = getLastPresentTensor(featureInputs);
-    //     Optional<Tensor> lastErrorOutput = getLastPresentTensor(errorOutputs);
-    //     Optional<Tensor> lastErrorInput = getLastPresentTensor(errorInputs);
-    //     Optional<Tensor> lastFeatureOutput = getLastPresentTensor(featureOutputs);
-    //
-    //     if (lastFeatureInput.isPresent() && lastFeatureOutput.isPresent())
-    //         assert(lastFeatureInput.get().getPlacement() == lastFeatureOutput.get().getPlacement());
-    //     if (lastFeatureInput.isPresent() && lastErrorInput.isPresent())
-    //         assert(lastFeatureInput.get().getPlacement() == lastErrorInput.get().getPlacement());
-    //     if (lastFeatureInput.isPresent() && lastErrorOutput.isPresent())
-    //         assert(lastFeatureInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
-    //
-    //     if (lastFeatureOutput.isPresent() && lastErrorInput.isPresent())
-    //         assert(lastFeatureOutput.get().getPlacement() == lastErrorInput.get().getPlacement());
-    //     if (lastFeatureOutput.isPresent() && lastErrorOutput.isPresent())
-    //         assert(lastFeatureOutput.get().getPlacement() == lastErrorOutput.get().getPlacement());
-    //
-    //     if (lastErrorInput.isPresent() && lastErrorOutput.isPresent())
-    //         assert(lastErrorInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
-    // }
-    // virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) {
-    //     // backPropagateError allows the previous layer to specify that it does not support back propagation,
-    //     // inferenceOnly means that even though back propagation may be supported, we are not using it since we are not training.
-    //     if (backPropagateError && !isInferenceOnly())
-    //         return getFirstPresentTensor(featureInputs).get().clone();
-    //     else
-    //         return Optional<Tensor>::empty();
-    // }
-    // virtual Optional<Tensor> connectToPreviousLayer(
-    //     TrainableLayer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
-    //     assert(!compiled);
-    //
-    //     Optional<Tensor> previouslyConnectedFeatureInput = getFirstPresentTensor(featureInputs);
-    //     if (previouslyConnectedFeatureInput.isPresent() && featureInput.isPresent()) {
-    //         assert(featureInput.get().getDescriptor() == previouslyConnectedFeatureInput.get().getDescriptor());
-    //         assert(featureInput.get().getPlacement() == previouslyConnectedFeatureInput.get().getPlacement());
-    //     }
-    //
-    //     streams.push_back(stream);
-    //
-    //     previousLayers.push_back(previousLayer);
-    //     featureInputs.emplace_back(featureInput);
-    //     errorOutputs.emplace_back(createErrorOutputTensor(backPropagateError, errorOutputs.size()));
-    //
-    //     Optional<Tensor> lastFeatureInput = getLastPresentTensor(featureInputs);
-    //     Optional<Tensor> firstFeatureInput = getFirstPresentTensor(featureInputs);
-    //     Optional<Tensor> lastErrorOutput = getLastPresentTensor(errorOutputs);
-    //     if (firstFeatureInput.isPresent()) {
-    //         assert(lastFeatureInput.get().getDescriptor() == firstFeatureInput.get().getDescriptor());
-    //         assert(lastFeatureInput.get().getPlacement() == firstFeatureInput.get().getPlacement());
-    //         if (lastErrorOutput.isPresent()) {
-    //             assert(lastFeatureInput.get().getDescriptor() == lastErrorOutput.get().getDescriptor());
-    //             assert(lastFeatureInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
-    //         }
-    //     } else if (lastErrorOutput.isPresent()) {
-    //         Optional<Tensor> firstErrorOutput = getFirstPresentTensor(errorOutputs);
-    //         assert(lastErrorOutput.get().getDescriptor() == firstErrorOutput.get().getDescriptor());
-    //         assert(lastErrorOutput.get().getPlacement() == firstErrorOutput.get().getPlacement());
-    //     }
-    //     ensureNoDeviceCrossing();
-    //
-    //     return errorOutputs.back();
-    // }
-    // FIXME: Temporarily moved here from layer
+   private:
+    class UnsupportedBackwardImplementation : public std::logic_error {
+       public:
+        explicit UnsupportedBackwardImplementation(const std::string &message) : std::logic_error(message) {}
+    };
 
    public:
     void forward(Optional<Tensor> featureInput, bool isValidation, uint32_t batchSize = 0) override {
@@ -236,36 +125,58 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
             if (gradientUpdateStream.isPresent()) {
                 errorInputReadyEvent = streams[connectionNumber].putEvent();
             }
-            if (wGradFusedWithEOutGrad) {
-                if (!isBackPropStub() && previousLayers[connectionNumber].isPresent()) {
-                    // Gradient accumulation needs error input, so gradient stream waits for this connection's
-                    // error input to be ready.
-                    if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
-                        gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
-                    }
-                    // Weights cannot be updated until all error outputs have been computed, so record the event marking that.
-                    Optional<Event> errorOutHasBeenComputedEvent =
-                        computeErrorOutAccumulateWeightsGradienFused(connectionNumber, clearGradientFirst);
-                    if (errorOutHasBeenComputedEvent.isPresent())
-                        errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
-                }
-            } else {
+
+            if (backwardGradientMode != BackwardGradientMode::Fused) {
                 // Compute output error gradient using current weights, on the data stream.
                 if ((!isBackPropStub() && previousLayers[connectionNumber].isPresent())) {
                     // Weights cannot be updated until all error outputs have been computed, so record the event marking that.
-                    Optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(connectionNumber);
-                    if (errorOutHasBeenComputedEvent.isPresent())
-                        errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
-                }
+                    try {
+                        Optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(connectionNumber);
+                        if (errorOutHasBeenComputedEvent.isPresent())
+                            errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
 
-                // Gradient accumulation needs error input, so gradient stream waits for this connection's
-                // error input to be ready.
-                if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
-                    gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
-                }
+                        // Gradient accumulation needs error input, so gradient stream waits for this connection's
+                        // error input to be ready.
+                        if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
+                            gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
+                        }
 
-                // Accumulate gradient for the weights per this connection, on the gradient stream.
-                accumulateWeightsGradient(connectionNumber, clearGradientFirst);
+                        // Accumulate gradient for the weights per this connection, on the gradient stream.
+                        accumulateWeightsGradient(connectionNumber, clearGradientFirst);
+                    } catch (const UnsupportedBackwardImplementation &) {
+                        backwardGradientMode = BackwardGradientMode::Fused;
+                    }
+                }
+            }
+
+            // backwardGradientMode can mutate in the block above.
+            if (backwardGradientMode == BackwardGradientMode::Fused) {
+                if (!isBackPropStub() && previousLayers[connectionNumber].isPresent()) {
+                    try {
+                        // Gradient accumulation needs error input, so gradient stream waits for this connection's
+                        // error input to be ready.
+                        if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
+                            gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
+                        }
+
+                        // Weights cannot be updated until all error outputs have been computed, so record the event marking that.
+                        Optional<Event> errorOutHasBeenComputedEvent =
+                            computeErrorOutAccumulateWeightsGradienFused(connectionNumber, clearGradientFirst);
+                        if (errorOutHasBeenComputedEvent.isPresent())
+                            errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
+                    } catch (const UnsupportedBackwardImplementation &) {
+                        throw std::runtime_error(
+                            getLayerType() +
+                            " must implement either:\n"
+                            "  (1) both computeErrorOut(...) and accumulateWeightsGradient(...)\n"
+                            "or\n"
+                            "  (2) computeErrorOutAccumulateWeightsGradienFused(...).\n"
+                            "With the preference, for performance, being (1) when fusing provides no benefit (e.g. separate kernels "
+                            "anyway, like matmuls).\n"
+                            "The performance preference is (2) when a single kernel can be launched to compute both (e.g. an elementwise "
+                            "or broadcast equation).\n");
+                    }
+                }
             }
         }
 
@@ -322,29 +233,44 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
     // Error in is up-to-date by the end of the data stream.
     virtual Optional<Event> computeErrorOut(uint32_t connectionNumber) {
-        throw std::runtime_error("computeErrorOut(...) called but not overridden.");
+        throw UnsupportedBackwardImplementation("computeErrorOut(...) not implemented.");
     }
 
     // Error in is up-to-date by the end of the gradient stream.
     // Gradient accumulation must be performed on the gradient stream, for serialization.
     virtual void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
-        throw std::runtime_error("accumulateWeightsGradient(...) called but not overridden.");
+        throw UnsupportedBackwardImplementation("accumulateWeightsGradient(...) not implemented.");
     }
 
     // Error in is up-to-date by the end of the gradient stream.
     // Gradient accumulation must be performed on the gradient stream, for serialization.
     virtual Optional<Event> computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) {
-        throw std::runtime_error("computeErrorOutAccumulateWeightsGradienFused(...) called but not overridden.");
+        throw UnsupportedBackwardImplementation("computeErrorOutAccumulateWeightsGradienFused(...) not implemented.");
     }
 
     // Return the name of the layer type
     virtual std::string getLayerType() = 0;
+    virtual uint64_t flopCountForward() = 0;
+    virtual uint64_t flopCountBackward() = 0;
 
    public:
     // Setters/Getters
     uint64_t getStampedId() const { return stampedId; }  // FIXME: Move to layer
-
     Optional<Stream> getGradientUpdateStream() const { return gradientUpdateStream; }
+
+   protected:
+    void attachGradientUpdateStream() {
+        if (gradientUpdateStream.isPresent())
+            return;
+        for (const auto &parameter : parameters) {
+            if (!parameter->isTrainable())
+                continue;
+            if (gradientUpdateStream.isEmpty()) {
+                gradientUpdateStream = Stream::getNextGradientUpdateStream(placement.getDeviceNum());
+                break;
+            }
+        }
+    }
 
    protected:
     std::vector<Stream> uniqueDataStreams;
@@ -367,6 +293,10 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
    private:
     // stampedId is used to identify which layers correspond to which other layers across multiple stamps of the same network.
     const int64_t stampedId;
+
+    enum class BackwardGradientMode : uint8_t { Unknown, Unfused, Fused };
+
+    BackwardGradientMode backwardGradientMode = BackwardGradientMode::Unknown;
 
    private:
     // Using a pattern that includes gradient updates, rather than this one that is wired through MultiConnectionLayer:
