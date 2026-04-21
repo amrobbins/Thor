@@ -58,7 +58,7 @@ class BatchNormalization : public TrainableLayer {
 
    private:
     void computeFeatureOut(uint32_t connectionNumber) override;
-    Optional<Event> computeErrorOut(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) override;
+    Optional<Event> computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) override;
     void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
 
     void runForward(Optional<Tensor> inputTensor,

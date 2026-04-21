@@ -212,9 +212,6 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         nextLayers[connectionNumber].get()->forward(featureOutputs[connectionNumber], batchSize, isValidation);
     }
 
-    // Weights are up-to-date by end of data stream
-    virtual void computeFeatureOut(uint32_t connectionNumber) = 0;
-
     void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {
         assert(running);
 
@@ -235,27 +232,41 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         // The gradient-update stream can wait on this and then run parameter-gradient work
         // without waiting for the later error-out backward kernel to finish.
         Optional<Event> errorInputReadyEvent = Optional<Event>::empty();
-        if (gradientUpdateStream.isPresent() && errorInputs[connectionNumber].isPresent()) {
-            errorInputReadyEvent = streams[connectionNumber].putEvent();
-        }
+        if (errorInputs[connectionNumber].isPresent()) {
+            if (gradientUpdateStream.isPresent()) {
+                errorInputReadyEvent = streams[connectionNumber].putEvent();
+            }
+            if (wGradFusedWithEOutGrad) {
+                if (!isBackPropStub() && previousLayers[connectionNumber].isPresent()) {
+                    // Gradient accumulation needs error input, so gradient stream waits for this connection's
+                    // error input to be ready.
+                    if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
+                        gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
+                    }
+                    // Weights cannot be updated until all error outputs have been computed, so record the event marking that.
+                    Optional<Event> errorOutHasBeenComputedEvent =
+                        computeErrorOutAccumulateWeightsGradienFused(connectionNumber, clearGradientFirst);
+                    if (errorOutHasBeenComputedEvent.isPresent())
+                        errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
+                }
+            } else {
+                // Compute output error gradient using current weights, on the data stream.
+                if ((!isBackPropStub() && previousLayers[connectionNumber].isPresent())) {
+                    // Weights cannot be updated until all error outputs have been computed, so record the event marking that.
+                    Optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(connectionNumber);
+                    if (errorOutHasBeenComputedEvent.isPresent())
+                        errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
+                }
 
-        // Compute output error gradient using current weights, on the data stream.
-        if ((!isBackPropStub() && previousLayers[connectionNumber].isPresent()) || wGradFusedWithEOutGrad) {
-            Optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(connectionNumber, clearGradientFirst);
-            if (errorOutHasBeenComputedEvent.isPresent())
-                errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
-        }
+                // Gradient accumulation needs error input, so gradient stream waits for this connection's
+                // error input to be ready.
+                if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
+                    gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
+                }
 
-        if (!errorInputs[connectionNumber].isPresent())
-            return;
-
-        if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
-            gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
-        }
-
-        // Accumulate gradient for the weights per this connection.
-        if (!wGradFusedWithEOutGrad) {
-            accumulateWeightsGradient(connectionNumber, clearGradientFirst);
+                // Accumulate gradient for the weights per this connection, on the gradient stream.
+                accumulateWeightsGradient(connectionNumber, clearGradientFirst);
+            }
         }
 
         numBackwardConnectionsMade += 1;
@@ -304,39 +315,36 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         previousLayers[connectionNumber].get()->backward(errorOutputs[connectionNumber], batchSize);
     }
 
-    // Error in is up-to-date by the end of the data stream.
-    // Gradient update stream must wait for that.
-    virtual void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) = 0;
+    // The following abstract methods need to be implemented, and then the layer will work.
+
+    // Weights are up-to-date by end of data stream
+    virtual void computeFeatureOut(uint32_t connectionNumber) = 0;
 
     // Error in is up-to-date by the end of the data stream.
-    virtual Optional<Event> computeErrorOut(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) = 0;
+    virtual Optional<Event> computeErrorOut(uint32_t connectionNumber) {
+        throw std::runtime_error("computeErrorOut(...) called but not overridden.");
+    }
+
+    // Error in is up-to-date by the end of the gradient stream.
+    // Gradient accumulation must be performed on the gradient stream, for serialization.
+    virtual void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
+        throw std::runtime_error("accumulateWeightsGradient(...) called but not overridden.");
+    }
+
+    // Error in is up-to-date by the end of the gradient stream.
+    // Gradient accumulation must be performed on the gradient stream, for serialization.
+    virtual Optional<Event> computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) {
+        throw std::runtime_error("computeErrorOutAccumulateWeightsGradienFused(...) called but not overridden.");
+    }
+
+    // Return the name of the layer type
+    virtual std::string getLayerType() = 0;
 
    public:
     // Setters/Getters
     uint64_t getStampedId() const { return stampedId; }  // FIXME: Move to layer
 
-    virtual std::string getLayerType() = 0;
     Optional<Stream> getGradientUpdateStream() const { return gradientUpdateStream; }
-
-    // The following functionality is handled by parameterizable.
-    // virtual std::vector<std::string> getParameterNames() {
-    //     std::vector<std::string> parameterNames;
-    //     for (const auto &parameter : parameters) {
-    //         parameterNames.push_back(parameter->getName());
-    //     }
-    //     return parameterNames;
-    // }
-    // virtual std::unordered_map<std::string, std::shared_ptr<Parameter>> getParameters() {
-    //     std::unordered_map<std::string, std::shared_ptr<Parameter>> allParams;
-    //     for (const auto &parameter : parameters)
-    //         allParams[parameter->getName()] = parameter;
-    //     return allParams;
-    // }
-    // virtual std::shared_ptr<Parameter> getParameter(const std::string &parameterName) {
-    //     if (!parameterIndexByName.contains(parameterName))
-    //         throw std::runtime_error("Do not have a parameter by the name of " + parameterName);
-    //     return parameters[parameterIndexByName[parameterName]];
-    // }
 
    protected:
     std::vector<Stream> uniqueDataStreams;
@@ -362,7 +370,6 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
    private:
     // Using a pattern that includes gradient updates, rather than this one that is wired through MultiConnectionLayer:
-    //     Also these could be updated to take only connection number, that would be provided by forward(...) or backward(...)
     void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) override {
         assert(false);
     }

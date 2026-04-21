@@ -34,7 +34,7 @@ class CustomLayer : public TrainableLayer {
     void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
 
     // Error-output backward work runs on the regular data stream.
-    Optional<Event> computeErrorOut(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) override;
+    Optional<Event> computeErrorOut(uint32_t connectionNumber) override;
 
     Optional<Tensor> createFeatureOutputTensor() override;
     Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
@@ -42,7 +42,8 @@ class CustomLayer : public TrainableLayer {
     uint64_t flopCountForward() override;
     uint64_t flopCountBackward() override;
 
-    std::string getLayerType() override { return "CustomLayer"; }
+    void setLayerName(const std::string& name) { customLayerName = name; }
+    std::string getLayerType() override { return "CustomLayer<" + customLayerName + ">"; }
 
    protected:
     void compileImpl() override;
@@ -58,6 +59,8 @@ class CustomLayer : public TrainableLayer {
     std::string inputName;
 
     bool useFastMath = false;
+
+    std::string customLayerName = "UnnamedType";
 
     std::vector<std::shared_ptr<FusedEquation>> forwardEq;
     std::vector<std::shared_ptr<FusedEquation>> backwardClearEq;
