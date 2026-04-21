@@ -220,64 +220,64 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
                numOutputColumns == other.numOutputColumns && numOutputRows == other.numOutputRows;
     }
 
-    std::string getGpuType() {
+    std::string getGpuType() const {
         assert(!uninitialized());
         return gpuType;
     }
-    int getFilterWidth() {
+    int getFilterWidth() const {
         assert(!uninitialized());
         return filterWidth;
     }
-    int getFilterHeight() {
+    int getFilterHeight() const {
         assert(!uninitialized());
         return filterHeight;
     }
-    int getFilterHorizontalStride() {
+    int getFilterHorizontalStride() const {
         assert(!uninitialized());
         return filterHorizontalStride;
     }
-    int getFilterVerticalStride() {
+    int getFilterVerticalStride() const {
         assert(!uninitialized());
         return filterVerticalStride;
     }
-    int getLeftAndRightPadWidth() {
+    int getLeftAndRightPadWidth() const {
         assert(!uninitialized());
         return leftAndRightPadWidth;
     }
-    int getTopAndBottomPadHeight() {
+    int getTopAndBottomPadHeight() const {
         assert(!uninitialized());
         return topAndBottomPadHeight;
     }
-    int getNumInputChannels() {
+    int getNumInputChannels() const {
         assert(!uninitialized());
         return numInputChannels;
     }
-    int getNumOutputChannels() {
+    int getNumOutputChannels() const {
         assert(!uninitialized());
         return numOutputChannels;
     }
-    int getBatchSize() {
+    int getBatchSize() const {
         assert(!uninitialized());
         return batchSize;
     }
-    int getNumInputColumns() {
+    int getNumInputColumns() const {
         assert(!uninitialized());
         return numInputColumns;
     }
-    int getNumInputRows() {
+    int getNumInputRows() const {
         assert(!uninitialized());
         return numInputRows;
     }
-    int getNumOutputColumns() {
+    int getNumOutputColumns() const {
         assert(!uninitialized());
         return numOutputColumns;
     }
-    int getNumOutputRows() {
+    int getNumOutputRows() const {
         assert(!uninitialized());
         return numOutputRows;
     }
 
-    std::string toString() {
+    std::string toString() const {
         assert(!uninitialized());
 
         std::string s;

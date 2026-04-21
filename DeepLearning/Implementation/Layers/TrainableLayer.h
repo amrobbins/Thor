@@ -284,7 +284,6 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     uint32_t numBackwardConnectionsMade = 0;
     uint32_t numBackwardConnections = 0;
 
-    bool wGradFusedWithEOutGrad = false;
     bool compiled = false;
     TensorPlacement placement;
 
