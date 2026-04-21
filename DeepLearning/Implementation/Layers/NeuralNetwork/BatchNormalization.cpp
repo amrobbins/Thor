@@ -99,7 +99,6 @@ void BatchNormalization::compileImpl() {
     ensureNoDeviceCrossing(placement);  // FIXME: create variant to take expected placement.
 
     attachGradientUpdateStream();
-    wGradFusedWithEOutGrad = true;
 
     for (const auto& parameter : parameters) {
         if (!parameter->isStorageInitialized()) {

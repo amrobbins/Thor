@@ -40,9 +40,6 @@ void CustomLayer::compileImpl() {
 
     assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
 
-    // Error-output and parameter-gradient backward work are stamped separately.
-    wGradFusedWithEOutGrad = false;
-
     forwardInputsByConnection.clear();
     forwardPreparedByConnection.clear();
     forwardStampedByConnection.clear();
@@ -355,7 +352,7 @@ Optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
     // FIXME: As an optimization later, when there is just 1 stage, then fuse them.
     // Then will need two fused equations, one that clears gradient one that accumulates.
     // In both cases, the error out gradient would need to be cleared, not accumulated.
-    assert(!wGradFusedWithEOutGrad);
+    // assert(!wGradFusedWithEOutGrad);
 
     if (errorInputs[connectionNumber].isEmpty()) {
         // No incoming gradient, potentially a StopGradientLayer was put there.
