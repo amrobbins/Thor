@@ -21,7 +21,9 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
     // All real stamped id's will have positive values
     TrainableLayer(const TensorPlacement &placement, bool inferenceOnly, int64_t stampedId = -1)
-        : placement(placement), inferenceOnly(inferenceOnly), stampedId(stampedId) {}
+        : placement(placement), stampedId(stampedId) {
+        setConstructForInferenceOnly(inferenceOnly);
+    }
 
     void setOptimizer(const std::string &parameterName, const std::shared_ptr<Optimizer> &optimizer) {
         assert(parameterIndexByName.contains(parameterName));
@@ -98,7 +100,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        nextLayers[connectionNumber].get()->forward(featureOutputs[connectionNumber], batchSize, isValidation);
+        nextLayers[connectionNumber].get()->forward(featureOutputs[connectionNumber], isValidation, batchSize);
     }
 
     void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {
@@ -286,8 +288,6 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
     bool compiled = false;
     TensorPlacement placement;
-
-    bool inferenceOnly;
 
    private:
     // stampedId is used to identify which layers correspond to which other layers across multiple stamps of the same network.

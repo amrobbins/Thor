@@ -155,9 +155,6 @@ void bind_convolution_2d(nb::module_ &m) {
         dropout, and batch normalization. This layer applies a bank of
         learnable filters over the spatial dimensions of the input tensor.
 
-        The connection order of the optional layers, when used, is the following:
-        [batch norm] -> [drop out] -> [fully connected] -> [activation]
-
         Parameters
         ----------
         network : thor.Network

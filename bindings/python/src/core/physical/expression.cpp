@@ -1435,22 +1435,192 @@ Return the compiled equation owned by this prepared dynamic expression.
     auto dynamic_expression = nb::class_<DynamicExpression>(physical, "DynamicExpression");
     dynamic_expression.attr("__module__") = "thor.physical";
 
-    dynamic_expression.def(nb::init<DynamicExpression::BuilderFn>(),
-                           "builder"_a,
-                           R"nbdoc(
+    dynamic_expression.def(
+        "__init__",
+        [](DynamicExpression* self, nb::callable builder) {
+            new (self) DynamicExpression([builder = nb::borrow<nb::callable>(builder)](const DynamicTensorMap& inputs,
+                                                                                       const DynamicTensorMap& outputs,
+                                                                                       Stream& stream) -> DynamicExpressionBuild {
+                nb::gil_scoped_acquire gil;
+                nb::object result = builder(inputs, outputs, stream);
+                return nb::cast<DynamicExpressionBuild>(result);
+            });
+        },
+        "builder"_a,
+        R"nbdoc(
 Create a dynamic expression from a Python callable.
 
 Parameters
 ----------
-builder : Callable[[dict[str, PhysicalTensor], thor.Stream], thor.physical.DynamicExpressionBuild]
-    A callable that receives a dict of bound input tensors and a stream, then
-    returns a DynamicExpressionBuild describing the compiled equation and any
-    default bindings to use when stamping.
+builder : Callable[
+    [dict[str, PhysicalTensor], dict[str, PhysicalTensor], thor.Stream],
+    thor.physical.DynamicExpressionBuild
+]
+    A callable that receives three arguments:
+
+    - ``inputs``:
+      A mapping from input name to the currently bound input tensor.
+
+      These are the tensors that the caller supplied when preparing or
+      stamping the dynamic expression. The builder may inspect their shape,
+      dtype, placement, and other metadata in order to choose how to build
+      the expression.
+
+    - ``outputs``:
+      A mapping from output name to caller-supplied output tensors.
+
+      This mapping represents the final outputs that the caller would like
+      the dynamic expression to write into.
+
+      The builder may use ``outputs`` to:
+
+      - validate that a provided output tensor has the expected shape, dtype,
+        or placement
+      - choose an output dtype or architecture that is compatible with the
+        requested outputs
+      - pass those tensors through as ``preallocated_outputs`` in the returned
+        ``DynamicExpressionBuild`` so the compiled equation writes into them
+
+      In other words, ``outputs`` is part of the builder's decision surface.
+      It is not just informational metadata.
+
+    - ``stream``:
+      The stream that will be used for preparation / stamping / execution.
+
+      The builder may inspect this if needed, but it should generally use the
+      stream only as contextual information when constructing the returned
+      ``DynamicExpressionBuild``.
+
+Returns
+-------
+thor.physical.DynamicExpressionBuild
+    An object describing the compiled equation and any default bindings to use
+    when stamping. Typically this includes:
+
+    - a compiled equation
+    - the chosen input bindings
+    - any caller-provided output tensors that should be reused as final outputs
 
 Notes
 -----
-The callable is invoked from C++ when ``prepare(...)``, ``stamp(...)``, or
-``stamp_backward(...)`` is called.
+The callable is invoked synchronously from C++ when ``prepare(...)``,
+``stamp(...)``, or ``stamp_backward(...)`` is called.
+
+This means the builder runs on the preparation / stamping path, not on the
+hot kernel execution path. It is therefore appropriate for the builder to make
+shape-dependent, dtype-dependent, or architecture-dependent decisions.
+
+The builder is expected to *describe* the computation by returning a
+``DynamicExpressionBuild``. It should not directly enqueue the actual forward
+or backward kernels itself.
+
+Examples
+--------
+A simple example that chooses the expression based on the shape of the input:
+
+.. code-block:: python
+
+    import thor
+    from thor.physical import Expression as ex
+    from thor.physical import DynamicExpression, DynamicExpressionBuild, FusedEquation
+
+    def make_dynamic_relu(device_num: int):
+        def builder(inputs, outputs, stream):
+            x_tensor = inputs["x"]
+
+            if len(x_tensor.dims) != 2:
+                raise ValueError("expected a rank-2 input")
+
+            x = ex.input("x")
+            y = ex.max(x, 0.0)
+
+            named = ex.outputs({"y": y})
+            equation = FusedEquation.compile(named.physical_outputs(), device_num)
+
+            return DynamicExpressionBuild(
+                equation=equation,
+                stamp_inputs=inputs,
+                preallocated_outputs=outputs,
+            )
+
+        return DynamicExpression(builder)
+
+Using ``outputs`` to validate and reuse a caller-provided output tensor:
+
+.. code-block:: python
+
+    import thor
+    from thor.physical import Expression as ex
+    from thor.physical import DynamicExpression, DynamicExpressionBuild, FusedEquation
+
+    def make_dynamic_identity(device_num: int):
+        def builder(inputs, outputs, stream):
+            x_tensor = inputs["x"]
+
+            if "y" in outputs:
+                y_tensor = outputs["y"]
+                if y_tensor.dims != x_tensor.dims:
+                    raise ValueError(
+                        f"output y has dims {y_tensor.dims}, expected {x_tensor.dims}"
+                    )
+                if y_tensor.placement != x_tensor.placement:
+                    raise ValueError("output y must be on the same device as x")
+
+            x = ex.input("x")
+            named = ex.outputs({"y": x})
+            equation = FusedEquation.compile(named.physical_outputs(), device_num)
+
+            return DynamicExpressionBuild(
+                equation=equation,
+                stamp_inputs=inputs,
+                preallocated_outputs=outputs,
+            )
+
+        return DynamicExpression(builder)
+
+A fully connected layer can be expressed by inspecting the bound parameter
+tensors at build time:
+
+.. code-block:: python
+
+    import thor
+    from thor.physical import Expression as ex
+    from thor.physical import DynamicExpression, DynamicExpressionBuild, FusedEquation
+
+    def fully_connected_dynamic_expression(device_num: int, has_bias: bool = True):
+        def builder(inputs, outputs, stream):
+            x_tensor = inputs["feature_input"]
+            w_tensor = inputs["weights"]
+
+            if len(x_tensor.dims) != 2:
+                raise ValueError("feature_input must be rank 2")
+            if len(w_tensor.dims) != 2:
+                raise ValueError("weights must be rank 2")
+            if x_tensor.dims[1] != w_tensor.dims[0]:
+                raise ValueError("feature_input and weights have incompatible shapes")
+
+            x = ex.input("feature_input")
+            w = ex.input("weights", output_dtype=w_tensor.dtype, compute_dtype=w_tensor.dtype)
+            y = x @ w
+
+            if has_bias:
+                b_tensor = inputs["biases"]
+                if len(b_tensor.dims) != 1 or b_tensor.dims[0] != w_tensor.dims[1]:
+                    raise ValueError("biases must have shape [out_features]")
+                b = ex.input("biases", output_dtype=b_tensor.dtype, compute_dtype=b_tensor.dtype)
+                y = y + b
+
+            named = ex.outputs({"feature_output": y})
+            equation = FusedEquation.compile(named.physical_outputs(), device_num)
+
+            return DynamicExpressionBuild(
+                equation=equation,
+                stamp_inputs=inputs,
+                preallocated_outputs=outputs,
+            )
+
+        return DynamicExpression(builder)
+
 )nbdoc");
 
     dynamic_expression.def("prepare",
@@ -1459,8 +1629,8 @@ The callable is invoked from C++ when ``prepare(...)``, ``stamp(...)``, or
                            "outputs"_a,
                            "stream"_a,
                            R"nbdoc(
-Validate the provided tensors and stream, then invoke the stored builder and
-return a PreparedDynamicExpression.
+Validate the provided tensors and stream, invoke the Python builder with
+``(inputs, outputs, stream)``, and return a PreparedDynamicExpression.
 )nbdoc");
 
     dynamic_expression.def(

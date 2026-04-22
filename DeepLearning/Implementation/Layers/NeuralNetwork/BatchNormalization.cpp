@@ -12,8 +12,8 @@ using DataType = TensorDescriptor::DataType;
 
 class BNParameter final : public Parameter {
    public:
-    BNParameter(const string& name, const Optional<TensorDescriptor::DataType>& storageDataType)
-        : Parameter(name, true), storageDataType(storageDataType) {}
+    BNParameter(const string& name, const Optional<TensorDescriptor::DataType>& storageDataType, bool trainable)
+        : Parameter(name, trainable), storageDataType(storageDataType) {}
 
     void createStorage(const Tensor& inputTensor) override {
         assert(inputTensor.getDimensions().size() == 2 || inputTensor.getDimensions().size() == 4);
@@ -46,10 +46,10 @@ BatchNormalization::BatchNormalization(const TensorPlacement& placement,
     : TrainableLayer(placement, inferenceOnly, stampedId),
       exponentialRunningAverageFactor(exponentialRunningAverageFactor.isPresent() ? exponentialRunningAverageFactor.get() : 0.05),
       epsilon(epsilon.isPresent() ? epsilon.get() : 0.0001) {
-    addParameter(make_shared<BNParameter>("weights", storageDataType));
-    addParameter(make_shared<BNParameter>("biases", storageDataType));
-    addParameter(make_shared<BNParameter>("running_mean", storageDataType));
-    addParameter(make_shared<BNParameter>("running_variance", storageDataType));
+    addParameter(make_shared<BNParameter>("weights", storageDataType, true));
+    addParameter(make_shared<BNParameter>("biases", storageDataType, true));
+    addParameter(make_shared<BNParameter>("running_mean", storageDataType, false));
+    addParameter(make_shared<BNParameter>("running_variance", storageDataType, false));
 }
 
 BatchNormalization::~BatchNormalization() { cleanup(); }
@@ -96,13 +96,16 @@ void BatchNormalization::compileImpl() {
 
     placement = input.getPlacement();
     assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-    ensureNoDeviceCrossing(placement);  // FIXME: create variant to take expected placement.
+    ensureNoDeviceCrossing(placement);
 
     attachGradientUpdateStream();
 
     for (const auto& parameter : parameters) {
         if (!parameter->isStorageInitialized()) {
-            parameter->compileStorageAndOptimizer(input, gradientUpdateStream, isInferenceOnly());
+            string paramName = parameter->getName();
+            bool trainable = paramName == "weights" || paramName == "biases";
+            bool inferenceOnly = isInferenceOnly();
+            parameter->compileStorageAndOptimizer(input, gradientUpdateStream, inferenceOnly || !trainable);
         }
         parameter->compileInitializer(getFanIn(), getFanOut());
     }

@@ -2,8 +2,6 @@
 
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/Parameter.h"
-#include "DeepLearning/Implementation/Parameter/Parameterizable.h"
-#include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
 
