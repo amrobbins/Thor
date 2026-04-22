@@ -3,6 +3,8 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -231,7 +233,11 @@ class DynamicExpression {
 
     [[nodiscard]] PreparedDynamicExpression prepare(const TensorMap& inputs, const TensorMap& outputs, Stream& stream) const {
         validateInputs(inputs, stream);
-        return PreparedDynamicExpression(builder_(inputs, outputs, stream), stream);
+        validateOutputs(outputs, stream);
+
+        DynamicExpressionBuild build = builder_(inputs, outputs, stream);
+        validateBuild(build, outputs);
+        return PreparedDynamicExpression(std::move(build), stream);
     }
 
     [[nodiscard]] StampedExecutionPlan stamp(const TensorMap& inputs, const TensorMap& outputs, Stream& stream) const {
@@ -290,7 +296,7 @@ class DynamicExpression {
     }
 
    private:
-    static void validateInputs(const TensorMap& inputs, Stream& stream) {
+    static void validateInputs(const TensorMap& inputs, const Stream& stream) {
         if (inputs.empty()) {
             throw std::invalid_argument("DynamicExpression requires at least one input tensor.");
         }
@@ -319,6 +325,124 @@ class DynamicExpression {
 
         if (stream.getGpuNum() != gpuNum) {
             throw std::runtime_error("DynamicExpression stream GPU does not match input tensor GPU.");
+        }
+    }
+
+    static void validateOutputs(const TensorMap& outputs, const Stream& stream) {
+        for (const auto& [name, tensor] : outputs) {
+            if (!tensor.isInitialized()) {
+                throw std::invalid_argument("DynamicExpression output tensor '" + name + "' is not initialized.");
+            }
+
+            const auto placement = tensor.getPlacement();
+            if (placement.getMemDevice() != TensorPlacement::MemDevices::GPU) {
+                throw std::invalid_argument("DynamicExpression output tensor '" + name + "' is not on GPU.");
+            }
+            if (placement.getDeviceNum() != stream.getGpuNum()) {
+                throw std::invalid_argument("DynamicExpression output tensor '" + name + "' is on a different GPU than the stream.");
+            }
+        }
+    }
+
+    static std::set<std::string> tensorMapKeys(const TensorMap& tensors) {
+        std::set<std::string> names;
+        for (const auto& [name, _] : tensors) {
+            names.insert(name);
+        }
+        return names;
+    }
+
+    static std::set<std::string> shapeMapKeys(const std::unordered_map<std::string, std::vector<uint64_t>>& shapes) {
+        std::set<std::string> names;
+        for (const auto& [name, _] : shapes) {
+            names.insert(name);
+        }
+        return names;
+    }
+
+    static std::set<std::string> vectorToSet(const std::vector<std::string>& names) {
+        return std::set<std::string>(names.begin(), names.end());
+    }
+
+    static std::string joinNames(const std::set<std::string>& names) {
+        if (names.empty()) {
+            return "<none>";
+        }
+
+        std::ostringstream oss;
+        bool first = true;
+        for (const auto& name : names) {
+            if (!first) {
+                oss << ", ";
+            }
+            oss << name;
+            first = false;
+        }
+        return oss.str();
+    }
+
+    static std::set<std::string> setDifference(const std::set<std::string>& lhs, const std::set<std::string>& rhs) {
+        std::set<std::string> difference;
+        for (const auto& name : lhs) {
+            if (!rhs.contains(name)) {
+                difference.insert(name);
+            }
+        }
+        return difference;
+    }
+
+    static void validateBuild(const DynamicExpressionBuild& build, const TensorMap& requested_outputs) {
+        if (!build.equation) {
+            throw std::invalid_argument("DynamicExpression builder returned a null equation.");
+        }
+
+        const std::set<std::string> built_output_names = vectorToSet(build.equation->getOutputNames());
+        const std::set<std::string> requested_output_names = tensorMapKeys(requested_outputs);
+        const std::set<std::string> preallocated_output_names = tensorMapKeys(build.preallocated_outputs);
+        const std::set<std::string> requested_output_shape_names = shapeMapKeys(build.requested_output_shapes);
+
+        if (!requested_output_names.empty() && built_output_names != requested_output_names) {
+            throw std::invalid_argument("DynamicExpression builder returned equation outputs {" + joinNames(built_output_names) +
+                                        "} but caller requested outputs {" + joinNames(requested_output_names) +
+                                        "}. Prune the equation outputs in the builder or provide matching outputs.");
+        }
+
+        const std::set<std::string> unknown_preallocated_output_names = setDifference(preallocated_output_names, built_output_names);
+        if (!unknown_preallocated_output_names.empty()) {
+            throw std::invalid_argument("DynamicExpression builder returned preallocated outputs {" + joinNames(preallocated_output_names) +
+                                        "} but the equation only produces {" + joinNames(built_output_names) +
+                                        "}. Unknown preallocated outputs: {" + joinNames(unknown_preallocated_output_names) + "}.");
+        }
+
+        const std::set<std::string> unknown_requested_output_shape_names = setDifference(requested_output_shape_names, built_output_names);
+        if (!unknown_requested_output_shape_names.empty()) {
+            throw std::invalid_argument("DynamicExpression builder returned requested output shapes for names {" +
+                                        joinNames(requested_output_shape_names) + "} but the equation only produces {" +
+                                        joinNames(built_output_names) + "}. Unknown requested output shape names: {" +
+                                        joinNames(unknown_requested_output_shape_names) + "}.");
+        }
+
+        if (!requested_output_names.empty()) {
+            if (preallocated_output_names != requested_output_names) {
+                throw std::invalid_argument(
+                    "DynamicExpression builder must return preallocated outputs exactly matching the caller-requested outputs. "
+                    "Requested outputs: {" +
+                    joinNames(requested_output_names) +
+                    "} "
+                    "Builder returned preallocated outputs: {" +
+                    joinNames(preallocated_output_names) + "}.");
+            }
+
+            for (const auto& [name, requested_tensor] : requested_outputs) {
+                const auto it = build.preallocated_outputs.find(name);
+                if (it == build.preallocated_outputs.end()) {
+                    throw std::invalid_argument("DynamicExpression builder did not return caller-requested output tensor '" + name + "'.");
+                }
+                if (!(it->second == requested_tensor)) {
+                    throw std::invalid_argument("DynamicExpression builder returned a different tensor for caller-requested output '" +
+                                                name + "'. Reuse the caller-provided tensor or prune the output in the builder.");
+                }
+            }
         }
     }
 
