@@ -40,7 +40,7 @@ class BatchNormalization : public TrainableLayer {
 
         std::shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormalization =
             std::make_shared<ThorImplementation::BatchNormalization>(
-                placement, false, exponentialRunningAverageFactor, epsilon, Tensor::DataType::FP32, getId());
+                placement, false, numItemsObserved, exponentialRunningAverageFactor, epsilon, Tensor::DataType::FP32, getId());
         stampOptimizer(physicalBatchNormalization);
 
         return physicalBatchNormalization;
@@ -80,6 +80,7 @@ class BatchNormalization : public TrainableLayer {
 
     Optional<std::string> runningMeansFile;
     Optional<std::string> runningVariancesFile;
+    uint64_t numItemsObserved = 0;
 };
 
 class BatchNormalization::Builder {

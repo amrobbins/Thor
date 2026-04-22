@@ -27,6 +27,7 @@ class BatchNormalization : public TrainableLayer {
 
     BatchNormalization(const TensorPlacement& placement,
                        bool inferenceOnly,
+                       uint64_t numItemsObserved,
                        Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
                        Optional<double> epsilon = Optional<double>::empty(),
                        Optional<TensorDescriptor::DataType> storageDataType = Optional<TensorDescriptor::DataType>::empty(),
@@ -41,6 +42,8 @@ class BatchNormalization : public TrainableLayer {
     void setEpsilon(double epsilon) { this->epsilon = epsilon; }
 
     std::string getLayerType() override { return "BatchNormalization"; }
+
+    uint64_t getNumItemsObserved() { return itemsObserved; }
 
     Optional<Tensor> createFeatureOutputTensor() override;
     Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
@@ -85,7 +88,7 @@ class BatchNormalization : public TrainableLayer {
     unsigned int width = 0;
 
     double exponentialRunningAverageFactor;
-    uint32_t itemsObserved = 0;
+    uint64_t itemsObserved = 0;
     std::vector<double> currentExponentialRunningAverageFactor;
     double epsilon;
 
