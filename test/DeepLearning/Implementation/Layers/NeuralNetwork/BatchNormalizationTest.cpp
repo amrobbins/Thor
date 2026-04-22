@@ -416,7 +416,7 @@ TEST(BatchNormalization, ParameterNamesAndShapes) {
 
     TensorDescriptor featureInDescriptor(dataType, {batchSize, numChannels});
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    BatchNormalization bn(gpuPlacement, false);
+    BatchNormalization bn(gpuPlacement, false, 0);
     NetworkOutput no(cpuPlacement);
 
     bn.setOptimizer("weights", make_shared<Adam>(4000, 0.001f, 0.9f, 0.999f, 1e-7f));
@@ -479,7 +479,7 @@ TEST(BatchNormalization, DirectForwardTrainingPerActivation2DNumerical) {
     writeCpuTensor(featureIn_h, inputValues);
 
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    BatchNormalization bn(gpuPlacement, false);
+    BatchNormalization bn(gpuPlacement, false, 0);
     NetworkOutput no(cpuPlacement);
 
     bn.setOptimizer("weights", make_shared<Adam>(4000, 0.001f, 0.9f, 0.999f, 1e-7f));
@@ -545,7 +545,7 @@ TEST(BatchNormalization, DirectForwardTrainingSpatialTwoPassesRunningStats) {
     Tensor featureIn_h(cpuPlacement, featureInDescriptor);
 
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    BatchNormalization bn(gpuPlacement, false);
+    BatchNormalization bn(gpuPlacement, false, 0);
     NetworkOutput no(cpuPlacement);
 
     bn.setOptimizer("weights", make_shared<Adam>(4000, 0.001f, 0.9f, 0.999f, 1e-7f));
@@ -635,7 +635,7 @@ TEST(BatchNormalization, DirectForwardInferenceSpatialNumerical) {
     writeCpuTensor(featureIn_h, inputValues);
 
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    BatchNormalization bn(gpuPlacement, true);
+    BatchNormalization bn(gpuPlacement, true, 0);
     NetworkOutput no(cpuPlacement);
 
     bn.setOptimizer("weights", make_shared<Adam>(4000, 0.001f, 0.9f, 0.999f, 1e-7f));
@@ -687,7 +687,7 @@ TEST(BatchNormalization, DirectBackwardSpatialNumerical) {
 
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
     GradientRivet gr1, gr2;
-    BatchNormalization bn(gpuPlacement, false);
+    BatchNormalization bn(gpuPlacement, false, 0);
     NetworkOutput no(cpuPlacement);
 
     shared_ptr<Adam> adamWeights = make_shared<Adam>(4000, 0.001f, 0.9f, 0.999f, 1e-7f);
@@ -819,7 +819,7 @@ TEST(BatchNormalization, DirectForwardTrainingSpatialRunningAverageWarmupAndClam
     Tensor featureIn_h(cpuPlacement, featureInDescriptor);
 
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    BatchNormalization bn(gpuPlacement, false, exponentialRunningAverageFactor);
+    BatchNormalization bn(gpuPlacement, false, 0.0, exponentialRunningAverageFactor);
     NetworkOutput no(cpuPlacement);
 
     bn.setOptimizer("weights", make_shared<Adam>(4000, 0.001f, 0.9f, 0.999f, 1e-7f));
@@ -1008,7 +1008,7 @@ TEST(BatchNormalization, DirectBackwardSpatialNumericalWithSgd) {
 
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
     GradientRivet gr1, gr2;
-    BatchNormalization bn(gpuPlacement, false);
+    BatchNormalization bn(gpuPlacement, false, 0);
     NetworkOutput no(cpuPlacement);
 
     shared_ptr<Sgd> sgdWeights = make_shared<Sgd>(5000, learningRate, 0.0f, 0.0f, false);

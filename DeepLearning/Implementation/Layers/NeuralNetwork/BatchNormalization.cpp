@@ -39,6 +39,7 @@ const float BatchNormalization::BETA_ACCUMULATE = 1.0f;
 
 BatchNormalization::BatchNormalization(const TensorPlacement& placement,
                                        bool inferenceOnly,
+                                       uint64_t numItemsObserved,
                                        Optional<double> exponentialRunningAverageFactor,
                                        Optional<double> epsilon,
                                        Optional<TensorDescriptor::DataType> storageDataType,
@@ -50,6 +51,8 @@ BatchNormalization::BatchNormalization(const TensorPlacement& placement,
     addParameter(make_shared<BNParameter>("biases", storageDataType, true));
     addParameter(make_shared<BNParameter>("running_mean", storageDataType, false));
     addParameter(make_shared<BNParameter>("running_variance", storageDataType, false));
+
+    itemsObserved = numItemsObserved;
 }
 
 BatchNormalization::~BatchNormalization() { cleanup(); }
@@ -216,8 +219,9 @@ void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
     assert(inputTensor.isPresent());
     assert(outputTensor.isPresent());
 
+    if (itemsObserved != UINT64_MAX)
+        itemsObserved += 1;
     if (currentExponentialRunningAverageFactor[connectionNumber] != exponentialRunningAverageFactor) {
-        ++itemsObserved;
         currentExponentialRunningAverageFactor[connectionNumber] = 1.0 / itemsObserved;
         if (currentExponentialRunningAverageFactor[connectionNumber] < exponentialRunningAverageFactor)
             currentExponentialRunningAverageFactor[connectionNumber] = exponentialRunningAverageFactor;

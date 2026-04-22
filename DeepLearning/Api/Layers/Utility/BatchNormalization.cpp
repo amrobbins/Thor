@@ -62,6 +62,7 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
     ThorImplementation::Tensor variance;
 
     if (batchNorm != nullptr) {
+        // FIXME: Simplify this with Parameterizable->serializeParameters(...)
         weightsFile = (layerName + "_weights.gds");
         j["weights_tensor"] = weightsFile;
         weights = batchNorm->getParameter("weights")->getStorage();
@@ -75,14 +76,14 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
         resultRunningMeanFile = (layerName + "_means.gds");
         j["means_tensor"] = resultRunningMeanFile;
         means = batchNorm->getParameter("running_mean")->getStorage().get();
-        ;
         archiveWriter.addArchiveFile(resultRunningMeanFile, means);
 
         resultRunningVarianceFile = (layerName + "_variances.gds");
         j["variances_tensor"] = resultRunningVarianceFile;
         variance = batchNorm->getParameter("running_variance")->getStorage().get();
-        ;
         archiveWriter.addArchiveFile(resultRunningVarianceFile, variance);
+
+        j["num_items_observed"] = batchNorm->getNumItemsObserved();
     }
 
     if (hasOptimizer()) {
@@ -96,7 +97,6 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
                                                      batchNorm->getParameter("biases")->getOptimizer(),
                                                      string("layer") + to_string(getId()),
                                                      saveOptimizerState);
-        // FIXME: Result running mean and variances as parameters with optimizers
     }
 
     return j;
@@ -108,6 +108,7 @@ void BatchNormalization::deserialize(shared_ptr<thor_file::TarReader> &archiveRe
     if (j.at("layer_type").get<std::string>() != "batch_normalization")
         throw runtime_error("Layer type mismatch in BatchNormalization::deserialize: " + j.at("layer_type").get<std::string>());
 
+    double numItemsObserved = j.at("num_items_observed").get<uint64_t>();
     float exponentialRunningAverageFactor = j.at("exponential_running_average_factor").get<float>();
     float epsilon = j.at("epsilon").get<float>();
 
@@ -125,6 +126,7 @@ void BatchNormalization::deserialize(shared_ptr<thor_file::TarReader> &archiveRe
 
     BatchNormalization batchNormalization = BatchNormalization();
     batchNormalization.exponentialRunningAverageFactor = exponentialRunningAverageFactor;
+    batchNormalization.numItemsObserved = numItemsObserved;
     batchNormalization.epsilon = epsilon;
     batchNormalization.featureInputs = featureInputs;
     for (uint32_t i = 0; i < batchNormalization.featureInputs.size(); ++i) {
