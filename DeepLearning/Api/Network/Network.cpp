@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 
 using namespace std;
@@ -401,6 +402,26 @@ Network::StatusCode Network::evaluateGraph() {
             continue;
         }
 
+        shared_ptr<CustomLayer> customLayer = dynamic_pointer_cast<CustomLayer>(layer);
+        if (customLayer) {
+            vector<Tensor> inputTensors = customLayer->getFeatureInputs();
+            vector<Tensor> outputTensors = customLayer->getFeatureOutputs();
+            assert(!inputTensors.empty());
+            assert(!outputTensors.empty());
+            for (uint32_t i = 0; i < inputTensors.size(); ++i) {
+                allTensors.insert(inputTensors[i]);
+                apiTensorToApiLoadingLayers[inputTensors[i]].push_back(customLayer);
+                apiLayerToApiInputTensors[customLayer].push_back(inputTensors[i]);
+            }
+            for (uint32_t i = 0; i < outputTensors.size(); ++i) {
+                allTensors.insert(outputTensors[i]);
+                assert(apiTensorToApiDrivingLayer.count(outputTensors[i]) == 0);
+                apiTensorToApiDrivingLayer[outputTensors[i]] = customLayer;
+                apiLayerToApiOutputTensors[customLayer].push_back(outputTensors[i]);
+            }
+            continue;
+        }
+
         shared_ptr<MultiConnectionLayer> multiConnectionLayer = dynamic_pointer_cast<MultiConnectionLayer>(layer);
         if (multiConnectionLayer) {
             vector<Tensor> inputTensors = multiConnectionLayer->getFeatureInputs();
@@ -658,7 +679,7 @@ void Network::stampNetworkInput(const shared_ptr<Thor::NetworkInput> networkInpu
     stampedNetwork.apiLayerToPhysicalLayer[networkInput->getId()] = implementationNetworkInput.get();
     stampedNetwork.physicalLayerToApiLayerShared[implementationNetworkInput] = networkInput->getId();
     stampedNetwork.physicalLayerToApiLayer[implementationNetworkInput.get()] = networkInput->getId();
-    stampedNetwork.recordIfParameterizable(networkInput, implementationNetworkInput);
+    // stampedNetwork.recordIfParameterizable(networkInput, implementationNetworkInput);
 
     // Map the api tensor to its physical driving layer
     stampedNetwork.apiTensorToPhysicalDrivingLayerShared[outputTensor] = outputLayer;
@@ -689,6 +710,7 @@ void Network::addLayerToNetwork(const Layer *layer) {
     auto stub = dynamic_cast<const Stub *>(layer);
     auto loss = dynamic_cast<const Loss *>(layer);
     auto metric = dynamic_cast<const Metric *>(layer);
+    auto customLayer = dynamic_cast<const CustomLayer *>(layer);
     auto multiConnectionLayer = dynamic_cast<const MultiConnectionLayer *>(layer);
     if (networkInput) {
         Tensor outputTensor = networkInput->getFeatureOutput();
@@ -713,6 +735,17 @@ void Network::addLayerToNetwork(const Layer *layer) {
         apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
         apiTensorByOriginalId[labelsTensor.getOriginalId()] = labelsTensor;
         apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
+    } else if (customLayer) {
+        vector<Tensor> inputTensors = customLayer->getFeatureInputs();
+        vector<Tensor> outputTensors = customLayer->getFeatureOutputs();
+        assert(!inputTensors.empty());
+        assert(!outputTensors.empty());
+        for (uint32_t i = 0; i < inputTensors.size(); ++i) {
+            apiTensorByOriginalId[inputTensors[i].getOriginalId()] = inputTensors[i];
+        }
+        for (uint32_t i = 0; i < outputTensors.size(); ++i) {
+            apiTensorByOriginalId[outputTensors[i].getOriginalId()] = outputTensors[i];
+        }
     } else if (multiConnectionLayer) {
         vector<Tensor> inputTensors = multiConnectionLayer->getFeatureInputs();
         vector<Tensor> outputTensors = multiConnectionLayer->getFeatureOutputs();
@@ -830,7 +863,7 @@ void Network::stampLayer(Tensor inputTensor,
         stampedNetwork.physicalLayerToApiLayerShared[implementationLayer] = layer->getId();
         stampedNetwork.physicalLayerToApiLayer[implementationLayer.get()] = layer->getId();
 
-        stampedNetwork.recordIfParameterizable(layer, implementationLayer);
+        // stampedNetwork.recordIfParameterizable(layer, implementationLayer);
 
         if (DEBUG_STAMP) {
             printf("stamped %s (physical layer id = %ld, api layer id = %ld) driven by physical layer id = %ld\n",
@@ -918,7 +951,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     stampedNetwork.physicalLayerToApiLayerShared[implementationNetworkOutput] = networkOutput->getId();
     stampedNetwork.physicalLayerToApiLayer[implementationNetworkOutput.get()] = networkOutput->getId();
 
-    stampedNetwork.recordIfParameterizable(networkOutput, implementationNetworkOutput);
+    // stampedNetwork.recordIfParameterizable(networkOutput, implementationNetworkOutput);
 }
 
 Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {

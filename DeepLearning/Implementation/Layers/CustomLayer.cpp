@@ -569,6 +569,7 @@ void CustomLayer::forward(Optional<Tensor> featureInput, bool validationPass, ui
         weightsAreUpToDateEvent.clear();
         isStartOfForward = false;
         isStartOfBackward = true;
+        clearGradientFirstThisBackwardPass = false;
         clearForwardArrivalBookkeeping();
     }
 
@@ -605,11 +606,10 @@ void CustomLayer::backward(Optional<Tensor> errorInput, uint32_t batchSize) {
     }
     assert(outputPort != outputNames.size());
 
-    bool clearGradientFirst = false;
     if (isStartOfBackward) {
         clearBackwardArrivalBookkeeping();
-        isStartOfBackward = false;  // important
-        clearGradientFirst = true;  // first backward arrival in this pass
+        isStartOfBackward = false;
+        clearGradientFirstThisBackwardPass = true;
     }
 
     assert(stillWaitingForBackwardErrorInputTensorIds.count(errorInput.get().getTensorId()) == 1);
@@ -635,7 +635,9 @@ void CustomLayer::backward(Optional<Tensor> errorInput, uint32_t batchSize) {
     if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
         gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
     }
-    accumulateWeightsGradient(0, clearGradientFirst);
+
+    accumulateWeightsGradient(0, clearGradientFirstThisBackwardPass);
+    clearGradientFirstThisBackwardPass = false;
 
     const bool gradientComplete = true;
     if (gradientComplete) {
