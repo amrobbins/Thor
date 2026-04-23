@@ -30,21 +30,26 @@ json Parameter::serialize(thor_file::TarWriter &archiveWriter,
                           ThorImplementation::StampedNetwork &stampedNetwork) const {
     json j = architectureJson();
 
-    shared_ptr<ThorImplementation::Parameterizable> physicalParameterizable =
-        stampedNetwork.getPhysicalParameterizableFromApiParameterizable(owner->getId());
-    shared_ptr<ThorImplementation::Parameter> physicalParameter = physicalParameterizable->getParameter(name);
-    ThorImplementation::Tensor physicalStorage = physicalParameter->getStorage();
-
-    string storageFile = "FIXME filename";
-    archiveWriter.addArchiveFile(storageFile, physicalStorage);
-
-    if (hasOptimizer()) {
-        j["optimizer"] = optimizer->serialize(archiveWriter,
-                                              stream,
-                                              physicalParameter->getOptimizer(),
-                                              "paramaterizable" + to_string(owner->getId()) + "_" + name,
-                                              saveOptimizerState);
-    }
+    // Below pattern wrong. Get the layer and assert that it casts to a parameterizable.
+    // Actually the whole pattern is wrong. I need to serialize each parameter when serializing a layer,
+    // like serializing a tensor. Then can just check in general if a layer supports parameters through casting
+    // as a parameterizable - if even needed, because I suppose I know ahead of time which layers are parameterizable.
+    // PARAMETERIZABLE DOES NOT OWN SERIALIZE, THE LAYER SIDE DOES.
+    // shared_ptr<ThorImplementation::Parameterizable> physicalParameterizable =
+    //     stampedNetwork.getPhysicalParameterizableFromApiParameterizable(owner->getId());
+    // shared_ptr<ThorImplementation::Parameter> physicalParameter = physicalParameterizable->getParameter(name);
+    // ThorImplementation::Tensor physicalStorage = physicalParameter->getStorage();
+    //
+    // string storageFile = "FIXME filename";
+    // archiveWriter.addArchiveFile(storageFile, physicalStorage);
+    //
+    // if (hasOptimizer()) {
+    //     j["optimizer"] = optimizer->serialize(archiveWriter,
+    //                                           stream,
+    //                                           physicalParameter->getOptimizer(),
+    //                                           "paramaterizable" + to_string(owner->getId()) + "_" + name,
+    //                                           saveOptimizerState);
+    // }
 
     return j;
 }

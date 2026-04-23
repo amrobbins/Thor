@@ -99,6 +99,8 @@ class CustomLayer : public TrainableLayer {
 
     std::string customLayerName = "UnnamedType";
 
+    bool clearGradientFirstThisBackwardPass = false;
+
     std::unordered_map<std::string, uint32_t> inputNameToPort;
     std::unordered_map<std::string, uint32_t> outputNameToPort;
 

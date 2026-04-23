@@ -53,25 +53,26 @@ class StampedNetwork {
     std::shared_ptr<ThorImplementation::Layer> getPhysicalLayerFromApiLayer(std::shared_ptr<Thor::Layer> apiLayer) {
         return apiLayerToPhysicalLayerShared[apiLayer->getId()];
     }
-    void recordIfParameterizable(std::shared_ptr<Thor::Layer> layer, std::shared_ptr<ThorImplementation::Layer> implementationLayer) {
-        std::shared_ptr<Thor::Parameterizable> parameterizable = dynamic_pointer_cast<Thor::Parameterizable>(layer);
-        if (parameterizable != nullptr) {
-            auto implementationParameterizable = std::dynamic_pointer_cast<ThorImplementation::Parameterizable>(implementationLayer);
-            assert(implementationParameterizable != nullptr);
-            apiParameterizableToPhysicalParameterizable[parameterizable->getId()] = implementationParameterizable;
-        }
-    }
-    std::shared_ptr<ThorImplementation::Parameterizable> getPhysicalParameterizableFromApiParameterizable(uint64_t apiParameterizableId) {
-        auto it = apiParameterizableToPhysicalParameterizable.find(apiParameterizableId);
-        assert(it != apiParameterizableToPhysicalParameterizable.end());
-        return it->second;
-    }
-    std::shared_ptr<ThorImplementation::Parameterizable> getPhysicalParameterizableFromApiParameterizable(
-        std::shared_ptr<Thor::Layer> apiParameterizable) {
-        assert(apiParameterizable != nullptr);
-        uint64_t apiParameterizableId = apiParameterizable->getId();
-        return getPhysicalParameterizableFromApiParameterizable(apiParameterizableId);
-    }
+    // void recordIfParameterizable(std::shared_ptr<Thor::Layer> layer, std::shared_ptr<ThorImplementation::Layer> implementationLayer) {
+    //     std::shared_ptr<Thor::Parameterizable> parameterizable = dynamic_pointer_cast<Thor::Parameterizable>(layer);
+    //     if (parameterizable != nullptr) {
+    //         auto implementationParameterizable = std::dynamic_pointer_cast<ThorImplementation::Parameterizable>(implementationLayer);
+    //         assert(implementationParameterizable != nullptr);
+    //         apiParameterizableToPhysicalParameterizable[parameterizable->getId()] = implementationParameterizable;
+    //     }
+    // }
+    // std::shared_ptr<ThorImplementation::Parameterizable> getPhysicalParameterizableFromApiParameterizable(uint64_t apiParameterizableId)
+    // {
+    //     auto it = apiParameterizableToPhysicalParameterizable.find(apiParameterizableId);
+    //     assert(it != apiParameterizableToPhysicalParameterizable.end());
+    //     return it->second;
+    // }
+    // std::shared_ptr<ThorImplementation::Parameterizable> getPhysicalParameterizableFromApiParameterizable(
+    //     std::shared_ptr<Thor::Layer> apiParameterizable) {
+    //     assert(apiParameterizable != nullptr);
+    //     uint64_t apiParameterizableId = apiParameterizable->getId();
+    //     return getPhysicalParameterizableFromApiParameterizable(apiParameterizableId);
+    // }
 
 #if defined(THOR_GTEST) || defined(__JETBRAINS_IDE__)
     std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> getApiLayerToPhysicalLayer() { return apiLayerToPhysicalLayerShared; }
