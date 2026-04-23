@@ -7,11 +7,13 @@ namespace ThorImplementation {
 
 Parameter::Parameter(string name, bool trainable) : name(name), trainable(trainable) { assert(!name.empty()); }
 
-void Parameter::compileStorageAndOptimizer(const Tensor& inputTensor, const Optional<Stream>& gradientUpdateStream, bool inferenceOnly) {
+void Parameter::compileStorageAndOptimizer(const StorageContext& context,
+                                           const Optional<Stream>& gradientUpdateStream,
+                                           bool inferenceOnly) {
     this->gradientUpdateStream = gradientUpdateStream;
     trainingEnabled = !inferenceOnly;
 
-    createStorage(inputTensor);
+    createStorage(context);
 
     if (isTrainable() && !inferenceOnly) {
         assert(hasOptimizer());
@@ -19,6 +21,10 @@ void Parameter::compileStorageAndOptimizer(const Tensor& inputTensor, const Opti
         optimizer->compile(storage, gradientUpdateStream.get());
     }
     storageInitialized = true;
+}
+
+void Parameter::compileStorageAndOptimizer(const Tensor& inputTensor, const Optional<Stream>& gradientUpdateStream, bool inferenceOnly) {
+    compileStorageAndOptimizer(StorageContext(inputTensor), gradientUpdateStream, inferenceOnly);
 }
 
 void Parameter::compileInitializer(uint64_t fanIn, uint64_t fanOut) {
@@ -41,11 +47,12 @@ Event Parameter::initialize() {
     return initReadyEvent;
 }
 
-void Parameter::applyGradient(uint32_t batchSize) {
-    if (isTrainingEnabled())
-        return;
+bool Parameter::applyGradient(uint32_t batchSize) {
+    if (!isTrainingEnabled())
+        return false;
     assert(optimizer != nullptr);
-    optimizer.get()->updateWeights(batchSize);
+    optimizer->updateWeights(batchSize);
+    return true;
 }
 
 bool Parameter::hasOptimizer() { return optimizer != nullptr; }

@@ -203,16 +203,11 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
                 // Update weights
                 // gradientIn is accumulated, for each weights vector, on its gradient stream.
                 // each weights vector is updated on its gradient stream
-                bool anyTrainingEnabled = false;
+                bool anyWeightsUpdated = false;
                 for (const auto &parameter : parameters) {
-                    if (!parameter->isTrainingEnabled())
-                        continue;
-                    anyTrainingEnabled = true;
-                    const std::shared_ptr<Optimizer> &optimizer = parameter->getOptimizer();
-                    assert(optimizer != nullptr);  // Training is enabled so it needs to have an optimizer.
-                    optimizer->updateWeights(batchSize);
+                    anyWeightsUpdated |= parameter->applyGradient(batchSize);
                 }
-                if (anyTrainingEnabled) {
+                if (anyWeightsUpdated) {
                     weightsAreUpToDateEvent = gradientUpdateStream.get().putEvent();
                 }
             }
@@ -261,6 +256,20 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     Optional<Stream> getGradientUpdateStream() const { return gradientUpdateStream; }
 
    protected:
+    virtual Parameter::StorageContext buildParameterStorageContext() const {
+        Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
+        assert(aFeatureInput.isPresent());
+
+        std::vector<Tensor> connectedFeatureInputs;
+        connectedFeatureInputs.reserve(featureInputs.size());
+        for (const auto &featureInput : featureInputs) {
+            if (featureInput.isPresent())
+                connectedFeatureInputs.push_back(featureInput.get());
+        }
+
+        return Parameter::StorageContext(aFeatureInput.get(), std::move(connectedFeatureInputs));
+    }
+
     void attachGradientUpdateStream() {
         if (gradientUpdateStream.isPresent())
             return;
