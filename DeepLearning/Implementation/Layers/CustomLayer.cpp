@@ -1,10 +1,15 @@
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 
+#include <set>
 #include <stdexcept>
 
 using namespace std;
 
 namespace ThorImplementation {
+
+namespace {
+std::set<std::string> toNameSet(const std::vector<std::string>& names) { return std::set<std::string>(names.begin(), names.end()); }
+}  // namespace
 
 CustomLayer::CustomLayer(DynamicExpression expr,
                          const TensorPlacement& placement,
@@ -12,93 +17,181 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          bool inferenceOnly,
                          int64_t stampedId,
                          bool useFastMath)
-    : TrainableLayer(placement, inferenceOnly, stampedId), layerDefinitionExpression(std::move(expr)), useFastMath(useFastMath) {
-    inputName = "feature_input";
+    : CustomLayer(std::move(expr),
+                  std::vector<std::string>{"feature_input"},
+                  std::vector<std::string>{"feature_output"},
+                  placement,
+                  parameters,
+                  inferenceOnly,
+                  stampedId,
+                  useFastMath) {}
 
-    if (inputName.empty())
-        throw runtime_error("Custom layer input sent empty name");
+CustomLayer::CustomLayer(DynamicExpression expr,
+                         std::vector<std::string> inputNames,
+                         std::vector<std::string> outputNames,
+                         const TensorPlacement& placement,
+                         const std::vector<std::shared_ptr<Parameter>>& parameters,
+                         bool inferenceOnly,
+                         int64_t stampedId,
+                         bool useFastMath)
+    : TrainableLayer(placement, inferenceOnly, stampedId),
+      layerDefinitionExpression(std::move(expr)),
+      inputNames(std::move(inputNames)),
+      outputNames(std::move(outputNames)),
+      useFastMath(useFastMath) {
+    validatePortNames(this->inputNames, "input");
+    validatePortNames(this->outputNames, "output");
 
-    if (inputName.length() >= 2 && inputName[0] == '_' && inputName[1] == '_')
-        throw runtime_error("Custom layer input names cannot start with __ that is reserved. Input name " + inputName + " is illegal.");
+    for (uint32_t i = 0; i < this->inputNames.size(); ++i) {
+        const auto [it, inserted] = inputNameToPort.emplace(this->inputNames[i], i);
+        if (!inserted) {
+            throw runtime_error("Duplicate CustomLayer input name: " + this->inputNames[i]);
+        }
+    }
+
+    for (uint32_t i = 0; i < this->outputNames.size(); ++i) {
+        const auto [it, inserted] = outputNameToPort.emplace(this->outputNames[i], i);
+        if (!inserted) {
+            throw runtime_error("Duplicate CustomLayer output name: " + this->outputNames[i]);
+        }
+    }
 
     for (const auto& param : parameters) {
         const string& paramName = param->getName();
         if (paramName.empty())
-            throw runtime_error("Custom layer parameter name cannot be empty.");
+            throw runtime_error("CustomLayer parameter name cannot be empty.");
 
-        if (paramName.length() >= 2 && paramName[0] == '_' && paramName[1] == '_')
-            throw runtime_error("Custom layer parameter names cannot start with __ that is reserved. Parameter name " + paramName +
+        if (paramName.length() >= 2 && paramName[0] == '_' && paramName[1] == '_') {
+            throw runtime_error("CustomLayer parameter names cannot start with __ that is reserved. Parameter name " + paramName +
                                 " is illegal.");
+        }
 
-        addParameter(param);  // verifies name uniqueness
+        if (inputNameToPort.contains(paramName)) {
+            throw runtime_error("CustomLayer parameter name collides with an input port name: " + paramName);
+        }
+
+        addParameter(param);  // verifies parameter name uniqueness
     }
+
+    ensurePortStorageAllocated();
     attachGradientUpdateStream();
 }
 
-void CustomLayer::compileImpl() {
-    TrainableLayer::compileImpl();
-
-    assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-
-    forwardInputsByConnection.clear();
-    forwardPreparedByConnection.clear();
-    forwardStampedByConnection.clear();
-
-    backwardErrorStampedByConnection.clear();
-    backwardWeightsClearStampedByConnection.clear();
-    backwardWeightsAccumulateStampedByConnection.clear();
-    backwardOutputsByConnection.clear();
-
-    // A bias-only layer may have no feature input.
-    Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
-    // A CustomLayer with no featureOutput would just waste computation, and doesn't make sense.
-    Optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureOutputs);
-    assert(aFeatureOutput.isPresent());
-
-    for (const auto& parameter : parameters) {
-        if (!parameter->isTrainable())
-            continue;
-        assert(gradientUpdateStream.isPresent());
+void CustomLayer::validatePortNames(const std::vector<std::string>& names, const std::string& what) {
+    if (names.empty()) {
+        throw runtime_error("CustomLayer requires at least one " + what + " port.");
     }
 
-    // Forward stamps: require both input and output tensors for the connection.
-    const uint32_t numForwardConnections = static_cast<uint32_t>(featureInputs.size());
-    for (uint32_t connectionNumber = 0; connectionNumber < numForwardConnections; ++connectionNumber) {
-        if (featureInputs[connectionNumber].isPresent() && featureOutputs.size() > connectionNumber &&
-            featureOutputs[connectionNumber].isPresent()) {
-            stampForward(connectionNumber);
+    std::set<std::string> seen;
+    for (const std::string& name : names) {
+        if (name.empty()) {
+            throw runtime_error("CustomLayer " + what + " port name cannot be empty.");
         }
-    }
-
-    if (isInferenceOnly() || isBackPropStub()) {
-        return;
-    }
-
-    // Backward stamps: stamp for every connection that has a feature input and either
-    // an incoming error or an outgoing error tensor. stampBackward() already handles
-    // empty errorInput/errorOutput cases appropriately.
-    const uint32_t numBackwardConnections = static_cast<uint32_t>(featureInputs.size());
-    for (uint32_t connectionNumber = 0; connectionNumber < numBackwardConnections; ++connectionNumber) {
-        if (!featureInputs[connectionNumber].isPresent()) {
-            continue;
+        if (name.length() >= 2 && name[0] == '_' && name[1] == '_') {
+            throw runtime_error("CustomLayer " + what + " port names cannot start with __ that is reserved. Name " + name + " is illegal.");
         }
-
-        const bool hasErrorInput = errorInputs.size() > connectionNumber && errorInputs[connectionNumber].isPresent();
-        const bool hasErrorOutput = errorOutputs.size() > connectionNumber && errorOutputs[connectionNumber].isPresent();
-
-        if (hasErrorInput || hasErrorOutput) {
-            stampBackward(connectionNumber);
+        if (!seen.insert(name).second) {
+            throw runtime_error("Duplicate CustomLayer " + what + " port name: " + name);
         }
     }
 }
 
-std::unordered_map<std::string, Tensor> CustomLayer::buildForwardInputs(const Tensor& dataIn) {
-    std::unordered_map<std::string, Tensor> inputs;
-    inputs[inputName] = dataIn;
+uint32_t CustomLayer::primaryInputPort() const {
+    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+        if (featureInputs[i].isPresent()) {
+            return i;
+        }
+    }
+    throw runtime_error("CustomLayer requires at least one connected input port before execution.");
+}
 
+Stream& CustomLayer::computeStream() {
+    const uint32_t port = primaryInputPort();
+    assert(port < streams.size());
+    return streams[port];
+}
+
+const Stream& CustomLayer::computeStream() const {
+    const uint32_t port = primaryInputPort();
+    assert(port < streams.size());
+    return streams[port];
+}
+
+void CustomLayer::ensurePortStorageAllocated() {
+    featureInputs.resize(inputNames.size(), Optional<Tensor>::empty());
+    errorOutputs.resize(inputNames.size(), Optional<Tensor>::empty());
+    previousLayers.resize(inputNames.size(), Optional<Layer*>::empty());
+    streams.resize(inputNames.size());
+
+    featureOutputs.resize(outputNames.size(), Optional<Tensor>::empty());
+    errorInputs.resize(outputNames.size(), Optional<Tensor>::empty());
+    nextLayers.resize(outputNames.size(), Optional<Layer*>::empty());
+
+    featureInputsConnectedForPorts.resize(inputNames.size(), Optional<Tensor>::empty());
+    errorOutputsConnectedForPorts.resize(inputNames.size(), Optional<Tensor>::empty());
+    featureOutputsConnectedForPorts.resize(outputNames.size(), Optional<Tensor>::empty());
+    errorInputsConnectedForPorts.resize(outputNames.size(), Optional<Tensor>::empty());
+}
+
+void CustomLayer::clearForwardArrivalBookkeeping() {
+    allForwardInputTensorIds.clear();
+    stillWaitingForForwardInputTensorIds.clear();
+    for (const auto& input : featureInputs) {
+        if (input.isPresent()) {
+            allForwardInputTensorIds.insert(input.get().getTensorId());
+        }
+    }
+    stillWaitingForForwardInputTensorIds = allForwardInputTensorIds;
+}
+
+void CustomLayer::clearBackwardArrivalBookkeeping() {
+    allBackwardErrorInputTensorIds.clear();
+    stillWaitingForBackwardErrorInputTensorIds.clear();
+    for (const auto& errorInput : errorInputs) {
+        if (errorInput.isPresent()) {
+            allBackwardErrorInputTensorIds.insert(errorInput.get().getTensorId());
+        }
+    }
+    stillWaitingForBackwardErrorInputTensorIds = allBackwardErrorInputTensorIds;
+}
+
+void CustomLayer::initialize() {
+    TrainableLayer::initialize();
+    clearForwardArrivalBookkeeping();
+    clearBackwardArrivalBookkeeping();
+}
+
+Parameter::StorageContext CustomLayer::buildParameterStorageContext() const {
+    std::vector<Tensor> connectedFeatureInputs;
+    connectedFeatureInputs.reserve(inputNames.size());
+    std::unordered_map<std::string, Tensor> namedFeatureInputs;
+
+    for (uint32_t i = 0; i < inputNames.size(); ++i) {
+        if (featureInputs[i].isEmpty()) {
+            throw runtime_error("CustomLayer missing connected feature input for port '" + inputNames[i] + "'.");
+        }
+        connectedFeatureInputs.push_back(featureInputs[i].get());
+        namedFeatureInputs.emplace(inputNames[i], featureInputs[i].get());
+    }
+
+    return Parameter::StorageContext(
+        featureInputs[primaryInputPort()].get(), std::move(connectedFeatureInputs), std::move(namedFeatureInputs));
+}
+
+PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs() {
+    PreparedDynamicExpression::TensorMap inputs;
+
+    for (uint32_t i = 0; i < inputNames.size(); ++i) {
+        if (featureInputs[i].isEmpty()) {
+            throw runtime_error("CustomLayer missing connected feature input for port '" + inputNames[i] + "'.");
+        }
+        inputs[inputNames[i]] = featureInputs[i].get();
+    }
+
+    const Parameter::StorageContext parameterStorageContext = buildParameterStorageContext();
     for (const auto& param : parameters) {
         if (!param->isStorageInitialized()) {
-            param->compileStorageAndOptimizer(dataIn, gradientUpdateStream, isInferenceOnly());
+            param->compileStorageAndOptimizer(parameterStorageContext, gradientUpdateStream, isInferenceOnly());
         }
 
         Optional<Tensor> paramStorage = param->getStorage();
@@ -109,313 +202,57 @@ std::unordered_map<std::string, Tensor> CustomLayer::buildForwardInputs(const Te
     return inputs;
 }
 
-// When connection number is set to UINT32_MAX, discard the stamp but return the output tensor.
-Optional<Tensor> CustomLayer::stampForward(uint32_t connectionNumber) {
-    Optional<Tensor> featureInput;
-    Optional<Tensor> featureOutput;
-    Stream stream;
-
-    PreparedDynamicExpression::TensorMap forwardOutputs;
-    if (connectionNumber == UINT32_MAX) {
-        featureInput = getFirstPresentTensor(featureInputs);
-        assert(featureInput.isPresent());
-        assert(!streams.empty());
-        stream = streams[0];
-    } else {
-        assert(connectionNumber == forwardInputsByConnection.size());
-        assert(connectionNumber == forwardPreparedByConnection.size());
-        assert(connectionNumber == forwardStampedByConnection.size());
-        assert(featureInputs[connectionNumber].isPresent());
-        assert(featureOutputs[connectionNumber].isPresent());
-
-        featureInput = featureInputs[connectionNumber];
-        featureOutput = featureOutputs[connectionNumber];
-        forwardOutputs[featureOutName] = featureOutput;
-        stream = streams[connectionNumber];
-    }
-
-    if (featureOutput.isPresent()) {
-        forwardInputsByConnection.push_back(buildForwardInputs(featureInput.get()));
-
-        forwardPreparedByConnection.push_back(std::make_shared<PreparedDynamicExpression>(
-            layerDefinitionExpression.prepare(forwardInputsByConnection.back(), forwardOutputs, stream)));
-
-        std::unordered_set<std::string> parameterNames;
-        for (const auto& parameter : parameters) {
-            parameterNames.insert(parameter->getName());
+PreparedDynamicExpression::TensorMap CustomLayer::buildForwardOutputs() const {
+    PreparedDynamicExpression::TensorMap outputs;
+    for (uint32_t i = 0; i < outputNames.size(); ++i) {
+        if (featureOutputs[i].isPresent()) {
+            outputs[outputNames[i]] = featureOutputs[i].get();
         }
-        const auto parameterFanOverrides = forwardPreparedByConnection.front()->getParameterFanOverrides(parameterNames);
-
-        const auto outputDims = featureOutput.get().getDescriptor().getDimensions();
-        for (const auto& parameter : parameters) {
-            auto it = parameterFanOverrides.find(parameter->getName());
-            if (it != parameterFanOverrides.end()) {
-                parameter->compileInitializer(it->second.fan_in, it->second.fan_out);
-            } else {
-                parameter->compileInitializer();
-            }
-        }
-
-        std::unordered_map<std::string, Tensor> forwardPreallocatedOutputs;
-        forwardPreallocatedOutputs[featureOutName] = featureOutput.get();
-
-        forwardStampedByConnection.push_back(
-            std::make_shared<StampedExecutionPlan>(forwardPreparedByConnection.back()->stamp(forwardPreallocatedOutputs)));
-
-        validatePreparedExpressionInputs(*forwardPreparedByConnection.back());
-
-        return Optional<Tensor>::empty();
-    } else {
-        std::unordered_map<std::string, Tensor> forwardInputs = buildForwardInputs(featureInput.get());
-        PreparedDynamicExpression forwardPrepared = layerDefinitionExpression.prepare(forwardInputs, forwardOutputs, stream);
-        validatePreparedExpressionInputs(forwardPrepared);
-        StampedExecutionPlan forwardStamped = forwardPrepared.stamp();
-        return forwardStamped.output(featureOutName);
     }
+    return outputs;
 }
 
-Optional<Tensor> CustomLayer::stampBackward(uint32_t connectionNumber) {
-    if (isInferenceOnly() || isBackPropStub()) {
-        return Optional<Tensor>::empty();
-    }
-
-    Optional<Tensor> errorInput;
-    PreparedDynamicExpression* preparedBackwardSource = nullptr;
-    std::optional<PreparedDynamicExpression> transientPrepared;
-
-    PreparedDynamicExpression::TensorMap forwardOutputs;
-    Optional<Tensor> featureOutput = featureOutputs[connectionNumber];
-    assert(featureOutput.isPresent());
-    forwardOutputs[featureOutName] = featureOutput;
-
-    assert(featureInputs.size() > connectionNumber);
-    assert(featureInputs[connectionNumber].isPresent());
-    assert(errorInputs.size() > connectionNumber);
-    assert(connectionNumber < streams.size());
-    assert(connectionNumber < forwardPreparedByConnection.size());
-    assert(forwardPreparedByConnection[connectionNumber] != nullptr);
-
-    errorInput = errorInputs[connectionNumber];
-    preparedBackwardSource = forwardPreparedByConnection[connectionNumber].get();
-
-    Optional<Tensor> errorOutput;
-    if (errorOutputs.size() > connectionNumber) {
-        errorOutput = errorOutputs[connectionNumber];
-    }
-
-    std::vector<std::string> errorTargets = {inputName};
-
-    std::vector<std::string> parameterTargets;
-    for (const auto& param : parameters) {
-        if (param->isTrainable()) {
-            parameterTargets.push_back(param->getName());
-        }
-    }
-
-    std::unordered_map<std::string, std::string> upstreamInputNamesByOutput;
-    upstreamInputNamesByOutput[featureOutName] = errorInName;
-
-    PreparedDynamicExpression* preparedWeightsBackwardSource = preparedBackwardSource;
-    std::optional<PreparedDynamicExpression> gradientPreparedBackwardSource;
-    if (!parameterTargets.empty()) {
-        assert(gradientUpdateStream.isPresent());
-        gradientPreparedBackwardSource.emplace(
-            layerDefinitionExpression.prepare(forwardInputsByConnection[connectionNumber], forwardOutputs, gradientUpdateStream.get()));
-        validatePreparedExpressionInputs(*gradientPreparedBackwardSource);
-        preparedWeightsBackwardSource = &gradientPreparedBackwardSource.value();
-    }
-
+PreparedDynamicExpression::TensorMap CustomLayer::buildBackwardAdditionalInputs() const {
     PreparedDynamicExpression::TensorMap backwardAdditionalInputs;
-    if (errorInput.isPresent()) {
-        backwardAdditionalInputs[errorInName] = errorInput.get();
-    }
-
-    if (connectionNumber >= backwardErrorStampedByConnection.size()) {
-        backwardErrorStampedByConnection.resize(connectionNumber + 1);
-        backwardWeightsClearStampedByConnection.resize(connectionNumber + 1);
-        backwardWeightsAccumulateStampedByConnection.resize(connectionNumber + 1);
-        backwardOutputsByConnection.resize(connectionNumber + 1);
-    }
-
-    auto& backwardOutputs = backwardOutputsByConnection[connectionNumber];
-    backwardOutputs.clear();
-
-    // 1. Separate error-output backward stamp on the regular data stream.
-    if (errorInput.isPresent() && errorOutput.isPresent()) {
-        PreparedDynamicExpression::TensorMap backwardErrorPreallocatedOutputs;
-        backwardErrorPreallocatedOutputs[errorOutName()] = errorOutput.get();
-
-        backwardErrorStampedByConnection[connectionNumber] =
-            std::make_shared<StampedExecutionPlan>(preparedBackwardSource->stampBackward(std::vector<std::string>{inputName},
-                                                                                         upstreamInputNamesByOutput,
-                                                                                         /*accumulate_grad_outputs=*/false,
-                                                                                         backwardAdditionalInputs,
-                                                                                         {},
-                                                                                         backwardErrorPreallocatedOutputs));
-    } else {
-        if (errorOutput.isPresent()) {
-            errorOutput.get().memsetAsync(streams[connectionNumber], 0);
+    for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
+        if (errorInputs[outputPort].isPresent()) {
+            backwardAdditionalInputs[errorInputNameForOutput(outputPort)] = errorInputs[outputPort].get();
         }
-        backwardErrorStampedByConnection[connectionNumber] = nullptr;
     }
+    return backwardAdditionalInputs;
+}
 
-    // 2/3. Separate parameter-gradient backward stamps on the gradient-update stream:
-    //      - clear-first / overwrite existing gradient buffers
-    //      - accumulate / add into existing gradient buffers
-    PreparedDynamicExpression::TensorMap backwardParameterPreallocatedOutputs;
-    for (auto& parameter : parameters) {
-        if (!parameter->isTrainable()) {
-            continue;
+PreparedDynamicExpression::TensorMap CustomLayer::buildBackwardInputGradOutputs() const {
+    PreparedDynamicExpression::TensorMap outputs;
+    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+        if (errorOutputs[inputPort].isPresent()) {
+            outputs[errorOutputNameForInput(inputPort)] = errorOutputs[inputPort].get();
         }
-
-        assert(parameter->hasOptimizer());
-        shared_ptr<Optimizer> parameterOptimizer = parameter->getOptimizer();
-        assert(parameterOptimizer != nullptr);
-        assert(parameterOptimizer->getWeightsGradient().isPresent());
-
-        const std::string gradName = parameter->getName() + "_grad";
-        backwardParameterPreallocatedOutputs[gradName] = parameterOptimizer->getWeightsGradient().get();
-        backwardOutputs[gradName] = parameterOptimizer->getWeightsGradient().get();
     }
-
-    if (!parameterTargets.empty() && errorInput.isPresent()) {
-        backwardWeightsClearStampedByConnection[connectionNumber] =
-            std::make_shared<StampedExecutionPlan>(preparedWeightsBackwardSource->stampBackward(parameterTargets,
-                                                                                                upstreamInputNamesByOutput,
-                                                                                                /*accumulate_grad_outputs=*/false,
-                                                                                                backwardAdditionalInputs,
-                                                                                                {},
-                                                                                                backwardParameterPreallocatedOutputs));
-
-        backwardWeightsAccumulateStampedByConnection[connectionNumber] =
-            std::make_shared<StampedExecutionPlan>(preparedWeightsBackwardSource->stampBackward(parameterTargets,
-                                                                                                upstreamInputNamesByOutput,
-                                                                                                /*accumulate_grad_outputs=*/true,
-                                                                                                backwardAdditionalInputs,
-                                                                                                {},
-                                                                                                backwardOutputs));
-    } else {
-        backwardWeightsClearStampedByConnection[connectionNumber] = nullptr;
-        backwardWeightsAccumulateStampedByConnection[connectionNumber] = nullptr;
-    }
-
-    return Optional<Tensor>::empty();
+    return outputs;
 }
 
-// Note: A featureInput is guaranteed to be connected before createFeatureOutputTensor() is called.
-Optional<Tensor> CustomLayer::createFeatureOutputTensor() {
-    assert(!featureInputs.empty());
-    Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
-    assert(aFeatureInput.isPresent());
-
-    Optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureOutputs);
-    if (aFeatureOutput.isPresent()) {
-        return aFeatureOutput.get().clone();
-    } else {
-        Optional<Tensor> featureOutput = stampForward(UINT32_MAX);
-        assert(featureOutput.isPresent());
-        return featureOutput;
-    }
+std::string CustomLayer::errorInputNameForOutput(uint32_t outputPortIndex) const {
+    assert(outputPortIndex < outputNames.size());
+    return "__grad_" + outputNames[outputPortIndex];
 }
 
-Optional<Tensor> CustomLayer::createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) {
-    if (!backPropagateError || isInferenceOnly()) {
-        return Optional<Tensor>::empty();
-    }
-
-    assert(featureInputs.size() > connectionNumber);
-    assert(featureInputs[connectionNumber].isPresent());
-    return featureInputs[connectionNumber].get().clone();
-}
-
-void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {
-    if (featureOutputs.empty())
-        throw runtime_error("CustomLayer::infer requires an output tensor.");
-    if (featureOutputs[connectionNumber].isEmpty())
-        throw runtime_error("CustomLayer::infer requires a present output tensor.");
-
-    if (featureInputs.empty())
-        throw runtime_error("CustomLayer::infer requires an input tensor.");
-    if (featureInputs[connectionNumber].isEmpty())
-        throw runtime_error("CustomLayer::infer requires a present input tensor.");
-
-    assert(connectionNumber < forwardStampedByConnection.size());
-    assert(forwardStampedByConnection[connectionNumber] != nullptr);
-
-    forwardStampedByConnection[connectionNumber]->run();
-}
-
-// Error-output backward work runs on the data stream.
-Optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
-    assert(connectionNumber < errorInputs.size());
-    // Custom layer currently never fuses wGrad and eOutGrad
-    // FIXME: As an optimization later, when there is just 1 stage, then fuse them.
-    // Then will need two fused equations, one that clears gradient one that accumulates.
-    // In both cases, the error out gradient would need to be cleared, not accumulated.
-    // assert(!wGradFusedWithEOutGrad);
-
-    if (errorInputs[connectionNumber].isEmpty()) {
-        // No incoming gradient, potentially a StopGradientLayer was put there.
-        // In that case there is no backward work to run for this connection.
-        return Optional<Event>::empty();
-    }
-
-    // If for some reason we do not have the stamp for this backward connection,
-    // then the contract is that it was decided that this backward connection is a no-op.
-    if (connectionNumber >= backwardErrorStampedByConnection.size()) {
-        return Optional<Event>::empty();
-    }
-    if (backwardErrorStampedByConnection[connectionNumber] == nullptr) {
-        return Optional<Event>::empty();
-    }
-
-    // Run the error-output backward stamp on the regular data stream.
-    backwardErrorStampedByConnection[connectionNumber]->run();
-    assert(connectionNumber < streams.size());
-    return streams[connectionNumber].putEvent();
-}
-
-// Gradient update stream synchronization is handled by TrainableLayer::backward().
-void CustomLayer::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
-    assert(connectionNumber < errorInputs.size());
-    if (errorInputs[connectionNumber].isEmpty()) {
-        // No incoming gradient, potentially a StopGradientLayer was put there.
-        // So there is no gradient work to be done for this connection.
-        return;
-    }
-
-    assert(gradientUpdateStream.isPresent());
-
-    if (clearGradientFirst) {
-        if (connectionNumber >= backwardWeightsClearStampedByConnection.size()) {
-            return;
-        }
-        if (backwardWeightsClearStampedByConnection[connectionNumber] == nullptr) {
-            return;
-        }
-        backwardWeightsClearStampedByConnection[connectionNumber]->run();
-        return;
-    }
-
-    if (connectionNumber >= backwardWeightsAccumulateStampedByConnection.size()) {
-        return;
-    }
-    if (backwardWeightsAccumulateStampedByConnection[connectionNumber] == nullptr) {
-        return;
-    }
-
-    backwardWeightsAccumulateStampedByConnection[connectionNumber]->run();
+std::string CustomLayer::errorOutputNameForInput(uint32_t inputPortIndex) const {
+    assert(inputPortIndex < inputNames.size());
+    return inputNames[inputPortIndex] + "_grad";
 }
 
 void CustomLayer::validatePreparedExpressionInputs(const PreparedDynamicExpression& prepared) {
     std::set<std::string> expectedInputNames;
-    expectedInputNames.insert(inputName);
+    for (const auto& name : inputNames) {
+        expectedInputNames.insert(name);
+    }
     for (const auto& param : parameters) {
         expectedInputNames.insert(param->getName());
     }
 
     std::set<std::string> actualInputNames;
-    for (const auto& name : prepared.stampInputs() | views::keys) {
+    for (const auto& [name, _] : prepared.stampInputs()) {
         actualInputNames.insert(name);
     }
 
@@ -433,31 +270,457 @@ void CustomLayer::validatePreparedExpressionInputs(const PreparedDynamicExpressi
     }
 }
 
-uint64_t CustomLayer::flopCountForward() {
-    uint64_t flops = 0;
-    for (const auto& stamped : forwardStampedByConnection) {
-        if (stamped != nullptr) {
-            flops += stamped->flopCount();
+void CustomLayer::validateStampedOutputNames(const StampedExecutionPlan& stamped,
+                                             const std::vector<std::string>& expectedNames,
+                                             const char* phase) {
+    const std::set<std::string> actualNames = toNameSet(stamped.outputNames());
+    const std::set<std::string> expectedNameSet = toNameSet(expectedNames);
+    if (actualNames != expectedNameSet) {
+        std::string expected;
+        for (const auto& name : expectedNameSet)
+            expected += name + " ";
+
+        std::string actual;
+        for (const auto& name : actualNames)
+            actual += name + " ";
+
+        throw runtime_error(std::string("CustomLayer ") + phase + " output mismatch. Expected outputs: " + expected +
+                            " Actual outputs: " + actual);
+    }
+}
+
+Optional<Tensor> CustomLayer::inferFeatureOutputTensor(uint32_t outputPortIndex) {
+    if (outputPortIndex >= outputNames.size()) {
+        throw runtime_error("CustomLayer output port index out of range.");
+    }
+
+    PreparedDynamicExpression::TensorMap discoveredOutputs;
+    PreparedDynamicExpression prepared = layerDefinitionExpression.prepare(buildForwardInputs(), discoveredOutputs, computeStream());
+    validatePreparedExpressionInputs(prepared);
+    StampedExecutionPlan stamped = prepared.stamp();
+    return stamped.output(outputNames[outputPortIndex]);
+}
+
+void CustomLayer::compileImpl() {
+    TrainableLayer::compileImpl();
+
+    assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    ensurePortStorageAllocated();
+    clearForwardArrivalBookkeeping();
+    clearBackwardArrivalBookkeeping();
+
+    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+        if (featureInputs[inputPort].isEmpty()) {
+            throw runtime_error("CustomLayer missing connected input port '" + inputNames[inputPort] + "'.");
         }
+    }
+
+    for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
+        if (featureOutputs[outputPort].isEmpty()) {
+            throw runtime_error("CustomLayer missing connected output port '" + outputNames[outputPort] + "'.");
+        }
+    }
+
+    forwardInputsByName = buildForwardInputs();
+    forwardOutputsByName = buildForwardOutputs();
+
+    forwardPrepared = std::make_shared<PreparedDynamicExpression>(
+        layerDefinitionExpression.prepare(forwardInputsByName, forwardOutputsByName, computeStream()));
+    validatePreparedExpressionInputs(*forwardPrepared);
+
+    std::unordered_set<std::string> parameterNames;
+    for (const auto& parameter : parameters) {
+        parameterNames.insert(parameter->getName());
+    }
+    const auto parameterFanOverrides = forwardPrepared->getParameterFanOverrides(parameterNames);
+    for (const auto& parameter : parameters) {
+        auto it = parameterFanOverrides.find(parameter->getName());
+        if (it != parameterFanOverrides.end()) {
+            parameter->compileInitializer(it->second.fan_in, it->second.fan_out);
+        } else {
+            parameter->compileInitializer();
+        }
+    }
+
+    forwardStamped = std::make_shared<StampedExecutionPlan>(forwardPrepared->stamp(forwardOutputsByName));
+    validateStampedOutputNames(*forwardStamped, outputNames, "forward");
+
+    backwardErrorStamped = nullptr;
+    backwardWeightsClearStamped = nullptr;
+    backwardWeightsAccumulateStamped = nullptr;
+    backwardAdditionalInputsByName.clear();
+    backwardInputGradOutputsByName.clear();
+
+    if (isInferenceOnly() || isBackPropStub()) {
+        return;
+    }
+
+    backwardAdditionalInputsByName = buildBackwardAdditionalInputs();
+    backwardInputGradOutputsByName = buildBackwardInputGradOutputs();
+
+    std::unordered_map<std::string, std::string> upstreamInputNamesByOutput;
+    for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
+        if (errorInputs[outputPort].isPresent()) {
+            upstreamInputNamesByOutput[outputNames[outputPort]] = errorInputNameForOutput(outputPort);
+        }
+    }
+
+    std::vector<std::string> inputTargets;
+    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+        if (errorOutputs[inputPort].isPresent()) {
+            inputTargets.push_back(inputNames[inputPort]);
+        }
+    }
+
+    if (!inputTargets.empty() && !backwardAdditionalInputsByName.empty()) {
+        backwardErrorStamped = std::make_shared<StampedExecutionPlan>(forwardPrepared->stampBackward(
+            inputTargets, upstreamInputNamesByOutput, false, backwardAdditionalInputsByName, {}, backwardInputGradOutputsByName));
+    }
+
+    std::vector<std::string> parameterTargets;
+    PreparedDynamicExpression::TensorMap backwardParameterPreallocatedOutputs;
+    for (auto& parameter : parameters) {
+        if (!parameter->isTrainable()) {
+            continue;
+        }
+
+        assert(parameter->hasOptimizer());
+        const shared_ptr<Optimizer>& parameterOptimizer = parameter->getOptimizer();
+        assert(parameterOptimizer != nullptr);
+        assert(parameterOptimizer->getWeightsGradient().isPresent());
+
+        const std::string gradName = parameter->getName() + "_grad";
+        parameterTargets.push_back(parameter->getName());
+        backwardParameterPreallocatedOutputs[gradName] = parameterOptimizer->getWeightsGradient().get();
+    }
+
+    if (!parameterTargets.empty() && !backwardAdditionalInputsByName.empty()) {
+        assert(gradientUpdateStream.isPresent());
+
+        PreparedDynamicExpression gradientPrepared =
+            layerDefinitionExpression.prepare(forwardInputsByName, forwardOutputsByName, gradientUpdateStream.get());
+        validatePreparedExpressionInputs(gradientPrepared);
+
+        backwardWeightsClearStamped = std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(
+            parameterTargets, upstreamInputNamesByOutput, false, backwardAdditionalInputsByName, {}, backwardParameterPreallocatedOutputs));
+
+        backwardWeightsAccumulateStamped = std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(
+            parameterTargets, upstreamInputNamesByOutput, true, backwardAdditionalInputsByName, {}, backwardParameterPreallocatedOutputs));
+    }
+}
+
+Optional<Tensor> CustomLayer::createFeatureOutputTensor() {
+    if (outputNames.size() != 1) {
+        throw runtime_error("CustomLayer::createFeatureOutputTensor() without a connection type is only valid for single-output layers.");
+    }
+    Optional<Tensor> featureOutput = inferFeatureOutputTensor(0);
+    assert(featureOutput.isPresent());
+    return featureOutput;
+}
+
+Optional<Tensor> CustomLayer::createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) {
+    if (!backPropagateError || isInferenceOnly()) {
+        return Optional<Tensor>::empty();
+    }
+
+    assert(connectionNumber < featureInputs.size());
+    assert(featureInputs[connectionNumber].isPresent());
+    return featureInputs[connectionNumber].get().clone();
+}
+
+Optional<Tensor> CustomLayer::connectToPreviousLayer(
+    Layer* previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) {
+    assert(!compiled);
+    ensurePortStorageAllocated();
+
+    if (connectionType < 0 || static_cast<size_t>(connectionType) >= inputNames.size()) {
+        throw runtime_error("CustomLayer input connection type out of range.");
+    }
+    const uint32_t inputPort = static_cast<uint32_t>(connectionType);
+
+    assert(featureInput.isPresent());
+    assert(previousLayers[inputPort].isEmpty());
+    assert(featureInputs[inputPort].isEmpty());
+    assert(errorOutputs[inputPort].isEmpty());
+
+    previousLayers[inputPort] = previousLayer;
+    featureInputs[inputPort] = featureInput;
+    featureInputsConnectedForPorts[inputPort] = featureInput;
+    streams[inputPort] = stream;
+    errorOutputs[inputPort] = createErrorOutputTensor(backPropagateError, inputPort);
+    errorOutputsConnectedForPorts[inputPort] = errorOutputs[inputPort];
+
+    ensureNoDeviceCrossing(placement);
+    return errorOutputs[inputPort];
+}
+
+void CustomLayer::connectToNextLayer(Layer* nextLayer, int driverConnectionType, int loaderConnectionType) {
+    assert(!compiled);
+    ensurePortStorageAllocated();
+
+    if (driverConnectionType < 0 || static_cast<size_t>(driverConnectionType) >= outputNames.size()) {
+        throw runtime_error("CustomLayer output connection type out of range.");
+    }
+    const uint32_t outputPort = static_cast<uint32_t>(driverConnectionType);
+
+    if (featureOutputs[outputPort].isEmpty()) {
+        Optional<Tensor> outputTensor = inferFeatureOutputTensor(outputPort);
+        assert(outputTensor.isPresent());
+        featureOutputs[outputPort] = outputTensor;
+        featureOutputsConnectedForPorts[outputPort] = outputTensor;
+    }
+
+    nextLayers[outputPort] = nextLayer;
+    errorInputs[outputPort] = nextLayer->connectToPreviousLayer(
+        this, featureOutputs[outputPort], computeStream(), shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType);
+    errorInputsConnectedForPorts[outputPort] = errorInputs[outputPort];
+
+    // If there is no downstream backward path for any output port, clear all upstream error outputs.
+    bool anyDownstreamBackprop = false;
+    for (const auto& errorInput : errorInputs) {
+        if (errorInput.isPresent()) {
+            anyDownstreamBackprop = true;
+            break;
+        }
+    }
+
+    if (!anyDownstreamBackprop) {
+        for (uint32_t inputPort = 0; inputPort < errorOutputs.size(); ++inputPort) {
+            if (errorOutputs[inputPort].isPresent() && previousLayers[inputPort].isPresent()) {
+                previousLayers[inputPort].get()->replaceErrorInput(errorOutputs[inputPort], Optional<Tensor>::empty());
+                errorOutputs[inputPort].clear();
+                errorOutputsConnectedForPorts[inputPort].clear();
+            }
+        }
+    }
+
+    ensureNoDeviceCrossing(placement);
+}
+
+void CustomLayer::replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
+    assert(oldErrorInput.isPresent());
+
+    bool replacementHappened = false;
+    for (uint32_t outputPort = 0; outputPort < errorInputs.size(); ++outputPort) {
+        if (errorInputs[outputPort].isEmpty() || errorInputs[outputPort].get() != oldErrorInput.get()) {
+            continue;
+        }
+        errorInputs[outputPort] = newErrorInput;
+        errorInputsConnectedForPorts[outputPort] = newErrorInput;
+        replacementHappened = true;
+    }
+    assert(replacementHappened);
+
+    bool anyDownstreamBackprop = false;
+    for (const auto& errorInput : errorInputs) {
+        if (errorInput.isPresent()) {
+            anyDownstreamBackprop = true;
+            break;
+        }
+    }
+
+    if (!anyDownstreamBackprop) {
+        for (uint32_t inputPort = 0; inputPort < errorOutputs.size(); ++inputPort) {
+            if (errorOutputs[inputPort].isPresent()) {
+                if (previousLayers[inputPort].isPresent()) {
+                    previousLayers[inputPort].get()->replaceErrorInput(errorOutputs[inputPort], Optional<Tensor>::empty());
+                }
+                errorOutputs[inputPort].clear();
+                errorOutputsConnectedForPorts[inputPort].clear();
+            }
+        }
+    }
+
+    clearBackwardArrivalBookkeeping();
+}
+
+void CustomLayer::synchronizeComputeStreamForForwardInputs() {
+    Stream& runStream = computeStream();
+    const uint32_t runPort = primaryInputPort();
+    for (uint32_t inputPort = 0; inputPort < streams.size(); ++inputPort) {
+        if (inputPort == runPort || featureInputs[inputPort].isEmpty()) {
+            continue;
+        }
+        Event readyEvent = streams[inputPort].putEvent();
+        runStream.waitEvent(readyEvent);
+    }
+}
+
+void CustomLayer::forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize) {
+    assert(running);
+    assert(featureInput.isPresent());
+
+    uint32_t inputPort = inputNames.size();
+    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+        if (featureInputs[i].isPresent() && featureInputs[i].get() == featureInput.get()) {
+            inputPort = i;
+            break;
+        }
+    }
+    assert(inputPort != inputNames.size());
+
+    if (isStartOfForward) {
+        if (weightsAreUpToDateEvent.isPresent()) {
+            for (const Stream& dataStream : uniqueDataStreams) {
+                dataStream.waitEvent(weightsAreUpToDateEvent);
+            }
+        }
+        weightsAreUpToDateEvent.clear();
+        isStartOfForward = false;
+        isStartOfBackward = true;
+        clearForwardArrivalBookkeeping();
+    }
+
+    assert(stillWaitingForForwardInputTensorIds.count(featureInput.get().getTensorId()) == 1);
+    stillWaitingForForwardInputTensorIds.erase(featureInput.get().getTensorId());
+
+    if (!stillWaitingForForwardInputTensorIds.empty()) {
+        return;
+    }
+    stillWaitingForForwardInputTensorIds = allForwardInputTensorIds;
+
+    synchronizeComputeStreamForForwardInputs();
+    computeFeatureOut(0);
+
+    for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
+        if (nextLayers[outputPort].isEmpty())
+            continue;
+        nextLayers[outputPort].get()->forward(featureOutputs[outputPort], validationPass, batchSize);
+    }
+}
+
+void CustomLayer::backward(Optional<Tensor> errorInput, uint32_t batchSize) {
+    assert(running);
+
+    if (errorInput.isEmpty())
+        return;
+
+    uint32_t outputPort = outputNames.size();
+    for (uint32_t i = 0; i < errorInputs.size(); ++i) {
+        if (errorInputs[i].isPresent() && errorInputs[i].get() == errorInput.get()) {
+            outputPort = i;
+            break;
+        }
+    }
+    assert(outputPort != outputNames.size());
+
+    bool clearGradientFirst = false;
+    if (isStartOfBackward) {
+        clearBackwardArrivalBookkeeping();
+        isStartOfBackward = false;  // important
+        clearGradientFirst = true;  // first backward arrival in this pass
+    }
+
+    assert(stillWaitingForBackwardErrorInputTensorIds.count(errorInput.get().getTensorId()) == 1);
+    stillWaitingForBackwardErrorInputTensorIds.erase(errorInput.get().getTensorId());
+
+    if (!stillWaitingForBackwardErrorInputTensorIds.empty()) {
+        return;
+    }
+    stillWaitingForBackwardErrorInputTensorIds = allBackwardErrorInputTensorIds;
+
+    Optional<Event> errorInputReadyEvent = Optional<Event>::empty();
+    if (gradientUpdateStream.isPresent()) {
+        errorInputReadyEvent = computeStream().putEvent();
+    }
+
+    if (backwardErrorStamped != nullptr) {
+        Optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(0);
+        if (errorOutHasBeenComputedEvent.isPresent()) {
+            errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
+        }
+    }
+
+    if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
+        gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
+    }
+    accumulateWeightsGradient(0, clearGradientFirst);
+
+    const bool gradientComplete = true;
+    if (gradientComplete) {
+        weightsAreUpToDateEvent.clear();
+
+        if (gradientUpdateStream.isPresent()) {
+            for (const Event& eOutComputedEvent : errorOutHasBeenComputedEvents) {
+                gradientUpdateStream.get().waitEvent(eOutComputedEvent);
+            }
+
+            bool anyWeightsUpdated = false;
+            for (const auto& parameter : parameters) {
+                anyWeightsUpdated |= parameter->applyGradient(batchSize);
+            }
+            if (anyWeightsUpdated) {
+                weightsAreUpToDateEvent = gradientUpdateStream.get().putEvent();
+            }
+        }
+        errorOutHasBeenComputedEvents.clear();
+        isStartOfForward = true;
+    }
+
+    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+        if (previousLayers[inputPort].isEmpty() || errorOutputs[inputPort].isEmpty()) {
+            continue;
+        }
+        previousLayers[inputPort].get()->backward(errorOutputs[inputPort], batchSize);
+    }
+}
+
+void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {
+    (void)connectionNumber;
+    if (!forwardStamped) {
+        throw runtime_error("CustomLayer::computeFeatureOut requires a stamped forward plan.");
+    }
+    forwardStamped->run();
+}
+
+Optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
+    (void)connectionNumber;
+    if (backwardErrorStamped == nullptr) {
+        return Optional<Event>::empty();
+    }
+    backwardErrorStamped->run();
+    return computeStream().putEvent();
+}
+
+void CustomLayer::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
+    (void)connectionNumber;
+    if (!gradientUpdateStream.isPresent()) {
+        return;
+    }
+
+    if (clearGradientFirst) {
+        if (backwardWeightsClearStamped != nullptr) {
+            backwardWeightsClearStamped->run();
+        }
+        return;
+    }
+
+    if (backwardWeightsAccumulateStamped != nullptr) {
+        backwardWeightsAccumulateStamped->run();
+    }
+}
+
+uint64_t CustomLayer::flopCountForward() { return forwardStamped == nullptr ? 0 : forwardStamped->flopCount(); }
+
+uint64_t CustomLayer::flopCountBackward() {
+    uint64_t flops = 0;
+    if (backwardErrorStamped != nullptr) {
+        flops += backwardErrorStamped->flopCount();
+    }
+    if (backwardWeightsAccumulateStamped != nullptr) {
+        flops += backwardWeightsAccumulateStamped->flopCount();
     }
     return flops;
 }
 
-uint64_t CustomLayer::flopCountBackward() {
-    uint64_t flops = 0;
-    for (const auto& stamped : backwardErrorStampedByConnection) {
-        if (stamped != nullptr) {
-            flops += stamped->flopCount();
+bool CustomLayer::isBackPropStub() {
+    for (const auto& errorOutput : errorOutputs) {
+        if (errorOutput.isPresent()) {
+            return false;
         }
     }
-    // Every stage is reported as an accumulation stage, so initially 0 + grad.
-    // This remains valid when there is multi-stage accumulation.
-    for (const auto& stamped : backwardWeightsAccumulateStampedByConnection) {
-        if (stamped != nullptr) {
-            flops += stamped->flopCount();
-        }
-    }
-    return flops;
+    return true;
 }
 
 }  // namespace ThorImplementation
