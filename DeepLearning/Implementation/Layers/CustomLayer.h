@@ -86,6 +86,7 @@ class CustomLayer : public TrainableLayer {
         std::set<unsigned long> expectedBackwardErrorInputTensorIds;
         std::unordered_map<std::string, std::string> upstreamInputNamesByOutput;
         std::unordered_set<std::string> upstreamOutputNames;
+        std::unordered_set<std::string> activeParameterTargetNames;
 
         std::shared_ptr<PreparedDynamicExpression> forwardPrepared;
         std::shared_ptr<StampedExecutionPlan> forwardStamped;
@@ -126,6 +127,7 @@ class CustomLayer : public TrainableLayer {
     void clearBackwardArrivalBookkeeping(uint32_t applicationIndex);
     void clearBackwardArrivalBookkeeping();
     bool applicationHasAnyDownstreamBackprop(uint32_t applicationIndex) const;
+    void recordEffectiveParameterBatchSizeForApplication(uint32_t applicationIndex, uint32_t batchSize);
 
     PreparedDynamicExpression::TensorMap buildForwardInputs(uint32_t applicationIndex);
     PreparedDynamicExpression::TensorMap buildForwardOutputs(uint32_t applicationIndex) const;
@@ -152,6 +154,7 @@ class CustomLayer : public TrainableLayer {
     bool clearGradientFirstThisBackwardPass = false;
     uint32_t numBackwardApplications = 0;
     uint32_t numBackwardApplicationsCompletedThisPass = 0;
+    std::unordered_map<std::string, uint64_t> effectiveBatchSizeByParameterName;
 
     std::unordered_map<std::string, uint32_t> inputNameToPort;
     std::unordered_map<std::string, uint32_t> outputNameToPort;
