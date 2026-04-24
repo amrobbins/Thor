@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <unordered_set>
@@ -279,6 +280,7 @@ void CustomLayer::clearBackwardArrivalBookkeeping() {
         clearBackwardArrivalBookkeeping(app);
     }
     numBackwardApplicationsCompletedThisPass = 0;
+    effectiveBatchSizeByParameterName.clear();
 }
 
 bool CustomLayer::applicationHasAnyDownstreamBackprop(uint32_t applicationIndex) const {
@@ -292,6 +294,17 @@ bool CustomLayer::applicationHasAnyDownstreamBackprop(uint32_t applicationIndex)
         }
     }
     return false;
+}
+
+void CustomLayer::recordEffectiveParameterBatchSizeForApplication(uint32_t applicationIndex, uint32_t batchSize) {
+    if (applicationIndex >= applications.size()) {
+        return;
+    }
+
+    const ApplicationState& app = applications[applicationIndex];
+    for (const std::string& parameterName : app.activeParameterTargetNames) {
+        effectiveBatchSizeByParameterName[parameterName] += batchSize;
+    }
 }
 
 void CustomLayer::initialize() {
@@ -556,6 +569,7 @@ void CustomLayer::compileImpl() {
         app.expectedBackwardErrorInputTensorIds.clear();
         app.upstreamInputNamesByOutput.clear();
         app.upstreamOutputNames.clear();
+        app.activeParameterTargetNames.clear();
         app.backwardGradientPatternCompiled = false;
 
         if (isInferenceOnly() || isBackPropStub()) {
@@ -627,7 +641,7 @@ void CustomLayer::compileImpl() {
 
         std::vector<std::string> activeParameterTargets = app.forwardPrepared->equation().filterTensorInputNamesReachableFromOutputs(
             allTrainableParameterTargets, app.upstreamOutputNames);
-        const std::unordered_set<std::string> activeParameterTargetNames(activeParameterTargets.begin(), activeParameterTargets.end());
+        app.activeParameterTargetNames = std::unordered_set<std::string>(activeParameterTargets.begin(), activeParameterTargets.end());
 
         PreparedDynamicExpression::TensorMap allParameterPreallocatedOutputs;
         PreparedDynamicExpression::TensorMap activeParameterPreallocatedOutputs;
@@ -644,7 +658,7 @@ void CustomLayer::compileImpl() {
             const std::string gradName = parameter->getName() + "_grad";
             Tensor gradientTensor = parameterOptimizer->getWeightsGradient().get();
             allParameterPreallocatedOutputs[gradName] = gradientTensor;
-            if (activeParameterTargetNames.contains(parameter->getName())) {
+            if (app.activeParameterTargetNames.contains(parameter->getName())) {
                 activeParameterPreallocatedOutputs[gradName] = gradientTensor;
             }
         }
@@ -926,6 +940,7 @@ void CustomLayer::backward(Optional<Tensor> errorInput, uint32_t batchSize) {
         }
 
         accumulateWeightsGradient(inputFlatIndex(applicationIndex, 0), clearGradientFirstThisBackwardPass);
+        recordEffectiveParameterBatchSizeForApplication(applicationIndex, batchSize);
         clearGradientFirstThisBackwardPass = false;
 
         for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
@@ -950,8 +965,23 @@ void CustomLayer::backward(Optional<Tensor> errorInput, uint32_t batchSize) {
 
             bool anyWeightsUpdated = false;
             for (const auto& parameter : parameters) {
-                anyWeightsUpdated |= parameter->applyGradient(batchSize);
+                if (!parameter->isTrainingEnabled()) {
+                    continue;
+                }
+
+                const auto effectiveBatchSizeIt = effectiveBatchSizeByParameterName.find(parameter->getName());
+                if (effectiveBatchSizeIt == effectiveBatchSizeByParameterName.end() || effectiveBatchSizeIt->second == 0) {
+                    continue;
+                }
+
+                if (effectiveBatchSizeIt->second > std::numeric_limits<uint32_t>::max()) {
+                    throw runtime_error("CustomLayer effective parameter batch size exceeds uint32_t range for parameter " +
+                                        parameter->getName() + ".");
+                }
+
+                anyWeightsUpdated |= parameter->applyGradient(static_cast<uint32_t>(effectiveBatchSizeIt->second));
             }
+            effectiveBatchSizeByParameterName.clear();
             if (anyWeightsUpdated) {
                 weightsAreUpToDateEvent = gradientUpdateStream.get().putEvent();
             }

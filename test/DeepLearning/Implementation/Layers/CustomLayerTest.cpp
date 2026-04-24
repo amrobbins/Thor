@@ -130,6 +130,13 @@ void subtractInPlace(std::vector<float>& lhs, const std::vector<float>& rhs) {
     }
 }
 
+void subtractScaledInPlace(std::vector<float>& lhs, const std::vector<float>& rhs, float scale) {
+    requireSameSize(lhs, rhs, "subtractScaledInPlace");
+    for (uint64_t i = 0; i < lhs.size(); ++i) {
+        lhs[i] -= scale * rhs[i];
+    }
+}
+
 void compileAndInitialize(const std::vector<Layer*>& layers) {
     for (Layer* layer : layers)
         layer->compile();
@@ -1532,7 +1539,9 @@ TEST(CustomLayer, MultiInterfaceSharedParameterForwardBackwardThreePassesResetBo
 
     auto scale = std::make_shared<FixedVectorParameter>("scale", expectedScale, true);
     auto bias = std::make_shared<FixedVectorParameter>("bias", expectedBias, true);
-    // step = learningRate / (batchSize * Loss::lossScalingFactor) = 8 / (2 * 4) = 1.
+    // step = learningRate / (effectiveBatchSize * Loss::lossScalingFactor)
+    //      = 8 / ((2 applications * 2 examples) * 4)
+    //      = 0.5
     scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(501, 8.0f, 0.0f, 0.0f, false)));
     bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(502, 8.0f, 0.0f, 0.0f, false)));
 
@@ -1624,8 +1633,9 @@ TEST(CustomLayer, MultiInterfaceSharedParameterForwardBackwardThreePassesResetBo
         expectAllClose(readCpuTensor(scaleGrad_h), expectedScaleGrad);
         expectAllClose(readCpuTensor(biasGrad_h), expectedBiasGrad);
 
-        subtractInPlace(expectedScale, expectedScaleGrad);
-        subtractInPlace(expectedBias, expectedBiasGrad);
+        const float effectiveStep = 0.5f;
+        subtractScaledInPlace(expectedScale, expectedScaleGrad, effectiveStep);
+        subtractScaledInPlace(expectedBias, expectedBiasGrad, effectiveStep);
 
         Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().get(), custom.getGradientUpdateStream().get());
         Tensor biasWeights_h = copyTensorToCpu(bias->getStorage().get(), custom.getGradientUpdateStream().get());
@@ -2509,6 +2519,208 @@ TEST(CustomLayer, MultiInterfaceSparseDownstreamBackpropResetsAcrossPassesAndRev
     ASSERT_EQ(y1Bridge.backwardCalls, 2);
 
     expectSparseBackwardResults();
+
+    cleanupLayers({&x0In,
+                   &y0In,
+                   &x1In,
+                   &y1In,
+                   &x0Rivet,
+                   &y0Rivet,
+                   &x1Rivet,
+                   &y1Rivet,
+                   &x0Bridge,
+                   &y0Bridge,
+                   &x1Bridge,
+                   &y1Bridge,
+                   &custom,
+                   &outX0Sink,
+                   &outY0InferenceSink,
+                   &outX1InferenceSink,
+                   &outY1Sink});
+}
+
+DynamicExpression buildSplitScaleSharedBiasTwoInputTwoOutputExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        auto x = Expression::input("x");
+        auto y = Expression::input("y");
+        auto scaleX = Expression::input("scale_x");
+        auto scaleY = Expression::input("scale_y");
+        auto bias = Expression::input("bias");
+        auto expressionOutputs = Expression::outputs({
+            {"out_x", x * scaleX + bias},
+            {"out_y", y * scaleY + bias},
+        });
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
+TEST(CustomLayer, MultiInterfaceEffectiveBatchSizeIsTrackedPerParameterForSparseApplications) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+
+    const std::vector<float> x0Values{1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    const std::vector<float> y0Values{-1.0f, 0.0f, 1.0f, 2.0f, 3.0f, 4.0f};
+    const std::vector<float> x1Values{2.0f, 1.0f, 0.0f, -1.0f, -2.0f, -3.0f};
+    const std::vector<float> y1Values{3.0f, 1.0f, -1.0f, 0.0f, 2.0f, 4.0f};
+
+    const std::vector<float> gradOutX0Values{1.0f, 0.0f, -1.0f, 2.0f, 1.0f, 0.5f};
+    const std::vector<float> gradOutY1Values{1.0f, 1.0f, 0.0f, -1.0f, 2.0f, -0.5f};
+
+    Tensor x0_h(cpuPlacement, descriptor);
+    Tensor y0_h(cpuPlacement, descriptor);
+    Tensor x1_h(cpuPlacement, descriptor);
+    Tensor y1_h(cpuPlacement, descriptor);
+    Tensor gradOutX0_h(cpuPlacement, descriptor);
+    Tensor gradOutY1_h(cpuPlacement, descriptor);
+    writeCpuTensor(x0_h, x0Values);
+    writeCpuTensor(y0_h, y0Values);
+    writeCpuTensor(x1_h, x1Values);
+    writeCpuTensor(y1_h, y1Values);
+    writeCpuTensor(gradOutX0_h, gradOutX0Values);
+    writeCpuTensor(gradOutY1_h, gradOutY1Values);
+
+    const std::vector<float> scaleXValues{2.0f, 3.0f, 4.0f};
+    const std::vector<float> scaleYValues{-1.0f, 0.5f, 2.0f};
+    const std::vector<float> biasValues{10.0f, 20.0f, 30.0f};
+
+    auto scaleX = std::make_shared<FixedVectorParameter>("scale_x", scaleXValues, true);
+    auto scaleY = std::make_shared<FixedVectorParameter>("scale_y", scaleYValues, true);
+    auto bias = std::make_shared<FixedVectorParameter>("bias", biasValues, true);
+
+    // learningRate / Loss::lossScalingFactor = 8 / 4 = 2.
+    // scale_x and scale_y each see one application batch of size 2, so their step is 1.
+    // bias sees two application batches, effective batch size 4, so its step is 0.5.
+    scaleX->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(1001, 8.0f, 0.0f, 0.0f, false)));
+    scaleY->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(1002, 8.0f, 0.0f, 0.0f, false)));
+    bias->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(1003, 8.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput x0In(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput y0In(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput x1In(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput y1In(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet x0Rivet, y0Rivet, x1Rivet, y1Rivet;
+    CountingPassthrough x0Bridge, y0Bridge, x1Bridge, y1Bridge;
+    CustomLayer custom(buildSplitScaleSharedBiasTwoInputTwoOutputExpression(gpuPlacement),
+                       {"x", "y"},
+                       {"out_x", "out_y"},
+                       gpuPlacement,
+                       {scaleX, scaleY, bias},
+                       false);
+    CountingPassthrough outX0Sink, outY0InferenceSink, outX1InferenceSink, outY1Sink;
+    outY0InferenceSink.setConstructForInferenceOnly(true);
+    outX1InferenceSink.setConstructForInferenceOnly(true);
+
+    x0In.connectToNextLayer(&x0Rivet);
+    x0Rivet.connectToNextLayer(&x0Bridge);
+    y0In.connectToNextLayer(&y0Rivet);
+    y0Rivet.connectToNextLayer(&y0Bridge);
+    x1In.connectToNextLayer(&x1Rivet);
+    x1Rivet.connectToNextLayer(&x1Bridge);
+    y1In.connectToNextLayer(&y1Rivet);
+    y1Rivet.connectToNextLayer(&y1Bridge);
+
+    x0Bridge.connectToNextLayer(&custom, 0, 0);
+    y0Bridge.connectToNextLayer(&custom, 0, 1);
+    x1Bridge.connectToNextLayer(&custom, 0, 2);
+    y1Bridge.connectToNextLayer(&custom, 0, 3);
+
+    // app 0 contributes only through out_x; app 1 contributes only through out_y.
+    custom.connectToNextLayer(&outX0Sink, 0, 0);
+    custom.connectToNextLayer(&outY0InferenceSink, 1, 0);
+    custom.connectToNextLayer(&outX1InferenceSink, 2, 0);
+    custom.connectToNextLayer(&outY1Sink, 3, 0);
+
+    compileAndInitialize({&x0In,
+                          &y0In,
+                          &x1In,
+                          &y1In,
+                          &x0Rivet,
+                          &y0Rivet,
+                          &x1Rivet,
+                          &y1Rivet,
+                          &x0Bridge,
+                          &y0Bridge,
+                          &x1Bridge,
+                          &y1Bridge,
+                          &custom,
+                          &outX0Sink,
+                          &outY0InferenceSink,
+                          &outX1InferenceSink,
+                          &outY1Sink});
+
+    ASSERT_TRUE(outX0Sink.getErrorOutput().isPresent());
+    ASSERT_TRUE(outY0InferenceSink.getErrorOutput().isEmpty());
+    ASSERT_TRUE(outX1InferenceSink.getErrorOutput().isEmpty());
+    ASSERT_TRUE(outY1Sink.getErrorOutput().isPresent());
+
+    x0In.forward(x0_h, false, batchSize);
+    y0In.forward(y0_h, false, batchSize);
+    x1In.forward(x1_h, false, batchSize);
+    y1In.forward(y1_h, false, batchSize);
+
+    outX0Sink.getErrorOutput().get().copyFromAsync(gradOutX0_h, custom.getStreams()[0]);
+    outY1Sink.getErrorOutput().get().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
+    Event app0GradReady = custom.getStreams()[0].putEvent();
+    Event app1GradReady = custom.getStreams()[2].putEvent();
+    app0GradReady.synchronize();
+    app1GradReady.synchronize();
+
+    outX0Sink.backward(outX0Sink.getErrorOutput(), batchSize);
+    ASSERT_EQ(x0Bridge.backwardCalls, 1);
+    ASSERT_EQ(y0Bridge.backwardCalls, 1);
+    ASSERT_EQ(x1Bridge.backwardCalls, 0);
+    ASSERT_EQ(y1Bridge.backwardCalls, 0);
+
+    outY1Sink.backward(outY1Sink.getErrorOutput(), batchSize);
+    ASSERT_EQ(x1Bridge.backwardCalls, 1);
+    ASSERT_EQ(y1Bridge.backwardCalls, 1);
+
+    const std::vector<float> zeroGradient(batchSize * features, 0.0f);
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0])),
+                   scaleInputGradient(gradOutX0Values, scaleXValues));
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0])), zeroGradient);
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[2].get(), custom.getStreams()[2])), zeroGradient);
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[3].get(), custom.getStreams()[2])),
+                   scaleInputGradient(gradOutY1Values, scaleYValues));
+
+    const std::vector<float> expectedScaleXGrad = featureWiseScaleGradient({x0Values}, {gradOutX0Values}, features);
+    const std::vector<float> expectedScaleYGrad = featureWiseScaleGradient({y1Values}, {gradOutY1Values}, features);
+    const std::vector<float> expectedBiasGrad = featureWiseBiasGradient({gradOutX0Values, gradOutY1Values}, features);
+
+    auto subtractScaled = [](std::vector<float> lhs, const std::vector<float>& rhs, float scale) {
+        requireSameSize(lhs, rhs, "subtractScaled");
+        for (uint64_t i = 0; i < lhs.size(); ++i) {
+            lhs[i] -= scale * rhs[i];
+        }
+        return lhs;
+    };
+
+    const std::vector<float> expectedScaleX = subtractScaled(scaleXValues, expectedScaleXGrad, 1.0f);
+    const std::vector<float> expectedScaleY = subtractScaled(scaleYValues, expectedScaleYGrad, 1.0f);
+    const std::vector<float> expectedBias = subtractScaled(biasValues, expectedBiasGrad, 0.5f);
+
+    expectAllClose(
+        readCpuTensor(copyTensorToCpu(scaleX->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
+        expectedScaleXGrad);
+    expectAllClose(
+        readCpuTensor(copyTensorToCpu(scaleY->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
+        expectedScaleYGrad);
+    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
+                   expectedBiasGrad);
+
+    expectAllClose(readCpuTensor(copyTensorToCpu(scaleX->getStorage().get(), custom.getGradientUpdateStream().get())), expectedScaleX);
+    expectAllClose(readCpuTensor(copyTensorToCpu(scaleY->getStorage().get(), custom.getGradientUpdateStream().get())), expectedScaleY);
+    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getStorage().get(), custom.getGradientUpdateStream().get())), expectedBias);
 
     cleanupLayers({&x0In,
                    &y0In,
