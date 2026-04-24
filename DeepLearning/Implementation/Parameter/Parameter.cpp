@@ -5,13 +5,14 @@ using namespace std;
 
 namespace ThorImplementation {
 
-Parameter::Parameter(string name, bool trainable) : name(name), trainable(trainable) { assert(!name.empty()); }
+Parameter::Parameter(string name, bool trainable) : name(name), trainable(trainable), trainingEnabled(trainable) { assert(!name.empty()); }
 
 void Parameter::compileStorageAndOptimizer(const StorageContext& context,
                                            const Optional<Stream>& gradientUpdateStream,
                                            bool inferenceOnly) {
     this->gradientUpdateStream = gradientUpdateStream;
-    trainingEnabled = !inferenceOnly;
+    if (inferenceOnly)
+        trainingEnabled = false;
 
     createStorage(context);
 
@@ -73,8 +74,9 @@ bool Parameter::isTrainingEnabled() const { return isTrainable() && trainingEnab
 void Parameter::setTrainingEnabled(bool enabled) {
     assert(isTrainable());
 
-    throw runtime_error("Toggling parameter trainabilty on/off is not yet supported.");
+    // FIXME:
     // Will need to ensure that the gradients are not computed for this parameter when trainability is off.
+    // This is only handled in CustomLayer right now, but if everything uses CustomLayer, then we are good.
     trainingEnabled = enabled;
 }
 

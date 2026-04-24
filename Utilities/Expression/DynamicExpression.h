@@ -231,7 +231,25 @@ class DynamicExpression {
         }
     }
 
+    DynamicExpression(std::vector<std::string> expected_input_names, std::vector<std::string> expected_output_names, BuilderFn builder)
+        : expected_input_names_(std::move(expected_input_names)),
+          expected_output_names_(std::move(expected_output_names)),
+          builder_(std::move(builder)) {
+        if (!builder_) {
+            throw std::invalid_argument("DynamicExpression requires a non-empty builder.");
+        }
+        validateExpectedNames(expected_input_names_, "input");
+        validateExpectedNames(expected_output_names_, "output");
+    }
+
+    [[nodiscard]] const std::vector<std::string>& getExpectedInputNames() const { return expected_input_names_; }
+    [[nodiscard]] const std::vector<std::string>& getExpectedOutputNames() const { return expected_output_names_; }
+
     [[nodiscard]] PreparedDynamicExpression prepare(const TensorMap& inputs, const TensorMap& outputs, Stream& stream) const {
+        validateExpectedTensorNames(inputs, expected_input_names_, "input");
+        if (!outputs.empty()) {
+            validateExpectedTensorNames(outputs, expected_output_names_, "output");
+        }
         validateInputs(inputs, stream);
         validateOutputs(outputs, stream);
 
@@ -446,6 +464,35 @@ class DynamicExpression {
         }
     }
 
+    static void validateExpectedNames(const std::vector<std::string>& names, const std::string& what) {
+        std::set<std::string> seen;
+        for (const auto& name : names) {
+            if (name.empty()) {
+                throw std::invalid_argument("DynamicExpression expected " + what + " name cannot be empty.");
+            }
+            if (!seen.insert(name).second) {
+                throw std::invalid_argument("DynamicExpression duplicate expected " + what + " name: " + name);
+            }
+        }
+    }
+
+    static void validateExpectedTensorNames(const TensorMap& tensors,
+                                            const std::vector<std::string>& expected_names,
+                                            const std::string& what) {
+        if (expected_names.empty()) {
+            return;
+        }
+
+        const std::set<std::string> actual = tensorMapKeys(tensors);
+        const std::set<std::string> expected = vectorToSet(expected_names);
+        if (actual != expected) {
+            throw std::invalid_argument("DynamicExpression " + what + " name mismatch. Expected {" + joinNames(expected) + "}, got {" +
+                                        joinNames(actual) + "}.");
+        }
+    }
+
+    std::vector<std::string> expected_input_names_;
+    std::vector<std::string> expected_output_names_;
     BuilderFn builder_;
 };
 

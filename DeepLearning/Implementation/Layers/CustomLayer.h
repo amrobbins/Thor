@@ -9,6 +9,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ThorImplementation {
@@ -24,7 +25,9 @@ class CustomLayer : public TrainableLayer {
                 int64_t stampedId = -1,
                 bool useFastMath = false);
 
-    // Named-port form. Port indices are the graph connection types.
+    // Named-port form. Connection types are encoded as:
+    //   input connection:  applicationIndex * inputNames.size() + inputPortIndex
+    //   output connection: applicationIndex * outputNames.size() + outputPortIndex
     CustomLayer(DynamicExpression expr,
                 std::vector<std::string> inputNames,
                 std::vector<std::string> outputNames,
@@ -67,25 +70,72 @@ class CustomLayer : public TrainableLayer {
    protected:
     void compileImpl() override;
     Parameter::StorageContext buildParameterStorageContext() const override;
+    void pruneUpstreamErrorOutputsForApplication(uint32_t applicationIndex);
 
    private:
+    struct ApplicationState {
+        std::set<unsigned long> allForwardInputTensorIds;
+        std::set<unsigned long> stillWaitingForForwardInputTensorIds;
+        std::set<unsigned long> allBackwardErrorInputTensorIds;
+        std::set<unsigned long> stillWaitingForBackwardErrorInputTensorIds;
+
+        bool forwardRanThisPass = false;
+        bool backwardRanThisPass = false;
+        bool backwardGradientPatternCompiled = false;
+
+        std::set<unsigned long> expectedBackwardErrorInputTensorIds;
+        std::unordered_map<std::string, std::string> upstreamInputNamesByOutput;
+        std::unordered_set<std::string> upstreamOutputNames;
+
+        std::shared_ptr<PreparedDynamicExpression> forwardPrepared;
+        std::shared_ptr<StampedExecutionPlan> forwardStamped;
+        std::shared_ptr<StampedExecutionPlan> backwardErrorStamped;
+        std::shared_ptr<StampedExecutionPlan> backwardWeightsClearStamped;
+        std::shared_ptr<StampedExecutionPlan> backwardWeightsAccumulateStamped;
+
+        std::unordered_map<std::string, Tensor> forwardInputsByName;
+        std::unordered_map<std::string, Tensor> forwardOutputsByName;
+        std::unordered_map<std::string, Tensor> backwardAdditionalInputsByName;
+        std::unordered_map<std::string, Tensor> backwardInputGradOutputsByName;
+    };
+
+    struct DecodedConnection {
+        uint32_t applicationIndex;
+        uint32_t portIndex;
+    };
+
     static void validatePortNames(const std::vector<std::string>& names, const std::string& what);
-    uint32_t primaryInputPort() const;
+
+    uint32_t inputFlatIndex(uint32_t applicationIndex, uint32_t inputPortIndex) const;
+    uint32_t outputFlatIndex(uint32_t applicationIndex, uint32_t outputPortIndex) const;
+    DecodedConnection decodeInputConnectionType(int connectionType) const;
+    DecodedConnection decodeOutputConnectionType(int connectionType) const;
+
+    uint32_t primaryInputFlatIndex(uint32_t applicationIndex) const;
+    Stream& computeStream(uint32_t applicationIndex);
+    const Stream& computeStream(uint32_t applicationIndex) const;
     Stream& computeStream();
     const Stream& computeStream() const;
+
+    void ensureApplicationStorageAllocated(uint32_t applicationIndex);
     void ensurePortStorageAllocated();
+    bool applicationHasAllInputPortsConnected(uint32_t applicationIndex) const;
+    void requireApplicationInputInterfaceConnected(uint32_t applicationIndex) const;
+    void clearForwardArrivalBookkeeping(uint32_t applicationIndex);
     void clearForwardArrivalBookkeeping();
+    void clearBackwardArrivalBookkeeping(uint32_t applicationIndex);
     void clearBackwardArrivalBookkeeping();
+    bool applicationHasAnyDownstreamBackprop(uint32_t applicationIndex) const;
 
-    PreparedDynamicExpression::TensorMap buildForwardInputs();
-    PreparedDynamicExpression::TensorMap buildForwardOutputs() const;
-    PreparedDynamicExpression::TensorMap buildBackwardAdditionalInputs() const;
-    PreparedDynamicExpression::TensorMap buildBackwardInputGradOutputs() const;
+    PreparedDynamicExpression::TensorMap buildForwardInputs(uint32_t applicationIndex);
+    PreparedDynamicExpression::TensorMap buildForwardOutputs(uint32_t applicationIndex) const;
+    PreparedDynamicExpression::TensorMap buildBackwardAdditionalInputs(uint32_t applicationIndex) const;
+    PreparedDynamicExpression::TensorMap buildBackwardInputGradOutputs(uint32_t applicationIndex) const;
 
-    Optional<Tensor> inferFeatureOutputTensor(uint32_t outputPortIndex);
+    Optional<Tensor> inferFeatureOutputTensor(uint32_t applicationIndex, uint32_t outputPortIndex);
     void validatePreparedExpressionInputs(const PreparedDynamicExpression& prepared);
     void validateStampedOutputNames(const StampedExecutionPlan& stamped, const std::vector<std::string>& expectedNames, const char* phase);
-    void synchronizeComputeStreamForForwardInputs();
+    void synchronizeComputeStreamForForwardInputs(uint32_t applicationIndex);
 
     std::string errorInputNameForOutput(uint32_t outputPortIndex) const;
     std::string errorOutputNameForInput(uint32_t inputPortIndex) const;
@@ -100,25 +150,13 @@ class CustomLayer : public TrainableLayer {
     std::string customLayerName = "UnnamedType";
 
     bool clearGradientFirstThisBackwardPass = false;
+    uint32_t numBackwardApplications = 0;
+    uint32_t numBackwardApplicationsCompletedThisPass = 0;
 
     std::unordered_map<std::string, uint32_t> inputNameToPort;
     std::unordered_map<std::string, uint32_t> outputNameToPort;
 
-    std::shared_ptr<PreparedDynamicExpression> forwardPrepared;
-    std::shared_ptr<StampedExecutionPlan> forwardStamped;
-    std::shared_ptr<StampedExecutionPlan> backwardErrorStamped;
-    std::shared_ptr<StampedExecutionPlan> backwardWeightsClearStamped;
-    std::shared_ptr<StampedExecutionPlan> backwardWeightsAccumulateStamped;
-
-    std::unordered_map<std::string, Tensor> forwardInputsByName;
-    std::unordered_map<std::string, Tensor> forwardOutputsByName;
-    std::unordered_map<std::string, Tensor> backwardAdditionalInputsByName;
-    std::unordered_map<std::string, Tensor> backwardInputGradOutputsByName;
-
-    std::set<unsigned long> allForwardInputTensorIds;
-    std::set<unsigned long> stillWaitingForForwardInputTensorIds;
-    std::set<unsigned long> allBackwardErrorInputTensorIds;
-    std::set<unsigned long> stillWaitingForBackwardErrorInputTensorIds;
+    std::vector<ApplicationState> applications;
 
     std::vector<Optional<Tensor>> featureInputsConnectedForPorts;
     std::vector<Optional<Tensor>> featureOutputsConnectedForPorts;

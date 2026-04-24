@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
+#include <unordered_set>
+
 namespace ThorImplementation {
 
 // TensorFanout has a single input tensor that is connected to multiple output tensors.
@@ -134,8 +136,14 @@ class TensorFanout : public MultiConnectionLayer {
         for (unsigned int i = 1; i < streams.size(); ++i)
             streams[i].waitEvent(inputReadyEvent);
 
-        for (unsigned int i = 0; i < nextLayers.size(); ++i)
-            nextLayers[i].get()->forward(featureInput, validationPass);
+        std::unordered_set<Layer *> forwardedLayers;
+        for (unsigned int i = 0; i < nextLayers.size(); ++i) {
+            Layer *nextLayer = nextLayers[i].get();
+            if (!forwardedLayers.insert(nextLayer).second) {
+                continue;
+            }
+            nextLayer->forward(featureInput, validationPass, batchSize);
+        }
     }
 
     virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {

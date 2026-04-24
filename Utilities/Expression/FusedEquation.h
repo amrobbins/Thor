@@ -266,6 +266,9 @@ class FusedEquation {
 
     std::vector<std::string> getOutputNames() const;
 
+    [[nodiscard]] std::vector<std::string> filterTensorInputNamesReachableFromOutputs(
+        const std::vector<std::string>& input_names, const std::unordered_set<std::string>& output_names) const;
+
     std::vector<uint64_t> getOutputShape(const Tensor& input) const;
     std::vector<uint64_t> getOutputShape(const std::unordered_map<std::string, Tensor>& inputs) const;
     std::unordered_map<std::string, std::vector<uint64_t>> getOutputShapes(const Tensor& input) const;

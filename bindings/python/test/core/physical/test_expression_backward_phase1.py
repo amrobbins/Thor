@@ -673,7 +673,7 @@ def test_compile_backward_rejects_multi_output_without_explicit_upstreams():
     })
     fwd_eq = ex.compile(outs, device_num=0)
 
-    with pytest.raises(RuntimeError, match="requires explicit upstream"):
+    with pytest.raises(RuntimeError, match="requires an explicit upstream"):
         fwd_eq.compile_backward(["x", "y"])
 
 
