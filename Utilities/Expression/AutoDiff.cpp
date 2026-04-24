@@ -1481,16 +1481,12 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
     if (forward_outputs.outputs.size() > 1 && !upstream_input_names_by_output.has_value()) {
         throw std::runtime_error(
-            "buildBackwardOutputs for multi-output forward equations requires explicit upstream input names for each output.");
+            "buildBackwardOutputs for multi-output forward equations requires an explicit upstream input name map. The map may be partial "
+            "when some outputs have no incoming gradient.");
     }
 
-    if (upstream_input_names_by_output.has_value()) {
-        for (const NamedOutput& forward_output : forward_outputs.outputs) {
-            if (!upstream_input_names_by_output->contains(forward_output.name)) {
-                throw std::runtime_error("buildBackwardOutputs missing explicit upstream input name for forward output: " +
-                                         forward_output.name);
-            }
-        }
+    if (upstream_input_names_by_output.has_value() && upstream_input_names_by_output->empty()) {
+        throw std::runtime_error("buildBackwardOutputs explicit upstream input map must contain at least one forward output.");
     }
 
     BackwardGraphBuilder builder(forward_expr);
@@ -1499,7 +1495,13 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
     for (const NamedOutput& forward_output : forward_outputs.outputs) {
         uint32_t output_seed = UINT32_MAX;
         if (upstream_input_names_by_output.has_value()) {
-            output_seed = builder.input(upstream_input_names_by_output->at(forward_output.name));
+            auto upstream_it = upstream_input_names_by_output->find(forward_output.name);
+            if (upstream_it == upstream_input_names_by_output->end()) {
+                // A partial explicit upstream map means this forward output did not receive
+                // an incoming gradient, so it contributes nothing to the requested wrt gradients.
+                continue;
+            }
+            output_seed = builder.input(upstream_it->second);
         } else {
             output_seed = builder.scalar(1.0);
         }

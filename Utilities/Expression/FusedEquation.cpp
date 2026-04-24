@@ -2817,6 +2817,111 @@ std::vector<std::string> FusedEquation::getOutputNames() const {
     return output_names;
 }
 
+std::vector<std::string> FusedEquation::filterTensorInputNamesReachableFromOutputs(
+    const std::vector<std::string>& input_names, const std::unordered_set<std::string>& output_names) const {
+    if (!outputs_template.expr) {
+        throw std::runtime_error("FusedEquation reachability query requires non-null PhysicalOutputs.expr.");
+    }
+
+    if (output_names.empty() || input_names.empty()) {
+        return {};
+    }
+
+    const PhysicalExpression& expr = *outputs_template.expr;
+
+    std::unordered_map<std::string, uint32_t> output_node_by_name;
+    output_node_by_name.reserve(outputs_template.outputs.size());
+    for (const NamedOutput& output : outputs_template.outputs) {
+        if (output.node_idx >= expr.nodes.size()) {
+            throw std::runtime_error("FusedEquation reachability query found output node out of range: " + output.name);
+        }
+        output_node_by_name.emplace(output.name, output.node_idx);
+    }
+
+    std::vector<uint32_t> stack;
+    stack.reserve(output_names.size());
+    std::vector<bool> scheduled(expr.nodes.size(), false);
+    for (const std::string& output_name : output_names) {
+        auto output_it = output_node_by_name.find(output_name);
+        if (output_it == output_node_by_name.end()) {
+            throw std::runtime_error("FusedEquation reachability query requested unknown output: " + output_name);
+        }
+        if (!scheduled[output_it->second]) {
+            scheduled[output_it->second] = true;
+            stack.push_back(output_it->second);
+        }
+    }
+
+    std::vector<bool> reaches_selected_output(expr.nodes.size(), false);
+    auto push_child = [&](uint32_t child) {
+        if (child == UINT32_MAX) {
+            return;
+        }
+        if (child >= expr.nodes.size()) {
+            throw std::runtime_error("FusedEquation reachability query found child node out of range.");
+        }
+        if (!scheduled[child]) {
+            scheduled[child] = true;
+            stack.push_back(child);
+        }
+    };
+
+    while (!stack.empty()) {
+        const uint32_t node_idx = stack.back();
+        stack.pop_back();
+
+        if (reaches_selected_output[node_idx]) {
+            continue;
+        }
+        reaches_selected_output[node_idx] = true;
+
+        const ExprNode& node = expr.nodes[node_idx];
+        push_child(node.lhs);
+        push_child(node.rhs);
+        push_child(node.aux);
+        push_child(node.alpha_node);
+        push_child(node.beta_node);
+    }
+
+    std::unordered_map<std::string, uint32_t> tensor_input_slot_by_name;
+    tensor_input_slot_by_name.reserve(expr.inputs.size());
+    for (const NamedInput& input : expr.inputs) {
+        if (input.kind == NamedInput::Kind::Tensor) {
+            tensor_input_slot_by_name.emplace(input.name, input.slot);
+        }
+    }
+
+    std::vector<std::string> filtered;
+    filtered.reserve(input_names.size());
+    std::unordered_set<std::string> seen_inputs;
+    for (const std::string& input_name : input_names) {
+        if (!seen_inputs.insert(input_name).second) {
+            throw std::runtime_error("FusedEquation reachability query received duplicate input name: " + input_name);
+        }
+
+        auto slot_it = tensor_input_slot_by_name.find(input_name);
+        if (slot_it == tensor_input_slot_by_name.end()) {
+            throw std::runtime_error("FusedEquation reachability query requested unknown tensor input: " + input_name);
+        }
+
+        const uint32_t slot = slot_it->second;
+        bool reaches = false;
+        for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+            const ExprNode& node = expr.nodes[node_idx];
+            if (node.op == ExprOp::INPUT && node.input_slot == slot && reaches_selected_output[node_idx]) {
+                reaches = true;
+                break;
+            }
+        }
+
+        if (reaches) {
+            filtered.push_back(input_name);
+        }
+    }
+
+    return filtered;
+}
+
 std::vector<uint64_t> FusedEquation::getOutputShape(const Tensor& input) const {
     if (outputs_template.outputs.size() != 1) {
         throw std::runtime_error(

@@ -2,6 +2,7 @@
 
 #include <set>
 #include <stdexcept>
+#include <unordered_set>
 
 using namespace std;
 
@@ -73,7 +74,6 @@ CustomLayer::CustomLayer(DynamicExpression expr,
         addParameter(param);  // verifies parameter name uniqueness
     }
 
-    ensurePortStorageAllocated();
     attachGradientUpdateStream();
 }
 
@@ -96,63 +96,202 @@ void CustomLayer::validatePortNames(const std::vector<std::string>& names, const
     }
 }
 
-uint32_t CustomLayer::primaryInputPort() const {
-    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        if (featureInputs[i].isPresent()) {
-            return i;
+uint32_t CustomLayer::inputFlatIndex(uint32_t applicationIndex, uint32_t inputPortIndex) const {
+    assert(inputPortIndex < inputNames.size());
+    return applicationIndex * inputNames.size() + inputPortIndex;
+}
+
+uint32_t CustomLayer::outputFlatIndex(uint32_t applicationIndex, uint32_t outputPortIndex) const {
+    assert(outputPortIndex < outputNames.size());
+    return applicationIndex * outputNames.size() + outputPortIndex;
+}
+
+CustomLayer::DecodedConnection CustomLayer::decodeInputConnectionType(int connectionType) const {
+    if (connectionType < 0) {
+        throw runtime_error("CustomLayer input connection type out of range.");
+    }
+    const uint32_t encoded = static_cast<uint32_t>(connectionType);
+    return DecodedConnection{encoded / static_cast<uint32_t>(inputNames.size()), encoded % static_cast<uint32_t>(inputNames.size())};
+}
+
+CustomLayer::DecodedConnection CustomLayer::decodeOutputConnectionType(int connectionType) const {
+    if (connectionType < 0) {
+        throw runtime_error("CustomLayer output connection type out of range.");
+    }
+    const uint32_t encoded = static_cast<uint32_t>(connectionType);
+    return DecodedConnection{encoded / static_cast<uint32_t>(outputNames.size()), encoded % static_cast<uint32_t>(outputNames.size())};
+}
+
+uint32_t CustomLayer::primaryInputFlatIndex(uint32_t applicationIndex) const {
+    if (applicationIndex >= applications.size()) {
+        throw runtime_error("CustomLayer application index out of range.");
+    }
+
+    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+        const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
+        if (flat < featureInputs.size() && featureInputs[flat].isPresent()) {
+            return flat;
         }
     }
     throw runtime_error("CustomLayer requires at least one connected input port before execution.");
 }
 
-Stream& CustomLayer::computeStream() {
-    const uint32_t port = primaryInputPort();
-    assert(port < streams.size());
-    return streams[port];
+Stream& CustomLayer::computeStream(uint32_t applicationIndex) {
+    const uint32_t flat = primaryInputFlatIndex(applicationIndex);
+    assert(flat < streams.size());
+    return streams[flat];
 }
 
-const Stream& CustomLayer::computeStream() const {
-    const uint32_t port = primaryInputPort();
-    assert(port < streams.size());
-    return streams[port];
+const Stream& CustomLayer::computeStream(uint32_t applicationIndex) const {
+    const uint32_t flat = primaryInputFlatIndex(applicationIndex);
+    assert(flat < streams.size());
+    return streams[flat];
 }
 
-void CustomLayer::ensurePortStorageAllocated() {
-    featureInputs.resize(inputNames.size(), Optional<Tensor>::empty());
-    errorOutputs.resize(inputNames.size(), Optional<Tensor>::empty());
-    previousLayers.resize(inputNames.size(), Optional<Layer*>::empty());
-    streams.resize(inputNames.size());
+Stream& CustomLayer::computeStream() { return computeStream(0); }
 
-    featureOutputs.resize(outputNames.size(), Optional<Tensor>::empty());
-    errorInputs.resize(outputNames.size(), Optional<Tensor>::empty());
-    nextLayers.resize(outputNames.size(), Optional<Layer*>::empty());
+const Stream& CustomLayer::computeStream() const { return computeStream(0); }
 
-    featureInputsConnectedForPorts.resize(inputNames.size(), Optional<Tensor>::empty());
-    errorOutputsConnectedForPorts.resize(inputNames.size(), Optional<Tensor>::empty());
-    featureOutputsConnectedForPorts.resize(outputNames.size(), Optional<Tensor>::empty());
-    errorInputsConnectedForPorts.resize(outputNames.size(), Optional<Tensor>::empty());
+void CustomLayer::ensureApplicationStorageAllocated(uint32_t applicationIndex) {
+    if (applications.size() <= applicationIndex) {
+        applications.resize(applicationIndex + 1);
+    }
+
+    const size_t requiredInputs = static_cast<size_t>(applicationIndex + 1) * inputNames.size();
+    const size_t requiredOutputs = static_cast<size_t>(applicationIndex + 1) * outputNames.size();
+
+    if (featureInputs.size() < requiredInputs)
+        featureInputs.resize(requiredInputs, Optional<Tensor>::empty());
+    if (errorOutputs.size() < requiredInputs)
+        errorOutputs.resize(requiredInputs, Optional<Tensor>::empty());
+    if (previousLayers.size() < requiredInputs)
+        previousLayers.resize(requiredInputs, Optional<Layer*>::empty());
+    if (streams.size() < requiredInputs)
+        streams.resize(requiredInputs);
+    if (featureInputsConnectedForPorts.size() < requiredInputs)
+        featureInputsConnectedForPorts.resize(requiredInputs, Optional<Tensor>::empty());
+    if (errorOutputsConnectedForPorts.size() < requiredInputs)
+        errorOutputsConnectedForPorts.resize(requiredInputs, Optional<Tensor>::empty());
+
+    if (featureOutputs.size() < requiredOutputs)
+        featureOutputs.resize(requiredOutputs, Optional<Tensor>::empty());
+    if (errorInputs.size() < requiredOutputs)
+        errorInputs.resize(requiredOutputs, Optional<Tensor>::empty());
+    if (nextLayers.size() < requiredOutputs)
+        nextLayers.resize(requiredOutputs, Optional<Layer*>::empty());
+    if (featureOutputsConnectedForPorts.size() < requiredOutputs)
+        featureOutputsConnectedForPorts.resize(requiredOutputs, Optional<Tensor>::empty());
+    if (errorInputsConnectedForPorts.size() < requiredOutputs)
+        errorInputsConnectedForPorts.resize(requiredOutputs, Optional<Tensor>::empty());
+}
+
+void CustomLayer::ensurePortStorageAllocated() { ensureApplicationStorageAllocated(0); }
+
+bool CustomLayer::applicationHasAllInputPortsConnected(uint32_t applicationIndex) const {
+    if (applicationIndex >= applications.size()) {
+        return false;
+    }
+
+    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+        const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
+        if (flat >= featureInputs.size() || featureInputs[flat].isEmpty()) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void CustomLayer::requireApplicationInputInterfaceConnected(uint32_t applicationIndex) const {
+    if (applicationHasAllInputPortsConnected(applicationIndex)) {
+        return;
+    }
+
+    std::string missingPorts;
+    if (applicationIndex >= applications.size()) {
+        missingPorts = "<entire interface>";
+    } else {
+        for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+            const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
+            if (flat >= featureInputs.size() || featureInputs[flat].isEmpty()) {
+                if (!missingPorts.empty()) {
+                    missingPorts += ", ";
+                }
+                missingPorts += inputNames[inputPort];
+            }
+        }
+    }
+
+    throw runtime_error("CustomLayer cannot construct an output tensor for application " + std::to_string(applicationIndex) +
+                        " until every input port in that interface is connected. Missing input port(s): " + missingPorts + ".");
+}
+
+void CustomLayer::clearForwardArrivalBookkeeping(uint32_t applicationIndex) {
+    assert(applicationIndex < applications.size());
+    ApplicationState& app = applications[applicationIndex];
+    app.allForwardInputTensorIds.clear();
+    app.stillWaitingForForwardInputTensorIds.clear();
+    app.forwardRanThisPass = false;
+
+    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+        const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
+        if (flat < featureInputs.size() && featureInputs[flat].isPresent()) {
+            app.allForwardInputTensorIds.insert(featureInputs[flat].get().getTensorId());
+        }
+    }
+    app.stillWaitingForForwardInputTensorIds = app.allForwardInputTensorIds;
 }
 
 void CustomLayer::clearForwardArrivalBookkeeping() {
-    allForwardInputTensorIds.clear();
-    stillWaitingForForwardInputTensorIds.clear();
-    for (const auto& input : featureInputs) {
-        if (input.isPresent()) {
-            allForwardInputTensorIds.insert(input.get().getTensorId());
+    for (uint32_t app = 0; app < applications.size(); ++app) {
+        clearForwardArrivalBookkeeping(app);
+    }
+}
+
+void CustomLayer::clearBackwardArrivalBookkeeping(uint32_t applicationIndex) {
+    assert(applicationIndex < applications.size());
+    ApplicationState& app = applications[applicationIndex];
+    app.allBackwardErrorInputTensorIds.clear();
+    app.stillWaitingForBackwardErrorInputTensorIds.clear();
+    app.backwardRanThisPass = false;
+
+    if (app.backwardGradientPatternCompiled) {
+        // Once compileImpl() has run, the expected incoming-gradient set is fixed for each
+        // application. Runtime backward() should only wait for that compile-time pattern;
+        // missing output ports are known to never send gradients for this application.
+        app.allBackwardErrorInputTensorIds = app.expectedBackwardErrorInputTensorIds;
+    } else {
+        // During connection/compile setup, derive the same pattern from currently connected
+        // downstream error inputs. compileImpl() snapshots it into expectedBackwardErrorInputTensorIds.
+        for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
+            const uint32_t flat = outputFlatIndex(applicationIndex, outputPort);
+            if (flat < errorInputs.size() && errorInputs[flat].isPresent()) {
+                app.allBackwardErrorInputTensorIds.insert(errorInputs[flat].get().getTensorId());
+            }
         }
     }
-    stillWaitingForForwardInputTensorIds = allForwardInputTensorIds;
+
+    app.stillWaitingForBackwardErrorInputTensorIds = app.allBackwardErrorInputTensorIds;
 }
 
 void CustomLayer::clearBackwardArrivalBookkeeping() {
-    allBackwardErrorInputTensorIds.clear();
-    stillWaitingForBackwardErrorInputTensorIds.clear();
-    for (const auto& errorInput : errorInputs) {
-        if (errorInput.isPresent()) {
-            allBackwardErrorInputTensorIds.insert(errorInput.get().getTensorId());
+    for (uint32_t app = 0; app < applications.size(); ++app) {
+        clearBackwardArrivalBookkeeping(app);
+    }
+    numBackwardApplicationsCompletedThisPass = 0;
+}
+
+bool CustomLayer::applicationHasAnyDownstreamBackprop(uint32_t applicationIndex) const {
+    if (applicationIndex >= applications.size()) {
+        return false;
+    }
+    for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
+        const uint32_t flat = outputFlatIndex(applicationIndex, outputPort);
+        if (flat < errorInputs.size() && errorInputs[flat].isPresent()) {
+            return true;
         }
     }
-    stillWaitingForBackwardErrorInputTensorIds = allBackwardErrorInputTensorIds;
+    return false;
 }
 
 void CustomLayer::initialize() {
@@ -162,30 +301,40 @@ void CustomLayer::initialize() {
 }
 
 Parameter::StorageContext CustomLayer::buildParameterStorageContext() const {
-    std::vector<Tensor> connectedFeatureInputs;
-    connectedFeatureInputs.reserve(inputNames.size());
-    std::unordered_map<std::string, Tensor> namedFeatureInputs;
+    if (applications.empty()) {
+        throw runtime_error("CustomLayer requires at least one application before parameter storage can be built.");
+    }
 
-    for (uint32_t i = 0; i < inputNames.size(); ++i) {
-        if (featureInputs[i].isEmpty()) {
-            throw runtime_error("CustomLayer missing connected feature input for port '" + inputNames[i] + "'.");
+    std::vector<Tensor> connectedFeatureInputs;
+    connectedFeatureInputs.reserve(featureInputs.size());
+    for (const auto& featureInput : featureInputs) {
+        if (featureInput.isPresent()) {
+            connectedFeatureInputs.push_back(featureInput.get());
         }
-        connectedFeatureInputs.push_back(featureInputs[i].get());
-        namedFeatureInputs.emplace(inputNames[i], featureInputs[i].get());
+    }
+
+    std::unordered_map<std::string, Tensor> namedFeatureInputs;
+    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+        const uint32_t flat = inputFlatIndex(0, inputPort);
+        if (flat >= featureInputs.size() || featureInputs[flat].isEmpty()) {
+            throw runtime_error("CustomLayer missing connected feature input for port '" + inputNames[inputPort] + "'.");
+        }
+        namedFeatureInputs.emplace(inputNames[inputPort], featureInputs[flat].get());
     }
 
     return Parameter::StorageContext(
-        featureInputs[primaryInputPort()].get(), std::move(connectedFeatureInputs), std::move(namedFeatureInputs));
+        featureInputs[primaryInputFlatIndex(0)].get(), std::move(connectedFeatureInputs), std::move(namedFeatureInputs));
 }
 
-PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs() {
+PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t applicationIndex) {
     PreparedDynamicExpression::TensorMap inputs;
 
-    for (uint32_t i = 0; i < inputNames.size(); ++i) {
-        if (featureInputs[i].isEmpty()) {
-            throw runtime_error("CustomLayer missing connected feature input for port '" + inputNames[i] + "'.");
+    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+        const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
+        if (flat >= featureInputs.size() || featureInputs[flat].isEmpty()) {
+            throw runtime_error("CustomLayer missing connected feature input for port '" + inputNames[inputPort] + "'.");
         }
-        inputs[inputNames[i]] = featureInputs[i].get();
+        inputs[inputNames[inputPort]] = featureInputs[flat].get();
     }
 
     const Parameter::StorageContext parameterStorageContext = buildParameterStorageContext();
@@ -202,31 +351,63 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs() {
     return inputs;
 }
 
-PreparedDynamicExpression::TensorMap CustomLayer::buildForwardOutputs() const {
+PreparedDynamicExpression::TensorMap CustomLayer::buildForwardOutputs(uint32_t applicationIndex) const {
     PreparedDynamicExpression::TensorMap outputs;
-    for (uint32_t i = 0; i < outputNames.size(); ++i) {
-        if (featureOutputs[i].isPresent()) {
-            outputs[outputNames[i]] = featureOutputs[i].get();
+    for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
+        const uint32_t flat = outputFlatIndex(applicationIndex, outputPort);
+        if (flat < featureOutputs.size() && featureOutputs[flat].isPresent()) {
+            outputs[outputNames[outputPort]] = featureOutputs[flat].get();
         }
     }
     return outputs;
 }
 
-PreparedDynamicExpression::TensorMap CustomLayer::buildBackwardAdditionalInputs() const {
+PreparedDynamicExpression::TensorMap CustomLayer::buildBackwardAdditionalInputs(uint32_t applicationIndex) const {
     PreparedDynamicExpression::TensorMap backwardAdditionalInputs;
+
+    if (applicationIndex >= applications.size()) {
+        return backwardAdditionalInputs;
+    }
+
+    const ApplicationState& app = applications[applicationIndex];
+
+    if (app.backwardGradientPatternCompiled) {
+        for (const auto& [outputName, upstreamGradientName] : app.upstreamInputNamesByOutput) {
+            const auto outputPortIt = outputNameToPort.find(outputName);
+            if (outputPortIt == outputNameToPort.end()) {
+                throw runtime_error("CustomLayer compiled backward pattern contains unknown output name: " + outputName);
+            }
+
+            const uint32_t flat = outputFlatIndex(applicationIndex, outputPortIt->second);
+            if (flat >= errorInputs.size() || errorInputs[flat].isEmpty()) {
+                throw runtime_error("CustomLayer compiled backward pattern expected an incoming gradient for output port '" + outputName +
+                                    "', but that error input is no longer connected.");
+            }
+            backwardAdditionalInputs[upstreamGradientName] = errorInputs[flat].get();
+        }
+        return backwardAdditionalInputs;
+    }
+
+    if (!applicationHasAnyDownstreamBackprop(applicationIndex)) {
+        return backwardAdditionalInputs;
+    }
+
     for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
-        if (errorInputs[outputPort].isPresent()) {
-            backwardAdditionalInputs[errorInputNameForOutput(outputPort)] = errorInputs[outputPort].get();
+        const uint32_t flat = outputFlatIndex(applicationIndex, outputPort);
+        if (flat < errorInputs.size() && errorInputs[flat].isPresent()) {
+            backwardAdditionalInputs[errorInputNameForOutput(outputPort)] = errorInputs[flat].get();
         }
     }
+
     return backwardAdditionalInputs;
 }
 
-PreparedDynamicExpression::TensorMap CustomLayer::buildBackwardInputGradOutputs() const {
+PreparedDynamicExpression::TensorMap CustomLayer::buildBackwardInputGradOutputs(uint32_t applicationIndex) const {
     PreparedDynamicExpression::TensorMap outputs;
     for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
-        if (errorOutputs[inputPort].isPresent()) {
-            outputs[errorOutputNameForInput(inputPort)] = errorOutputs[inputPort].get();
+        const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
+        if (flat < errorOutputs.size() && errorOutputs[flat].isPresent()) {
+            outputs[errorOutputNameForInput(inputPort)] = errorOutputs[flat].get();
         }
     }
     return outputs;
@@ -289,13 +470,18 @@ void CustomLayer::validateStampedOutputNames(const StampedExecutionPlan& stamped
     }
 }
 
-Optional<Tensor> CustomLayer::inferFeatureOutputTensor(uint32_t outputPortIndex) {
+Optional<Tensor> CustomLayer::inferFeatureOutputTensor(uint32_t applicationIndex, uint32_t outputPortIndex) {
     if (outputPortIndex >= outputNames.size()) {
         throw runtime_error("CustomLayer output port index out of range.");
     }
+    if (applicationIndex >= applications.size()) {
+        throw runtime_error("CustomLayer application index out of range.");
+    }
+    requireApplicationInputInterfaceConnected(applicationIndex);
 
     PreparedDynamicExpression::TensorMap discoveredOutputs;
-    PreparedDynamicExpression prepared = layerDefinitionExpression.prepare(buildForwardInputs(), discoveredOutputs, computeStream());
+    PreparedDynamicExpression prepared =
+        layerDefinitionExpression.prepare(buildForwardInputs(applicationIndex), discoveredOutputs, computeStream(applicationIndex));
     validatePreparedExpressionInputs(prepared);
     StampedExecutionPlan stamped = prepared.stamp();
     return stamped.output(outputNames[outputPortIndex]);
@@ -306,115 +492,204 @@ void CustomLayer::compileImpl() {
 
     assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
 
-    ensurePortStorageAllocated();
+    if (applications.empty()) {
+        throw runtime_error("CustomLayer must have at least one connected input interface.");
+    }
+
     clearForwardArrivalBookkeeping();
     clearBackwardArrivalBookkeeping();
 
-    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
-        if (featureInputs[inputPort].isEmpty()) {
-            throw runtime_error("CustomLayer missing connected input port '" + inputNames[inputPort] + "'.");
+    bool compiledParameterInitializers = false;
+    numBackwardApplications = 0;
+
+    for (uint32_t applicationIndex = 0; applicationIndex < applications.size(); ++applicationIndex) {
+        ApplicationState& app = applications[applicationIndex];
+
+        for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+            const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
+            if (flat >= featureInputs.size() || featureInputs[flat].isEmpty()) {
+                throw runtime_error("CustomLayer missing connected input port '" + inputNames[inputPort] + "' for application " +
+                                    std::to_string(applicationIndex) + ".");
+            }
         }
-    }
 
-    for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
-        if (featureOutputs[outputPort].isEmpty()) {
-            throw runtime_error("CustomLayer missing connected output port '" + outputNames[outputPort] + "'.");
+        for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
+            const uint32_t flat = outputFlatIndex(applicationIndex, outputPort);
+            if (flat >= featureOutputs.size() || featureOutputs[flat].isEmpty()) {
+                throw runtime_error("CustomLayer missing connected output port '" + outputNames[outputPort] + "' for application " +
+                                    std::to_string(applicationIndex) + ".");
+            }
         }
-    }
 
-    forwardInputsByName = buildForwardInputs();
-    forwardOutputsByName = buildForwardOutputs();
+        app.forwardInputsByName = buildForwardInputs(applicationIndex);
+        app.forwardOutputsByName = buildForwardOutputs(applicationIndex);
 
-    forwardPrepared = std::make_shared<PreparedDynamicExpression>(
-        layerDefinitionExpression.prepare(forwardInputsByName, forwardOutputsByName, computeStream()));
-    validatePreparedExpressionInputs(*forwardPrepared);
+        app.forwardPrepared = std::make_shared<PreparedDynamicExpression>(
+            layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, computeStream(applicationIndex)));
+        validatePreparedExpressionInputs(*app.forwardPrepared);
 
-    std::unordered_set<std::string> parameterNames;
-    for (const auto& parameter : parameters) {
-        parameterNames.insert(parameter->getName());
-    }
-    const auto parameterFanOverrides = forwardPrepared->getParameterFanOverrides(parameterNames);
-    for (const auto& parameter : parameters) {
-        auto it = parameterFanOverrides.find(parameter->getName());
-        if (it != parameterFanOverrides.end()) {
-            parameter->compileInitializer(it->second.fan_in, it->second.fan_out);
-        } else {
-            parameter->compileInitializer();
+        if (!compiledParameterInitializers) {
+            std::unordered_set<std::string> parameterNames;
+            for (const auto& parameter : parameters) {
+                parameterNames.insert(parameter->getName());
+            }
+            const auto parameterFanOverrides = app.forwardPrepared->getParameterFanOverrides(parameterNames);
+            for (const auto& parameter : parameters) {
+                auto it = parameterFanOverrides.find(parameter->getName());
+                if (it != parameterFanOverrides.end()) {
+                    parameter->compileInitializer(it->second.fan_in, it->second.fan_out);
+                } else {
+                    parameter->compileInitializer();
+                }
+            }
+            compiledParameterInitializers = true;
         }
-    }
 
-    forwardStamped = std::make_shared<StampedExecutionPlan>(forwardPrepared->stamp(forwardOutputsByName));
-    validateStampedOutputNames(*forwardStamped, outputNames, "forward");
+        app.forwardStamped = std::make_shared<StampedExecutionPlan>(app.forwardPrepared->stamp(app.forwardOutputsByName));
+        validateStampedOutputNames(*app.forwardStamped, outputNames, "forward");
 
-    backwardErrorStamped = nullptr;
-    backwardWeightsClearStamped = nullptr;
-    backwardWeightsAccumulateStamped = nullptr;
-    backwardAdditionalInputsByName.clear();
-    backwardInputGradOutputsByName.clear();
+        app.backwardErrorStamped = nullptr;
+        app.backwardWeightsClearStamped = nullptr;
+        app.backwardWeightsAccumulateStamped = nullptr;
+        app.backwardAdditionalInputsByName.clear();
+        app.backwardInputGradOutputsByName.clear();
+        app.expectedBackwardErrorInputTensorIds.clear();
+        app.upstreamInputNamesByOutput.clear();
+        app.upstreamOutputNames.clear();
+        app.backwardGradientPatternCompiled = false;
 
-    if (isInferenceOnly() || isBackPropStub()) {
-        return;
-    }
-
-    backwardAdditionalInputsByName = buildBackwardAdditionalInputs();
-    backwardInputGradOutputsByName = buildBackwardInputGradOutputs();
-
-    std::unordered_map<std::string, std::string> upstreamInputNamesByOutput;
-    for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
-        if (errorInputs[outputPort].isPresent()) {
-            upstreamInputNamesByOutput[outputNames[outputPort]] = errorInputNameForOutput(outputPort);
-        }
-    }
-
-    std::vector<std::string> inputTargets;
-    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
-        if (errorOutputs[inputPort].isPresent()) {
-            inputTargets.push_back(inputNames[inputPort]);
-        }
-    }
-
-    if (!inputTargets.empty() && !backwardAdditionalInputsByName.empty()) {
-        backwardErrorStamped = std::make_shared<StampedExecutionPlan>(forwardPrepared->stampBackward(
-            inputTargets, upstreamInputNamesByOutput, false, backwardAdditionalInputsByName, {}, backwardInputGradOutputsByName));
-    }
-
-    std::vector<std::string> parameterTargets;
-    PreparedDynamicExpression::TensorMap backwardParameterPreallocatedOutputs;
-    for (auto& parameter : parameters) {
-        if (!parameter->isTrainable()) {
+        if (isInferenceOnly() || isBackPropStub()) {
+            app.backwardGradientPatternCompiled = true;
             continue;
         }
 
-        assert(parameter->hasOptimizer());
-        const shared_ptr<Optimizer>& parameterOptimizer = parameter->getOptimizer();
-        assert(parameterOptimizer != nullptr);
-        assert(parameterOptimizer->getWeightsGradient().isPresent());
+        if (!applicationHasAnyDownstreamBackprop(applicationIndex)) {
+            pruneUpstreamErrorOutputsForApplication(applicationIndex);
+            app.backwardErrorStamped = nullptr;
+            app.backwardWeightsClearStamped = nullptr;
+            app.backwardWeightsAccumulateStamped = nullptr;
+            app.backwardAdditionalInputsByName.clear();
+            app.backwardInputGradOutputsByName.clear();
+            app.backwardGradientPatternCompiled = true;
+            continue;
+        }
 
-        const std::string gradName = parameter->getName() + "_grad";
-        parameterTargets.push_back(parameter->getName());
-        backwardParameterPreallocatedOutputs[gradName] = parameterOptimizer->getWeightsGradient().get();
+        // Snapshot the per-application downstream-gradient pattern at compile time. For a
+        // given application, each output gradient either exists every backward pass or never
+        // exists, based on the downstream topology observed during compileImpl(). Runtime
+        // backward() only waits for this fixed set and the backward stamps are specialized
+        // to this fixed partial upstream map.
+        for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
+            const uint32_t flat = outputFlatIndex(applicationIndex, outputPort);
+            if (flat < errorInputs.size() && errorInputs[flat].isPresent()) {
+                app.expectedBackwardErrorInputTensorIds.insert(errorInputs[flat].get().getTensorId());
+                app.upstreamInputNamesByOutput[outputNames[outputPort]] = errorInputNameForOutput(outputPort);
+                app.upstreamOutputNames.insert(outputNames[outputPort]);
+            }
+        }
+        app.backwardGradientPatternCompiled = true;
+
+        app.backwardAdditionalInputsByName = buildBackwardAdditionalInputs(applicationIndex);
+        if (!app.backwardAdditionalInputsByName.empty()) {
+            numBackwardApplications += 1;
+        }
+
+        // Keep every connected upstream error-output target for this application, even when a target is not
+        // reachable from the subset of forward outputs that received incoming gradients. In that case AutoDiff
+        // emits a zero gradient for the requested wrt input without requiring a synthetic upstream zero tensor.
+        // This preserves graph-level backprop bookkeeping: upstream layers connected to the full input interface
+        // still receive exactly one backward() call carrying a zero tensor for inactive input ports.
+        std::vector<std::string> inputTargets;
+        for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+            const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
+            if (flat < errorOutputs.size() && errorOutputs[flat].isPresent()) {
+                inputTargets.push_back(inputNames[inputPort]);
+            }
+        }
+        app.backwardInputGradOutputsByName = buildBackwardInputGradOutputs(applicationIndex);
+
+        if (!inputTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
+            app.backwardErrorStamped =
+                std::make_shared<StampedExecutionPlan>(app.forwardPrepared->stampBackward(inputTargets,
+                                                                                          app.upstreamInputNamesByOutput,
+                                                                                          false,
+                                                                                          app.backwardAdditionalInputsByName,
+                                                                                          {},
+                                                                                          app.backwardInputGradOutputsByName));
+        }
+
+        std::vector<std::string> allTrainableParameterTargets;
+        for (auto& parameter : parameters) {
+            if (parameter->isTrainingEnabled()) {
+                allTrainableParameterTargets.push_back(parameter->getName());
+            }
+        }
+
+        std::vector<std::string> activeParameterTargets = app.forwardPrepared->equation().filterTensorInputNamesReachableFromOutputs(
+            allTrainableParameterTargets, app.upstreamOutputNames);
+        const std::unordered_set<std::string> activeParameterTargetNames(activeParameterTargets.begin(), activeParameterTargets.end());
+
+        PreparedDynamicExpression::TensorMap allParameterPreallocatedOutputs;
+        PreparedDynamicExpression::TensorMap activeParameterPreallocatedOutputs;
+        for (auto& parameter : parameters) {
+            if (!parameter->isTrainingEnabled()) {
+                continue;
+            }
+
+            assert(parameter->hasOptimizer());
+            const shared_ptr<Optimizer>& parameterOptimizer = parameter->getOptimizer();
+            assert(parameterOptimizer != nullptr);
+            assert(parameterOptimizer->getWeightsGradient().isPresent());
+
+            const std::string gradName = parameter->getName() + "_grad";
+            Tensor gradientTensor = parameterOptimizer->getWeightsGradient().get();
+            allParameterPreallocatedOutputs[gradName] = gradientTensor;
+            if (activeParameterTargetNames.contains(parameter->getName())) {
+                activeParameterPreallocatedOutputs[gradName] = gradientTensor;
+            }
+        }
+
+        if (!allTrainableParameterTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
+            assert(gradientUpdateStream.isPresent());
+
+            PreparedDynamicExpression gradientPrepared =
+                layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, gradientUpdateStream.get());
+            validatePreparedExpressionInputs(gradientPrepared);
+
+            // Every application with downstream backprop gets a clear-first stamp that writes every trainable
+            // gradient buffer. Whichever application arrives first in a backward pass can therefore initialize
+            // all parameter gradients without a separate memset, while the partial upstream map makes inactive
+            // outputs contribute zeros rather than synthetic zero tensors.
+            app.backwardWeightsClearStamped =
+                std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(allTrainableParameterTargets,
+                                                                                      app.upstreamInputNamesByOutput,
+                                                                                      false,
+                                                                                      app.backwardAdditionalInputsByName,
+                                                                                      {},
+                                                                                      allParameterPreallocatedOutputs));
+
+            if (!activeParameterTargets.empty()) {
+                app.backwardWeightsAccumulateStamped =
+                    std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(activeParameterTargets,
+                                                                                          app.upstreamInputNamesByOutput,
+                                                                                          true,
+                                                                                          app.backwardAdditionalInputsByName,
+                                                                                          {},
+                                                                                          activeParameterPreallocatedOutputs));
+            }
+        }
     }
 
-    if (!parameterTargets.empty() && !backwardAdditionalInputsByName.empty()) {
-        assert(gradientUpdateStream.isPresent());
-
-        PreparedDynamicExpression gradientPrepared =
-            layerDefinitionExpression.prepare(forwardInputsByName, forwardOutputsByName, gradientUpdateStream.get());
-        validatePreparedExpressionInputs(gradientPrepared);
-
-        backwardWeightsClearStamped = std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(
-            parameterTargets, upstreamInputNamesByOutput, false, backwardAdditionalInputsByName, {}, backwardParameterPreallocatedOutputs));
-
-        backwardWeightsAccumulateStamped = std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(
-            parameterTargets, upstreamInputNamesByOutput, true, backwardAdditionalInputsByName, {}, backwardParameterPreallocatedOutputs));
-    }
+    // Now that every application has a compiled backward-gradient pattern, reset
+    // the arrival bookkeeping from those fixed per-application expectations.
+    clearBackwardArrivalBookkeeping();
 }
 
 Optional<Tensor> CustomLayer::createFeatureOutputTensor() {
     if (outputNames.size() != 1) {
         throw runtime_error("CustomLayer::createFeatureOutputTensor() without a connection type is only valid for single-output layers.");
     }
-    Optional<Tensor> featureOutput = inferFeatureOutputTensor(0);
+    Optional<Tensor> featureOutput = inferFeatureOutputTensor(0, 0);
     assert(featureOutput.isPresent());
     return featureOutput;
 }
@@ -424,125 +699,122 @@ Optional<Tensor> CustomLayer::createErrorOutputTensor(bool backPropagateError, u
         return Optional<Tensor>::empty();
     }
 
-    assert(connectionNumber < featureInputs.size());
-    assert(featureInputs[connectionNumber].isPresent());
-    return featureInputs[connectionNumber].get().clone();
+    DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
+    const uint32_t flat = inputFlatIndex(decoded.applicationIndex, decoded.portIndex);
+    assert(flat < featureInputs.size());
+    assert(featureInputs[flat].isPresent());
+    return featureInputs[flat].get().clone();
 }
 
 Optional<Tensor> CustomLayer::connectToPreviousLayer(
     Layer* previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) {
     assert(!compiled);
-    ensurePortStorageAllocated();
 
-    if (connectionType < 0 || static_cast<size_t>(connectionType) >= inputNames.size()) {
-        throw runtime_error("CustomLayer input connection type out of range.");
-    }
-    const uint32_t inputPort = static_cast<uint32_t>(connectionType);
+    const DecodedConnection decoded = decodeInputConnectionType(connectionType);
+    ensureApplicationStorageAllocated(decoded.applicationIndex);
+    const uint32_t flat = inputFlatIndex(decoded.applicationIndex, decoded.portIndex);
 
     assert(featureInput.isPresent());
-    assert(previousLayers[inputPort].isEmpty());
-    assert(featureInputs[inputPort].isEmpty());
-    assert(errorOutputs[inputPort].isEmpty());
+    assert(previousLayers[flat].isEmpty());
+    assert(featureInputs[flat].isEmpty());
+    assert(errorOutputs[flat].isEmpty());
 
-    previousLayers[inputPort] = previousLayer;
-    featureInputs[inputPort] = featureInput;
-    featureInputsConnectedForPorts[inputPort] = featureInput;
-    streams[inputPort] = stream;
-    errorOutputs[inputPort] = createErrorOutputTensor(backPropagateError, inputPort);
-    errorOutputsConnectedForPorts[inputPort] = errorOutputs[inputPort];
+    previousLayers[flat] = previousLayer;
+    featureInputs[flat] = featureInput;
+    featureInputsConnectedForPorts[flat] = featureInput;
+    streams[flat] = stream;
+    errorOutputs[flat] = createErrorOutputTensor(backPropagateError, connectionType);
+    errorOutputsConnectedForPorts[flat] = errorOutputs[flat];
 
     ensureNoDeviceCrossing(placement);
-    return errorOutputs[inputPort];
+    return errorOutputs[flat];
 }
 
 void CustomLayer::connectToNextLayer(Layer* nextLayer, int driverConnectionType, int loaderConnectionType) {
     assert(!compiled);
-    ensurePortStorageAllocated();
 
-    if (driverConnectionType < 0 || static_cast<size_t>(driverConnectionType) >= outputNames.size()) {
-        throw runtime_error("CustomLayer output connection type out of range.");
-    }
-    const uint32_t outputPort = static_cast<uint32_t>(driverConnectionType);
+    const DecodedConnection decoded = decodeOutputConnectionType(driverConnectionType);
+    ensureApplicationStorageAllocated(decoded.applicationIndex);
+    const uint32_t flat = outputFlatIndex(decoded.applicationIndex, decoded.portIndex);
 
-    if (featureOutputs[outputPort].isEmpty()) {
-        Optional<Tensor> outputTensor = inferFeatureOutputTensor(outputPort);
+    if (featureOutputs[flat].isEmpty()) {
+        Optional<Tensor> outputTensor = inferFeatureOutputTensor(decoded.applicationIndex, decoded.portIndex);
         assert(outputTensor.isPresent());
-        featureOutputs[outputPort] = outputTensor;
-        featureOutputsConnectedForPorts[outputPort] = outputTensor;
+        featureOutputs[flat] = outputTensor;
+        featureOutputsConnectedForPorts[flat] = outputTensor;
     }
 
-    nextLayers[outputPort] = nextLayer;
-    errorInputs[outputPort] = nextLayer->connectToPreviousLayer(
-        this, featureOutputs[outputPort], computeStream(), shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType);
-    errorInputsConnectedForPorts[outputPort] = errorInputs[outputPort];
-
-    // If there is no downstream backward path for any output port, clear all upstream error outputs.
-    bool anyDownstreamBackprop = false;
-    for (const auto& errorInput : errorInputs) {
-        if (errorInput.isPresent()) {
-            anyDownstreamBackprop = true;
-            break;
-        }
-    }
-
-    if (!anyDownstreamBackprop) {
-        for (uint32_t inputPort = 0; inputPort < errorOutputs.size(); ++inputPort) {
-            if (errorOutputs[inputPort].isPresent() && previousLayers[inputPort].isPresent()) {
-                previousLayers[inputPort].get()->replaceErrorInput(errorOutputs[inputPort], Optional<Tensor>::empty());
-                errorOutputs[inputPort].clear();
-                errorOutputsConnectedForPorts[inputPort].clear();
-            }
-        }
-    }
+    nextLayers[flat] = nextLayer;
+    errorInputs[flat] = nextLayer->connectToPreviousLayer(this,
+                                                          featureOutputs[flat],
+                                                          computeStream(decoded.applicationIndex),
+                                                          shouldConnectToBackPropErrorIn() && !isBackPropStub(),
+                                                          loaderConnectionType);
+    errorInputsConnectedForPorts[flat] = errorInputs[flat];
 
     ensureNoDeviceCrossing(placement);
+}
+
+void CustomLayer::pruneUpstreamErrorOutputsForApplication(uint32_t applicationIndex) {
+    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+        const uint32_t inputFlat = inputFlatIndex(applicationIndex, inputPort);
+        if (inputFlat >= errorOutputs.size() || errorOutputs[inputFlat].isEmpty()) {
+            continue;
+        }
+
+        if (previousLayers[inputFlat].isPresent()) {
+            previousLayers[inputFlat].get()->replaceErrorInput(errorOutputs[inputFlat], Optional<Tensor>::empty());
+        }
+
+        errorOutputs[inputFlat].clear();
+        errorOutputsConnectedForPorts[inputFlat].clear();
+    }
 }
 
 void CustomLayer::replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
     assert(oldErrorInput.isPresent());
 
     bool replacementHappened = false;
-    for (uint32_t outputPort = 0; outputPort < errorInputs.size(); ++outputPort) {
-        if (errorInputs[outputPort].isEmpty() || errorInputs[outputPort].get() != oldErrorInput.get()) {
+    std::set<uint32_t> affectedApplications;
+    for (uint32_t flat = 0; flat < errorInputs.size(); ++flat) {
+        if (errorInputs[flat].isEmpty() || errorInputs[flat].get() != oldErrorInput.get()) {
             continue;
         }
-        errorInputs[outputPort] = newErrorInput;
-        errorInputsConnectedForPorts[outputPort] = newErrorInput;
+        errorInputs[flat] = newErrorInput;
+        errorInputsConnectedForPorts[flat] = newErrorInput;
+        affectedApplications.insert(flat / outputNames.size());
         replacementHappened = true;
     }
     assert(replacementHappened);
 
-    bool anyDownstreamBackprop = false;
-    for (const auto& errorInput : errorInputs) {
-        if (errorInput.isPresent()) {
-            anyDownstreamBackprop = true;
-            break;
-        }
-    }
-
-    if (!anyDownstreamBackprop) {
-        for (uint32_t inputPort = 0; inputPort < errorOutputs.size(); ++inputPort) {
-            if (errorOutputs[inputPort].isPresent()) {
-                if (previousLayers[inputPort].isPresent()) {
-                    previousLayers[inputPort].get()->replaceErrorInput(errorOutputs[inputPort], Optional<Tensor>::empty());
-                }
-                errorOutputs[inputPort].clear();
-                errorOutputsConnectedForPorts[inputPort].clear();
-            }
-        }
-    }
-
-    clearBackwardArrivalBookkeeping();
-}
-
-void CustomLayer::synchronizeComputeStreamForForwardInputs() {
-    Stream& runStream = computeStream();
-    const uint32_t runPort = primaryInputPort();
-    for (uint32_t inputPort = 0; inputPort < streams.size(); ++inputPort) {
-        if (inputPort == runPort || featureInputs[inputPort].isEmpty()) {
+    for (uint32_t applicationIndex : affectedApplications) {
+        if (applicationHasAnyDownstreamBackprop(applicationIndex)) {
             continue;
         }
-        Event readyEvent = streams[inputPort].putEvent();
+        for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+            const uint32_t inputFlat = inputFlatIndex(applicationIndex, inputPort);
+            if (inputFlat >= errorOutputs.size() || errorOutputs[inputFlat].isEmpty()) {
+                continue;
+            }
+            if (previousLayers[inputFlat].isPresent()) {
+                previousLayers[inputFlat].get()->replaceErrorInput(errorOutputs[inputFlat], Optional<Tensor>::empty());
+            }
+            errorOutputs[inputFlat].clear();
+            errorOutputsConnectedForPorts[inputFlat].clear();
+        }
+        clearBackwardArrivalBookkeeping(applicationIndex);
+    }
+}
+
+void CustomLayer::synchronizeComputeStreamForForwardInputs(uint32_t applicationIndex) {
+    Stream& runStream = computeStream(applicationIndex);
+    const uint32_t runFlat = primaryInputFlatIndex(applicationIndex);
+    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+        const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
+        if (flat == runFlat || flat >= streams.size() || featureInputs[flat].isEmpty()) {
+            continue;
+        }
+        Event readyEvent = streams[flat].putEvent();
         runStream.waitEvent(readyEvent);
     }
 }
@@ -551,14 +823,13 @@ void CustomLayer::forward(Optional<Tensor> featureInput, bool validationPass, ui
     assert(running);
     assert(featureInput.isPresent());
 
-    uint32_t inputPort = inputNames.size();
-    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        if (featureInputs[i].isPresent() && featureInputs[i].get() == featureInput.get()) {
-            inputPort = i;
-            break;
+    std::set<uint32_t> candidateApplications;
+    for (uint32_t flat = 0; flat < featureInputs.size(); ++flat) {
+        if (featureInputs[flat].isPresent() && featureInputs[flat].get() == featureInput.get()) {
+            candidateApplications.insert(flat / inputNames.size());
         }
     }
-    assert(inputPort != inputNames.size());
+    assert(!candidateApplications.empty());
 
     if (isStartOfForward) {
         if (weightsAreUpToDateEvent.isPresent()) {
@@ -573,21 +844,31 @@ void CustomLayer::forward(Optional<Tensor> featureInput, bool validationPass, ui
         clearForwardArrivalBookkeeping();
     }
 
-    assert(stillWaitingForForwardInputTensorIds.count(featureInput.get().getTensorId()) == 1);
-    stillWaitingForForwardInputTensorIds.erase(featureInput.get().getTensorId());
-
-    if (!stillWaitingForForwardInputTensorIds.empty()) {
-        return;
-    }
-    stillWaitingForForwardInputTensorIds = allForwardInputTensorIds;
-
-    synchronizeComputeStreamForForwardInputs();
-    computeFeatureOut(0);
-
-    for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
-        if (nextLayers[outputPort].isEmpty())
+    const unsigned long tensorId = featureInput.get().getTensorId();
+    for (uint32_t applicationIndex : candidateApplications) {
+        ApplicationState& app = applications[applicationIndex];
+        if (app.forwardRanThisPass) {
             continue;
-        nextLayers[outputPort].get()->forward(featureOutputs[outputPort], validationPass, batchSize);
+        }
+        if (app.stillWaitingForForwardInputTensorIds.count(tensorId) == 0) {
+            continue;
+        }
+        app.stillWaitingForForwardInputTensorIds.erase(tensorId);
+
+        if (!app.stillWaitingForForwardInputTensorIds.empty()) {
+            continue;
+        }
+
+        app.forwardRanThisPass = true;
+        synchronizeComputeStreamForForwardInputs(applicationIndex);
+        computeFeatureOut(inputFlatIndex(applicationIndex, 0));
+
+        for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
+            const uint32_t flat = outputFlatIndex(applicationIndex, outputPort);
+            if (nextLayers[flat].isEmpty())
+                continue;
+            nextLayers[flat].get()->forward(featureOutputs[flat], validationPass, batchSize);
+        }
     }
 }
 
@@ -597,14 +878,13 @@ void CustomLayer::backward(Optional<Tensor> errorInput, uint32_t batchSize) {
     if (errorInput.isEmpty())
         return;
 
-    uint32_t outputPort = outputNames.size();
-    for (uint32_t i = 0; i < errorInputs.size(); ++i) {
-        if (errorInputs[i].isPresent() && errorInputs[i].get() == errorInput.get()) {
-            outputPort = i;
-            break;
+    std::set<uint32_t> candidateApplications;
+    for (uint32_t flat = 0; flat < errorInputs.size(); ++flat) {
+        if (errorInputs[flat].isPresent() && errorInputs[flat].get() == errorInput.get()) {
+            candidateApplications.insert(flat / outputNames.size());
         }
     }
-    assert(outputPort != outputNames.size());
+    assert(!candidateApplications.empty());
 
     if (isStartOfBackward) {
         clearBackwardArrivalBookkeeping();
@@ -612,35 +892,55 @@ void CustomLayer::backward(Optional<Tensor> errorInput, uint32_t batchSize) {
         clearGradientFirstThisBackwardPass = true;
     }
 
-    assert(stillWaitingForBackwardErrorInputTensorIds.count(errorInput.get().getTensorId()) == 1);
-    stillWaitingForBackwardErrorInputTensorIds.erase(errorInput.get().getTensorId());
-
-    if (!stillWaitingForBackwardErrorInputTensorIds.empty()) {
-        return;
-    }
-    stillWaitingForBackwardErrorInputTensorIds = allBackwardErrorInputTensorIds;
-
-    Optional<Event> errorInputReadyEvent = Optional<Event>::empty();
-    if (gradientUpdateStream.isPresent()) {
-        errorInputReadyEvent = computeStream().putEvent();
-    }
-
-    if (backwardErrorStamped != nullptr) {
-        Optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(0);
-        if (errorOutHasBeenComputedEvent.isPresent()) {
-            errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
+    const unsigned long tensorId = errorInput.get().getTensorId();
+    for (uint32_t applicationIndex : candidateApplications) {
+        ApplicationState& app = applications[applicationIndex];
+        if (app.backwardRanThisPass) {
+            continue;
         }
+        if (app.stillWaitingForBackwardErrorInputTensorIds.count(tensorId) == 0) {
+            continue;
+        }
+        app.stillWaitingForBackwardErrorInputTensorIds.erase(tensorId);
+
+        if (!app.stillWaitingForBackwardErrorInputTensorIds.empty()) {
+            continue;
+        }
+
+        app.backwardRanThisPass = true;
+
+        Optional<Event> errorInputReadyEvent = Optional<Event>::empty();
+        if (gradientUpdateStream.isPresent()) {
+            errorInputReadyEvent = computeStream(applicationIndex).putEvent();
+        }
+
+        if (app.backwardErrorStamped != nullptr) {
+            Optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(inputFlatIndex(applicationIndex, 0));
+            if (errorOutHasBeenComputedEvent.isPresent()) {
+                errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
+            }
+        }
+
+        if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
+            gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
+        }
+
+        accumulateWeightsGradient(inputFlatIndex(applicationIndex, 0), clearGradientFirstThisBackwardPass);
+        clearGradientFirstThisBackwardPass = false;
+
+        for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+            const uint32_t inputFlat = inputFlatIndex(applicationIndex, inputPort);
+            if (previousLayers[inputFlat].isEmpty() || errorOutputs[inputFlat].isEmpty()) {
+                continue;
+            }
+            previousLayers[inputFlat].get()->backward(errorOutputs[inputFlat], batchSize);
+        }
+
+        numBackwardApplicationsCompletedThisPass += 1;
     }
 
-    if (gradientUpdateStream.isPresent() && errorInputReadyEvent.isPresent()) {
-        gradientUpdateStream.get().waitEvent(errorInputReadyEvent);
-    }
-
-    accumulateWeightsGradient(0, clearGradientFirstThisBackwardPass);
-    clearGradientFirstThisBackwardPass = false;
-
-    const bool gradientComplete = true;
-    if (gradientComplete) {
+    if (numBackwardApplications > 0 && numBackwardApplicationsCompletedThisPass == numBackwardApplications) {
+        numBackwardApplicationsCompletedThisPass = 0;
         weightsAreUpToDateEvent.clear();
 
         if (gradientUpdateStream.isPresent()) {
@@ -659,59 +959,67 @@ void CustomLayer::backward(Optional<Tensor> errorInput, uint32_t batchSize) {
         errorOutHasBeenComputedEvents.clear();
         isStartOfForward = true;
     }
-
-    for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
-        if (previousLayers[inputPort].isEmpty() || errorOutputs[inputPort].isEmpty()) {
-            continue;
-        }
-        previousLayers[inputPort].get()->backward(errorOutputs[inputPort], batchSize);
-    }
 }
 
 void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {
-    (void)connectionNumber;
-    if (!forwardStamped) {
+    DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
+    if (decoded.applicationIndex >= applications.size() || !applications[decoded.applicationIndex].forwardStamped) {
         throw runtime_error("CustomLayer::computeFeatureOut requires a stamped forward plan.");
     }
-    forwardStamped->run();
+    applications[decoded.applicationIndex].forwardStamped->run();
 }
 
 Optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
-    (void)connectionNumber;
-    if (backwardErrorStamped == nullptr) {
+    DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
+    if (decoded.applicationIndex >= applications.size() || applications[decoded.applicationIndex].backwardErrorStamped == nullptr) {
         return Optional<Event>::empty();
     }
-    backwardErrorStamped->run();
-    return computeStream().putEvent();
+    applications[decoded.applicationIndex].backwardErrorStamped->run();
+    return computeStream(decoded.applicationIndex).putEvent();
 }
 
 void CustomLayer::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
-    (void)connectionNumber;
     if (!gradientUpdateStream.isPresent()) {
         return;
     }
 
+    DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
+    if (decoded.applicationIndex >= applications.size()) {
+        return;
+    }
+    ApplicationState& app = applications[decoded.applicationIndex];
+
     if (clearGradientFirst) {
-        if (backwardWeightsClearStamped != nullptr) {
-            backwardWeightsClearStamped->run();
+        if (app.backwardWeightsClearStamped != nullptr) {
+            app.backwardWeightsClearStamped->run();
         }
         return;
     }
 
-    if (backwardWeightsAccumulateStamped != nullptr) {
-        backwardWeightsAccumulateStamped->run();
+    if (app.backwardWeightsAccumulateStamped != nullptr) {
+        app.backwardWeightsAccumulateStamped->run();
     }
 }
 
-uint64_t CustomLayer::flopCountForward() { return forwardStamped == nullptr ? 0 : forwardStamped->flopCount(); }
+uint64_t CustomLayer::flopCountForward() {
+    uint64_t flops = 0;
+    for (const ApplicationState& app : applications) {
+        if (app.forwardStamped != nullptr) {
+            flops += app.forwardStamped->flopCount();
+        }
+    }
+    return flops;
+}
 
 uint64_t CustomLayer::flopCountBackward() {
     uint64_t flops = 0;
-    if (backwardErrorStamped != nullptr) {
-        flops += backwardErrorStamped->flopCount();
-    }
-    if (backwardWeightsAccumulateStamped != nullptr) {
-        flops += backwardWeightsAccumulateStamped->flopCount();
+    for (const ApplicationState& app : applications) {
+        if (app.backwardErrorStamped != nullptr) {
+            flops += app.backwardErrorStamped->flopCount();
+        }
+        if (app.backwardWeightsAccumulateStamped != nullptr) {
+            flops += app.backwardWeightsAccumulateStamped->flopCount();
+        }
     }
     return flops;
 }
