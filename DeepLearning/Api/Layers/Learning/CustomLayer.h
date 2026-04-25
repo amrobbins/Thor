@@ -26,6 +26,7 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
 
     CustomLayer(ThorImplementation::DynamicExpression expr,
                 const std::vector<TensorMap>& inputInterfaces,
+                std::vector<std::shared_ptr<Parameter>> parameters = {},
                 bool inferenceOnly = false,
                 bool useFastMath = false);
 
@@ -33,6 +34,7 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     const std::vector<std::string>& getOutputNames() const { return outputNames; }
     TensorMap getOutputInterface(const TensorMap& inputInterface) const;
     const ThorImplementation::DynamicExpression& getExpression() const { return expr; }
+    const std::vector<std::shared_ptr<Parameter>>& getParameters() const { return parameters; }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                              Stream stream,
@@ -98,6 +100,8 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     std::vector<TensorMap> inputInterfaces;
     std::vector<TensorMap> outputInterfaces;
 
+    std::vector<std::shared_ptr<Parameter>> parameters;
+
     // Per-interface readiness is tracked by logical input port, not by tensor, because the same tensor may satisfy
     // several named inputs and/or participate in several input interfaces.
     std::vector<std::set<uint32_t>> connectedInputPortIndicesByInterface;
@@ -122,7 +126,7 @@ class CustomLayer::Builder {
         assert(!_expr->getExpectedInputNames().empty());
         assert(!_expr->getExpectedOutputNames().empty());
 
-        CustomLayer customLayer(*_expr, _inputInterfaces, _inferenceOnly, _useFastMath);
+        CustomLayer customLayer(*_expr, _inputInterfaces, _parameters, _inferenceOnly, _useFastMath);
 
         if (_layerOptimizer != nullptr)
             customLayer.optimizer = _layerOptimizer;
@@ -148,6 +152,19 @@ class CustomLayer::Builder {
         return *this;
     }
 
+    virtual CustomLayer::Builder& parameter(std::shared_ptr<Parameter> parameter) {
+        assert(parameter != nullptr);
+        this->_parameters.push_back(std::move(parameter));
+        return *this;
+    }
+
+    virtual CustomLayer::Builder& parameters(std::vector<std::shared_ptr<Parameter>> parameters) {
+        for (const auto& parameter : parameters)
+            assert(parameter != nullptr);
+        this->_parameters = std::move(parameters);
+        return *this;
+    }
+
     // In the vast majority of pointwise and broadcast fused kernels, the kernel is memory bandwidth bound, not compute bound.
     // So the recommendation here is usually to not use Nvidia --use_fast_math compiler flag, which this option enables.
     // It is potentially less accurate often without a performance gain, so only use if you really know that it is something that you want.
@@ -166,6 +183,7 @@ class CustomLayer::Builder {
     Optional<Network*> _network;
     std::shared_ptr<ThorImplementation::DynamicExpression> _expr;
     std::vector<TensorMap> _inputInterfaces;
+    std::vector<std::shared_ptr<Parameter>> _parameters;
     bool _inferenceOnly = false;
     bool _useFastMath = false;
     std::shared_ptr<Optimizer> _layerOptimizer;

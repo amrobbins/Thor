@@ -55,7 +55,7 @@ class Parameter {
     std::shared_ptr<Initializer> getInitializer();
     void clearInitializer();
 
-    std::string getName();
+    std::string getName() const;
     Optional<Tensor> getStorage();
 
     [[nodiscard]] bool isTrainable() const;

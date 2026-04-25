@@ -66,7 +66,7 @@ void Parameter::setInitializer(Optional<shared_ptr<Initializer>> newInitializer)
 shared_ptr<Initializer> Parameter::getInitializer() { return initializer; }
 void Parameter::clearInitializer() { initializer = nullptr; }
 
-string Parameter::getName() { return name; }
+string Parameter::getName() const { return name; }
 Optional<Tensor> Parameter::getStorage() { return storage; }
 
 bool Parameter::isTrainable() const { return trainable; }

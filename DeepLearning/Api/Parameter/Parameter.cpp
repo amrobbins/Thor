@@ -3,11 +3,68 @@
 
 #include "DeepLearning/Implementation/Parameter/Parameter.h"
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+
+#include <stdexcept>
+#include <utility>
 
 using namespace std;
 using json = nlohmann::json;
 
 namespace Thor {
+
+namespace {
+class ApiBackedImplementationParameter : public ThorImplementation::Parameter {
+   public:
+    explicit ApiBackedImplementationParameter(const Thor::Parameter *apiParameter)
+        : ThorImplementation::Parameter(apiParameter->getName(), apiParameter->isTrainable()), apiParameter(apiParameter) {
+        if (this->apiParameter == nullptr)
+            throw runtime_error("Cannot stamp a null API Parameter.");
+    }
+
+    void createStorage(const ThorImplementation::Tensor &inputTensor) override { storage = apiParameter->create_storage(inputTensor); }
+
+   private:
+    const Thor::Parameter *apiParameter;
+};
+}  // namespace
+
+Parameter::Parameter(std::string name,
+                     std::vector<uint64_t> shape,
+                     DataType dtype,
+                     std::shared_ptr<Initializer> initializer,
+                     bool trainable,
+                     std::shared_ptr<Optimizer> optimizer)
+    : initialized(true),
+      name(std::move(name)),
+      shape(std::move(shape)),
+      dtype(dtype),
+      initializer(std::move(initializer)),
+      trainable(trainable),
+      optimizer(std::move(optimizer)),
+      trainingEnabled(trainable) {
+    validateReadyForUse();
+    storage = Tensor(this->dtype, this->shape);
+}
+
+void Parameter::validateShape(const std::vector<uint64_t> &shape) {
+    if (shape.empty())
+        throw runtime_error("Parameter shape cannot be empty.");
+    for (uint64_t dim : shape) {
+        if (dim == 0)
+            throw runtime_error("Parameter shape dimensions must be > 0.");
+    }
+}
+
+void Parameter::validateReadyForUse() const {
+    if (name.empty())
+        throw runtime_error("Parameter name cannot be empty.");
+    if (name.length() >= 2 && name[0] == '_' && name[1] == '_')
+        throw runtime_error("Parameter names cannot start with __; that prefix is reserved. Parameter name " + name + " is illegal.");
+    validateShape(shape);
+    if (optimizer != nullptr && !trainable)
+        throw runtime_error("Only trainable parameters may have optimizer overrides.");
+}
 
 json Parameter::architectureJson() const {
     json j;
@@ -77,6 +134,11 @@ Parameter Parameter::deserialize(const json &j, std::shared_ptr<thor_file::TarRe
 }
 std::string Parameter::getVersion() { return "1.0.0"; }
 
+const std::string &Parameter::getName() const { return name; }
+const std::vector<uint64_t> &Parameter::getShape() const { return shape; }
+Parameter::DataType Parameter::getDataType() const { return dtype; }
+std::shared_ptr<Initializer> Parameter::getInitializer() const { return initializer; }
+
 bool Parameter::isTrainable() const { return trainable; }
 bool Parameter::isTrainingEnabled() const { return isTrainable() && trainingEnabled; }
 void Parameter::setTrainingEnabled(bool enabled) {
@@ -89,6 +151,33 @@ void Parameter::setTrainingEnabled(bool enabled) {
 bool Parameter::hasOptimizer() const { return optimizer != nullptr; }
 std::shared_ptr<Optimizer> Parameter::getOptimizer() { return optimizer; }
 
+ThorImplementation::Tensor Parameter::createStorage(const ThorImplementation::Tensor &inputTensor) const {
+    if (!initialized)
+        throw runtime_error("Cannot create storage for an uninitialized Parameter.");
+    validateReadyForUse();
+
+    return createStorage(inputTensor, shape, dtype);
+}
+
+ThorImplementation::Tensor Parameter::createStorage(const ThorImplementation::Tensor &inputTensor,
+                                                    const std::vector<uint64_t> &shape,
+                                                    DataType dtype) const {
+    validateShape(shape);
+    ThorImplementation::TensorDescriptor descriptor(dtype, shape);
+    return ThorImplementation::Tensor(inputTensor.getPlacement(), descriptor);
+}
+
+ThorImplementation::Tensor Parameter::create_storage(const ThorImplementation::Tensor &inputTensor) const {
+    return createStorage(inputTensor);
+}
+
+std::shared_ptr<ThorImplementation::Parameter> Parameter::stamp() {
+    std::shared_ptr<ApiBackedImplementationParameter> physicalParameter = std::make_shared<ApiBackedImplementationParameter>(this);
+    if (initializer != nullptr)
+        physicalParameter->setInitializer(initializer->stamp());
+    return physicalParameter;
+}
+
 std::shared_ptr<Parameter> Parameter::Builder::build() {
     assert(!_name.empty());
     assert(!_shape.empty());
@@ -99,24 +188,15 @@ std::shared_ptr<Parameter> Parameter::Builder::build() {
     if (_optimizerOverride != nullptr)
         assert(_trainable.get() == true);
 
-    std::shared_ptr<Parameter> parameter = std::make_shared<Parameter>();
-    parameter->name = _name;
-    parameter->shape = _shape;
-    parameter->dtype = _dtype;
-    parameter->initializer = _initializer;
-    parameter->trainable = _trainable;
-    parameter->trainingEnabled = parameter->trainable;
-    parameter->optimizer = _optimizerOverride;
-    parameter->storage = Tensor(parameter->dtype, parameter->shape);
-    parameter->initialized = true;
-    parameter->owner = _owner;
+    std::shared_ptr<Parameter> parameter =
+        std::make_shared<Parameter>(_name, _shape, _dtype.get(), _initializer->clone(), _trainable.get(), _optimizerOverride);
     return parameter;
 }
 
 Parameter::Builder &Parameter::Builder::name(const std::string &_name) {
     assert(this->_name.empty());
     assert(!_name.empty());
-    if (_name.length() >= 2 && _name[0] == '_' && _name[0] == '_')
+    if (_name.length() >= 2 && _name[0] == '_' && _name[1] == '_')
         throw runtime_error("Parameter names cannot start with __ that is reserved. Parameter name " + _name + " is illegal.");
     this->_name = _name;
     return *this;
@@ -162,12 +242,6 @@ Parameter::Builder &Parameter::Builder::optimizer(std::shared_ptr<Optimizer> &_o
 Parameter::Builder &Parameter::Builder::optimizer(std::shared_ptr<Optimizer> &&_optimizerOverride) {
     assert(this->_optimizerOverride == nullptr);
     this->_optimizerOverride = _optimizerOverride;
-    return *this;
-};
-
-Parameter::Builder &Parameter::Builder::owner(const std::shared_ptr<Parameterizable> &_owner) {
-    assert(this->_owner == nullptr);
-    this->_owner = _owner;
     return *this;
 };
 

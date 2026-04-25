@@ -55,6 +55,8 @@ class TrainableLayer : public MultiConnectionLayer {
             assert(hasOptimizer());
         if (hasOptimizer()) {
             for (const std::string &paramName : physicalTrainableLayer->listParameters()) {
+                if (!physicalTrainableLayer->getParameter(paramName)->isTrainable())
+                    continue;
                 std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = optimizer->stamp(physicalTrainableLayer);
                 physicalTrainableLayer->setOptimizer(paramName, physicalOptimizer);
             }

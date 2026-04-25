@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -8,6 +9,7 @@
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Parameter/Parameter.h"
 #include "Utilities/Common/Optional.h"
 
 namespace Thor {
@@ -19,6 +21,14 @@ class Parameter {
     using DataType = ThorImplementation::TensorDescriptor::DataType;
     class Builder;
 
+    Parameter() = default;
+    Parameter(std::string name,
+              std::vector<uint64_t> shape,
+              DataType dtype = DataType::FP32,
+              std::shared_ptr<Initializer> initializer = nullptr,
+              bool trainable = true,
+              std::shared_ptr<Optimizer> optimizer = nullptr);
+
     virtual ~Parameter() = default;
 
     static std::string getVersion();
@@ -29,6 +39,11 @@ class Parameter {
                                      ThorImplementation::StampedNetwork &stampedNetwork) const;
     static Parameter deserialize(const nlohmann::json &j, std::shared_ptr<thor_file::TarReader> &archiveReader);
 
+    [[nodiscard]] const std::string &getName() const;
+    [[nodiscard]] const std::vector<uint64_t> &getShape() const;
+    [[nodiscard]] DataType getDataType() const;
+    [[nodiscard]] std::shared_ptr<Initializer> getInitializer() const;
+
     bool isTrainable() const;
     bool isTrainingEnabled() const;
     void setTrainingEnabled(bool enabled);
@@ -36,7 +51,23 @@ class Parameter {
     bool hasOptimizer() const;
     std::shared_ptr<Optimizer> getOptimizer();
 
+    // API-side parameter storage definition. This runs at physical layer compile time.
+    // The default implementation is the basic fixed-shape parameter: allocate this parameter's
+    // shape/dtype on the same placement as inputTensor. Python subclasses should override
+    // create_storage(...) and return a thor.physical.PhysicalTensor.
+    virtual ThorImplementation::Tensor createStorage(const ThorImplementation::Tensor &inputTensor) const;
+    ThorImplementation::Tensor createStorage(const ThorImplementation::Tensor &inputTensor,
+                                             const std::vector<uint64_t> &shape,
+                                             DataType dtype) const;
+    virtual ThorImplementation::Tensor create_storage(const ThorImplementation::Tensor &inputTensor) const;
+
+    // Build an implementation parameter that delegates storage creation back to this API parameter.
+    virtual std::shared_ptr<ThorImplementation::Parameter> stamp();
+
    private:
+    static void validateShape(const std::vector<uint64_t> &shape);
+    void validateReadyForUse() const;
+
     bool initialized = false;
 
     std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
@@ -49,8 +80,6 @@ class Parameter {
     bool trainable = false;
     std::shared_ptr<Optimizer> optimizer = nullptr;
     bool trainingEnabled = false;
-
-    std::shared_ptr<Parameterizable> owner = nullptr;
 
     Tensor storage;
 };
@@ -68,7 +97,6 @@ class Parameter::Builder {
     virtual Parameter::Builder &trainable(const bool _trainable);
     virtual Parameter::Builder &optimizer(std::shared_ptr<Optimizer> &_optimizerOverride);
     virtual Parameter::Builder &optimizer(std::shared_ptr<Optimizer> &&_optimizerOverride);
-    virtual Parameter::Builder &owner(const std::shared_ptr<Parameterizable> &_owner);
 
    private:
     std::string _name{};
@@ -77,7 +105,6 @@ class Parameter::Builder {
     std::shared_ptr<Initializer> _initializer = nullptr;
     Optional<bool> _trainable = Optional<bool>::empty();
     std::shared_ptr<Optimizer> _optimizerOverride = nullptr;
-    std::shared_ptr<Parameterizable> _owner = nullptr;
 };
 
 }  // namespace Thor
