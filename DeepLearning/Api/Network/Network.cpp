@@ -148,11 +148,10 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
 }
 
 Network::StatusCode Network::connect(bool inferenceOnly) {
-    if (defaultOptimizer != nullptr) {
-        attachOptimizerToLayers(false);
-    }
-
     if (!inferenceOnly) {
+        if (defaultOptimizer != nullptr)
+            attachOptimizerToLayers(false);
+
         for (auto trainableLayer : allTrainableLayersInNetwork) {
             if (!trainableLayer->hasOptimizer()) {
                 string message = "A layer of type ";
@@ -209,6 +208,7 @@ shared_ptr<PlacedNetwork> Network::place(
     }
     for (uint32_t i = 0; i < devices.size(); ++i) {
         for (uint32_t j = 0; j < numStampsPerDevice[i]; ++j) {
+            // FIXME: need to propagate inferenceOnly from here through to the API layer to the implementation layer
             StatusCode statusCode = stampNetwork(devices[i], initDoneEvents, batchSize, stampedNetworks);
             if (statusCode != StatusCode::SUCCESS)
                 throw logic_error("Error when stamping network, error: " + statusCodeToString(statusCode));
