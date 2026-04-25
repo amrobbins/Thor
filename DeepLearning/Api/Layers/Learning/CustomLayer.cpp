@@ -16,19 +16,35 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          std::vector<std::shared_ptr<Parameter>> parameters,
                          bool inferenceOnly,
                          bool useFastMath)
+    : CustomLayer(std::move(expr), {}, {}, inputInterfaces, {}, std::move(parameters), inferenceOnly, useFastMath) {}
+
+CustomLayer::CustomLayer(DynamicExpression expr,
+                         std::vector<std::string> inputNames,
+                         std::vector<std::string> outputNames,
+                         const std::vector<TensorMap>& inputInterfaces,
+                         const std::vector<TensorMap>& outputInterfaces,
+                         std::vector<std::shared_ptr<Parameter>> parameters,
+                         bool inferenceOnly,
+                         bool useFastMath)
     : expr(std::move(expr)), inferenceOnly(inferenceOnly), useFastMath(useFastMath), parameters(std::move(parameters)) {
-    inputNames = this->expr.getExpectedInputNames();
-    outputNames = this->expr.getExpectedOutputNames();
+    if (inputNames.empty())
+        inputNames = this->expr.getExpectedInputNames();
+    if (outputNames.empty())
+        outputNames = this->expr.getExpectedOutputNames();
+
+    this->inputNames = std::move(inputNames);
+    this->outputNames = std::move(outputNames);
 
     if (inputInterfaces.empty())
         throw runtime_error("Cannot create a CustomLayer with zero input interfaces.");
 
     validateInputInterfacesMatchExpression();
     validateOutputInterfacesMatchExpression();
+    validateExpressionCanBindFeatureAndParameterInputs();
 
     for (const TensorMap& inputInterface : inputInterfaces) {
         validateTensorInterface(inputInterface, "input");
-        validateInterfaceNames(inputInterface, inputNames, "input");
+        validateInterfaceNames(inputInterface, this->inputNames, "input");
     }
 
     // Ensure no two interfaces are exactly the same. Aliasing a tensor across otherwise-distinct interfaces is allowed,
@@ -43,7 +59,7 @@ CustomLayer::CustomLayer(DynamicExpression expr,
 
     // Ensure shape and dtype equivalence between all corresponding tensors across all interfaces.
     const TensorMap& referenceInterface = inputInterfaces.front();
-    for (const std::string& name : inputNames) {
+    for (const std::string& name : this->inputNames) {
         const Tensor& referenceTensor = referenceInterface.at(name);
         const auto referenceDataType = referenceTensor.getDataType();
         const auto referenceDimensions = referenceTensor.getDimensions();
@@ -62,7 +78,10 @@ CustomLayer::CustomLayer(DynamicExpression expr,
     }
 
     assignInputInterfaces(inputInterfaces);
-    materializeOutputInterfacesFromInputInterfaces();
+    if (outputInterfaces.empty())
+        materializeOutputInterfacesFromInputInterfaces();
+    else
+        assignOutputInterfaces(outputInterfaces);
     initialized = true;
 }
 
@@ -122,13 +141,44 @@ void CustomLayer::validateInterfaceNames(const TensorMap& tensorInterface,
 
 void CustomLayer::validateInputInterfacesMatchExpression() const {
     if (inputNames.empty()) {
-        throw runtime_error("CustomLayer expression must declare expected input names.");
+        throw runtime_error("CustomLayer must declare at least one feature input name.");
     }
 }
 
 void CustomLayer::validateOutputInterfacesMatchExpression() const {
     if (outputNames.empty()) {
-        throw runtime_error("CustomLayer expression must declare expected output names.");
+        throw runtime_error("CustomLayer must declare at least one output name.");
+    }
+}
+
+void CustomLayer::validateExpressionCanBindFeatureAndParameterInputs() const {
+    const std::vector<std::string>& expectedInputNames = expr.getExpectedInputNames();
+    if (expectedInputNames.empty())
+        return;
+
+    std::set<std::string> expected(expectedInputNames.begin(), expectedInputNames.end());
+    for (const std::string& name : inputNames) {
+        if (!expected.contains(name)) {
+            throw runtime_error("CustomLayer expression expected input names do not include feature input '" + name + "'.");
+        }
+    }
+    for (const auto& parameter : parameters) {
+        if (parameter == nullptr)
+            throw runtime_error("CustomLayer contains a null Parameter.");
+        const std::string& name = parameter->getName();
+        if (!expected.contains(name)) {
+            throw runtime_error("CustomLayer expression expected input names do not include parameter '" + name + "'.");
+        }
+    }
+
+    const std::vector<std::string>& expectedOutputNames = expr.getExpectedOutputNames();
+    if (!expectedOutputNames.empty()) {
+        std::set<std::string> expectedOutputs(expectedOutputNames.begin(), expectedOutputNames.end());
+        for (const std::string& name : outputNames) {
+            if (!expectedOutputs.contains(name)) {
+                throw runtime_error("CustomLayer expression expected output names do not include output '" + name + "'.");
+            }
+        }
     }
 }
 

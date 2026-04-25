@@ -1,5 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -12,15 +15,65 @@ namespace ThorImplementation {
 class Parameter {
    public:
     struct StorageContext {
-        Tensor primaryInput;
-        std::vector<Tensor> featureInputs;
         std::unordered_map<std::string, Tensor> namedInputs;
 
-        StorageContext(const Tensor &primaryInput) : primaryInput(primaryInput), featureInputs{primaryInput} {}
-        StorageContext(const Tensor &primaryInput,
-                       std::vector<Tensor> featureInputs,
-                       std::unordered_map<std::string, Tensor> namedInputs = {})
-            : primaryInput(primaryInput), featureInputs(std::move(featureInputs)), namedInputs(std::move(namedInputs)) {}
+        StorageContext() = default;
+
+        explicit StorageContext(const Tensor &featureInput) : namedInputs{{"feature_input", featureInput}} {}
+
+        StorageContext(std::unordered_map<std::string, Tensor> namedInputs) : namedInputs(std::move(namedInputs)) {}
+
+        bool hasInput(const std::string &name) const { return namedInputs.contains(name); }
+
+        std::vector<std::string> getInputNames() const {
+            std::vector<std::string> names;
+            names.reserve(namedInputs.size());
+
+            for (const auto &[name, _] : namedInputs)
+                names.emplace_back(name);
+
+            std::sort(names.begin(), names.end());
+            return names;
+        }
+
+        std::string getInputNamesString() const {
+            if (namedInputs.size() == 0)
+                return "<None>";
+
+            std::ostringstream ss;
+            ss << "[";
+
+            const std::vector<std::string> names = getInputNames();
+            for (uint64_t i = 0; i < names.size(); ++i) {
+                if (i > 0)
+                    ss << ", ";
+                ss << "\"" << names[i] << "\"";
+            }
+
+            ss << "]";
+            return ss.str();
+        }
+
+        const Tensor &getInput(const std::string &name) const {
+            auto it = namedInputs.find(name);
+            if (it == namedInputs.end()) {
+                throw std::runtime_error("Parameter::StorageContext: No input named \"" + name +
+                                         "\". Available inputs: " + getInputNamesString());
+            }
+
+            return it->second;
+        }
+
+        Tensor getFeatureInput() const {
+            if (namedInputs.size() != 1) {
+                throw std::runtime_error(
+                    "Parameter::StorageContext::getFeatureInput: There is not exactly 1 input available; "
+                    "use Parameter::StorageContext::getInput(name) instead. Available inputs: " +
+                    getInputNamesString());
+            }
+
+            return namedInputs.begin()->second;
+        }
     };
 
     virtual ~Parameter() = default;
@@ -36,7 +89,7 @@ class Parameter {
 
     void compileInitializer(uint64_t fanIn = 0, uint64_t fanOut = 0);
 
-    virtual void createStorage(const StorageContext &context) { createStorage(context.primaryInput); }
+    virtual void createStorage(const StorageContext &context) { createStorage(context.getFeatureInput()); }
     virtual void createStorage(const Tensor &inputTensor) = 0;
     void clearStorage();
 

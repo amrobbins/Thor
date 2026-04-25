@@ -186,7 +186,7 @@ class ContextAwareBiasParameter : public Parameter {
     std::vector<unsigned long> rhsDimensions;
 
     void createStorage(const StorageContext& context) override {
-        seenFeatureInputCount = context.featureInputs.size();
+        seenFeatureInputCount = context.namedInputs.size();
         sawLhs = context.namedInputs.contains("lhs");
         sawRhs = context.namedInputs.contains("rhs");
         if (!sawLhs || !sawRhs)
@@ -208,7 +208,7 @@ class FixedVectorParameter : public Parameter {
         : Parameter(std::move(name), trainable), initialValues(std::move(initialValues)) {}
 
     void createStorage(const StorageContext& context) override {
-        const Tensor& primary = context.primaryInput;
+        const Tensor& primary = context.getInput("x");
         if (primary.getDataType() != DataType::FP32)
             throw std::runtime_error("FixedVectorParameter currently supports FP32 only.");
 

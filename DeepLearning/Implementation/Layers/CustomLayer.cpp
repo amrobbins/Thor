@@ -335,8 +335,7 @@ Parameter::StorageContext CustomLayer::buildParameterStorageContext() const {
         namedFeatureInputs.emplace(inputNames[inputPort], featureInputs[flat].get());
     }
 
-    return Parameter::StorageContext(
-        featureInputs[primaryInputFlatIndex(0)].get(), std::move(connectedFeatureInputs), std::move(namedFeatureInputs));
+    return Parameter::StorageContext(std::move(namedFeatureInputs));
 }
 
 PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t applicationIndex) {

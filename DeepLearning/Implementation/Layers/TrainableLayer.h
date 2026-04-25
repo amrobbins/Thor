@@ -267,7 +267,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
                 connectedFeatureInputs.push_back(featureInput.get());
         }
 
-        return Parameter::StorageContext(aFeatureInput.get(), std::move(connectedFeatureInputs));
+        return Parameter::StorageContext(aFeatureInput.get());
     }
 
     void attachGradientUpdateStream() {

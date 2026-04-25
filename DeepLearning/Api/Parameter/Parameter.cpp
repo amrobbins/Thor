@@ -22,6 +22,9 @@ class ApiBackedImplementationParameter : public ThorImplementation::Parameter {
             throw runtime_error("Cannot stamp a null API Parameter.");
     }
 
+    void createStorage(const ThorImplementation::Parameter::StorageContext &context) override {
+        storage = apiParameter->create_storage(context);
+    }
     void createStorage(const ThorImplementation::Tensor &inputTensor) override { storage = apiParameter->create_storage(inputTensor); }
 
    private:
@@ -151,12 +154,22 @@ void Parameter::setTrainingEnabled(bool enabled) {
 bool Parameter::hasOptimizer() const { return optimizer != nullptr; }
 std::shared_ptr<Optimizer> Parameter::getOptimizer() { return optimizer; }
 
+ThorImplementation::Tensor Parameter::createStorage(const StorageContext &context) const {
+    return createStorage(context.getFeatureInput());
+}
+
 ThorImplementation::Tensor Parameter::createStorage(const ThorImplementation::Tensor &inputTensor) const {
     if (!initialized)
         throw runtime_error("Cannot create storage for an uninitialized Parameter.");
     validateReadyForUse();
 
     return createStorage(inputTensor, shape, dtype);
+}
+
+ThorImplementation::Tensor Parameter::createStorage(const StorageContext &context,
+                                                    const std::vector<uint64_t> &shape,
+                                                    DataType dtype) const {
+    return createStorage(context.getFeatureInput(), shape, dtype);
 }
 
 ThorImplementation::Tensor Parameter::createStorage(const ThorImplementation::Tensor &inputTensor,
@@ -166,6 +179,8 @@ ThorImplementation::Tensor Parameter::createStorage(const ThorImplementation::Te
     ThorImplementation::TensorDescriptor descriptor(dtype, shape);
     return ThorImplementation::Tensor(inputTensor.getPlacement(), descriptor);
 }
+
+ThorImplementation::Tensor Parameter::create_storage(const StorageContext &context) const { return createStorage(context); }
 
 ThorImplementation::Tensor Parameter::create_storage(const ThorImplementation::Tensor &inputTensor) const {
     return createStorage(inputTensor);
