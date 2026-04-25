@@ -11,8 +11,12 @@ using DynamicExpression = ThorImplementation::DynamicExpression;
 
 namespace Thor {
 
-CustomLayer::CustomLayer(DynamicExpression expr, const std::vector<TensorMap>& inputInterfaces, bool inferenceOnly, bool useFastMath)
-    : expr(std::move(expr)), inferenceOnly(inferenceOnly), useFastMath(useFastMath) {
+CustomLayer::CustomLayer(DynamicExpression expr,
+                         const std::vector<TensorMap>& inputInterfaces,
+                         std::vector<std::shared_ptr<Parameter>> parameters,
+                         bool inferenceOnly,
+                         bool useFastMath)
+    : expr(std::move(expr)), inferenceOnly(inferenceOnly), useFastMath(useFastMath), parameters(std::move(parameters)) {
     inputNames = this->expr.getExpectedInputNames();
     outputNames = this->expr.getExpectedOutputNames();
 
@@ -342,15 +346,21 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
         throw runtime_error("CustomLayer::stamp called with a tensor that is not one of its declared inputs.");
     }
 
-    auto physicalLayer = std::make_shared<ThorImplementation::CustomLayer>(expr,
-                                                                           inputNames,
-                                                                           outputNames,
-                                                                           placement,
-                                                                           std::vector<std::shared_ptr<ThorImplementation::Parameter>>{},
-                                                                           inferenceOnly,
-                                                                           Layer::getId(),
-                                                                           useFastMath);
+    std::vector<std::shared_ptr<ThorImplementation::Parameter>> physicalParameters;
+    physicalParameters.reserve(parameters.size());
+    bool hasTrainableParameter = false;
+    for (const auto& parameter : parameters) {
+        if (parameter == nullptr)
+            throw runtime_error("CustomLayer contains a null Parameter.");
+        hasTrainableParameter |= parameter->isTrainable();
+        physicalParameters.push_back(parameter->stamp());
+    }
+
+    auto physicalLayer = std::make_shared<ThorImplementation::CustomLayer>(
+        expr, inputNames, outputNames, placement, physicalParameters, inferenceOnly, Layer::getId(), useFastMath);
     physicalLayer->setLayerName(getLayerType());
+    if (hasTrainableParameter)
+        stampOptimizer(physicalLayer);
     return physicalLayer;
 }
 
@@ -364,6 +374,7 @@ json CustomLayer::architectureJson() const {
     j["output_names"] = outputNames;
     j["input_interfaces"] = json::array();
     j["output_interfaces"] = json::array();
+    j["parameters"] = json::array();
 
     for (const TensorMap& inputInterface : inputInterfaces) {
         json interfaceJson;
@@ -379,6 +390,11 @@ json CustomLayer::architectureJson() const {
             interfaceJson[name] = outputInterface.at(name).architectureJson();
         }
         j["output_interfaces"].push_back(interfaceJson);
+    }
+
+    for (const auto& parameter : parameters) {
+        if (parameter != nullptr)
+            j["parameters"].push_back(parameter->architectureJson());
     }
 
     // FIXME: Will need to serialize the expression.

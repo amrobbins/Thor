@@ -15,6 +15,7 @@ void bind_version(nb::module_ &thor);
 void bind_network(nb::module_ &thor);
 void bind_placed_network(nb::module_ &thor);
 void bind_tensor(nb::module_ &thor);
+void bind_parameter(nb::module_ &thor);
 
 void bind_activations(nb::module_ &activations);
 void bind_initializers(nb::module_ &initializers);
@@ -53,6 +54,7 @@ NB_MODULE(_thor, thor) {
     dt.attr("__module__") = "thor";
 
     bind_tensor(thor);
+    bind_parameter(thor);
     bind_network(thor);
     bind_placed_network(thor);
 

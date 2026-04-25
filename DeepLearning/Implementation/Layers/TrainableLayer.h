@@ -205,7 +205,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
                 // each weights vector is updated on its gradient stream
                 bool anyWeightsUpdated = false;
                 for (const auto &parameter : parameters) {
-                    anyWeightsUpdated |= parameter->applyGradient(batchSize);
+                    anyWeightsUpdated |= parameter->applyGradient(batchSize * numBackwardConnections);
                 }
                 if (anyWeightsUpdated) {
                     weightsAreUpToDateEvent = gradientUpdateStream.get().putEvent();
