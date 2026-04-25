@@ -30,6 +30,15 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
                 bool inferenceOnly = false,
                 bool useFastMath = false);
 
+    CustomLayer(ThorImplementation::DynamicExpression expr,
+                std::vector<std::string> inputNames,
+                std::vector<std::string> outputNames,
+                const std::vector<TensorMap>& inputInterfaces,
+                const std::vector<TensorMap>& outputInterfaces,
+                std::vector<std::shared_ptr<Parameter>> parameters = {},
+                bool inferenceOnly = false,
+                bool useFastMath = false);
+
     const std::vector<std::string>& getInputNames() const { return inputNames; }
     const std::vector<std::string>& getOutputNames() const { return outputNames; }
     TensorMap getOutputInterface(const TensorMap& inputInterface) const;
@@ -79,6 +88,7 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     void assignOutputInterfaces(const std::vector<TensorMap>& outputInterfaces);
     void validateInputInterfacesMatchExpression() const;
     void validateOutputInterfacesMatchExpression() const;
+    void validateExpressionCanBindFeatureAndParameterInputs() const;
     static void validateTensorInterface(const TensorMap& tensorInterface, const std::string& what);
     static void validateInterfaceNames(const TensorMap& tensorInterface,
                                        const std::vector<std::string>& expectedNames,
@@ -123,10 +133,15 @@ class CustomLayer::Builder {
         assert(_network.isPresent());
         assert(_expr != nullptr);
         assert(!_inputInterfaces.empty());
-        assert(!_expr->getExpectedInputNames().empty());
-        assert(!_expr->getExpectedOutputNames().empty());
+        if (_inputNames.empty())
+            _inputNames = _expr->getExpectedInputNames();
+        if (_outputNames.empty())
+            _outputNames = _expr->getExpectedOutputNames();
+        assert(!_inputNames.empty());
+        assert(!_outputNames.empty());
 
-        CustomLayer customLayer(*_expr, _inputInterfaces, _parameters, _inferenceOnly, _useFastMath);
+        CustomLayer customLayer(
+            *_expr, _inputNames, _outputNames, _inputInterfaces, _outputInterfaces, _parameters, _inferenceOnly, _useFastMath);
 
         if (_layerOptimizer != nullptr)
             customLayer.optimizer = _layerOptimizer;
@@ -147,8 +162,25 @@ class CustomLayer::Builder {
         return *this;
     }
 
+    virtual CustomLayer::Builder& inputNames(std::vector<std::string> inputNames) {
+        assert(this->_inputNames.empty());
+        this->_inputNames = std::move(inputNames);
+        return *this;
+    }
+
+    virtual CustomLayer::Builder& outputNames(std::vector<std::string> outputNames) {
+        assert(this->_outputNames.empty());
+        this->_outputNames = std::move(outputNames);
+        return *this;
+    }
+
     virtual CustomLayer::Builder& inputInterface(const TensorMap& inputInterface) {
         this->_inputInterfaces.push_back(inputInterface);
+        return *this;
+    }
+
+    virtual CustomLayer::Builder& outputInterface(const TensorMap& outputInterface) {
+        this->_outputInterfaces.push_back(outputInterface);
         return *this;
     }
 
@@ -182,7 +214,10 @@ class CustomLayer::Builder {
    private:
     Optional<Network*> _network;
     std::shared_ptr<ThorImplementation::DynamicExpression> _expr;
+    std::vector<std::string> _inputNames;
+    std::vector<std::string> _outputNames;
     std::vector<TensorMap> _inputInterfaces;
+    std::vector<TensorMap> _outputInterfaces;
     std::vector<std::shared_ptr<Parameter>> _parameters;
     bool _inferenceOnly = false;
     bool _useFastMath = false;

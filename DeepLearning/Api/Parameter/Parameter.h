@@ -51,14 +51,19 @@ class Parameter {
     bool hasOptimizer() const;
     std::shared_ptr<Optimizer> getOptimizer();
 
+    using StorageContext = ThorImplementation::Parameter::StorageContext;
+
     // API-side parameter storage definition. This runs at physical layer compile time.
     // The default implementation is the basic fixed-shape parameter: allocate this parameter's
-    // shape/dtype on the same placement as inputTensor. Python subclasses should override
-    // create_storage(...) and return a thor.physical.PhysicalTensor.
+    // shape/dtype on the same placement as the context's single feature input. Python subclasses
+    // should override create_storage(...) and return a thor.physical.PhysicalTensor.
+    virtual ThorImplementation::Tensor createStorage(const StorageContext &context) const;
     virtual ThorImplementation::Tensor createStorage(const ThorImplementation::Tensor &inputTensor) const;
+    ThorImplementation::Tensor createStorage(const StorageContext &context, const std::vector<uint64_t> &shape, DataType dtype) const;
     ThorImplementation::Tensor createStorage(const ThorImplementation::Tensor &inputTensor,
                                              const std::vector<uint64_t> &shape,
                                              DataType dtype) const;
+    virtual ThorImplementation::Tensor create_storage(const StorageContext &context) const;
     virtual ThorImplementation::Tensor create_storage(const ThorImplementation::Tensor &inputTensor) const;
 
     // Build an implementation parameter that delegates storage creation back to this API parameter.

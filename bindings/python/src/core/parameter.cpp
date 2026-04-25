@@ -2,6 +2,7 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 #include <nanobind/trampoline.h>
 
@@ -20,17 +21,56 @@ using namespace std;
 using namespace Thor;
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 using PhysicalTensor = ThorImplementation::Tensor;
+using StorageContext = ThorImplementation::Parameter::StorageContext;
 
 class PyParameter : public Parameter {
    public:
     NB_TRAMPOLINE(Parameter, 1);
 
-    PhysicalTensor create_storage(const PhysicalTensor& inputTensor) const override { NB_OVERRIDE(create_storage, inputTensor); }
+    PhysicalTensor create_storage(const StorageContext& context) const override { NB_OVERRIDE(create_storage, context); }
 };
+
+namespace {
+PhysicalTensor createStorageHelper(const Parameter& self,
+                                   const nb::object& input_or_context,
+                                   std::optional<std::vector<uint64_t>> shape,
+                                   std::optional<DataType> dtype) {
+    auto create_from_input = [&](const PhysicalTensor& inputTensor) {
+        if (shape.has_value() || dtype.has_value()) {
+            return self.createStorage(inputTensor, shape.value_or(self.getShape()), dtype.value_or(self.getDataType()));
+        }
+        return self.createStorage(inputTensor);
+    };
+
+    if (nb::isinstance<StorageContext>(input_or_context)) {
+        const StorageContext& context = nb::cast<const StorageContext&>(input_or_context);
+        if (shape.has_value() || dtype.has_value()) {
+            return self.createStorage(context, shape.value_or(self.getShape()), dtype.value_or(self.getDataType()));
+        }
+        return self.createStorage(context);
+    }
+
+    const PhysicalTensor& inputTensor = nb::cast<const PhysicalTensor&>(input_or_context);
+    return create_from_input(inputTensor);
+}
+}  // namespace
 
 void bind_parameter(nb::module_& thor) {
     auto parameter = nb::class_<Parameter, PyParameter>(thor, "Parameter");
     parameter.attr("__module__") = "thor";
+
+    auto storage_context = nb::class_<StorageContext>(parameter, "StorageContext");
+    storage_context.attr("__module__") = "thor";
+    storage_context.attr("__qualname__") = "Parameter.StorageContext";
+    storage_context.def(nb::init<>());
+    storage_context.def(nb::init<const PhysicalTensor&>(), "feature_input"_a);
+    storage_context.def(nb::init<std::unordered_map<std::string, PhysicalTensor>>(), "named_inputs"_a);
+    storage_context.def_prop_ro("inputs", [](const StorageContext& self) { return self.namedInputs; });
+    storage_context.def("has_input", &StorageContext::hasInput, "name"_a);
+    storage_context.def("get_input", &StorageContext::getInput, "name"_a, nb::rv_policy::copy);
+    storage_context.def("get_feature_input", &StorageContext::getFeatureInput);
+    storage_context.def("input_names", &StorageContext::getInputNames);
+    storage_context.def("input_names_string", &StorageContext::getInputNamesString);
 
     parameter.def(
         "__init__",
@@ -55,23 +95,6 @@ Create a fixed-shape API parameter.
 The parameter is logical at API construction time. During physical layer compilation,
 it stamps to an implementation parameter and allocates storage on the same placement as
 the layer input tensor passed to ``create_storage``.
-
-Parameters
-----------
-name : str
-    Parameter name. Names beginning with ``__`` are reserved.
-shape : list[int]
-    Physical parameter shape, including all non-batch dimensions. Parameters do not
-    automatically receive a batch dimension.
-dtype : thor.DataType, default thor.DataType.fp32
-    Storage dtype.
-initializer : thor.initializers.Initializer or None, default None
-    Optional initializer used when the physical storage is initialized.
-trainable : bool, default True
-    Whether gradients and optimizer updates should be applied.
-optimizer : thor.optimizers.Optimizer or None, default None
-    Reserved for parameter-specific optimizer overrides. Layer-level optimizers are
-    currently the primary supported path.
         )nbdoc");
 
     parameter.def_prop_ro("name", &Parameter::getName);
@@ -83,46 +106,44 @@ optimizer : thor.optimizers.Optimizer or None, default None
     parameter.def("set_training_enabled", &Parameter::setTrainingEnabled, "enabled"_a);
     parameter.def("has_optimizer", &Parameter::hasOptimizer);
 
-    parameter.def(
-        "createStorage",
-        [](const Parameter& self,
-           const PhysicalTensor& inputTensor,
-           std::optional<std::vector<uint64_t>> shape,
-           std::optional<DataType> dtype) {
-            if (shape.has_value() || dtype.has_value()) {
-                return self.createStorage(inputTensor, shape.value_or(self.getShape()), dtype.value_or(self.getDataType()));
-            }
-            return self.createStorage(inputTensor);
-        },
-        "input_tensor"_a,
-        "shape"_a.none() = nb::none(),
-        "dtype"_a.none() = nb::none(),
-        R"nbdoc(
+    parameter.def("createStorage",
+                  &createStorageHelper,
+                  "input_or_context"_a,
+                  "shape"_a.none() = nb::none(),
+                  "dtype"_a.none() = nb::none(),
+                  R"nbdoc(
 Default physical storage helper.
 
 This intentionally bypasses the Python ``create_storage`` virtual override, so a
 subclass can compute a dynamic shape or dtype and delegate allocation back to the
 basic fixed-shape allocator::
 
-    def create_storage(self, input_tensor):
-        shape = [input_tensor.get_descriptor().get_dimensions()[-1]]
-        dtype = input_tensor.get_descriptor().get_data_type()
-        return self.createStorage(input_tensor, shape=shape, dtype=dtype)
+    def create_storage(self, ctx):
+        x = ctx.get_input("feature_input")
+        shape = [x.get_descriptor().get_dimensions()[-1]]
+        dtype = x.get_descriptor().get_data_type()
+        return self.createStorage(x, shape=shape, dtype=dtype)
 
-When ``shape`` or ``dtype`` are omitted, this uses the parameter's stored fixed
-shape and dtype.
+``input_or_context`` may be either a ``thor.physical.PhysicalTensor`` or a
+``thor.Parameter.StorageContext``.
         )nbdoc");
 
-    parameter.def("create_storage",
-                  &Parameter::create_storage,
-                  "input_tensor"_a,
-                  R"nbdoc(
-Create physical storage for this parameter from a physical input tensor.
+    parameter.def(
+        "create_storage",
+        [](const Parameter& self, const nb::object& input_or_context) {
+            if (nb::isinstance<StorageContext>(input_or_context)) {
+                return self.create_storage(nb::cast<const StorageContext&>(input_or_context));
+            }
+            return self.create_storage(nb::cast<const PhysicalTensor&>(input_or_context));
+        },
+        "input_or_context"_a,
+        R"nbdoc(
+Create physical storage for this parameter from a physical input tensor or storage context.
 
-Subclasses may override this method and return a ``thor.physical.PhysicalTensor``.
-The default implementation allocates this parameter's fixed shape and dtype on the
-same placement as ``input_tensor``. Within an override, call ``createStorage`` to
-delegate to the default allocator.
+Custom-layer parameters should generally override ``create_storage(ctx)`` and use
+``ctx.get_input(name)`` so named feature inputs are available. The default
+implementation allocates this parameter's fixed shape and dtype on the context's
+single feature input placement.
         )nbdoc");
 
     parameter.attr("__doc__") = R"nbdoc(
@@ -130,7 +151,7 @@ Logical API parameter used by custom trainable layers.
 
 A ``Parameter`` describes storage that will be materialized later, when the API
 network is stamped into physical layers. The base class is the common fixed-shape
-case; subclass it and override ``create_storage(input_tensor)`` when storage shape,
-dtype, or placement should be computed directly from the physical layer input.
+case; subclass it and override ``create_storage(ctx)`` when storage shape, dtype,
+or placement should be computed directly from named physical layer inputs.
     )nbdoc";
 }
