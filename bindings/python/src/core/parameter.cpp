@@ -27,7 +27,10 @@ class PyParameter : public Parameter {
    public:
     NB_TRAMPOLINE(Parameter, 1);
 
-    PhysicalTensor create_storage(const StorageContext& context) const override { NB_OVERRIDE(create_storage, context); }
+    PhysicalTensor create_storage(const StorageContext& context) const override {
+        nb::gil_scoped_acquire gil;
+        NB_OVERRIDE(create_storage, context);
+    }
 };
 
 namespace {

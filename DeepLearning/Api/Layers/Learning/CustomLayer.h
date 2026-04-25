@@ -211,6 +211,11 @@ class CustomLayer::Builder {
         return *this;
     }
 
+    virtual CustomLayer::Builder& inferenceOnly(bool inferenceOnly = true) {
+        this->_inferenceOnly = inferenceOnly;
+        return *this;
+    }
+
    private:
     Optional<Network*> _network;
     std::shared_ptr<ThorImplementation::DynamicExpression> _expr;

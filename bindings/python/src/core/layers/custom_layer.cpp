@@ -43,6 +43,30 @@ using FusedEquation = ThorImplementation::FusedEquation;
 
 namespace {
 
+class GilSafePythonObject {
+   public:
+    explicit GilSafePythonObject(nb::handle object) : object(object.ptr()) {
+        nb::gil_scoped_acquire gil;
+        Py_XINCREF(this->object);
+    }
+
+    GilSafePythonObject(const GilSafePythonObject&) = delete;
+    GilSafePythonObject& operator=(const GilSafePythonObject&) = delete;
+
+    ~GilSafePythonObject() {
+        if (object == nullptr)
+            return;
+
+        nb::gil_scoped_acquire gil;
+        Py_XDECREF(object);
+    }
+
+    nb::handle get() const { return nb::handle(object); }
+
+   private:
+    PyObject* object = nullptr;
+};
+
 struct OrderedApiTensorMap {
     std::vector<std::string> names;
     TensorMap tensors;
@@ -150,32 +174,6 @@ std::vector<std::pair<std::string, Expression>> expressionsFromPythonDict(nb::di
     return namedExpressions;
 }
 
-class CustomLayerApiContext {
-   public:
-    CustomLayerApiContext(TensorMap inputs, TensorMap outputs) : inputs(std::move(inputs)), outputs(std::move(outputs)) {}
-
-    const TensorMap& getInputs() const { return inputs; }
-    const TensorMap& getOutputs() const { return outputs; }
-
-    Tensor input(const std::string& name) const { return getFrom(inputs, name, "input"); }
-    Tensor output(const std::string& name) const { return getFrom(outputs, name, "output"); }
-
-    bool hasInput(const std::string& name) const { return inputs.contains(name); }
-    bool hasOutput(const std::string& name) const { return outputs.contains(name); }
-
-   private:
-    static Tensor getFrom(const TensorMap& tensors, const std::string& name, const std::string& what) {
-        auto it = tensors.find(name);
-        if (it == tensors.end()) {
-            throw std::runtime_error("CustomLayerApiContext has no " + what + " named '" + name + "'.");
-        }
-        return it->second;
-    }
-
-    TensorMap inputs;
-    TensorMap outputs;
-};
-
 class CustomLayerBuildContext {
    public:
     CustomLayerBuildContext(PhysicalTensorMap allInputs,
@@ -281,7 +279,7 @@ class CustomLayerBuildContext {
     bool useFastMath;
 };
 
-DynamicExpression makeDynamicExpressionFromOwner(nb::object buildOwner,
+DynamicExpression makeDynamicExpressionFromOwner(nb::handle buildOwner,
                                                  std::vector<std::string> featureInputNames,
                                                  std::vector<std::string> outputNames,
                                                  std::vector<std::string> parameterNames,
@@ -292,17 +290,17 @@ DynamicExpression makeDynamicExpressionFromOwner(nb::object buildOwner,
         throw std::runtime_error("CustomLayer owner object must define build(ctx).");
     }
 
+    auto buildOwnerRef = std::make_shared<GilSafePythonObject>(buildOwner);
+
     return DynamicExpression(
         expectedInputNames,
         outputNames,
-        [buildOwner = std::move(buildOwner),
-         featureInputNames = std::move(featureInputNames),
-         parameterNames = std::move(parameterNames),
-         useFastMath](const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
+        [buildOwnerRef, featureInputNames = std::move(featureInputNames), parameterNames = std::move(parameterNames), useFastMath](
+            const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
             nb::gil_scoped_acquire gil;
 
             CustomLayerBuildContext ctx(inputs, outputs, featureInputNames, parameterNames, stream, useFastMath);
-            nb::object result = buildOwner.attr("build")(nb::cast(ctx));
+            nb::object result = buildOwnerRef->get().attr("build")(nb::cast(ctx));
 
             if (nb::isinstance<DynamicExpressionBuild>(result)) {
                 return nb::cast<DynamicExpressionBuild>(result);
@@ -331,18 +329,18 @@ DynamicExpression makeDynamicExpression(nb::callable buildCallable,
                                         std::vector<std::string> parameterNames,
                                         bool useFastMath) {
     std::vector<std::string> expectedInputNames = concatenateInputNames(featureInputNames, parameterNames);
+    auto buildCallableRef = std::make_shared<GilSafePythonObject>(buildCallable);
 
     return DynamicExpression(
         expectedInputNames,
         outputNames,
-        [buildCallable = nb::borrow<nb::callable>(buildCallable),
-         featureInputNames = std::move(featureInputNames),
-         parameterNames = std::move(parameterNames),
-         useFastMath](const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
+        [buildCallableRef, featureInputNames = std::move(featureInputNames), parameterNames = std::move(parameterNames), useFastMath](
+            const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
             nb::gil_scoped_acquire gil;
 
             CustomLayerBuildContext ctx(inputs, outputs, featureInputNames, parameterNames, stream, useFastMath);
-            nb::object result = buildCallable(nb::cast(ctx));
+            nb::object callable = nb::borrow<nb::object>(buildCallableRef->get());
+            nb::object result = callable(nb::cast(ctx));
 
             if (nb::isinstance<DynamicExpressionBuild>(result)) {
                 return nb::cast<DynamicExpressionBuild>(result);
@@ -369,10 +367,7 @@ class PythonCustomLayerRecipe {
    public:
     virtual ~PythonCustomLayerRecipe() = default;
 
-    virtual nb::object parameters(const CustomLayerApiContext& ctx) {
-        (void)ctx;
-        return nb::list();
-    }
+    virtual nb::object parameters() { return nb::list(); }
 
     virtual nb::object build(const CustomLayerBuildContext& ctx) {
         (void)ctx;
@@ -386,8 +381,6 @@ class PythonCustomLayerRecipe {
                     std::shared_ptr<Optimizer> optimizer,
                     bool inferenceOnly,
                     bool useFastMath) {
-        (void)inferenceOnly;
-
         OrderedApiTensorMap inputs = apiTensorMapFromPython(inputsObj, "inputs");
         OrderedApiTensorMap outputs = apiTensorMapFromPython(outputsObj, "outputs");
 
@@ -396,14 +389,13 @@ class PythonCustomLayerRecipe {
         inputNames = inputs.names;
         outputNames = outputs.names;
 
-        CustomLayerApiContext apiCtx(apiInputs, apiOutputs);
-        nb::object parametersObj = owner.attr("parameters")(nb::cast(apiCtx));
+        nb::object parametersObj = owner.attr("parameters")();
 
         std::vector<std::shared_ptr<Parameter>> parameters = parametersFromPython(parametersObj);
         std::vector<std::string> paramNames = parameterNames(parameters);
         parameters_ = parameters;
 
-        DynamicExpression expr = makeDynamicExpressionFromOwner(std::move(owner), inputNames, outputNames, paramNames, useFastMath);
+        DynamicExpression expr = makeDynamicExpressionFromOwner(owner, inputNames, outputNames, paramNames, useFastMath);
 
         CustomLayer::Builder builder;
         builder.network(network)
@@ -413,7 +405,8 @@ class PythonCustomLayerRecipe {
             .inputInterface(apiInputs)
             .outputInterface(apiOutputs)
             .parameters(parameters)
-            .useFastMath(useFastMath);
+            .useFastMath(useFastMath)
+            .inferenceOnly(inferenceOnly);
 
         if (optimizer != nullptr) {
             builder.optimizer(std::move(optimizer));
@@ -455,23 +448,12 @@ class PyPythonCustomLayerRecipe : public PythonCustomLayerRecipe {
    public:
     NB_TRAMPOLINE(PythonCustomLayerRecipe, 2);
 
-    nb::object parameters(const CustomLayerApiContext& ctx) override { NB_OVERRIDE(parameters, ctx); }
-
     nb::object build(const CustomLayerBuildContext& ctx) override { NB_OVERRIDE(build, ctx); }
 };
 
 }  // namespace
 
 void bind_custom_layer(nb::module_& layers) {
-    auto api_ctx = nb::class_<CustomLayerApiContext>(layers, "CustomLayerApiContext");
-    api_ctx.attr("__module__") = "thor.layers";
-    api_ctx.def_prop_ro("inputs", &CustomLayerApiContext::getInputs, nb::rv_policy::reference_internal);
-    api_ctx.def_prop_ro("outputs", &CustomLayerApiContext::getOutputs, nb::rv_policy::reference_internal);
-    api_ctx.def("input", &CustomLayerApiContext::input, "name"_a);
-    api_ctx.def("output", &CustomLayerApiContext::output, "name"_a);
-    api_ctx.def("has_input", &CustomLayerApiContext::hasInput, "name"_a);
-    api_ctx.def("has_output", &CustomLayerApiContext::hasOutput, "name"_a);
-
     auto ctx = nb::class_<CustomLayerBuildContext>(layers, "CustomLayerBuildContext");
     ctx.attr("__module__") = "thor.layers";
     ctx.def_prop_ro("inputs", &CustomLayerBuildContext::inputs, nb::rv_policy::reference_internal);
@@ -536,7 +518,7 @@ and adds it to the network. The native/network layer owns this recipe for delaye
 physical build(ctx) calls, while the recipe does not own the native layer.
         )nbdoc");
 
-    public_custom_layer.def("parameters", &PythonCustomLayerRecipe::parameters, "ctx"_a);
+    public_custom_layer.def("parameters", &PythonCustomLayerRecipe::parameters);
     public_custom_layer.def("build", &PythonCustomLayerRecipe::build, "ctx"_a);
     public_custom_layer.def("get_output", &PythonCustomLayerRecipe::getOutput, "name"_a);
     public_custom_layer.def("__getitem__", &PythonCustomLayerRecipe::getOutput, "name"_a);
@@ -559,8 +541,6 @@ physical build(ctx) calls, while the recipe does not own the native layer.
            std::shared_ptr<Optimizer> optimizer,
            bool inferenceOnly,
            bool useFastMath) {
-            (void)inferenceOnly;
-
             OrderedApiTensorMap inputs = apiTensorMapFromPython(inputsObj, "inputs");
             OrderedApiTensorMap outputs = apiTensorMapFromPython(outputsObj, "outputs");
             std::vector<std::shared_ptr<Parameter>> parameters = parametersFromPython(parametersObj);
@@ -576,7 +556,8 @@ physical build(ctx) calls, while the recipe does not own the native layer.
                 .inputInterface(inputs.tensors)
                 .outputInterface(outputs.tensors)
                 .parameters(parameters)
-                .useFastMath(useFastMath);
+                .useFastMath(useFastMath)
+                .inferenceOnly(inferenceOnly);
 
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
