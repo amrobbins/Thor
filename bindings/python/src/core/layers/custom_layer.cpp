@@ -17,7 +17,9 @@
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Parameter/Parameter.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -418,6 +420,7 @@ class PythonCustomLayerRecipe {
         // - This Python recipe must not strongly own the native CustomLayer back, or we create self -> native -> self.
         // - We only cache the logical output interface here for convenient __getitem__ access.
         outputInterface = built.getOutputInterface(apiInputs);
+        parameterizableId = built.getParameterizableId();
     }
 
     Tensor getOutput(const std::string& name) const {
@@ -434,6 +437,28 @@ class PythonCustomLayerRecipe {
     const std::vector<std::string>& getOutputNames() const { return outputNames; }
     const std::vector<std::shared_ptr<Parameter>>& getParameters() const { return parameters_; }
 
+    BoundParameter getBoundParameter(PlacedNetwork& placedNetwork, const std::string& name) const {
+        for (const auto& parameter : parameters_) {
+            if (parameter != nullptr && parameter->getName() == name) {
+                return BoundParameter(parameter, &placedNetwork, parameterizableId);
+            }
+        }
+
+        throw std::runtime_error("CustomLayer has no parameter named '" + name + "'.");
+    }
+
+    std::vector<BoundParameter> getBoundParameters(PlacedNetwork& placedNetwork) const {
+        std::vector<BoundParameter> boundParameters;
+        boundParameters.reserve(parameters_.size());
+        for (const auto& parameter : parameters_) {
+            if (parameter == nullptr) {
+                throw std::runtime_error("CustomLayer contained a null parameter.");
+            }
+            boundParameters.emplace_back(parameter, &placedNetwork, parameterizableId);
+        }
+        return boundParameters;
+    }
+
    private:
     TensorMap apiInputs;
     TensorMap apiOutputs;
@@ -441,6 +466,7 @@ class PythonCustomLayerRecipe {
     std::vector<std::string> inputNames;
     std::vector<std::string> outputNames;
     std::vector<std::shared_ptr<Parameter>> parameters_;
+    uint64_t parameterizableId = 0;
 };
 
 class PyPythonCustomLayerRecipe : public PythonCustomLayerRecipe {
@@ -528,6 +554,8 @@ physical build(context) calls, while the recipe does not own the native layer.
     public_custom_layer.def("get_input_names", &PythonCustomLayerRecipe::getInputNames);
     public_custom_layer.def("get_output_names", &PythonCustomLayerRecipe::getOutputNames);
     public_custom_layer.def("get_parameters", &PythonCustomLayerRecipe::getParameters, nb::rv_policy::reference_internal);
+    public_custom_layer.def("get_bound_parameter", &PythonCustomLayerRecipe::getBoundParameter, "placed_network"_a, "name"_a);
+    public_custom_layer.def("get_bound_parameters", &PythonCustomLayerRecipe::getBoundParameters, "placed_network"_a);
 
     auto custom_layer = nb::class_<CustomLayer, TrainableLayer>(layers, "_CustomLayer");
     custom_layer.attr("__module__") = "thor.layers";
@@ -582,4 +610,6 @@ thor.layers.CustomLayer instead.
     custom_layer.def("get_input_names", &CustomLayer::getInputNames);
     custom_layer.def("get_output_names", &CustomLayer::getOutputNames);
     custom_layer.def("get_parameters", &CustomLayer::getParameters, nb::rv_policy::reference_internal);
+    custom_layer.def("get_bound_parameter", &CustomLayer::getBoundParameter, "placed_network"_a, "name"_a);
+    custom_layer.def("get_bound_parameters", &CustomLayer::getBoundParameters, "placed_network"_a);
 }

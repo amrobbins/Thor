@@ -15,59 +15,61 @@
 
 namespace Thor {
 class Optimizer;
+class BoundParameter;
 class Parameterizable;
 
 class Parameter {
    public:
     using DataType = ThorImplementation::TensorDescriptor::DataType;
     using StorageContext = ThorImplementation::Parameter::StorageContext;
-    using StorageContextStorageFactory = std::function<ThorImplementation::Tensor(const StorageContext &)>;
+    using StorageContextStorageFactory = std::function<ThorImplementation::Tensor(const StorageContext&)>;
     class Builder;
 
     Parameter() = default;
     Parameter(std::string name,
-              const std::vector<uint64_t> &shape,
+              const std::vector<uint64_t>& shape,
               DataType dtype = DataType::FP32,
               std::shared_ptr<Initializer> initializer = nullptr,
               bool trainable = true,
-              std::shared_ptr<Optimizer> optimizer = nullptr);
+              std::shared_ptr<Optimizer> optimizer = nullptr,
+              bool trainingInitiallyEnabled = true);
     Parameter(std::string name,
               StorageContextStorageFactory createStorage,
               std::shared_ptr<Initializer> initializer = nullptr,
               bool trainable = true,
-              std::shared_ptr<Optimizer> optimizer = nullptr);
+              std::shared_ptr<Optimizer> optimizer = nullptr,
+              bool trainingInitiallyEnabled = true);
 
     virtual ~Parameter() = default;
 
     static std::string getVersion();
     virtual nlohmann::json architectureJson() const;
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+    virtual nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                                      Stream stream,
                                      bool saveOptimizerState,
-                                     ThorImplementation::StampedNetwork &stampedNetwork) const;
-    static Parameter deserialize(const nlohmann::json &j, std::shared_ptr<thor_file::TarReader> &archiveReader);
+                                     ThorImplementation::StampedNetwork& stampedNetwork) const;
+    static Parameter deserialize(const nlohmann::json& j, std::shared_ptr<thor_file::TarReader>& archiveReader);
 
-    [[nodiscard]] const std::string &getName() const;
+    [[nodiscard]] const std::string& getName() const;
     [[nodiscard]] std::shared_ptr<Initializer> getInitializer() const;
 
     bool isTrainable() const;
-    bool isTrainingEnabled() const;
-    void setTrainingEnabled(bool enabled);
+    bool isTrainingInitiallyEnabled() const;
 
     bool hasOptimizer() const;
     std::shared_ptr<Optimizer> getOptimizer();
 
     // Convenience helper to allocate storage with the same properties (placement, etc.) as inputTensor,
     // but having shape and dtype.
-    static ThorImplementation::Tensor allocateStorage(const ThorImplementation::Tensor &inputTensor,
-                                                      const std::vector<uint64_t> &shape,
+    static ThorImplementation::Tensor allocateStorage(const ThorImplementation::Tensor& inputTensor,
+                                                      const std::vector<uint64_t>& shape,
                                                       DataType dtype);
 
     // Build an implementation parameter that delegates storage creation to the factory bound on this API parameter.
     virtual std::shared_ptr<ThorImplementation::Parameter> stamp();
 
    private:
-    static void validateShape(const std::vector<uint64_t> &shape);
+    static void validateShape(const std::vector<uint64_t>& shape);
     void validateReadyForUse() const;
     void validateStorageFactoryReadyForStamping() const;
 
@@ -80,7 +82,7 @@ class Parameter {
     std::shared_ptr<Initializer> initializer = nullptr;
     bool trainable = false;
     std::shared_ptr<Optimizer> optimizer = nullptr;
-    bool trainingEnabled = false;
+    bool trainingInitiallyEnabled = true;
 
     // A parameter uses either storageContextCreateStorage function to determine attributes at layer compile time
     // -- OR --
@@ -90,6 +92,8 @@ class Parameter {
     Optional<DataType> dtype = Optional<DataType>::empty();
 
     Tensor storage;
+
+    friend class BoundParameter;
 };
 
 class Parameter::Builder {
@@ -97,13 +101,13 @@ class Parameter::Builder {
     virtual ~Builder() = default;
     virtual std::shared_ptr<Parameter> build();
 
-    virtual Parameter::Builder &name(const std::string &_name);
-    virtual Parameter::Builder &initializer(std::shared_ptr<Initializer> &_initializer);
-    virtual Parameter::Builder &initializer(std::shared_ptr<Initializer> &&_initializer);
-    virtual Parameter::Builder &trainable(const bool _trainable);
-    virtual Parameter::Builder &optimizer(std::shared_ptr<Optimizer> &_optimizerOverride);
-    virtual Parameter::Builder &optimizer(std::shared_ptr<Optimizer> &&_optimizerOverride);
-    virtual Parameter::Builder &createStorage(StorageContextStorageFactory createStorage);
+    virtual Parameter::Builder& name(const std::string& _name);
+    virtual Parameter::Builder& initializer(std::shared_ptr<Initializer>& _initializer);
+    virtual Parameter::Builder& initializer(std::shared_ptr<Initializer>&& _initializer);
+    virtual Parameter::Builder& trainable(const bool _trainable);
+    virtual Parameter::Builder& optimizer(std::shared_ptr<Optimizer>& _optimizerOverride);
+    virtual Parameter::Builder& optimizer(std::shared_ptr<Optimizer>&& _optimizerOverride);
+    virtual Parameter::Builder& createStorage(StorageContextStorageFactory createStorage);
 
    private:
     std::string _name{};

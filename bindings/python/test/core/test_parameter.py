@@ -42,6 +42,16 @@ def test_fixed_shape_parameter_constructor_defaults_dtype_to_fp32():
     assert parameter.has_optimizer() is False
 
 
+def test_api_parameter_does_not_expose_training_enabled_setter():
+    parameter = thor.Parameter(
+        name="biases",
+        shape=[7],
+    )
+
+    assert hasattr(parameter, "is_training_initially_enabled") is True
+    assert hasattr(parameter, "set_training_enabled") is False
+
+
 def test_storage_context_accepts_single_tensor_and_uses_feature_input_name():
     input_tensor = _cpu_input(dims=(4, 7))
     ctx = thor.Parameter.StorageContext(input_tensor)
