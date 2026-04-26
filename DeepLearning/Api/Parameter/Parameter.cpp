@@ -22,9 +22,22 @@ class ApiBackedImplementationParameter : public ThorImplementation::Parameter {
         : ThorImplementation::Parameter(std::move(name), trainable), storageContextCreateStorage(std::move(storageContextCreateStorage)) {}
 
     void createStorage(const ThorImplementation::Parameter::StorageContext &context) override {
-        if (!storageContextCreateStorage)
-            throw runtime_error("Parameter storage factory for StorageContext was not bound.");
-        storage = storageContextCreateStorage(context);
+        // Either use the bound function (C++ or python) that gets input tensor context,
+        // or when it was not supplied then assert that dtype and shape were supplied and create
+        // a tensor co-located with the input tensors having dtype and shape.
+        if (storageContextCreateStorage) {
+            storage = storageContextCreateStorage(context);
+        } else {
+            if (dtype.isEmpty())
+                throw runtime_error("Parameter.dtype was not set for parameter " + name +
+                                    " and create_storage_from_context(StorageContext context) was not bound. You need to pick one of those "
+                                    "routes to allocate parameter storage.");
+            if (shape.isEmpty())
+                throw runtime_error("Parameter.shape was not set for parameter " + name +
+                                    " and create_storage_from_context(StorageContext context) was not bound. You need to pick one of those "
+                                    "routes to allocate parameter storage.");
+            ThorImplementation::Parameter::createStorage(context);
+        }
     }
 
    private:
@@ -175,8 +188,7 @@ ThorImplementation::Tensor Parameter::allocateStorage(const ThorImplementation::
                                                       const std::vector<uint64_t> &shape,
                                                       DataType dtype) {
     validateShape(shape);
-    ThorImplementation::TensorDescriptor descriptor(dtype, shape);
-    return ThorImplementation::Tensor(inputTensor.getPlacement(), descriptor);
+    return ThorImplementation::Parameter::allocateStorage(inputTensor.getPlacement(), shape, dtype);
 }
 
 std::shared_ptr<ThorImplementation::Parameter> Parameter::stamp() {

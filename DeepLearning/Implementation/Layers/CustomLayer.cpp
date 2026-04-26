@@ -76,6 +76,7 @@ CustomLayer::CustomLayer(DynamicExpression expr,
             throw runtime_error("CustomLayer parameter name collides with an output port name: " + paramName);
         }
 
+        param->informExpressionBased();
         addParameter(param);  // verifies parameter name uniqueness
     }
 
@@ -839,6 +840,18 @@ void CustomLayer::synchronizeComputeStreamForForwardInputs(uint32_t applicationI
 void CustomLayer::forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize) {
     assert(running);
     assert(featureInput.isPresent());
+
+    // If training was enabled or disabled, expression will need to be recompiled
+    // because the set of gradients changed.
+    bool needsRecompile = false;
+    for (const auto& param : parameters) {
+        if (param->needsExpressionRecompile()) {
+            needsRecompile = true;
+            param->informExpressionRecompiled();
+        }
+    }
+    if (needsRecompile)
+        compileImpl();
 
     std::set<uint32_t> candidateApplications;
     for (uint32_t flat = 0; flat < featureInputs.size(); ++flat) {

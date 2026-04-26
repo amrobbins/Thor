@@ -77,7 +77,11 @@ class Parameter {
 
     virtual ~Parameter() = default;
 
-    Parameter(std::string name, bool trainable);  // Later constraint
+    Parameter(std::string name, bool trainable);  // Later add constraint here
+    Parameter(std::string name,
+              bool trainable,
+              const std::vector<uint64_t> &shape,
+              const TensorDescriptor::DataType dtype);  // Later add constraint here
 
     // Remember this is called by API layer so that will hand over the optimizer
     // 1. Create storage given featureInput(s) 2. Compile the optimizer
@@ -88,7 +92,10 @@ class Parameter {
 
     void compileInitializer(uint64_t fanIn = 0, uint64_t fanOut = 0);
 
-    virtual void createStorage(const StorageContext &context) = 0;
+    virtual void createStorage(const StorageContext &context);
+    static Tensor allocateStorage(const TensorPlacement placement,
+                                  const std::vector<uint64_t> &shape,
+                                  const TensorDescriptor::DataType dtype);
     void clearStorage();
 
     Event initialize();
@@ -115,11 +122,20 @@ class Parameter {
 
     bool isStorageInitialized() const;
 
+    void informExpressionBased() {
+        expressionBased = true;
+        needExpressionRecompile = true;
+    }
+    bool needsExpressionRecompile() const { return needExpressionRecompile; }
+    void informExpressionRecompiled() { needExpressionRecompile = false; }
+
    protected:
     const std::string name;
     Optional<Tensor> storage;
     const bool trainable;
     bool trainingEnabled;
+    bool expressionBased = false;
+    bool needExpressionRecompile = false;
 
     std::shared_ptr<Optimizer> optimizer;
     std::shared_ptr<Initializer> initializer;
@@ -127,6 +143,9 @@ class Parameter {
     Optional<Stream> gradientUpdateStream;
 
     bool storageInitialized = false;
+
+    Optional<std::vector<uint64_t>> shape = Optional<std::vector<uint64_t>>::empty();
+    Optional<TensorDescriptor::DataType> dtype;
 };
 
 }  // namespace ThorImplementation
