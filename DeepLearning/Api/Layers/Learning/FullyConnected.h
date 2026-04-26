@@ -37,16 +37,16 @@ class FullyConnected : public TrainableLayer {
 
     virtual ~FullyConnected() = default;
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<FullyConnected>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<FullyConnected>(*this); }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
-                                     Stream stream,
-                                     bool saveOptimizerState,
-                                     ThorImplementation::StampedNetwork &stampedNetwork) const;
+    nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+                             Stream stream,
+                             bool saveOptimizerState,
+                             ThorImplementation::StampedNetwork &stampedNetwork) const override;
 
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
 
    protected:
     virtual bool isMultiLayer() const {
@@ -57,7 +57,7 @@ class FullyConnected : public TrainableLayer {
 
     virtual void buildSupportLayersAndAddToNetwork(Network *network);
 
-    virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {
+    void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) override {
         std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
         int gpuNum = stream.getGpuNum();
         assert(!inputDimensions.empty());
@@ -98,17 +98,17 @@ class FullyConnected : public TrainableLayer {
             ThorImplementation::TensorDescriptor::DataType::FP16);
     }
 
-    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
-                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
-                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
-                                                             Thor::Tensor connectingApiTensor) const {
+    std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                     std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                     std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                     Thor::Tensor connectingApiTensor,
+                                                     const bool inferenceOnly) const override {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         // Note: Network notes when a layer has already been stamped and only adds a connection, does not re-stamp the layer
-        // FIXME: add support for data type and inference only.
+        // FIXME: add support for data type.
         Tensor::DataType weightsDataType = Tensor::DataType::FP16;
-        bool inferenceOnly = false;
         std::shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected = std::make_shared<ThorImplementation::FullyConnected>(
             numOutputFeatures, hasBias, weightsDataType, placement, inferenceOnly, getId());
         stampOptimizer(physicalFullyConnected);

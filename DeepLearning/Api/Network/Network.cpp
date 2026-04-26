@@ -55,7 +55,8 @@ void Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
 Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                                           vector<Event> &initDoneEvents,
                                           uint32_t batchSize,
-                                          vector<ThorImplementation::StampedNetwork> &stampedNetworks) {
+                                          vector<ThorImplementation::StampedNetwork> &stampedNetworks,
+                                          const bool inferenceOnly) {
     ThorImplementation::StampedNetwork stampedNetwork;
     stampedNetwork.gpuNum = gpuNum;
 
@@ -90,7 +91,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
 
             const shared_ptr<NetworkOutput> networkOutput = dynamic_pointer_cast<NetworkOutput>(layer);
             if (networkOutput) {
-                stampNetworkOutput(inputTensor, networkOutput, gpuNum, batchSize, stampedNetwork);
+                stampNetworkOutput(inputTensor, networkOutput, gpuNum, batchSize, stampedNetwork, inferenceOnly);
                 continue;
             }
 
@@ -102,7 +103,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                 continue;
             }
 
-            stampLayer(inputTensor, layer, gpuNum, batchSize, stampedNetwork);
+            stampLayer(inputTensor, layer, gpuNum, batchSize, stampedNetwork, inferenceOnly);
         }
 
         // 3. Now that all layers have been constructed and connected, compile all layers
@@ -209,7 +210,7 @@ shared_ptr<PlacedNetwork> Network::place(
     for (uint32_t i = 0; i < devices.size(); ++i) {
         for (uint32_t j = 0; j < numStampsPerDevice[i]; ++j) {
             // FIXME: need to propagate inferenceOnly from here through to the API layer to the implementation layer
-            StatusCode statusCode = stampNetwork(devices[i], initDoneEvents, batchSize, stampedNetworks);
+            StatusCode statusCode = stampNetwork(devices[i], initDoneEvents, batchSize, stampedNetworks, inferenceOnly);
             if (statusCode != StatusCode::SUCCESS)
                 throw logic_error("Error when stamping network, error: " + statusCodeToString(statusCode));
         }
@@ -801,7 +802,8 @@ void Network::stampLayer(Tensor inputTensor,
                          const shared_ptr<Thor::Layer> layer,
                          uint32_t gpuNum,
                          uint32_t batchSize,
-                         ThorImplementation::StampedNetwork &stampedNetwork) {
+                         ThorImplementation::StampedNetwork &stampedNetwork,
+                         const bool inferenceOnly) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayerShared[inputTensor];
     shared_ptr<Thor::Layer> apiDrivingLayer =
@@ -857,7 +859,7 @@ void Network::stampLayer(Tensor inputTensor,
             fflush(stdout);
         }
     } else {
-        implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor);
+        implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor, inferenceOnly);
         stampedNetwork.apiLayerToPhysicalLayerShared[layer->getId()] = implementationLayer;
         stampedNetwork.apiLayerToPhysicalLayer[layer->getId()] = implementationLayer.get();
         stampedNetwork.physicalLayerToApiLayerShared[implementationLayer] = layer->getId();
@@ -901,7 +903,8 @@ void Network::stampNetworkOutput(Tensor inputTensor,
                                  const shared_ptr<Thor::NetworkOutput> networkOutput,
                                  uint32_t gpuNum,
                                  uint32_t batchSize,
-                                 ThorImplementation::StampedNetwork &stampedNetwork) {
+                                 ThorImplementation::StampedNetwork &stampedNetwork,
+                                 const bool inferenceOnly) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayerShared[inputTensor];
     shared_ptr<Thor::Layer> apiDrivingLayer =
@@ -932,7 +935,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     // Stamp the network output
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     shared_ptr<ThorImplementation::Layer> implementationLayer =
-        ((Layer *)networkOutput.get())->stamp(cpuPlacement, physicalDrivingLayer, apiDrivingLayer, inputTensor);
+        ((Layer *)networkOutput.get())->stamp(cpuPlacement, physicalDrivingLayer, apiDrivingLayer, inputTensor, inferenceOnly);
     shared_ptr<ThorImplementation::NetworkOutput> implementationNetworkOutput =
         dynamic_pointer_cast<ThorImplementation::NetworkOutput>(implementationLayer);
     Layer::connectTwoLayers(physicalDrivingLayer, implementationNetworkOutput, apiDrivingLayer, networkOutput, inputTensor);

@@ -32,15 +32,16 @@ class BatchNormalization : public TrainableLayer {
     virtual nlohmann::json architectureJson() const;
 
    protected:
-    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
-                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
-                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
-                                                             Thor::Tensor connectingApiTensor) const {
+    std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                     std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                     std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                     Thor::Tensor connectingApiTensor,
+                                                     const bool inferenceOnly) const override {
         assert(initialized);
 
         std::shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormalization =
             std::make_shared<ThorImplementation::BatchNormalization>(
-                placement, false, numItemsObserved, exponentialRunningAverageFactor, epsilon, Tensor::DataType::FP32, getId());
+                placement, inferenceOnly, numItemsObserved, exponentialRunningAverageFactor, epsilon, Tensor::DataType::FP32, getId());
         stampOptimizer(physicalBatchNormalization);
 
         return physicalBatchNormalization;

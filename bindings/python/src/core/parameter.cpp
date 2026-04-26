@@ -24,6 +24,34 @@ using DataType = ThorImplementation::TensorDescriptor::DataType;
 using PhysicalTensor = ThorImplementation::Tensor;
 using StorageContext = ThorImplementation::Parameter::StorageContext;
 
+namespace {
+
+class GilSafePythonObject {
+   public:
+    explicit GilSafePythonObject(nb::handle object) : object(object.ptr()) {
+        nb::gil_scoped_acquire gil;
+        Py_XINCREF(this->object);
+    }
+
+    GilSafePythonObject(const GilSafePythonObject&) = delete;
+    GilSafePythonObject& operator=(const GilSafePythonObject&) = delete;
+
+    ~GilSafePythonObject() {
+        if (object == nullptr)
+            return;
+
+        nb::gil_scoped_acquire gil;
+        Py_XDECREF(object);
+    }
+
+    nb::handle get() const { return nb::handle(object); }
+
+   private:
+    PyObject* object = nullptr;
+};
+
+}  // namespace
+
 void bind_parameter(nb::module_& thor) {
     auto parameter = nb::class_<Parameter>(thor, "Parameter");
     parameter.attr("__module__") = "thor";
@@ -87,10 +115,14 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
                 throw std::runtime_error("create_storage_from_context must be callable.");
             }
 
-            auto createStorage = [create_storage_from_context = nb::borrow<nb::callable>(create_storage_from_context)](
-                                     const StorageContext& context) -> PhysicalTensor {
+            auto createStorageRef = std::make_shared<GilSafePythonObject>(create_storage_from_context);
+
+            auto createStorage = [createStorageRef](const StorageContext& context) -> PhysicalTensor {
                 nb::gil_scoped_acquire gil;
-                nb::object result = create_storage_from_context(context);
+
+                nb::callable createStorageCallable = nb::borrow<nb::callable>(createStorageRef->get());
+
+                nb::object result = createStorageCallable(context);
                 return nb::cast<PhysicalTensor>(result);
             };
 

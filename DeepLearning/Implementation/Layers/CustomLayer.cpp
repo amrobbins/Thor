@@ -72,6 +72,10 @@ CustomLayer::CustomLayer(DynamicExpression expr,
             throw runtime_error("CustomLayer parameter name collides with an input port name: " + paramName);
         }
 
+        if (outputNameToPort.contains(paramName)) {
+            throw runtime_error("CustomLayer parameter name collides with an output port name: " + paramName);
+        }
+
         addParameter(param);  // verifies parameter name uniqueness
     }
 

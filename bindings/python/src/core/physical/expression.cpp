@@ -32,6 +32,34 @@ using DynamicTensorMap = std::unordered_map<std::string, Tensor>;
 using DynamicTensorScalarMap = std::unordered_map<std::string, TensorScalarBinding>;
 using DynamicShapeMap = std::unordered_map<std::string, std::vector<uint64_t>>;
 
+namespace {
+
+class GilSafePythonObject {
+   public:
+    explicit GilSafePythonObject(nb::handle object) : object(object.ptr()) {
+        nb::gil_scoped_acquire gil;
+        Py_XINCREF(this->object);
+    }
+
+    GilSafePythonObject(const GilSafePythonObject&) = delete;
+    GilSafePythonObject& operator=(const GilSafePythonObject&) = delete;
+
+    ~GilSafePythonObject() {
+        if (object == nullptr)
+            return;
+
+        nb::gil_scoped_acquire gil;
+        Py_XDECREF(object);
+    }
+
+    nb::handle get() const { return nb::handle(object); }
+
+   private:
+    PyObject* object = nullptr;
+};
+
+}  // namespace
+
 static nb::dict parameterFanOverridesToPython(const FusedEquation::ParameterFanOverrideMap& overrides) {
     nb::dict result;
     for (const auto& [name, hint] : overrides) {
@@ -1438,13 +1466,17 @@ Return the compiled equation owned by this prepared dynamic expression.
     dynamic_expression.def(
         "__init__",
         [](DynamicExpression* self, nb::callable builder) {
-            new (self) DynamicExpression([builder = nb::borrow<nb::callable>(builder)](const DynamicTensorMap& inputs,
-                                                                                       const DynamicTensorMap& outputs,
-                                                                                       Stream& stream) -> DynamicExpressionBuild {
-                nb::gil_scoped_acquire gil;
-                nb::object result = builder(inputs, outputs, stream);
-                return nb::cast<DynamicExpressionBuild>(result);
-            });
+            auto builderRef = std::make_shared<GilSafePythonObject>(builder);
+
+            new (self) DynamicExpression(
+                [builderRef](const DynamicTensorMap& inputs, const DynamicTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
+                    nb::gil_scoped_acquire gil;
+
+                    nb::callable builderCallable = nb::borrow<nb::callable>(builderRef->get());
+
+                    nb::object result = builderCallable(inputs, outputs, stream);
+                    return nb::cast<DynamicExpressionBuild>(result);
+                });
         },
         "builder"_a,
         R"nbdoc(

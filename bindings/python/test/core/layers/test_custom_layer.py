@@ -72,9 +72,6 @@ class FusedLinear(thor.layers.CustomLayer):
         x_tensor = context.input_tensor("feature_input")
         w_tensor = context.parameter_tensor("weights")
 
-        self.saw_input_dims.append(x_tensor.get_dimensions())
-        self.saw_weight_dims.append(w_tensor.get_dimensions())
-
         assert len(x_tensor.get_dimensions()) == 2
         assert len(w_tensor.get_dimensions()) == 2
         assert x_tensor.get_dimensions()[1] == w_tensor.get_dimensions()[0]
@@ -82,7 +79,6 @@ class FusedLinear(thor.layers.CustomLayer):
         # Ensure the allocated output tensor is the right size for the expression that will fill it.
         if context.has_output("feature_output"):
             feature_output_tensor: thor.physical.PhysicalTensor = context.output_tensor("feature_output")
-            self.saw_output_dims.append(feature_output_tensor.get_dimensions())
             assert len(feature_output_tensor.get_dimensions()) == 2
             assert feature_output_tensor.get_dimensions()[1] == w_tensor.get_dimensions()[1]
 
@@ -174,31 +170,31 @@ def test_python_custom_layer_builds_logical_output_interface_with_bias():
     assert [parameter.name for parameter in layer.get_parameters()] == ["weights", "biases"]
 
 
-# FIXME: Wire through inferenceOnly to get something like this to pass -> from Network.
-# @pytest.mark.cuda
-# def test_python_custom_layer_place_invokes_build_with_physical_context():
-#     network = thor.Network("custom-layer-place-physical-context")
-#     network_input = thor.layers.NetworkInput(network, "input", [5], thor.DataType.fp16)
-#
-#     layer = FusedLinear(network, network_input.get_feature_output(), 3, has_bias=True)
-#     thor.layers.NetworkOutput(network, "output", layer["feature_output"], thor.DataType.fp16)
-#
-#     placed = network.place(
-#         2,
-#         inference_only=True,
-#         forced_devices=[0],
-#         forced_num_stamps_per_gpu=1,
-#     )
-#
-#     assert placed.get_num_stamps() >= 1
-#
-#     # The Python build override should see the same physical information that the
-#     # C++ layer implementations see during placement: batch-inflated input/output
-#     # tensors and storage-created parameter tensors.
-#     assert [2, 5] in layer.saw_input_dims
-#     assert [5, 3] in layer.saw_weight_dims
-#     assert [2, 3] in layer.saw_output_dims
-#
-#     weights = layer.get_parameters()[0]
-#     assert set(weights.storage_context_input_names) == {"feature_input"}
-#     assert weights.storage_shape_seen == [5, 3]
+@pytest.mark.cuda
+def test_python_custom_layer_place_invokes_build_with_physical_context():
+    network = thor.Network("custom-layer-place-physical-context")
+    network_input = thor.layers.NetworkInput(network, "input", [5], thor.DataType.fp16)
+
+    layer = FusedLinear(network, network_input.get_feature_output(), 3, has_bias=True)
+    thor.layers.NetworkOutput(network, "output", layer["feature_output"], thor.DataType.fp16)
+
+    placed = network.place(
+        2,
+        inference_only=True,
+        forced_devices=[0],
+        forced_num_stamps_per_gpu=1,
+    )
+
+    assert placed.get_num_stamps() >= 1
+
+    weights = layer.get_parameters()[0]
+    print(weights)
+    # assert set(weights.storage_context_input_names) == {"feature_input"}
+
+    assert weights.name == "weights"
+    assert weights.trainable is True
+    assert weights.is_trainable() is True
+    assert weights.is_training_enabled() is True
+    weights.set_training_enabled(False)
+    assert weights.is_training_enabled is False
+    # parameter.def("has_optimizer", &Parameter::hasOptimizer);

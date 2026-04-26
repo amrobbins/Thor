@@ -27,7 +27,6 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     CustomLayer(ThorImplementation::DynamicExpression expr,
                 const std::vector<TensorMap>& inputInterfaces,
                 std::vector<std::shared_ptr<Parameter>> parameters = {},
-                bool inferenceOnly = false,
                 bool useFastMath = false);
 
     CustomLayer(ThorImplementation::DynamicExpression expr,
@@ -36,7 +35,6 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
                 const std::vector<TensorMap>& inputInterfaces,
                 const std::vector<TensorMap>& outputInterfaces,
                 std::vector<std::shared_ptr<Parameter>> parameters = {},
-                bool inferenceOnly = false,
                 bool useFastMath = false);
 
     const std::vector<std::string>& getInputNames() const { return inputNames; }
@@ -64,7 +62,8 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
-                                                     Thor::Tensor connectingApiTensor) const override;
+                                                     Thor::Tensor connectingApiTensor,
+                                                     const bool inferenceOnly) const override;
 
     void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) override { physicalLayer->compile(); }
 
@@ -101,7 +100,6 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     uint32_t encodeOutputConnection(uint32_t interfaceIndex, uint32_t outputPortIndex) const;
 
     ThorImplementation::DynamicExpression expr;
-    bool inferenceOnly = false;
     bool useFastMath = false;
 
     std::vector<std::string> inputNames;
@@ -140,8 +138,7 @@ class CustomLayer::Builder {
         assert(!_inputNames.empty());
         assert(!_outputNames.empty());
 
-        CustomLayer customLayer(
-            *_expr, _inputNames, _outputNames, _inputInterfaces, _outputInterfaces, _parameters, _inferenceOnly, _useFastMath);
+        CustomLayer customLayer(*_expr, _inputNames, _outputNames, _inputInterfaces, _outputInterfaces, _parameters, _useFastMath);
 
         if (_layerOptimizer != nullptr)
             customLayer.optimizer = _layerOptimizer;
@@ -211,11 +208,6 @@ class CustomLayer::Builder {
         return *this;
     }
 
-    virtual CustomLayer::Builder& inferenceOnly(bool inferenceOnly = true) {
-        this->_inferenceOnly = inferenceOnly;
-        return *this;
-    }
-
    private:
     Optional<Network*> _network;
     std::shared_ptr<ThorImplementation::DynamicExpression> _expr;
@@ -224,7 +216,6 @@ class CustomLayer::Builder {
     std::vector<TensorMap> _inputInterfaces;
     std::vector<TensorMap> _outputInterfaces;
     std::vector<std::shared_ptr<Parameter>> _parameters;
-    bool _inferenceOnly = false;
     bool _useFastMath = false;
     std::shared_ptr<Optimizer> _layerOptimizer;
 };
