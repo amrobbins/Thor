@@ -101,7 +101,7 @@ class StampedNetwork {
     std::map<std::string, std::shared_ptr<ThorImplementation::NetworkInput>> inputNamedShared;
     std::map<std::string, std::shared_ptr<ThorImplementation::NetworkOutput>> outputNamedShared;
 
-    std::map<uint64_t, std::shared_ptr<ThorImplementation::Parameterizable>> apiParameterizableToPhysicalParameterizable;
+    // std::map<uint64_t, std::shared_ptr<ThorImplementation::Parameterizable>> apiParameterizableToPhysicalParameterizable;
     // FIXME: get rid of raw pointers
     // For performance, store and use the raw pointers
     std::vector<ThorImplementation::NetworkInput *> inputs;

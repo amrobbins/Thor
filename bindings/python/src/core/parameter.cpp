@@ -137,7 +137,8 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
 Create an API parameter whose implementation storage is allocated at physical layer compile time.
 
 Provide ``create_storage_from_context``. For single-input layers, the default feature input name is
-``"feature_input"``, and ``Parameter.StorageContext.get_feature_input()`` returns that tensor when exactly one input is present.
+``"feature_input"``, and ``Parameter.StorageContext.get_feature_input()`` returns that tensor when
+exactly one input is present.
     )nbdoc");
 
     parameter.def_static("allocate_storage",

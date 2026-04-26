@@ -187,14 +187,20 @@ def test_python_custom_layer_place_invokes_build_with_physical_context():
 
     assert placed.get_num_stamps() >= 1
 
-    weights = layer.get_parameters()[0]
-    print(weights)
-    # assert set(weights.storage_context_input_names) == {"feature_input"}
-
+    weights: thor.Parameter = layer.get_parameters()[0]
     assert weights.name == "weights"
     assert weights.trainable is True
     assert weights.is_trainable() is True
     assert weights.is_training_enabled() is True
-    weights.set_training_enabled(False)
-    assert weights.is_training_enabled is False
-    # parameter.def("has_optimizer", &Parameter::hasOptimizer);
+    # weights.set_training_enabled(False)
+    #assert weights.is_training_enabled is False
+    assert weights.has_optimizer() is False
+
+    biases: thor.Parameter = layer.get_parameters()[1]
+    assert biases.name == "biases"
+    assert biases.trainable is True
+    assert biases.is_trainable() is True
+    assert biases.is_training_enabled() is True
+    # biases.set_training_enabled(False)
+    #assert biases.is_training_enabled is False
+    assert biases.has_optimizer() is False

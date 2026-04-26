@@ -300,6 +300,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
    private:
     // stampedId is used to identify which layers correspond to which other layers across multiple stamps of the same network.
+    // So it is the id of the API layer.
     const int64_t stampedId;
 
     enum class BackwardGradientMode : uint8_t { Unknown, Unfused, Fused };
