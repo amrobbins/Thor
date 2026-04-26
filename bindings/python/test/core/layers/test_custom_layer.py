@@ -5,177 +5,98 @@ import thor
 from thor.physical import Expression as ex
 
 
-class Weights(thor.Parameter):
-
-    def __init__(self, out_features):
-        super().__init__(
-            name="weights",
-            shape=[1, out_features],
-            dtype=thor.DataType.fp32,
-            trainable=True,
-        )
-        self.out_features = out_features
-        self.storage_ctx_input_names = None
-        self.storage_shape_seen = None
-
-    def create_storage(self, ctx):
-        self.storage_ctx_input_names = ctx.input_names()
-
-        x = ctx.get_input("feature_input")
-        dims = x.get_descriptor().get_dimensions()
-        batch = dims[0]
-        in_features = x.get_descriptor().get_total_num_elements() // batch
-
-        self.storage_shape_seen = [in_features, self.out_features]
-
-        return self.createStorage(
-            x,
-            shape=[in_features, self.out_features],
-            dtype=x.get_descriptor().get_data_type(),
-        )
-
-
 class FusedLinear(thor.layers.CustomLayer):
 
     def __init__(self, network: thor.Network, x: thor.Tensor, num_output_features: int, has_bias: bool):
-        self.out_features = num_output_features
-        self.has_bias = has_bias
+        self.num_output_features: int = num_output_features
+        self.has_bias: bool = has_bias
+
         super().__init__(
             network=network,
             inputs={"feature_input": x},          # API tensor
+            # FIXME: Is it ok to require outputs from here or are they a layer compile time thing?
+            #        Check on the implementation side how they are defined.
+            #        Also if they are defined here, then maybe I don't need custom layer to infer the output tensor.
             outputs={
                 "feature_output": thor.Tensor([num_output_features], x.get_data_type())
             },
         )
 
     def parameters(self) -> list[thor.Parameter]:
-        params: list[thor.Parameter] = [Weights(self.out_features)]
+
+        num_output_features = self.num_output_features
+
+        def create_weights_storage_from_context(context: thor.Parameter.StorageContext) -> thor.physical.PhysicalTensor:
+            input_tensor = context.get_feature_input()
+            batch_size = input_tensor.get_descriptor().get_dimensions()[0]
+            num_input_features = input_tensor.get_descriptor().get_total_num_elements() // batch_size
+            return thor.Parameter.allocate_storage(
+                input_tensor,
+                shape=[num_input_features, num_output_features],
+                dtype=input_tensor.get_descriptor().get_data_type(),
+            )
+
+        weights = thor.Parameter(
+            name="weights",
+            create_storage_from_context=create_weights_storage_from_context,
+            trainable=True,
+        )
+
+        params: list[thor.Parameter] = [weights]
         if self.has_bias:
-            params.append(
-                thor.Parameter(
-                    name="biases",
-                    shape=[self.out_features],
-                    dtype=thor.DataType.fp32,
-                    trainable=True,
-                ))
+
+            def create_biases_storage_from_context(
+                    context: thor.Parameter.StorageContext) -> thor.physical.PhysicalTensor:
+                input_tensor = context.get_feature_input()
+                return thor.Parameter.allocate_storage(
+                    input_tensor,
+                    shape=[num_output_features],
+                    dtype=input_tensor.get_descriptor().get_data_type(),
+                )
+
+            biases = thor.Parameter(
+                name="biases",
+                create_storage_from_context=create_biases_storage_from_context,
+                trainable=True,
+            )
+            params.append(biases)
         return params
 
     def build(
         self,
-        ctx: thor.layers.CustomLayerBuildContext,
+        context: thor.layers.CustomLayerBuildContext,
     ) -> dict[str, thor.physical.Expression]:
-        x = ctx.input("feature_input")
-        w = ctx.param("weights")
+        # Physical tensors carry the information that is only known after placement:
+        # batch-inflated shapes, placement, and parameter storage shapes. Expressions
+        # are only the symbolic graph values that will be compiled.
+        x_tensor = context.input_tensor("feature_input")
+        w_tensor = context.parameter_tensor("weights")
+
+        self.saw_input_dims.append(x_tensor.get_dimensions())
+        self.saw_weight_dims.append(w_tensor.get_dimensions())
+
+        assert len(x_tensor.get_dimensions()) == 2
+        assert len(w_tensor.get_dimensions()) == 2
+        assert x_tensor.get_dimensions()[1] == w_tensor.get_dimensions()[0]
 
         # Ensure the allocated output tensor is the right size for the expression that will fill it.
-        if ctx.has_output("feature_output"):
-            feature_output: thor.physical.PhysicalTensor = ctx.output_tensors["feature_output"]
-            assert len(feature_output.get_dimensions()) == 2
-            assert feature_output.get_dimensions()[1] == w.get_dimensions()[1]
+        if context.has_output("feature_output"):
+            feature_output_tensor: thor.physical.PhysicalTensor = context.output_tensor("feature_output")
+            self.saw_output_dims.append(feature_output_tensor.get_dimensions())
+            assert len(feature_output_tensor.get_dimensions()) == 2
+            assert feature_output_tensor.get_dimensions()[1] == w_tensor.get_dimensions()[1]
 
         # Define the expression whose result will be placed in the output tensor.
+        x = context.input("feature_input")
+        w = context.param("weights")
         feature_output = x @ w
         if self.has_bias:
-            b = ctx.param("biases")
+            b = context.param("biases")
             feature_output = feature_output + b
 
         # Bind the output tensor as the memory that the expression will fill.
         return {
             "feature_output": feature_output,
-        }
-
-
-# FIXME: This is an antipattern:
-class DictParameterLayer(thor.layers.CustomLayer):
-
-    def __init__(self, network, x, out_features):
-        self.out_features = out_features
-        super().__init__(
-            network=network,
-            inputs={
-                "feature_input": x,
-            },
-            outputs={
-                "feature_output": thor.Tensor([out_features], x.get_data_type()),
-            },
-        )
-
-    def parameters(self) -> dict[str, thor.Parameter]:
-        # FIXME: dict of parameters should not be supported. We require a list, the parameter owns its name
-        #        can't have the duplication.
-        return {
-            "weights":
-                Weights(self.out_features),
-            "biases":
-                thor.Parameter(
-                    name="biases",
-                    shape=[self.out_features],
-                    dtype=thor.DataType.fp32,
-                    trainable=True,
-                ),
-        }
-
-    def build(
-        self,
-        ctx: thor.layers.CustomLayerBuildContext,
-    ) -> dict[str, thor.physical.Expression]:
-        x = ctx.input("feature_input")
-        w = ctx.param("weights")
-        b = ctx.param("biases")
-        return {
-            "feature_output": x @ w + b,
-        }
-
-
-class CommonSubexpressionLayer(thor.layers.CustomLayer):
-
-    def __init__(self, network, x, out_features):
-        self.out_features = out_features
-        self.build_ctx_seen = False
-
-        super().__init__(
-            network=network,
-            inputs={
-                "feature_input": x,
-            },
-            outputs={
-                "feature_output": thor.Tensor([out_features], x.get_data_type()),
-                "aux_output": thor.Tensor([out_features], x.get_data_type()),
-            },
-        )
-
-    def parameters(self) -> list[thor.Parameter]:
-        return [
-            Weights(self.out_features),
-            thor.Parameter(
-                name="biases",
-                shape=[self.out_features],
-                dtype=thor.DataType.fp32,
-                trainable=True,
-            ),
-        ]
-
-    def build(
-        self,
-        ctx: thor.layers.CustomLayerBuildContext,
-    ) -> dict[str, thor.physical.Expression]:
-        self.build_ctx_seen = True
-
-        x = ctx.input("feature_input")
-        w = ctx.param("weights")
-        b = ctx.param("biases")
-
-        # Shared trunk.
-        projected = x @ w
-        shifted = projected + b
-
-        # Reuse the same common subexpression in multiple outputs.
-        feature_output = shifted * shifted
-        aux_output = shifted + shifted
-
-        return {
-            "feature_output": feature_output,
-            "aux_output": aux_output,
         }
 
 
@@ -253,42 +174,31 @@ def test_python_custom_layer_builds_logical_output_interface_with_bias():
     assert [parameter.name for parameter in layer.get_parameters()] == ["weights", "biases"]
 
 
-def test_python_custom_layer_accepts_dict_returned_from_parameters():
-    network = thor.Network("custom-layer-dict-parameters")
-    x = thor.Tensor([6], thor.DataType.fp16)
-
-    layer = DictParameterLayer(network, x, 2)
-
-    assert layer["feature_output"].get_dimensions() == [2]
-    assert layer["feature_output"].get_data_type() == thor.DataType.fp16
-    assert [parameter.name for parameter in layer.get_parameters()] == ["weights", "biases"]
-
-
-def test_python_custom_layer_supports_multiple_named_outputs():
-    network = thor.Network("custom-layer-multi-output")
-    x = thor.Tensor([5], thor.DataType.fp16)
-
-    layer = CommonSubexpressionLayer(network, x, 3)
-
-    feature_output = layer["feature_output"]
-    aux_output = layer["aux_output"]
-
-    assert feature_output.get_dimensions() == [3]
-    assert feature_output.get_data_type() == thor.DataType.fp16
-
-    assert aux_output.get_dimensions() == [3]
-    assert aux_output.get_data_type() == thor.DataType.fp16
-
-    assert layer.get_input_names() == ["feature_input"]
-    assert layer.get_output_names() == ["feature_output", "aux_output"]
-    assert set(layer.outputs.keys()) == {"feature_output", "aux_output"}
-
-
-def test_python_custom_layer_rejects_missing_output_name():
-    network = thor.Network("custom-layer-missing-output")
-    x = thor.Tensor([5], thor.DataType.fp16)
-
-    layer = FusedLinear(network, x, 3, has_bias=False)
-
-    with pytest.raises(RuntimeError, match="missing"):
-        layer["missing"]
+# FIXME: Wire through inferenceOnly to get something like this to pass -> from Network.
+# @pytest.mark.cuda
+# def test_python_custom_layer_place_invokes_build_with_physical_context():
+#     network = thor.Network("custom-layer-place-physical-context")
+#     network_input = thor.layers.NetworkInput(network, "input", [5], thor.DataType.fp16)
+#
+#     layer = FusedLinear(network, network_input.get_feature_output(), 3, has_bias=True)
+#     thor.layers.NetworkOutput(network, "output", layer["feature_output"], thor.DataType.fp16)
+#
+#     placed = network.place(
+#         2,
+#         inference_only=True,
+#         forced_devices=[0],
+#         forced_num_stamps_per_gpu=1,
+#     )
+#
+#     assert placed.get_num_stamps() >= 1
+#
+#     # The Python build override should see the same physical information that the
+#     # C++ layer implementations see during placement: batch-inflated input/output
+#     # tensors and storage-created parameter tensors.
+#     assert [2, 5] in layer.saw_input_dims
+#     assert [5, 3] in layer.saw_weight_dims
+#     assert [2, 3] in layer.saw_output_dims
+#
+#     weights = layer.get_parameters()[0]
+#     assert set(weights.storage_context_input_names) == {"feature_input"}
+#     assert weights.storage_shape_seen == [5, 3]

@@ -29,8 +29,8 @@ class CustomLayer : public TrainableLayer {
     //   input connection:  applicationIndex * inputNames.size() + inputPortIndex
     //   output connection: applicationIndex * outputNames.size() + outputPortIndex
     CustomLayer(DynamicExpression expr,
-                std::vector<std::string> inputNames,
-                std::vector<std::string> outputNames,
+                std::vector<std::string> inputNames,   // FIXME: Should I just take input and output names from expr?
+                std::vector<std::string> outputNames,  // Then I don't need the backwards compatible overload
                 const TensorPlacement& placement,
                 const std::vector<std::shared_ptr<Parameter>>& parameters,
                 bool inferenceOnly,

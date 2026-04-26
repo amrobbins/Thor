@@ -19,9 +19,8 @@ class Parameter {
 
         StorageContext() = default;
 
-        explicit StorageContext(const Tensor &featureInput) : namedInputs{{"feature_input", featureInput}} {}
-
         StorageContext(std::unordered_map<std::string, Tensor> namedInputs) : namedInputs(std::move(namedInputs)) {}
+        StorageContext(Tensor featureInput) : namedInputs({{"feature_input", featureInput}}) {}
 
         bool hasInput(const std::string &name) const { return namedInputs.contains(name); }
 
@@ -64,7 +63,7 @@ class Parameter {
             return it->second;
         }
 
-        Tensor getFeatureInput() const {
+        const Tensor &getFeatureInput() const {
             if (namedInputs.size() != 1) {
                 throw std::runtime_error(
                     "Parameter::StorageContext::getFeatureInput: There is not exactly 1 input available; "
@@ -89,8 +88,7 @@ class Parameter {
 
     void compileInitializer(uint64_t fanIn = 0, uint64_t fanOut = 0);
 
-    virtual void createStorage(const StorageContext &context) { createStorage(context.getFeatureInput()); }
-    virtual void createStorage(const Tensor &inputTensor) = 0;
+    virtual void createStorage(const StorageContext &context) = 0;
     void clearStorage();
 
     Event initialize();

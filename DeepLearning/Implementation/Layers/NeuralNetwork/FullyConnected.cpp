@@ -8,7 +8,8 @@ class FCWeightsParameter : public Parameter {
     FCWeightsParameter(Optional<TensorDescriptor::DataType> storageDataType, uint32_t numOutputFeatures)
         : Parameter("weights", true), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
 
-    void createStorage(const Tensor& inputTensor) override {
+    void createStorage(const StorageContext& context) override {
+        const Tensor& inputTensor = context.getFeatureInput();
         TensorDescriptor::DataType resolvedDataType;
         if (storageDataType.isPresent())
             resolvedDataType = storageDataType.get();
@@ -30,7 +31,8 @@ class FCBiasesParameter : public Parameter {
     FCBiasesParameter(Optional<TensorDescriptor::DataType> storageDataType, uint32_t numOutputFeatures)
         : Parameter("biases", true), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
 
-    void createStorage(const Tensor& inputTensor) override {
+    void createStorage(const StorageContext& context) override {
+        const Tensor& inputTensor = context.getFeatureInput();
         TensorDescriptor::DataType resolvedDataType;
         if (storageDataType.isPresent())
             resolvedDataType = storageDataType.get();

@@ -196,10 +196,6 @@ class ContextAwareBiasParameter : public Parameter {
         rhsDimensions = rhs.getDimensions();
         storage = Tensor(rhs.getPlacement(), TensorDescriptor(rhs.getDataType(), {rhsDimensions.back()}));
     }
-
-    void createStorage(const Tensor& inputTensor) override {
-        throw std::runtime_error("ContextAwareBiasParameter should use the StorageContext overload, not the single-input overload.");
-    }
 };
 
 class FixedVectorParameter : public Parameter {
@@ -225,8 +221,6 @@ class FixedVectorParameter : public Parameter {
         Event ready = initStream.putEvent();
         ready.synchronize();
     }
-
-    void createStorage(const Tensor& inputTensor) override { createStorage(StorageContext(inputTensor)); }
 
    private:
     std::vector<float> initialValues;
