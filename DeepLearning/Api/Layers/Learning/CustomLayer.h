@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
+#include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Parameter/Parameter.h"
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
@@ -41,7 +42,8 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     const std::vector<std::string>& getOutputNames() const { return outputNames; }
     TensorMap getOutputInterface(const TensorMap& inputInterface) const;
     const ThorImplementation::DynamicExpression& getExpression() const { return expr; }
-    const std::vector<std::shared_ptr<Parameter>>& getParameters() const { return parameters; }
+    const std::vector<std::shared_ptr<Parameter>>& getParameters() const override { return parameters; }
+    uint64_t getParameterizableId() const override { return getId(); }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                              Stream stream,

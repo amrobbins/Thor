@@ -50,13 +50,14 @@ Parameter::Parameter(std::string name,
                      DataType dtype,
                      std::shared_ptr<Initializer> initializer,
                      bool trainable,
-                     std::shared_ptr<Optimizer> optimizer)
+                     std::shared_ptr<Optimizer> optimizer,
+                     bool trainingInitiallyEnabled)
     : initialized(true),
       name(std::move(name)),
       initializer(std::move(initializer)),
       trainable(trainable),
       optimizer(std::move(optimizer)),
-      trainingEnabled(trainable),
+      trainingInitiallyEnabled(trainingInitiallyEnabled),
       shape(shape),
       dtype(dtype) {
     validateReadyForUse();
@@ -66,13 +67,14 @@ Parameter::Parameter(std::string name,
                      StorageContextStorageFactory createStorage,
                      std::shared_ptr<Initializer> initializer,
                      bool trainable,
-                     std::shared_ptr<Optimizer> optimizer)
+                     std::shared_ptr<Optimizer> optimizer,
+                     bool trainingInitiallyEnabled)
     : initialized(true),
       name(std::move(name)),
       initializer(std::move(initializer)),
       trainable(trainable),
       optimizer(std::move(optimizer)),
-      trainingEnabled(trainable),
+      trainingInitiallyEnabled(trainingInitiallyEnabled),
       storageContextCreateStorage(std::move(createStorage)) {
     validateReadyForUse();
 }
@@ -103,6 +105,7 @@ void Parameter::validateStorageFactoryReadyForStamping() const {
     }
 }
 
+// Parameters don't need to be serialized, bound parameters do. That will resolve the trainingInitiallyEnabled vs current state issue.
 json Parameter::architectureJson() const {
     json j;
     j["version"] = getVersion();
@@ -110,7 +113,7 @@ json Parameter::architectureJson() const {
     j["storage"] = storage.architectureJson();
     j["trainable"] = trainable;
     if (trainable)
-        j["training_enabled"] = trainingEnabled;
+        j["training_enabled"] = trainingInitiallyEnabled;
     if (initializer != nullptr)
         j["initializer"] = initializer->architectureJson();
     if (optimizer != nullptr)
@@ -157,9 +160,9 @@ Parameter Parameter::deserialize(const json &j, std::shared_ptr<thor_file::TarRe
     deserialized.storage = Tensor::deserialize(j["storage"]);
     deserialized.trainable = j.at("trainable").get<bool>();
     if (deserialized.trainable)
-        deserialized.trainingEnabled = j.at("training_enabled").get<bool>();
+        deserialized.trainingInitiallyEnabled = j.at("training_enabled").get<bool>();
     else
-        deserialized.trainingEnabled = false;
+        deserialized.trainingInitiallyEnabled = false;
     if (j.contains("initializer"))
         deserialized.initializer = Initializer::deserialize(j["initializer"]);
     if (j.contains("optimizer_override"))
@@ -173,13 +176,7 @@ const std::string &Parameter::getName() const { return name; }
 std::shared_ptr<Initializer> Parameter::getInitializer() const { return initializer; }
 
 bool Parameter::isTrainable() const { return trainable; }
-bool Parameter::isTrainingEnabled() const { return isTrainable() && trainingEnabled; }
-void Parameter::setTrainingEnabled(bool enabled) {
-    assert(isTrainable());
-
-    throw runtime_error("Toggling parameter trainabilty on/off is not yet supported.");
-    trainingEnabled = enabled;
-}
+bool Parameter::isTrainingInitiallyEnabled() const { return isTrainable() && trainingInitiallyEnabled; }
 
 bool Parameter::hasOptimizer() const { return optimizer != nullptr; }
 std::shared_ptr<Optimizer> Parameter::getOptimizer() { return optimizer; }

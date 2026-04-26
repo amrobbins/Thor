@@ -191,16 +191,29 @@ def test_python_custom_layer_place_invokes_build_with_physical_context():
     assert weights.name == "weights"
     assert weights.trainable is True
     assert weights.is_trainable() is True
-    assert weights.is_training_enabled() is True
-    # weights.set_training_enabled(False)
-    #assert weights.is_training_enabled is False
+    assert weights.is_training_initially_enabled() is True
     assert weights.has_optimizer() is False
 
     biases: thor.Parameter = layer.get_parameters()[1]
     assert biases.name == "biases"
     assert biases.trainable is True
     assert biases.is_trainable() is True
-    assert biases.is_training_enabled() is True
-    # biases.set_training_enabled(False)
-    #assert biases.is_training_enabled is False
+    assert biases.is_training_initially_enabled() is True
     assert biases.has_optimizer() is False
+
+    bound_weights: thor.BoundParameter = layer.get_bound_parameter(placed, "weights")
+    assert bound_weights.name == "weights"
+    assert bound_weights.trainable is True
+    assert bound_weights.is_training_enabled() is False
+    bound_weights.set_training_enabled(True)
+    assert bound_weights.is_training_enabled() is True
+    bound_weights.set_training_enabled(False)
+    assert bound_weights.is_training_enabled() is False
+
+    bound_biases: thor.BoundParameter = layer.get_bound_parameters(placed)[1]
+    assert bound_biases.name == "biases"
+    assert bound_biases.is_training_enabled() is False
+    bound_biases.set_training_enabled(True)
+    assert bound_biases.is_training_enabled() is True
+    bound_biases.set_training_enabled(False)
+    assert bound_biases.is_training_enabled() is False

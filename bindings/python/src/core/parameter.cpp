@@ -11,7 +11,9 @@
 #include <utility>
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Parameter/Parameter.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
@@ -53,6 +55,15 @@ class GilSafePythonObject {
 }  // namespace
 
 void bind_parameter(nb::module_& thor) {
+    auto bound_parameter = nb::class_<BoundParameter>(thor, "BoundParameter");
+    bound_parameter.attr("__module__") = "thor";
+    bound_parameter.def_prop_ro("name", &BoundParameter::getName);
+    bound_parameter.def_prop_ro("trainable", &BoundParameter::isTrainable);
+    bound_parameter.def("is_trainable", &BoundParameter::isTrainable);
+    bound_parameter.def("is_training_enabled", &BoundParameter::isTrainingEnabled);
+    bound_parameter.def("set_training_enabled", &BoundParameter::setTrainingEnabled, "enabled"_a);
+    bound_parameter.def("has_optimizer", &BoundParameter::hasOptimizer);
+
     auto parameter = nb::class_<Parameter>(thor, "Parameter");
     parameter.attr("__module__") = "thor";
 
@@ -153,7 +164,6 @@ Allocate implementation storage on the same placement as ``input_tensor`` with t
     parameter.def_prop_ro("name", &Parameter::getName);
     parameter.def_prop_ro("trainable", &Parameter::isTrainable);
     parameter.def("is_trainable", &Parameter::isTrainable);
-    parameter.def("is_training_enabled", &Parameter::isTrainingEnabled);
-    parameter.def("set_training_enabled", &Parameter::setTrainingEnabled, "enabled"_a);
+    parameter.def("is_training_initially_enabled", &Parameter::isTrainingInitiallyEnabled);
     parameter.def("has_optimizer", &Parameter::hasOptimizer);
 }
