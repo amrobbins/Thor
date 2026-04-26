@@ -15,7 +15,8 @@ class BNParameter final : public Parameter {
     BNParameter(const string& name, const Optional<TensorDescriptor::DataType>& storageDataType, bool trainable)
         : Parameter(name, trainable), storageDataType(storageDataType) {}
 
-    void createStorage(const Tensor& inputTensor) override {
+    void createStorage(const StorageContext& context) override {
+        const Tensor& inputTensor = context.getFeatureInput();
         assert(inputTensor.getDimensions().size() == 2 || inputTensor.getDimensions().size() == 4);
         const uint64_t channels = inputTensor.getDimensions()[1];
         TensorDescriptor::DataType resolvedDataType;

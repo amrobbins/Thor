@@ -106,17 +106,18 @@ std::vector<std::shared_ptr<Parameter>> parametersFromPython(nb::object obj) {
     }
 
     if (nb::isinstance<nb::dict>(obj)) {
-        nb::dict mapping = nb::cast<nb::dict>(obj);
-        result.reserve(mapping.size());
-        for (auto item : mapping) {
-            (void)item.first;
-            result.push_back(nb::cast<std::shared_ptr<Parameter>>(item.second));
-        }
-        return result;
+        throw std::runtime_error(
+            "CustomLayer parameters() must return list[thor.Parameter], not dict[str, thor.Parameter]. "
+            "Parameter names are owned by the Parameter objects themselves.");
     }
 
-    nb::iterable iterable = nb::cast<nb::iterable>(obj);
-    for (nb::handle item : iterable) {
+    if (!nb::isinstance<nb::list>(obj)) {
+        throw std::runtime_error("CustomLayer parameters() must return list[thor.Parameter].");
+    }
+
+    nb::list parameters = nb::cast<nb::list>(obj);
+    result.reserve(parameters.size());
+    for (nb::handle item : parameters) {
         result.push_back(nb::cast<std::shared_ptr<Parameter>>(item));
     }
     return result;
@@ -287,7 +288,7 @@ DynamicExpression makeDynamicExpressionFromOwner(nb::handle buildOwner,
     std::vector<std::string> expectedInputNames = concatenateInputNames(featureInputNames, parameterNames);
 
     if (!nb::hasattr(buildOwner, "build")) {
-        throw std::runtime_error("CustomLayer owner object must define build(ctx).");
+        throw std::runtime_error("CustomLayer owner object must define build(context).");
     }
 
     auto buildOwnerRef = std::make_shared<GilSafePythonObject>(buildOwner);
@@ -299,8 +300,8 @@ DynamicExpression makeDynamicExpressionFromOwner(nb::handle buildOwner,
             const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
             nb::gil_scoped_acquire gil;
 
-            CustomLayerBuildContext ctx(inputs, outputs, featureInputNames, parameterNames, stream, useFastMath);
-            nb::object result = buildOwnerRef->get().attr("build")(nb::cast(ctx));
+            CustomLayerBuildContext context(inputs, outputs, featureInputNames, parameterNames, stream, useFastMath);
+            nb::object result = buildOwnerRef->get().attr("build")(nb::cast(context));
 
             if (nb::isinstance<DynamicExpressionBuild>(result)) {
                 return nb::cast<DynamicExpressionBuild>(result);
@@ -308,7 +309,7 @@ DynamicExpression makeDynamicExpressionFromOwner(nb::handle buildOwner,
 
             if (!nb::isinstance<nb::dict>(result)) {
                 throw std::runtime_error(
-                    "CustomLayer build(ctx) must return dict[str, thor.physical.Expression] or thor.physical.DynamicExpressionBuild.");
+                    "CustomLayer build(context) must return dict[str, thor.physical.Expression] or thor.physical.DynamicExpressionBuild.");
             }
 
             Outputs expressionOutputs = Expression::outputs(expressionsFromPythonDict(nb::cast<nb::dict>(result)));
@@ -338,9 +339,9 @@ DynamicExpression makeDynamicExpression(nb::callable buildCallable,
             const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
             nb::gil_scoped_acquire gil;
 
-            CustomLayerBuildContext ctx(inputs, outputs, featureInputNames, parameterNames, stream, useFastMath);
+            CustomLayerBuildContext context(inputs, outputs, featureInputNames, parameterNames, stream, useFastMath);
             nb::object callable = nb::borrow<nb::object>(buildCallableRef->get());
-            nb::object result = callable(nb::cast(ctx));
+            nb::object result = callable(nb::cast(context));
 
             if (nb::isinstance<DynamicExpressionBuild>(result)) {
                 return nb::cast<DynamicExpressionBuild>(result);
@@ -348,7 +349,7 @@ DynamicExpression makeDynamicExpression(nb::callable buildCallable,
 
             if (!nb::isinstance<nb::dict>(result)) {
                 throw std::runtime_error(
-                    "CustomLayer build(ctx) must return dict[str, thor.physical.Expression] or thor.physical.DynamicExpressionBuild.");
+                    "CustomLayer build(context) must return dict[str, thor.physical.Expression] or thor.physical.DynamicExpressionBuild.");
             }
 
             Outputs expressionOutputs = Expression::outputs(expressionsFromPythonDict(nb::cast<nb::dict>(result)));
@@ -369,9 +370,9 @@ class PythonCustomLayerRecipe {
 
     virtual nb::object parameters() { return nb::list(); }
 
-    virtual nb::object build(const CustomLayerBuildContext& ctx) {
-        (void)ctx;
-        throw std::runtime_error("CustomLayer subclasses must override build(ctx).");
+    virtual nb::object build(const CustomLayerBuildContext& context) {
+        (void)context;
+        throw std::runtime_error("CustomLayer subclasses must override build(context).");
     }
 
     void initialize(nb::object owner,
@@ -448,32 +449,37 @@ class PyPythonCustomLayerRecipe : public PythonCustomLayerRecipe {
    public:
     NB_TRAMPOLINE(PythonCustomLayerRecipe, 2);
 
-    nb::object build(const CustomLayerBuildContext& ctx) override { NB_OVERRIDE(build, ctx); }
+    nb::object parameters() override { NB_OVERRIDE(parameters); }
+    nb::object build(const CustomLayerBuildContext& context) override { NB_OVERRIDE(build, context); }
 };
 
 }  // namespace
 
 void bind_custom_layer(nb::module_& layers) {
-    auto ctx = nb::class_<CustomLayerBuildContext>(layers, "CustomLayerBuildContext");
-    ctx.attr("__module__") = "thor.layers";
-    ctx.def_prop_ro("inputs", &CustomLayerBuildContext::inputs, nb::rv_policy::reference_internal);
-    ctx.def_prop_ro("parameters", &CustomLayerBuildContext::parameters, nb::rv_policy::reference_internal);
-    ctx.def_prop_ro("all_inputs", &CustomLayerBuildContext::all_inputs, nb::rv_policy::reference_internal);
-    ctx.def_prop_ro("outputs", &CustomLayerBuildContext::output_tensors, nb::rv_policy::reference_internal);
-    ctx.def_prop_ro("stream", &CustomLayerBuildContext::getStream, nb::rv_policy::reference_internal);
-    ctx.def_prop_ro("device_num", &CustomLayerBuildContext::deviceNum);
-    ctx.def_prop_ro("use_fast_math", &CustomLayerBuildContext::getUseFastMath);
-    ctx.def("input_tensor", &CustomLayerBuildContext::inputTensor, "name"_a);
-    ctx.def("parameter_tensor", &CustomLayerBuildContext::parameterTensor, "name"_a);
-    ctx.def("param_tensor", &CustomLayerBuildContext::parameterTensor, "name"_a);
-    ctx.def("output_tensor", &CustomLayerBuildContext::outputTensor, "name"_a);
-    ctx.def("has_input", &CustomLayerBuildContext::hasInput, "name"_a);
-    ctx.def("has_parameter", &CustomLayerBuildContext::hasParameter, "name"_a);
-    ctx.def("has_param", &CustomLayerBuildContext::hasParameter, "name"_a);
-    ctx.def("has_output", &CustomLayerBuildContext::hasOutput, "name"_a);
-    ctx.def(
+    auto context = nb::class_<CustomLayerBuildContext>(layers, "CustomLayerBuildContext");
+    context.attr("__module__") = "thor.layers";
+    context.def_prop_ro("inputs", &CustomLayerBuildContext::inputs, nb::rv_policy::reference_internal);
+    context.def_prop_ro("input_tensors", &CustomLayerBuildContext::inputs, nb::rv_policy::reference_internal);
+    context.def_prop_ro("parameters", &CustomLayerBuildContext::parameters, nb::rv_policy::reference_internal);
+    context.def_prop_ro("parameter_tensors", &CustomLayerBuildContext::parameters, nb::rv_policy::reference_internal);
+    context.def_prop_ro("param_tensors", &CustomLayerBuildContext::parameters, nb::rv_policy::reference_internal);
+    context.def_prop_ro("all_inputs", &CustomLayerBuildContext::all_inputs, nb::rv_policy::reference_internal);
+    context.def_prop_ro("outputs", &CustomLayerBuildContext::output_tensors, nb::rv_policy::reference_internal);
+    context.def_prop_ro("output_tensors", &CustomLayerBuildContext::output_tensors, nb::rv_policy::reference_internal);
+    context.def_prop_ro("stream", &CustomLayerBuildContext::getStream, nb::rv_policy::reference_internal);
+    context.def_prop_ro("device_num", &CustomLayerBuildContext::deviceNum);
+    context.def_prop_ro("use_fast_math", &CustomLayerBuildContext::getUseFastMath);
+    context.def("input_tensor", &CustomLayerBuildContext::inputTensor, "name"_a);
+    context.def("parameter_tensor", &CustomLayerBuildContext::parameterTensor, "name"_a);
+    context.def("param_tensor", &CustomLayerBuildContext::parameterTensor, "name"_a);
+    context.def("output_tensor", &CustomLayerBuildContext::outputTensor, "name"_a);
+    context.def("has_input", &CustomLayerBuildContext::hasInput, "name"_a);
+    context.def("has_parameter", &CustomLayerBuildContext::hasParameter, "name"_a);
+    context.def("has_param", &CustomLayerBuildContext::hasParameter, "name"_a);
+    context.def("has_output", &CustomLayerBuildContext::hasOutput, "name"_a);
+    context.def(
         "input", &CustomLayerBuildContext::input, "name"_a, "output_dtype"_a.none() = nb::none(), "compute_dtype"_a.none() = nb::none());
-    ctx.def(
+    context.def(
         "param", &CustomLayerBuildContext::param, "name"_a, "output_dtype"_a.none() = nb::none(), "compute_dtype"_a.none() = nb::none());
 
     auto public_custom_layer = nb::class_<PythonCustomLayerRecipe, PyPythonCustomLayerRecipe>(layers, "CustomLayer");
@@ -510,16 +516,16 @@ Subclassable custom trainable layer.
 
 Subclasses normally override:
 
-    parameters(api_ctx) -> list[thor.Parameter] | dict[str, thor.Parameter]
-    build(ctx) -> dict[str, thor.physical.Expression] | thor.physical.DynamicExpressionBuild
+    parameters() -> list[thor.Parameter]
+    build(context) -> dict[str, thor.physical.Expression] | thor.physical.DynamicExpressionBuild
 
 The public Python object is a recipe. Construction creates a native Thor::CustomLayer
 and adds it to the network. The native/network layer owns this recipe for delayed
-physical build(ctx) calls, while the recipe does not own the native layer.
+physical build(context) calls, while the recipe does not own the native layer.
         )nbdoc");
 
     public_custom_layer.def("parameters", &PythonCustomLayerRecipe::parameters);
-    public_custom_layer.def("build", &PythonCustomLayerRecipe::build, "ctx"_a);
+    public_custom_layer.def("build", &PythonCustomLayerRecipe::build, "context"_a);
     public_custom_layer.def("get_output", &PythonCustomLayerRecipe::getOutput, "name"_a);
     public_custom_layer.def("__getitem__", &PythonCustomLayerRecipe::getOutput, "name"_a);
     public_custom_layer.def_prop_ro("outputs", &PythonCustomLayerRecipe::getOutputInterface);

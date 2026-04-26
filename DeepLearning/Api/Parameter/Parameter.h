@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -19,12 +20,19 @@ class Parameterizable;
 class Parameter {
    public:
     using DataType = ThorImplementation::TensorDescriptor::DataType;
+    using StorageContext = ThorImplementation::Parameter::StorageContext;
+    using StorageContextStorageFactory = std::function<ThorImplementation::Tensor(const StorageContext &)>;
     class Builder;
 
     Parameter() = default;
     Parameter(std::string name,
-              std::vector<uint64_t> shape,
+              const std::vector<uint64_t> &shape,
               DataType dtype = DataType::FP32,
+              std::shared_ptr<Initializer> initializer = nullptr,
+              bool trainable = true,
+              std::shared_ptr<Optimizer> optimizer = nullptr);
+    Parameter(std::string name,
+              StorageContextStorageFactory createStorage,
               std::shared_ptr<Initializer> initializer = nullptr,
               bool trainable = true,
               std::shared_ptr<Optimizer> optimizer = nullptr);
@@ -40,8 +48,6 @@ class Parameter {
     static Parameter deserialize(const nlohmann::json &j, std::shared_ptr<thor_file::TarReader> &archiveReader);
 
     [[nodiscard]] const std::string &getName() const;
-    [[nodiscard]] const std::vector<uint64_t> &getShape() const;
-    [[nodiscard]] DataType getDataType() const;
     [[nodiscard]] std::shared_ptr<Initializer> getInitializer() const;
 
     bool isTrainable() const;
@@ -51,27 +57,19 @@ class Parameter {
     bool hasOptimizer() const;
     std::shared_ptr<Optimizer> getOptimizer();
 
-    using StorageContext = ThorImplementation::Parameter::StorageContext;
+    // Convenience helper to allocate storage with the same properties (placement, etc.) as inputTensor,
+    // but having shape and dtype.
+    static ThorImplementation::Tensor allocateStorage(const ThorImplementation::Tensor &inputTensor,
+                                                      const std::vector<uint64_t> &shape,
+                                                      DataType dtype);
 
-    // API-side parameter storage definition. This runs at physical layer compile time.
-    // The default implementation is the basic fixed-shape parameter: allocate this parameter's
-    // shape/dtype on the same placement as the context's single feature input. Python subclasses
-    // should override create_storage(...) and return a thor.physical.PhysicalTensor.
-    virtual ThorImplementation::Tensor createStorage(const StorageContext &context) const;
-    virtual ThorImplementation::Tensor createStorage(const ThorImplementation::Tensor &inputTensor) const;
-    ThorImplementation::Tensor createStorage(const StorageContext &context, const std::vector<uint64_t> &shape, DataType dtype) const;
-    ThorImplementation::Tensor createStorage(const ThorImplementation::Tensor &inputTensor,
-                                             const std::vector<uint64_t> &shape,
-                                             DataType dtype) const;
-    virtual ThorImplementation::Tensor create_storage(const StorageContext &context) const;
-    virtual ThorImplementation::Tensor create_storage(const ThorImplementation::Tensor &inputTensor) const;
-
-    // Build an implementation parameter that delegates storage creation back to this API parameter.
+    // Build an implementation parameter that delegates storage creation to the factory bound on this API parameter.
     virtual std::shared_ptr<ThorImplementation::Parameter> stamp();
 
    private:
     static void validateShape(const std::vector<uint64_t> &shape);
     void validateReadyForUse() const;
+    void validateStorageFactoryReadyForStamping() const;
 
     bool initialized = false;
 
@@ -79,12 +77,17 @@ class Parameter {
     Optional<std::string> storageFile;
 
     std::string name{};
-    std::vector<uint64_t> shape{};
-    DataType dtype = DataType::FP32;
     std::shared_ptr<Initializer> initializer = nullptr;
     bool trainable = false;
     std::shared_ptr<Optimizer> optimizer = nullptr;
     bool trainingEnabled = false;
+
+    // A parameter uses either storageContextCreateStorage function to determine attributes at layer compile time
+    // -- OR --
+    // shape and dtype to determine attributes at parameter definition time
+    StorageContextStorageFactory storageContextCreateStorage = nullptr;
+    Optional<std::vector<uint64_t>> shape = Optional<std::vector<uint64_t>>::empty();
+    Optional<DataType> dtype = Optional<DataType>::empty();
 
     Tensor storage;
 };
@@ -95,21 +98,19 @@ class Parameter::Builder {
     virtual std::shared_ptr<Parameter> build();
 
     virtual Parameter::Builder &name(const std::string &_name);
-    virtual Parameter::Builder &shape(const std::vector<uint64_t> &_shape);
-    virtual Parameter::Builder &dtype(const DataType &_dtype);
     virtual Parameter::Builder &initializer(std::shared_ptr<Initializer> &_initializer);
     virtual Parameter::Builder &initializer(std::shared_ptr<Initializer> &&_initializer);
     virtual Parameter::Builder &trainable(const bool _trainable);
     virtual Parameter::Builder &optimizer(std::shared_ptr<Optimizer> &_optimizerOverride);
     virtual Parameter::Builder &optimizer(std::shared_ptr<Optimizer> &&_optimizerOverride);
+    virtual Parameter::Builder &createStorage(StorageContextStorageFactory createStorage);
 
    private:
     std::string _name{};
-    std::vector<uint64_t> _shape{};
-    Optional<DataType> _dtype = Optional<DataType>::empty();
     std::shared_ptr<Initializer> _initializer = nullptr;
     Optional<bool> _trainable = Optional<bool>::empty();
     std::shared_ptr<Optimizer> _optimizerOverride = nullptr;
+    StorageContextStorageFactory _storageContextCreateStorage = nullptr;
 };
 
 }  // namespace Thor

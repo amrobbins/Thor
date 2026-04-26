@@ -25,7 +25,7 @@ void Parameter::compileStorageAndOptimizer(const StorageContext& context,
 }
 
 void Parameter::compileStorageAndOptimizer(const Tensor& inputTensor, const Optional<Stream>& gradientUpdateStream, bool inferenceOnly) {
-    compileStorageAndOptimizer(StorageContext(inputTensor), gradientUpdateStream, inferenceOnly);
+    compileStorageAndOptimizer(StorageContext({{"feature_input", inputTensor}}), gradientUpdateStream, inferenceOnly);
 }
 
 void Parameter::compileInitializer(uint64_t fanIn, uint64_t fanOut) {
