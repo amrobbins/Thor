@@ -28,9 +28,17 @@ class CustomLayer : public TrainableLayer {
     // Named-port form. Connection types are encoded as:
     //   input connection:  applicationIndex * inputNames.size() + inputPortIndex
     //   output connection: applicationIndex * outputNames.size() + outputPortIndex
+    //
+    // Input and output names could be taken from the expression, but then a name collision
+    // between a parameter with either an input or output could not be detected.
+    // The thinking is that needing to know the input and output names before layer compile time
+    // is necessary anyway, so that the proper connections can be made at the graph level
+    // before compiling it, so requiring input names and output names to be specified
+    // helps with readablity, explicitness and safety, without taking anything away
+    // from dynamic compile time logic.
     CustomLayer(DynamicExpression expr,
-                std::vector<std::string> inputNames,   // FIXME: Should I just take input and output names from expr?
-                std::vector<std::string> outputNames,  // Then I don't need the backwards compatible overload
+                std::vector<std::string> inputNames,
+                std::vector<std::string> outputNames,
                 const TensorPlacement& placement,
                 const std::vector<std::shared_ptr<Parameter>>& parameters,
                 bool inferenceOnly,

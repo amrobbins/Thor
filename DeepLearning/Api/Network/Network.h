@@ -139,7 +139,8 @@ class Network {
     virtual StatusCode stampNetwork(uint32_t gpuNum,
                                     std::vector<Event> &initDoneEvents,
                                     uint32_t batchSize,
-                                    std::vector<ThorImplementation::StampedNetwork> &stampedNetworks);
+                                    std::vector<ThorImplementation::StampedNetwork> &stampedNetworks,
+                                    const bool inferenceOnly);
 
     virtual StatusCode evaluateGraph();
     virtual StatusCode checkForDuplicateInOutPortNames();
@@ -156,12 +157,14 @@ class Network {
                                     const std::shared_ptr<Thor::NetworkOutput> networkOutput,
                                     uint32_t gpuNum,
                                     uint32_t batchSize,
-                                    ThorImplementation::StampedNetwork &stampedNetwork);
+                                    ThorImplementation::StampedNetwork &stampedNetwork,
+                                    const bool inferenceOnly);
     virtual void stampLayer(Tensor inputTensor,
                             const std::shared_ptr<Thor::Layer> layer,
                             uint32_t gpuNum,
                             uint32_t batchSize,
-                            ThorImplementation::StampedNetwork &stampedNetwork);
+                            ThorImplementation::StampedNetwork &stampedNetwork,
+                            const bool inferenceOnly);
 
     void createBatchDimensions(std::vector<uint64_t> &batchDimensions, std::vector<uint64_t> tensorDimensions, uint32_t batchSize);
 

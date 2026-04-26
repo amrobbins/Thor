@@ -124,7 +124,8 @@ class Layer {
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                              std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                              std::shared_ptr<Thor::Layer> drivingApiLayer,
-                                                             Thor::Tensor connectingApiTensor) const = 0;
+                                                             Thor::Tensor connectingApiTensor,
+                                                             const bool inferenceOnly) const = 0;
 
     virtual void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) { physicalLayer->compile(); }
 

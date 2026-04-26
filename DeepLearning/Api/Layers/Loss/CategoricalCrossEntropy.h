@@ -34,10 +34,12 @@ class CategoricalCrossEntropy : public Loss {
 
     virtual void buildSupportLayersAndAddToNetwork();
 
-    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
-                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
-                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
-                                                             Thor::Tensor connectingApiTensor) const {
+    std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                     std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                     std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                     Thor::Tensor connectingApiTensor,
+                                                     const bool inferenceOnly) const override {
+        // FIXME: How to prune backward then.
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 

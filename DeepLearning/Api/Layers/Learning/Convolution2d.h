@@ -74,16 +74,16 @@ class Convolution2d : public TrainableLayer {
         ThorImplementation::GpuConvolution::instance().chooseOptimalKernelBackward(convolutionKernelRequirement, stream);
     }
 
-    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
-                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
-                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
-                                                             Thor::Tensor connectingApiTensor) const {
+    std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                     std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                     std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                     Thor::Tensor connectingApiTensor,
+                                                     const bool inferenceOnly) const override {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
-        // FIXME: add support for data type and inference only.
+        // FIXME: add support for data type
         Tensor::DataType weightsDataType = Tensor::DataType::FP16;
-        bool inferenceOnly = false;
         std::shared_ptr<ThorImplementation::Convolution2d> physicalConvolution2d =
             std::make_shared<ThorImplementation::Convolution2d>(filterWidth,
                                                                 filterHeight,

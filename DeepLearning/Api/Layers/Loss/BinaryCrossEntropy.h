@@ -27,16 +27,18 @@ class BinaryCrossEntropy : public Loss {
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
-    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
-                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
-                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
-                                                             Thor::Tensor connectingApiTensor) const {
+    std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                     std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                     std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                     Thor::Tensor connectingApiTensor,
+                                                     const bool inferenceOnly) const override {
+        // FIXME: How to prune backward then.
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
         // Sigmoid and LossShaper are connected during multi-layer flattening
-        std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy = std::make_shared<ThorImplementation::CrossEntropy>(
-            CrossEntropyLossType::BINARY, lossDataType);
+        std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy =
+            std::make_shared<ThorImplementation::CrossEntropy>(CrossEntropyLossType::BINARY, lossDataType);
         return crossEntropy;
     }
 

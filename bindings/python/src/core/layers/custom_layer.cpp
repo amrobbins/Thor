@@ -380,7 +380,6 @@ class PythonCustomLayerRecipe {
                     nb::dict inputsObj,
                     nb::dict outputsObj,
                     std::shared_ptr<Optimizer> optimizer,
-                    bool inferenceOnly,
                     bool useFastMath) {
         OrderedApiTensorMap inputs = apiTensorMapFromPython(inputsObj, "inputs");
         OrderedApiTensorMap outputs = apiTensorMapFromPython(outputsObj, "outputs");
@@ -406,8 +405,7 @@ class PythonCustomLayerRecipe {
             .inputInterface(apiInputs)
             .outputInterface(apiOutputs)
             .parameters(parameters)
-            .useFastMath(useFastMath)
-            .inferenceOnly(inferenceOnly);
+            .useFastMath(useFastMath);
 
         if (optimizer != nullptr) {
             builder.optimizer(std::move(optimizer));
@@ -492,7 +490,6 @@ void bind_custom_layer(nb::module_& layers) {
            nb::dict inputsObj,
            nb::dict outputsObj,
            std::shared_ptr<Optimizer> optimizer,
-           bool inferenceOnly,
            bool useFastMath) {
             new (self) PythonCustomLayerRecipe();
 
@@ -503,13 +500,12 @@ void bind_custom_layer(nb::module_& layers) {
             // The recipe intentionally does not own the native CustomLayer back.
             nb::object owner = nb::cast(self, nb::rv_policy::reference);
 
-            self->initialize(std::move(owner), network, inputsObj, outputsObj, std::move(optimizer), inferenceOnly, useFastMath);
+            self->initialize(std::move(owner), network, inputsObj, outputsObj, std::move(optimizer), useFastMath);
         },
         "network"_a,
         "inputs"_a,
         "outputs"_a,
         "optimizer"_a.none() = nb::none(),
-        "inference_only"_a = false,
         "use_fast_math"_a = false,
         R"nbdoc(
 Subclassable custom trainable layer.
@@ -545,7 +541,6 @@ physical build(context) calls, while the recipe does not own the native layer.
            nb::callable buildCallable,
            nb::object parametersObj,
            std::shared_ptr<Optimizer> optimizer,
-           bool inferenceOnly,
            bool useFastMath) {
             OrderedApiTensorMap inputs = apiTensorMapFromPython(inputsObj, "inputs");
             OrderedApiTensorMap outputs = apiTensorMapFromPython(outputsObj, "outputs");
@@ -562,8 +557,7 @@ physical build(context) calls, while the recipe does not own the native layer.
                 .inputInterface(inputs.tensors)
                 .outputInterface(outputs.tensors)
                 .parameters(parameters)
-                .useFastMath(useFastMath)
-                .inferenceOnly(inferenceOnly);
+                .useFastMath(useFastMath);
 
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
@@ -578,7 +572,6 @@ physical build(context) calls, while the recipe does not own the native layer.
         "build"_a,
         "parameters"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
-        "inference_only"_a = false,
         "use_fast_math"_a = false,
         R"nbdoc(
 Internal/native CustomLayer constructor. Most Python users should subclass

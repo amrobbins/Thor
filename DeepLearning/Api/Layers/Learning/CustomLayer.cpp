@@ -14,9 +14,8 @@ namespace Thor {
 CustomLayer::CustomLayer(DynamicExpression expr,
                          const std::vector<TensorMap>& inputInterfaces,
                          std::vector<std::shared_ptr<Parameter>> parameters,
-                         bool inferenceOnly,
                          bool useFastMath)
-    : CustomLayer(std::move(expr), {}, {}, inputInterfaces, {}, std::move(parameters), inferenceOnly, useFastMath) {}
+    : CustomLayer(std::move(expr), {}, {}, inputInterfaces, {}, std::move(parameters), useFastMath) {}
 
 CustomLayer::CustomLayer(DynamicExpression expr,
                          std::vector<std::string> inputNames,
@@ -24,9 +23,8 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          const std::vector<TensorMap>& inputInterfaces,
                          const std::vector<TensorMap>& outputInterfaces,
                          std::vector<std::shared_ptr<Parameter>> parameters,
-                         bool inferenceOnly,
                          bool useFastMath)
-    : expr(std::move(expr)), inferenceOnly(inferenceOnly), useFastMath(useFastMath), parameters(std::move(parameters)) {
+    : expr(std::move(expr)), useFastMath(useFastMath), parameters(std::move(parameters)) {
     if (inputNames.empty())
         inputNames = this->expr.getExpectedInputNames();
     if (outputNames.empty())
@@ -388,7 +386,8 @@ uint64_t CustomLayer::getFirstInstanceMemRequirementInBytes(uint32_t batchSize, 
 std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation::TensorPlacement placement,
                                                               std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                               std::shared_ptr<Thor::Layer> drivingApiLayer,
-                                                              Thor::Tensor connectingApiTensor) const {
+                                                              Thor::Tensor connectingApiTensor,
+                                                              const bool inferenceOnly) const {
     (void)drivingLayer;
     (void)drivingApiLayer;
 
@@ -419,7 +418,6 @@ json CustomLayer::architectureJson() const {
     j["factory"] = Layer::Factory::Learning.value();
     j["version"] = "1.0.0";
     j["layer_type"] = "custom_layer";
-    j["inference_only"] = inferenceOnly;
     j["input_names"] = inputNames;
     j["output_names"] = outputNames;
     j["input_interfaces"] = json::array();
