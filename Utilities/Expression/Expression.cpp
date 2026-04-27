@@ -3,8 +3,10 @@
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 
 #include <functional>
+#include <sstream>
 
 using DataType = ThorImplementation::TensorDescriptor::DataType;
+using json = nlohmann::json;
 
 namespace ThorImplementation {
 
@@ -60,6 +62,283 @@ class HelperStreamPool {
 };
 
 HelperStreamPool helperStreamPool;
+
+std::string namedInputKindToString(NamedInput::Kind kind) {
+    switch (kind) {
+        case NamedInput::Kind::Tensor:
+            return "tensor";
+        case NamedInput::Kind::RuntimeScalarFp32:
+            return "runtime_scalar_fp32";
+        case NamedInput::Kind::TensorRuntimeScalar:
+            return "tensor_runtime_scalar";
+        default:
+            throw std::runtime_error("Unknown NamedInput::Kind.");
+    }
+}
+
+NamedInput::Kind namedInputKindFromString(const std::string& kind) {
+    if (kind == "tensor")
+        return NamedInput::Kind::Tensor;
+    if (kind == "runtime_scalar_fp32")
+        return NamedInput::Kind::RuntimeScalarFp32;
+    if (kind == "tensor_runtime_scalar")
+        return NamedInput::Kind::TensorRuntimeScalar;
+    throw std::runtime_error("Unknown expression input kind '" + kind + "'.");
+}
+
+std::string exprOpExternalName(ExprOp op) {
+    switch (op) {
+        case ExprOp::INPUT:
+            return "input";
+        case ExprOp::RUNTIME_SCALAR:
+            return "runtime_scalar";
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
+            return "tensor_runtime_scalar";
+        case ExprOp::SCALAR_FP:
+            return "scalar_fp";
+        case ExprOp::ADD:
+            return "add";
+        case ExprOp::SUB:
+            return "sub";
+        case ExprOp::MUL:
+            return "mul";
+        case ExprOp::DIV:
+            return "div";
+        case ExprOp::POW:
+            return "pow";
+        case ExprOp::NEG:
+            return "neg";
+        case ExprOp::ABS:
+            return "abs";
+        case ExprOp::EXP:
+            return "exp";
+        case ExprOp::EXP2:
+            return "exp2";
+        case ExprOp::EXP10:
+            return "exp10";
+        case ExprOp::LN:
+            return "ln";
+        case ExprOp::LOG2:
+            return "log2";
+        case ExprOp::LOG10:
+            return "log10";
+        case ExprOp::SQRT:
+            return "sqrt";
+        case ExprOp::FILL:
+            return "fill";
+        case ExprOp::UNSQUEEZE:
+            return "unsqueeze";
+        case ExprOp::SQUEEZE:
+            return "squeeze";
+        case ExprOp::TRANSPOSE:
+            return "transpose";
+        case ExprOp::MIN:
+            return "min";
+        case ExprOp::MAX:
+            return "max";
+        case ExprOp::MIN_GRAD_LEFT:
+            return "min_grad_left";
+        case ExprOp::MIN_GRAD_RIGHT:
+            return "min_grad_right";
+        case ExprOp::MAX_GRAD_LEFT:
+            return "max_grad_left";
+        case ExprOp::MAX_GRAD_RIGHT:
+            return "max_grad_right";
+        case ExprOp::MATMUL:
+            return "matmul";
+        case ExprOp::GEMM:
+            return "gemm";
+        case ExprOp::CONV2D:
+            return "conv2d";
+        case ExprOp::CONV2D_BACKWARD_DATA:
+            return "conv2d_backward_data";
+        case ExprOp::CONV2D_BACKWARD_FILTER:
+            return "conv2d_backward_filter";
+        case ExprOp::REDUCE_SUM:
+            return "reduce_sum";
+        case ExprOp::REDUCE_PROD:
+            return "reduce_prod";
+        case ExprOp::REDUCE_MIN:
+            return "reduce_min";
+        case ExprOp::REDUCE_MAX:
+            return "reduce_max";
+        case ExprOp::REDUCE_ARGMIN:
+            return "reduce_argmin";
+        case ExprOp::REDUCE_ARGMAX:
+            return "reduce_argmax";
+        case ExprOp::REDUCE_MIN_BACKWARD:
+            return "reduce_min_backward";
+        case ExprOp::REDUCE_MAX_BACKWARD:
+            return "reduce_max_backward";
+        case ExprOp::REDUCE_AVG:
+            return "reduce_avg";
+        case ExprOp::REDUCE_NORM1:
+            return "reduce_norm1";
+        case ExprOp::REDUCE_NORM2:
+            return "reduce_norm2";
+        default:
+            throw std::runtime_error("Unknown ExprOp.");
+    }
+}
+
+ExprOp exprOpFromExternalName(const std::string& op) {
+    static const std::unordered_map<std::string, ExprOp> lookup = {
+        {"input", ExprOp::INPUT},
+        {"runtime_scalar", ExprOp::RUNTIME_SCALAR},
+        {"tensor_runtime_scalar", ExprOp::TENSOR_RUNTIME_SCALAR},
+        {"scalar_fp", ExprOp::SCALAR_FP},
+        {"add", ExprOp::ADD},
+        {"sub", ExprOp::SUB},
+        {"mul", ExprOp::MUL},
+        {"div", ExprOp::DIV},
+        {"pow", ExprOp::POW},
+        {"neg", ExprOp::NEG},
+        {"abs", ExprOp::ABS},
+        {"exp", ExprOp::EXP},
+        {"exp2", ExprOp::EXP2},
+        {"exp10", ExprOp::EXP10},
+        {"ln", ExprOp::LN},
+        {"log2", ExprOp::LOG2},
+        {"log10", ExprOp::LOG10},
+        {"sqrt", ExprOp::SQRT},
+        {"fill", ExprOp::FILL},
+        {"unsqueeze", ExprOp::UNSQUEEZE},
+        {"squeeze", ExprOp::SQUEEZE},
+        {"transpose", ExprOp::TRANSPOSE},
+        {"min", ExprOp::MIN},
+        {"max", ExprOp::MAX},
+        {"min_grad_left", ExprOp::MIN_GRAD_LEFT},
+        {"min_grad_right", ExprOp::MIN_GRAD_RIGHT},
+        {"max_grad_left", ExprOp::MAX_GRAD_LEFT},
+        {"max_grad_right", ExprOp::MAX_GRAD_RIGHT},
+        {"matmul", ExprOp::MATMUL},
+        {"gemm", ExprOp::GEMM},
+        {"conv2d", ExprOp::CONV2D},
+        {"conv2d_backward_data", ExprOp::CONV2D_BACKWARD_DATA},
+        {"conv2d_backward_filter", ExprOp::CONV2D_BACKWARD_FILTER},
+        {"reduce_sum", ExprOp::REDUCE_SUM},
+        {"reduce_prod", ExprOp::REDUCE_PROD},
+        {"reduce_min", ExprOp::REDUCE_MIN},
+        {"reduce_max", ExprOp::REDUCE_MAX},
+        {"reduce_argmin", ExprOp::REDUCE_ARGMIN},
+        {"reduce_argmax", ExprOp::REDUCE_ARGMAX},
+        {"reduce_min_backward", ExprOp::REDUCE_MIN_BACKWARD},
+        {"reduce_max_backward", ExprOp::REDUCE_MAX_BACKWARD},
+        {"reduce_avg", ExprOp::REDUCE_AVG},
+        {"reduce_norm1", ExprOp::REDUCE_NORM1},
+        {"reduce_norm2", ExprOp::REDUCE_NORM2},
+    };
+
+    auto it = lookup.find(op);
+    if (it == lookup.end()) {
+        throw std::runtime_error("Unknown expression op '" + op + "'.");
+    }
+    return it->second;
+}
+
+json optionalDTypeJson(const Optional<DataType>& dtype) {
+    if (!dtype.isPresent()) {
+        return nullptr;
+    }
+    return json(dtype.get());
+}
+
+Optional<DataType> optionalDTypeFromJson(const json& value) {
+    if (value.is_null()) {
+        return Optional<DataType>::empty();
+    }
+    return value.get<DataType>();
+}
+
+void setOptionalDTypeJson(json& dst, const char* key, const Optional<DataType>& dtype) { dst[key] = optionalDTypeJson(dtype); }
+
+void parseOptionalDTypeField(const json& src, const char* key, Optional<DataType>& dst) {
+    if (!src.contains(key)) {
+        dst = Optional<DataType>::empty();
+        return;
+    }
+    dst = optionalDTypeFromJson(src.at(key));
+}
+
+uint64_t fnv1a64(const std::string& text) {
+    constexpr uint64_t kOffset = 1469598103934665603ULL;
+    constexpr uint64_t kPrime = 1099511628211ULL;
+
+    uint64_t hash = kOffset;
+    for (unsigned char c : text) {
+        hash ^= static_cast<uint64_t>(c);
+        hash *= kPrime;
+    }
+    return hash;
+}
+
+std::string hex64(uint64_t value) {
+    std::ostringstream ss;
+    ss << std::hex << std::setw(16) << std::setfill('0') << value;
+    return ss.str();
+}
+
+json exprNodeToJson(const ExprNode& node) {
+    json j;
+    j["op"] = exprOpExternalName(node.op);
+    j["lhs"] = node.lhs;
+    j["rhs"] = node.rhs;
+    j["aux"] = node.aux;
+    j["input_slot"] = node.input_slot;
+    j["scalar_fp"] = node.scalar_fp;
+    j["alpha_fp"] = node.alpha_fp;
+    j["beta_fp"] = node.beta_fp;
+    j["alpha_node"] = node.alpha_node;
+    j["beta_node"] = node.beta_node;
+    j["transpose_lhs"] = node.transpose_lhs;
+    j["transpose_rhs"] = node.transpose_rhs;
+    j["transpose_aux"] = node.transpose_aux;
+    j["conv_stride_h"] = node.conv_stride_h;
+    j["conv_stride_w"] = node.conv_stride_w;
+    j["conv_pad_h"] = node.conv_pad_h;
+    j["conv_pad_w"] = node.conv_pad_w;
+    setOptionalDTypeJson(j, "input_tensor_dtype", node.input_tensor_dtype);
+    setOptionalDTypeJson(j, "output_dtype", node.output_dtype);
+    setOptionalDTypeJson(j, "compute_dtype", node.compute_dtype);
+    setOptionalDTypeJson(j, "backward_output_dtype", node.backward_output_dtype);
+    setOptionalDTypeJson(j, "backward_compute_dtype", node.backward_compute_dtype);
+    j["reduction_axes"] = node.reduction_axes;
+    j["squeeze_axes"] = node.squeeze_axes;
+    j["unsqueeze_axes"] = node.unsqueeze_axes;
+    j["fill_dims"] = node.fill_dims;
+    return j;
+}
+
+ExprNode exprNodeFromJson(const json& j) {
+    ExprNode node;
+    node.op = exprOpFromExternalName(j.at("op").get<std::string>());
+    node.lhs = j.value("lhs", UINT32_MAX);
+    node.rhs = j.value("rhs", UINT32_MAX);
+    node.aux = j.value("aux", UINT32_MAX);
+    node.input_slot = j.value("input_slot", UINT32_MAX);
+    node.scalar_fp = j.value("scalar_fp", 0.0);
+    node.alpha_fp = j.value("alpha_fp", 1.0);
+    node.beta_fp = j.value("beta_fp", 0.0);
+    node.alpha_node = j.value("alpha_node", UINT32_MAX);
+    node.beta_node = j.value("beta_node", UINT32_MAX);
+    node.transpose_lhs = j.value("transpose_lhs", false);
+    node.transpose_rhs = j.value("transpose_rhs", false);
+    node.transpose_aux = j.value("transpose_aux", false);
+    node.conv_stride_h = j.value("conv_stride_h", 1);
+    node.conv_stride_w = j.value("conv_stride_w", 1);
+    node.conv_pad_h = j.value("conv_pad_h", 0);
+    node.conv_pad_w = j.value("conv_pad_w", 0);
+    parseOptionalDTypeField(j, "input_tensor_dtype", node.input_tensor_dtype);
+    parseOptionalDTypeField(j, "output_dtype", node.output_dtype);
+    parseOptionalDTypeField(j, "compute_dtype", node.compute_dtype);
+    parseOptionalDTypeField(j, "backward_output_dtype", node.backward_output_dtype);
+    parseOptionalDTypeField(j, "backward_compute_dtype", node.backward_compute_dtype);
+    node.reduction_axes = j.value("reduction_axes", std::vector<uint64_t>{});
+    node.squeeze_axes = j.value("squeeze_axes", std::vector<uint64_t>{});
+    node.unsqueeze_axes = j.value("unsqueeze_axes", std::vector<uint64_t>{});
+    node.fill_dims = j.value("fill_dims", std::vector<uint64_t>{});
+    return node;
+}
 
 }  // namespace
 
@@ -424,6 +703,240 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
     ss << "]";
 
     return ss.str();
+}
+
+std::string canonicalize(const PhysicalOutputs& outputs) {
+    if (!outputs.expr) {
+        throw std::runtime_error("canonicalize(PhysicalOutputs): expr is null.");
+    }
+
+    std::ostringstream ss;
+    ss << "inputs=[";
+    for (size_t i = 0; i < outputs.expr->inputs.size(); ++i) {
+        if (i > 0)
+            ss << ",";
+        const NamedInput& input = outputs.expr->inputs[i];
+        ss << "{" << input.slot << ":" << input.name << ":" << namedInputKindToString(input.kind) << "}";
+    }
+    ss << "]";
+
+    std::vector<std::string> memo(outputs.expr->nodes.size());
+    std::vector<uint8_t> memoReady(outputs.expr->nodes.size(), 0);
+    ss << ";outputs=[";
+    for (size_t i = 0; i < outputs.outputs.size(); ++i) {
+        if (i > 0)
+            ss << ",";
+        const NamedOutput& output = outputs.outputs[i];
+        if (output.node_idx >= outputs.expr->nodes.size()) {
+            throw std::runtime_error("canonicalize(PhysicalOutputs): output node index out of range.");
+        }
+        ss << "{" << output.name << ":" << canonicalizeNode(*outputs.expr, output.node_idx, memo, memoReady) << "}";
+    }
+    ss << "]";
+
+    return ss.str();
+}
+
+std::string expressionHash(const PhysicalOutputs& outputs) { return "fnv1a64:" + hex64(fnv1a64(canonicalize(outputs))); }
+
+void ExpressionDefinition::validate() const {
+    if (!outputs.expr) {
+        throw std::runtime_error("ExpressionDefinition requires a non-null PhysicalExpression.");
+    }
+    if (outputs.outputs.empty()) {
+        throw std::runtime_error("ExpressionDefinition requires at least one named output.");
+    }
+
+    std::unordered_set<uint32_t> seen_slots;
+    std::unordered_set<std::string> seen_input_names;
+    for (const NamedInput& input : outputs.expr->inputs) {
+        if (input.name.empty()) {
+            throw std::runtime_error("ExpressionDefinition input name cannot be empty.");
+        }
+        if (!seen_slots.insert(input.slot).second) {
+            throw std::runtime_error("ExpressionDefinition has duplicate input slot " + std::to_string(input.slot) + ".");
+        }
+        if (!seen_input_names.insert(input.name).second) {
+            throw std::runtime_error("ExpressionDefinition has duplicate input name '" + input.name + "'.");
+        }
+    }
+
+    if (seen_slots.size() != outputs.expr->inputs.size()) {
+        throw std::runtime_error("ExpressionDefinition input slot validation failed.");
+    }
+    for (uint32_t i = 0; i < outputs.expr->inputs.size(); ++i) {
+        if (!seen_slots.contains(i)) {
+            throw std::runtime_error("ExpressionDefinition input slots must be contiguous starting at 0.");
+        }
+    }
+
+    auto validateNodeIndex = [&](uint32_t node_idx, const std::string& field_name) {
+        if (node_idx == UINT32_MAX) {
+            throw std::runtime_error("ExpressionDefinition node field '" + field_name + "' is missing.");
+        }
+        if (node_idx >= outputs.expr->nodes.size()) {
+            throw std::runtime_error("ExpressionDefinition node field '" + field_name + "' is out of range.");
+        }
+    };
+
+    for (size_t node_idx = 0; node_idx < outputs.expr->nodes.size(); ++node_idx) {
+        const ExprNode& node = outputs.expr->nodes[node_idx];
+        const auto node_index_u32 = static_cast<uint32_t>(node_idx);
+
+        if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+            if (node.input_slot == UINT32_MAX || node.input_slot >= outputs.expr->inputs.size()) {
+                throw std::runtime_error("ExpressionDefinition input node has invalid input slot.");
+            }
+        }
+
+        if (Expression::isUnaryOp(node.op)) {
+            validateNodeIndex(node.lhs, "lhs");
+            if (node.lhs >= node_index_u32) {
+                throw std::runtime_error("ExpressionDefinition unary node must reference an earlier node.");
+            }
+        }
+        if (Expression::isBinaryOp(node.op)) {
+            validateNodeIndex(node.lhs, "lhs");
+            validateNodeIndex(node.rhs, "rhs");
+            if (node.lhs >= node_index_u32 || node.rhs >= node_index_u32) {
+                throw std::runtime_error("ExpressionDefinition binary node must reference earlier nodes.");
+            }
+        }
+        if (Expression::isTernaryOp(node.op)) {
+            validateNodeIndex(node.lhs, "lhs");
+            validateNodeIndex(node.rhs, "rhs");
+            validateNodeIndex(node.aux, "aux");
+            if (node.lhs >= node_index_u32 || node.rhs >= node_index_u32 || node.aux >= node_index_u32) {
+                throw std::runtime_error("ExpressionDefinition ternary node must reference earlier nodes.");
+            }
+        }
+        if ((node.op == ExprOp::GEMM) && node.alpha_node != UINT32_MAX && node.alpha_node >= node_index_u32) {
+            throw std::runtime_error("ExpressionDefinition GEMM alpha_node must reference an earlier node.");
+        }
+        if ((node.op == ExprOp::GEMM) && node.beta_node != UINT32_MAX && node.beta_node >= node_index_u32) {
+            throw std::runtime_error("ExpressionDefinition GEMM beta_node must reference an earlier node.");
+        }
+    }
+
+    std::unordered_set<std::string> seen_output_names;
+    for (const NamedOutput& output : outputs.outputs) {
+        if (output.name.empty()) {
+            throw std::runtime_error("ExpressionDefinition output name cannot be empty.");
+        }
+        if (!seen_output_names.insert(output.name).second) {
+            throw std::runtime_error("ExpressionDefinition has duplicate output name '" + output.name + "'.");
+        }
+        if (output.node_idx >= outputs.expr->nodes.size()) {
+            throw std::runtime_error("ExpressionDefinition output node index out of range.");
+        }
+    }
+
+    if (!expected_input_names.empty()) {
+        std::unordered_set<std::string> expected(expected_input_names.begin(), expected_input_names.end());
+        if (expected.size() != expected_input_names.size()) {
+            throw std::runtime_error("ExpressionDefinition expected_input_names contains duplicates.");
+        }
+        if (expected != seen_input_names) {
+            throw std::runtime_error("ExpressionDefinition expected_input_names do not match the serialized inputs.");
+        }
+    }
+
+    if (!expected_output_names.empty()) {
+        std::unordered_set<std::string> expected(expected_output_names.begin(), expected_output_names.end());
+        if (expected.size() != expected_output_names.size()) {
+            throw std::runtime_error("ExpressionDefinition expected_output_names contains duplicates.");
+        }
+        if (expected != seen_output_names) {
+            throw std::runtime_error("ExpressionDefinition expected_output_names do not match the serialized outputs.");
+        }
+    }
+}
+
+json ExpressionDefinition::architectureJson() const {
+    validate();
+
+    json j;
+    j["type"] = "thor.expression";
+    j["schema_version"] = 1;
+    j["inputs"] = json::array();
+    j["nodes"] = json::array();
+    j["outputs"] = json::array();
+    j["expected_input_names"] = expected_input_names;
+    j["expected_output_names"] = expected_output_names;
+
+    for (const NamedInput& input : outputs.expr->inputs) {
+        j["inputs"].push_back(json{{"slot", input.slot}, {"name", input.name}, {"kind", namedInputKindToString(input.kind)}});
+    }
+    for (const ExprNode& node : outputs.expr->nodes) {
+        j["nodes"].push_back(exprNodeToJson(node));
+    }
+    for (const NamedOutput& output : outputs.outputs) {
+        j["outputs"].push_back(json{{"name", output.name}, {"node", output.node_idx}});
+    }
+
+    const std::string computed_hash = expressionHash(outputs);
+    j["canonical_hash"] = computed_hash;
+    return j;
+}
+
+ExpressionDefinition ExpressionDefinition::fromOutputs(const Outputs& outputs) {
+    ExpressionDefinition definition;
+    definition.outputs = outputs.physicalOutputs();
+
+    for (const NamedInput& input : definition.outputs.expr->inputs) {
+        definition.expected_input_names.push_back(input.name);
+    }
+    for (const NamedOutput& output : definition.outputs.outputs) {
+        definition.expected_output_names.push_back(output.name);
+    }
+    definition.canonical_hash = expressionHash(definition.outputs);
+    definition.validate();
+    return definition;
+}
+
+ExpressionDefinition ExpressionDefinition::deserialize(const json& j) {
+    if (j.at("type").get<std::string>() != "thor.expression") {
+        throw std::runtime_error("ExpressionDefinition::deserialize type mismatch: " + j.at("type").get<std::string>());
+    }
+    const int schema_version = j.at("schema_version").get<int>();
+    if (schema_version != 1) {
+        throw std::runtime_error("Unsupported thor.expression schema_version: " + std::to_string(schema_version));
+    }
+
+    ExpressionDefinition definition;
+    definition.outputs.expr = std::make_shared<PhysicalExpression>();
+    definition.expected_input_names = j.value("expected_input_names", std::vector<std::string>{});
+    definition.expected_output_names = j.value("expected_output_names", std::vector<std::string>{});
+    definition.canonical_hash = j.value("canonical_hash", std::string{});
+
+    for (const json& input_json : j.at("inputs")) {
+        definition.outputs.expr->inputs.push_back(NamedInput{
+            .name = input_json.at("name").get<std::string>(),
+            .slot = input_json.at("slot").get<uint32_t>(),
+            .kind = namedInputKindFromString(input_json.at("kind").get<std::string>()),
+        });
+    }
+
+    for (const json& node_json : j.at("nodes")) {
+        definition.outputs.expr->nodes.push_back(exprNodeFromJson(node_json));
+    }
+
+    for (const json& output_json : j.at("outputs")) {
+        definition.outputs.outputs.push_back(NamedOutput{
+            .name = output_json.at("name").get<std::string>(),
+            .node_idx = output_json.at("node").get<uint32_t>(),
+        });
+    }
+
+    definition.validate();
+
+    const std::string computed_hash = expressionHash(definition.outputs);
+    if (!definition.canonical_hash.empty() && definition.canonical_hash != computed_hash) {
+        throw std::runtime_error("ExpressionDefinition canonical_hash mismatch. Expected '" + definition.canonical_hash +
+                                 "' but computed '" + computed_hash + "'.");
+    }
+    definition.canonical_hash = computed_hash;
+    return definition;
 }
 
 bool Expression::isLeafOp(const ExprOp op) {

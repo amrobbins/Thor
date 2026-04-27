@@ -6,6 +6,7 @@
 #include <functional>
 #include <iomanip>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -16,6 +17,7 @@
 
 namespace ThorImplementation {
 struct PhysicalExecutionStage;
+class Outputs;
 
 enum class ExprOp : uint16_t {
     INPUT = 3,
@@ -168,6 +170,18 @@ struct PhysicalOutputs {
     std::vector<NamedOutput> outputs;
 };
 
+struct ExpressionDefinition {
+    PhysicalOutputs outputs;
+    std::vector<std::string> expected_input_names;
+    std::vector<std::string> expected_output_names;
+    std::string canonical_hash;
+
+    [[nodiscard]] nlohmann::json architectureJson() const;
+    [[nodiscard]] static ExpressionDefinition fromOutputs(const Outputs& outputs);
+    [[nodiscard]] static ExpressionDefinition deserialize(const nlohmann::json& j);
+    void validate() const;
+};
+
 class Outputs {
    public:
     [[nodiscard]] const std::shared_ptr<PhysicalExpression>& expression() const { return expr; }
@@ -181,6 +195,14 @@ class Outputs {
             .expr = expr,
             .outputs = outputs,
         };
+    }
+
+    [[nodiscard]] static Outputs fromPhysicalOutputs(PhysicalOutputs physicalOutputs) {
+        if (!physicalOutputs.expr) {
+            throw std::runtime_error("Outputs::fromPhysicalOutputs requires a non-null PhysicalExpression.");
+        }
+
+        return Outputs(std::move(physicalOutputs.expr), std::move(physicalOutputs.outputs));
     }
 
    private:
@@ -354,6 +376,8 @@ bool isCommutative(ExprOp op);
 std::string opName(ExprOp op);
 std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex, std::unordered_map<uint32_t, std::string>& memo);
 std::string canonicalize(const PhysicalExpression& expr);
+std::string canonicalize(const PhysicalOutputs& outputs);
+std::string expressionHash(const PhysicalOutputs& outputs);
 std::string canonicalize(const PhysicalExecutionStage& stage);
 
 }  // namespace ThorImplementation

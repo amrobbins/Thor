@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 using namespace std;
@@ -211,7 +212,7 @@ void CustomLayer::validateParameterNames() const {
     std::set<std::string> featureInputNames(inputNames.begin(), inputNames.end());
     for (const auto& parameter : parameters) {
         if (parameter == nullptr) {
-            throw runtime_error("CustomLayer contains a null Parameter.");
+            throw runtime_error("CustomLayer contains a null ParameterSpecification.");
         }
 
         const std::string& name = parameter->getName();
@@ -237,7 +238,7 @@ void CustomLayer::validateExpressionCanBindFeatureAndParameterInputs() const {
     }
     for (const auto& parameter : parameters) {
         if (parameter == nullptr)
-            throw runtime_error("CustomLayer contains a null Parameter.");
+            throw runtime_error("CustomLayer contains a null ParameterSpecification.");
         const std::string& name = parameter->getName();
         if (!expected.contains(name)) {
             throw runtime_error("CustomLayer expression expected input names do not include parameter '" + name + "'.");
@@ -569,6 +570,7 @@ json CustomLayer::architectureJson() const {
     j["factory"] = Layer::Factory::Learning.value();
     j["version"] = "1.0.0";
     j["layer_type"] = "custom_layer";
+    j["use_fast_math"] = useFastMath;
     j["input_names"] = inputNames;
     j["output_names"] = outputNames;
     j["input_interfaces"] = json::array();
@@ -596,9 +598,64 @@ json CustomLayer::architectureJson() const {
             j["parameters"].push_back(parameter->architectureJson());
     }
 
-    // FIXME: Will need to serialize the expression.
+    auto serializedDefinition = expr.getSerializedDefinition();
+    if (serializedDefinition == nullptr) {
+        throw runtime_error(
+            "CustomLayer expression is not serializable. Construct it from a ThorImplementation::ExpressionDefinition or "
+            "DynamicExpression::fromExpressionDefinition(...). Arbitrary DynamicExpression builders cannot be saved.");
+    }
+    j["expression"] = serializedDefinition->architectureJson();
 
     return j;
+}
+
+void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
+    if (j.at("version").get<std::string>() != "1.0.0")
+        throw runtime_error("Unsupported version in CustomLayer::deserialize: " + j["version"].get<std::string>());
+    if (j.at("layer_type").get<std::string>() != "custom_layer")
+        throw runtime_error("Layer type mismatch in CustomLayer::deserialize: " + j.at("layer_type").get<std::string>());
+
+    const bool useFastMath = j.value("use_fast_math", false);
+    std::vector<std::string> inputNames = j.at("input_names").get<std::vector<std::string>>();
+    std::vector<std::string> outputNames = j.at("output_names").get<std::vector<std::string>>();
+    ThorImplementation::ExpressionDefinition expressionDefinition =
+        ThorImplementation::ExpressionDefinition::deserialize(j.at("expression"));
+
+    std::vector<TensorMap> inputInterfaces;
+    for (const json& interfaceJson : j.at("input_interfaces")) {
+        TensorMap inputInterface;
+        for (const std::string& name : inputNames) {
+            const json& tensorJson = interfaceJson.at(name);
+            uint64_t originalTensorId = tensorJson.at("id").get<uint64_t>();
+            inputInterface.emplace(name, network->getApiTensorByOriginalId(originalTensorId));
+        }
+        inputInterfaces.push_back(std::move(inputInterface));
+    }
+
+    std::vector<TensorMap> outputInterfaces;
+    for (const json& interfaceJson : j.at("output_interfaces")) {
+        TensorMap outputInterface;
+        for (const std::string& name : outputNames) {
+            outputInterface.emplace(name, Tensor::deserialize(interfaceJson.at(name)));
+        }
+        outputInterfaces.push_back(std::move(outputInterface));
+    }
+
+    std::vector<std::shared_ptr<ParameterSpecification>> parameters;
+    for (const json& parameterJson : j.at("parameters")) {
+        ParameterSpecification parameter = ParameterSpecification::deserialize(parameterJson, archiveReader);
+        parameters.push_back(std::make_shared<ParameterSpecification>(std::move(parameter)));
+    }
+
+    CustomLayer customLayer(DynamicExpression::fromExpressionDefinition(expressionDefinition, useFastMath),
+                            std::move(inputNames),
+                            std::move(outputNames),
+                            inputInterfaces,
+                            outputInterfaces,
+                            std::move(parameters),
+                            useFastMath);
+    customLayer.initialized = true;
+    customLayer.addToNetwork(network);
 }
 
 json CustomLayer::serialize(thor_file::TarWriter& archiveWriter,
@@ -616,3 +673,10 @@ json CustomLayer::serialize(thor_file::TarWriter& archiveWriter,
 }
 
 }  // namespace Thor
+
+namespace {
+static const bool registered = [] {
+    Thor::TrainableLayer::register_layer("custom_layer", &Thor::CustomLayer::deserialize);
+    return true;
+}();
+}  // namespace
