@@ -242,8 +242,69 @@ class DynamicExpression {
         validateExpectedNames(expected_output_names_, "output");
     }
 
+    DynamicExpression(std::vector<std::string> expected_input_names,
+                      std::vector<std::string> expected_output_names,
+                      BuilderFn builder,
+                      std::shared_ptr<const ExpressionDefinition> serialized_definition)
+        : expected_input_names_(std::move(expected_input_names)),
+          expected_output_names_(std::move(expected_output_names)),
+          builder_(std::move(builder)),
+          serialized_definition_(std::move(serialized_definition)) {
+        if (!builder_) {
+            throw std::invalid_argument("DynamicExpression requires a non-empty builder.");
+        }
+        validateExpectedNames(expected_input_names_, "input");
+        validateExpectedNames(expected_output_names_, "output");
+    }
+
     [[nodiscard]] const std::vector<std::string>& getExpectedInputNames() const { return expected_input_names_; }
     [[nodiscard]] const std::vector<std::string>& getExpectedOutputNames() const { return expected_output_names_; }
+    [[nodiscard]] std::shared_ptr<const ExpressionDefinition> getSerializedDefinition() const { return serialized_definition_; }
+
+    [[nodiscard]] static DynamicExpression fromExpressionDefinition(const ExpressionDefinition& definition, bool use_fast_math = false) {
+        definition.validate();
+
+        if (!definition.outputs.expr) {
+            throw std::invalid_argument("DynamicExpression::fromExpressionDefinition requires a non-null PhysicalExpression.");
+        }
+
+        for (const NamedInput& input : definition.outputs.expr->inputs) {
+            if (input.kind != NamedInput::Kind::Tensor) {
+                throw std::invalid_argument(
+                    "DynamicExpression::fromExpressionDefinition currently supports tensor inputs only. Unsupported input '" + input.name +
+                    "'.");
+            }
+        }
+
+        auto serialized_definition = std::make_shared<ExpressionDefinition>(definition);
+        std::vector<std::string> expected_input_names = definition.expected_input_names;
+        std::vector<std::string> expected_output_names = definition.expected_output_names;
+        if (expected_input_names.empty()) {
+            for (const NamedInput& input : definition.outputs.expr->inputs) {
+                expected_input_names.push_back(input.name);
+            }
+        }
+        if (expected_output_names.empty()) {
+            for (const NamedOutput& output : definition.outputs.outputs) {
+                expected_output_names.push_back(output.name);
+            }
+        }
+
+        return DynamicExpression(
+            expected_input_names,
+            expected_output_names,
+            [serialized_definition, use_fast_math](const TensorMap& inputs, const TensorMap& outputs, Stream& stream) {
+                return DynamicExpressionBuild{
+                    .equation = std::make_shared<FusedEquation>(
+                        FusedEquation::compile(serialized_definition->outputs, stream.getGpuNum(), use_fast_math)),
+                    .stamp_inputs = inputs,
+                    .tensor_scalar_inputs = {},
+                    .preallocated_outputs = outputs,
+                    .requested_output_shapes = {},
+                };
+            },
+            serialized_definition);
+    }
 
     [[nodiscard]] DynamicExpressionBuild build(const TensorMap& inputs, const TensorMap& outputs, Stream& stream) const {
         validateExpectedTensorNames(inputs, expected_input_names_, "input");
@@ -505,6 +566,7 @@ class DynamicExpression {
     std::vector<std::string> expected_input_names_;
     std::vector<std::string> expected_output_names_;
     BuilderFn builder_;
+    std::shared_ptr<const ExpressionDefinition> serialized_definition_ = nullptr;
 };
 
 }  // namespace ThorImplementation

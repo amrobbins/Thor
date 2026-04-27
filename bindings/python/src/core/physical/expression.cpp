@@ -23,6 +23,7 @@ using DataType = ThorImplementation::TensorDescriptor::DataType;
 using Tensor = ThorImplementation::Tensor;
 using StampedExecutionPlan = ThorImplementation::StampedExecutionPlan;
 using Outputs = ThorImplementation::Outputs;
+using ExpressionDefinition = ThorImplementation::ExpressionDefinition;
 using NamedOutput = ThorImplementation::NamedOutput;
 using DynamicExpression = ThorImplementation::DynamicExpression;
 using TensorScalarBinding = ThorImplementation::TensorScalarBinding;
@@ -696,7 +697,9 @@ Args:
         "output_dtype"_a.none() = DataType::FP32,
         reduce_norm2_doc.c_str());
 
-    nb::class_<Outputs>(expr, "Outputs")
+    auto outputs_type = nb::class_<Outputs>(physical, "Outputs");
+    outputs_type.attr("__module__") = "thor.physical";
+    outputs_type
         .def(
             "compile",
             [](const Outputs& self, int device_num, bool use_fast_math) {
@@ -705,6 +708,13 @@ Args:
             },
             "device_num"_a = 0,
             "use_fast_math"_a = false)
+        .def("to_json", [](const Outputs& self) { return ExpressionDefinition::fromOutputs(self).architectureJson().dump(); })
+        .def_static(
+            "from_json",
+            [](const std::string& payload) {
+                return Outputs::fromPhysicalOutputs(ExpressionDefinition::deserialize(nlohmann::json::parse(payload)).outputs);
+            },
+            "payload"_a)
         .def("output_names", [](const Outputs& self) {
             std::vector<std::string> names;
             for (const NamedOutput& output : self.namedOutputs()) {
@@ -712,6 +722,18 @@ Args:
             }
             return names;
         });
+
+    auto expression_definition_type = nb::class_<ExpressionDefinition>(physical, "ExpressionDefinition");
+    expression_definition_type.attr("__module__") = "thor.physical";
+    expression_definition_type.def_static("from_outputs", &ExpressionDefinition::fromOutputs, "outputs"_a)
+        .def("to_json", [](const ExpressionDefinition& self) { return self.architectureJson().dump(); })
+        .def_static(
+            "from_json",
+            [](const std::string& payload) { return ExpressionDefinition::deserialize(nlohmann::json::parse(payload)); },
+            "payload"_a)
+        .def_prop_ro("expected_input_names", [](const ExpressionDefinition& self) { return self.expected_input_names; })
+        .def_prop_ro("expected_output_names", [](const ExpressionDefinition& self) { return self.expected_output_names; })
+        .def_prop_ro("canonical_hash", [](const ExpressionDefinition& self) { return self.canonical_hash; });
 
     expr.def_static(
         "outputs",
@@ -1463,6 +1485,14 @@ Return the compiled equation owned by this prepared dynamic expression.
     auto dynamic_expression = nb::class_<DynamicExpression>(physical, "DynamicExpression");
     dynamic_expression.attr("__module__") = "thor.physical";
 
+    dynamic_expression.def_static(
+        "from_expression_definition",
+        [](const ExpressionDefinition& definition, bool use_fast_math) {
+            return DynamicExpression::fromExpressionDefinition(definition, use_fast_math);
+        },
+        "definition"_a,
+        "use_fast_math"_a = false);
+
     dynamic_expression.def(
         "__init__",
         [](DynamicExpression* self, nb::callable builder) {
@@ -1654,6 +1684,8 @@ tensors at build time:
         return DynamicExpression(builder)
 
 )nbdoc");
+
+    dynamic_expression.def_prop_ro("serialized_definition", &DynamicExpression::getSerializedDefinition);
 
     dynamic_expression.def("prepare",
                            &DynamicExpression::prepare,

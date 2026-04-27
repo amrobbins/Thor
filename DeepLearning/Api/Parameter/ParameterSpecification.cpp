@@ -113,7 +113,17 @@ json ParameterSpecification::architectureJson() const {
     json j;
     j["version"] = getVersion();
     j["name"] = name;
-    j["storage"] = storage.architectureJson();
+    if (storage.isInitialized()) {
+        j["storage"] = storage.architectureJson();
+    } else if (shape.isPresent() && dtype.isPresent()) {
+        j["shape"] = shape.get();
+        j["dtype"] = json(dtype.get());
+    } else {
+        throw runtime_error(
+            "Parameter '" + name +
+            "' is not serializable because its storage is determined by a runtime StorageContext factory and no resolved storage "
+            "or static shape/dtype definition is available.");
+    }
     j["trainable"] = trainable;
     if (trainable)
         j["training_enabled"] = trainingInitiallyEnabled;
@@ -135,9 +145,9 @@ json ParameterSpecification::serialize(thor_file::TarWriter &archiveWriter,
     // like serializing a tensor. Then can just check in general if a layer supports parameters through casting
     // as a parameterizable - if even needed, because I suppose I know ahead of time which layers are parameterizable.
     // PARAMETERIZABLE DOES NOT OWN SERIALIZE, THE LAYER SIDE DOES.
-    // shared_ptr<ThorImplementation::Parameterizable> physicalParameterizable =
+    // shared_ptr<ThorImplementation::PhysicalParameterizable> physicalParameterizable =
     //     stampedNetwork.getPhysicalParameterizableFromApiParameterizable(owner->getId());
-    // shared_ptr<ThorImplementation::Parameter> physicalParameter = physicalParameterizable->getParameter(name);
+    // shared_ptr<ThorImplementation::PhysicalParameter> physicalParameter = physicalParameterizable->getParameter(name);
     // ThorImplementation::Tensor physicalStorage = physicalParameter->getStorage();
     //
     // string storageFile = "FIXME filename";
@@ -156,11 +166,20 @@ json ParameterSpecification::serialize(thor_file::TarWriter &archiveWriter,
 
 ParameterSpecification ParameterSpecification::deserialize(const json &j, std::shared_ptr<thor_file::TarReader> &archiveReader) {
     if (j.at("version").get<std::string>() != "1.0.0")
-        throw std::runtime_error("Unsupported version in Parameter::deserialize: " + j["version"].get<std::string>());
+        throw std::runtime_error("Unsupported version in ParameterSpecification::deserialize: " + j["version"].get<std::string>());
 
     ParameterSpecification deserialized;
     deserialized.name = j.at("name").get<std::string>();
-    deserialized.storage = Tensor::deserialize(j["storage"]);
+    if (j.contains("storage")) {
+        deserialized.storage = Tensor::deserialize(j["storage"]);
+    } else {
+        if (!j.contains("shape") || !j.contains("dtype")) {
+            throw std::runtime_error(
+                "ParameterSpecification::deserialize requires either a serialized storage tensor or both shape and dtype metadata.");
+        }
+        deserialized.shape = j.at("shape").get<std::vector<uint64_t>>();
+        deserialized.dtype = j.at("dtype").get<DataType>();
+    }
     deserialized.trainable = j.at("trainable").get<bool>();
     if (deserialized.trainable)
         deserialized.trainingInitiallyEnabled = j.at("training_enabled").get<bool>();
@@ -224,7 +243,7 @@ std::shared_ptr<ParameterSpecification> ParameterSpecification::Builder::build()
         assert(_trainable.get() == true);
 
     if (!_storageContextCreateStorage) {
-        throw runtime_error("Parameter::Builder requires createStorage(StorageContext) to be bound.");
+        throw runtime_error("ParameterSpecification::Builder requires createStorage(StorageContext) to be bound.");
     }
 
     return std::make_shared<ParameterSpecification>(
@@ -272,7 +291,7 @@ ParameterSpecification::Builder &ParameterSpecification::Builder::optimizer(std:
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::createStorage(StorageContextStorageFactory createStorage) {
     if (this->_storageContextCreateStorage) {
-        throw runtime_error("Parameter::Builder storage factory may only be bound once.");
+        throw runtime_error("ParameterSpecification::Builder storage factory may only be bound once.");
     }
     this->_storageContextCreateStorage = std::move(createStorage);
     return *this;

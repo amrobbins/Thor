@@ -53,7 +53,7 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
                              bool saveOptimizerState,
                              ThorImplementation::StampedNetwork& stampedNetwork) const override;
     nlohmann::json architectureJson() const override;
-    // FIXME: Will need deserialize but first need to support serialization and deserialization of expressions.
+    static void deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader, const nlohmann::json& j, Network* network);
 
     // Graph bookkeeping
     std::shared_ptr<Layer> clone() const override { return std::make_shared<CustomLayer>(*this); }
@@ -203,7 +203,7 @@ class CustomLayer::Builder {
 
         for (const auto& parameter : parameters) {
             if (parameter == nullptr) {
-                throw std::runtime_error("CustomLayer::Builder received a null Parameter.");
+                throw std::runtime_error("CustomLayer::Builder received a null ParameterSpecification.");
             }
 
             this->_parameters.push_back(std::make_shared<ParameterSpecification>(*parameter));
