@@ -98,8 +98,10 @@ void Parameter::validateReadyForUse() const {
 }
 
 void Parameter::validateStorageFactoryReadyForStamping() const {
-    const bool hasStorageContextFactory = static_cast<bool>(storageContextCreateStorage);
+    if (dtype.isPresent() && shape.isPresent())
+        return;
 
+    const bool hasStorageContextFactory = static_cast<bool>(storageContextCreateStorage);
     if (!hasStorageContextFactory) {
         throw runtime_error("A StorageContext parameter storage factory must be bound before stamping the parameter '" + name + "'.");
     }
@@ -191,10 +193,25 @@ ThorImplementation::Tensor Parameter::allocateStorage(const ThorImplementation::
 std::shared_ptr<ThorImplementation::Parameter> Parameter::stamp() {
     validateStorageFactoryReadyForStamping();
 
-    std::shared_ptr<ApiBackedImplementationParameter> physicalParameter =
-        std::make_shared<ApiBackedImplementationParameter>(name, trainable, storageContextCreateStorage);
-    if (initializer != nullptr)
+    std::shared_ptr<ThorImplementation::Parameter> physicalParameter;
+
+    if (storageContextCreateStorage) {
+        physicalParameter = std::make_shared<ApiBackedImplementationParameter>(name, trainable, storageContextCreateStorage);
+    } else {
+        assert(shape.isPresent());
+        assert(dtype.isPresent());
+
+        physicalParameter = std::make_shared<ThorImplementation::Parameter>(name, trainable, shape.get(), dtype.get());
+    }
+
+    if (initializer != nullptr) {
         physicalParameter->setInitializer(initializer->stamp());
+    }
+
+    if (trainable && !trainingInitiallyEnabled) {
+        physicalParameter->setTrainingEnabled(false);
+    }
+
     return physicalParameter;
 }
 

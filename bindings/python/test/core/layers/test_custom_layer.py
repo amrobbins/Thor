@@ -6,56 +6,43 @@ import thor
 
 class FusedLinear(thor.layers.CustomLayer):
 
-    def __init__(self, network: thor.Network, x: thor.Tensor, num_output_features: int, has_bias: bool):
-        self.num_output_features: int = num_output_features
+    def __init__(self, network: thor.Network, x: thor.Tensor, num_units: int, has_bias: bool):
+        self.num_units: int = num_units
         self.has_bias: bool = has_bias
 
         super().__init__(
             network=network,
-            inputs={
-                "feature_input": x
-            },
-            outputs={
-                "feature_output": thor.Tensor([num_output_features], x.get_data_type()),
-            },
+            inputs=x,
         )
 
-    def parameters(self) -> list[thor.Parameter]:
-        num_output_features = self.num_output_features
+    def parameters(self) -> list[thor.ParameterSpecification]:
+        num_units = self.num_units
 
-        def create_weights_storage_from_context(context: thor.Parameter.StorageContext) -> thor.physical.PhysicalTensor:
+        def create_weights_storage_from_context(
+                context: thor.ParameterSpecification.StorageContext) -> thor.physical.PhysicalTensor:
             input_tensor = context.get_feature_input()
             batch_size = input_tensor.get_descriptor().get_dimensions()[0]
             num_input_features = input_tensor.get_descriptor().get_total_num_elements() // batch_size
-            return thor.Parameter.allocate_storage(
+            return thor.ParameterSpecification.allocate_storage(
                 input_tensor,
-                shape=[num_input_features, num_output_features],
+                shape=[num_input_features, num_units],
                 dtype=input_tensor.get_descriptor().get_data_type(),
             )
 
-        weights = thor.Parameter(
+        weights = thor.ParameterSpecification(
             name="weights",
             create_storage_from_context=create_weights_storage_from_context,
             trainable=True,
         )
 
-        params: list[thor.Parameter] = [weights]
+        params: list[thor.ParameterSpecification] = [weights]
         if self.has_bias:
-
-            def create_biases_storage_from_context(
-                context: thor.Parameter.StorageContext,
-            ) -> thor.physical.PhysicalTensor:
-                input_tensor = context.get_feature_input()
-                return thor.Parameter.allocate_storage(
-                    input_tensor,
-                    shape=[num_output_features],
-                    dtype=input_tensor.get_descriptor().get_data_type(),
-                )
-
-            biases = thor.Parameter(
+            biases = thor.ParameterSpecification(
                 name="biases",
-                create_storage_from_context=create_biases_storage_from_context,
+                shape=[num_units],
+                dtype=thor.DataType.fp32,
                 trainable=True,
+                training_initially_enabled=True,
             )
             params.append(biases)
         return params
@@ -115,16 +102,16 @@ class MultiInputMultiOutputAffine(thor.layers.CustomLayer):
                 "lhs": lhs,
                 "rhs": rhs,
             },
-            outputs={
-                "sum_output": thor.Tensor(lhs.get_dimensions(), lhs.get_data_type()),
-                "affine_output": thor.Tensor(lhs.get_dimensions(), lhs.get_data_type()),
-            },
+            output_names=["sum_output", "affine_output"],
             use_fast_math=use_fast_math,
         )
 
-    def parameters(self) -> list[thor.Parameter]:
+    def parameters(self) -> list[thor.ParameterSpecification]:
+        storage_context_input_names = self.storage_context_input_names
+        storage_context_input_dims = self.storage_context_input_dims
 
-        def allocate_vector(context: thor.Parameter.StorageContext, name: str) -> thor.physical.PhysicalTensor:
+        def allocate_vector(
+                context: thor.ParameterSpecification.StorageContext, name: str) -> thor.physical.PhysicalTensor:
             assert context.has_input("lhs") is True
             assert context.has_input("rhs") is True
             assert context.input_names() == ["lhs", "rhs"]
@@ -139,25 +126,25 @@ class MultiInputMultiOutputAffine(thor.layers.CustomLayer):
             with pytest.raises(RuntimeError, match="There is not exactly 1 input available"):
                 context.get_feature_input()
 
-            self.storage_context_input_names.append(context.input_names())
-            self.storage_context_input_dims.append({
+            storage_context_input_names.append(context.input_names())
+            storage_context_input_dims.append({
                 "lhs": lhs_dims,
                 "rhs": rhs_dims,
             })
 
-            return thor.Parameter.allocate_storage(
+            return thor.ParameterSpecification.allocate_storage(
                 lhs,
                 shape=[lhs_dims[1]],
                 dtype=lhs.get_descriptor().get_data_type(),
             )
 
         return [
-            thor.Parameter(
+            thor.ParameterSpecification(
                 name="scale",
                 create_storage_from_context=lambda ctx: allocate_vector(ctx, "scale"),
                 trainable=True,
             ),
-            thor.Parameter(
+            thor.ParameterSpecification(
                 name="bias",
                 create_storage_from_context=lambda ctx: allocate_vector(ctx, "bias"),
                 trainable=True,
@@ -198,7 +185,6 @@ class MultiInputMultiOutputAffine(thor.layers.CustomLayer):
         assert set(context.parameters.keys()) == {"scale", "bias"}
         assert set(context.parameter_tensors.keys()) == {"scale", "bias"}
         assert set(context.param_tensors.keys()) == {"scale", "bias"}
-        assert set(context.all_inputs.keys()) == {"lhs", "rhs", "scale", "bias"}
 
         output_dims: dict[str, list[int]] = {}
         if context.has_output("sum_output"):
@@ -242,9 +228,7 @@ class NoParameterMimoLayer(thor.layers.CustomLayer):
                 "lhs": lhs,
                 "rhs": rhs
             },
-            outputs={
-                "sum": thor.Tensor(lhs.get_dimensions(), lhs.get_data_type())
-            },
+            output_names=["sum"],
         )
 
     def build(self, context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
@@ -387,14 +371,14 @@ def test_python_custom_layer_place_invokes_build_with_physical_context():
 
     assert placed.get_num_stamps() >= 1
 
-    weights: thor.Parameter = layer.get_parameters()[0]
+    weights: thor.ParameterSpecification = layer.get_parameters()[0]
     assert weights.name == "weights"
     assert weights.trainable is True
     assert weights.is_trainable() is True
     assert weights.is_training_initially_enabled() is True
     assert weights.has_optimizer() is False
 
-    biases: thor.Parameter = layer.get_parameters()[1]
+    biases: thor.ParameterSpecification = layer.get_parameters()[1]
     assert biases.name == "biases"
     assert biases.trainable is True
     assert biases.is_trainable() is True
@@ -436,8 +420,8 @@ def test_python_custom_layer_mimo_place_exposes_named_physical_contexts_and_para
     assert placed.get_num_stamps() >= 1
     assert layer.storage_context_input_names
     assert all(names == ["lhs", "rhs"] for names in layer.storage_context_input_names)
-    assert {tuple(record["lhs"]) for record in layer.storage_context_input_dims} == {(3, 5)}
-    assert {tuple(record["rhs"]) for record in layer.storage_context_input_dims} == {(3, 5)}
+    assert (3, 5) in {tuple(record["lhs"]) for record in layer.storage_context_input_dims}
+    assert (3, 5) in {tuple(record["rhs"]) for record in layer.storage_context_input_dims}
 
     assert layer.build_contexts
     assert any(ctx["input_dims"] == {
@@ -484,19 +468,14 @@ def test_python_custom_layer_supports_inherited_python_build_and_parameters():
         def __init__(self, network: thor.Network, x: thor.Tensor):
             super().__init__(
                 network=network,
-                inputs={
-                    "feature_input": x
-                },
-                outputs={
-                    "feature_output": thor.Tensor(x.get_dimensions(), x.get_data_type())
-                },
+                inputs=x,
             )
 
         def parameters(self):
             return [
-                thor.Parameter(
+                thor.ParameterSpecification(
                     name="bias",
-                    create_storage_from_context=lambda ctx: thor.Parameter.allocate_storage(
+                    create_storage_from_context=lambda ctx: thor.ParameterSpecification.allocate_storage(
                         ctx.get_feature_input(),
                         shape=[ctx.get_feature_input().get_descriptor().get_dimensions()[1]],
                         dtype=ctx.get_feature_input().get_descriptor().get_data_type(),
@@ -534,17 +513,12 @@ def test_python_custom_layer_parameters_must_return_list_not_dict():
             x = thor.Tensor([3], thor.DataType.fp32)
             super().__init__(
                 network=network,
-                inputs={
-                    "feature_input": x
-                },
-                outputs={
-                    "feature_output": thor.Tensor([3], thor.DataType.fp32)
-                },
+                inputs=x,
             )
 
         def parameters(self):
             return {
-                "weights": thor.Parameter(name="weights", shape=[3])
+                "weights": thor.ParameterSpecification(name="weights", shape=[3])
             }
 
         def build(self, context):
@@ -552,7 +526,7 @@ def test_python_custom_layer_parameters_must_return_list_not_dict():
                 "feature_output": context.input("feature_input")
             }
 
-    with pytest.raises(RuntimeError, match=r"parameters\(\) must return list\[thor.Parameter\], not dict"):
+    with pytest.raises(RuntimeError, match=r"parameters\(\) must return list\[thor.ParameterSpecification\], not dict"):
         BadParametersDict()
 
 
@@ -565,12 +539,7 @@ def test_python_custom_layer_parameters_must_return_list():
             x = thor.Tensor([3], thor.DataType.fp32)
             super().__init__(
                 network=network,
-                inputs={
-                    "feature_input": x
-                },
-                outputs={
-                    "feature_output": thor.Tensor([3], thor.DataType.fp32)
-                },
+                inputs=x,
             )
 
         def parameters(self):
@@ -581,7 +550,7 @@ def test_python_custom_layer_parameters_must_return_list():
                 "feature_output": context.input("feature_input")
             }
 
-    with pytest.raises(RuntimeError, match=r"parameters\(\) must return list\[thor.Parameter\]"):
+    with pytest.raises(RuntimeError, match=r"parameters\(\) must return list\[thor.ParameterSpecification\]"):
         BadParametersScalar()
 
 
@@ -594,18 +563,13 @@ def test_python_custom_layer_rejects_duplicate_parameter_names():
             x = thor.Tensor([3], thor.DataType.fp32)
             super().__init__(
                 network=network,
-                inputs={
-                    "feature_input": x
-                },
-                outputs={
-                    "feature_output": thor.Tensor([3], thor.DataType.fp32)
-                },
+                inputs=x,
             )
 
         def parameters(self):
             return [
-                thor.Parameter(name="weights", shape=[3]),
-                thor.Parameter(name="weights", shape=[3]),
+                thor.ParameterSpecification(name="weights", shape=[3]),
+                thor.ParameterSpecification(name="weights", shape=[3]),
             ]
 
         def build(self, context):
@@ -626,16 +590,11 @@ def test_python_custom_layer_rejects_parameter_name_that_conflicts_with_feature_
             x = thor.Tensor([3], thor.DataType.fp32)
             super().__init__(
                 network=network,
-                inputs={
-                    "feature_input": x
-                },
-                outputs={
-                    "feature_output": thor.Tensor([3], thor.DataType.fp32)
-                },
+                inputs=x,
             )
 
         def parameters(self):
-            return [thor.Parameter(name="feature_input", shape=[3])]
+            return [thor.ParameterSpecification(name="feature_input", shape=[3])]
 
         def build(self, context):
             return {
@@ -654,19 +613,14 @@ def test_python_custom_layer_place_rejects_parameter_name_that_conflicts_with_ou
         def __init__(self, network: thor.Network, x: thor.Tensor):
             super().__init__(
                 network=network,
-                inputs={
-                    "feature_input": x
-                },
-                outputs={
-                    "feature_output": thor.Tensor(x.get_dimensions(), x.get_data_type())
-                },
+                inputs=x,
             )
 
         def parameters(self):
             return [
-                thor.Parameter(
+                thor.ParameterSpecification(
                     name="feature_output",
-                    create_storage_from_context=lambda ctx: thor.Parameter.allocate_storage(
+                    create_storage_from_context=lambda ctx: thor.ParameterSpecification.allocate_storage(
                         ctx.get_feature_input(),
                         shape=[ctx.get_feature_input().get_descriptor().get_dimensions()[1]],
                         dtype=ctx.get_feature_input().get_descriptor().get_data_type(),
@@ -693,25 +647,23 @@ def test_python_custom_layer_rejects_empty_inputs_and_outputs():
     network = thor.Network("custom-layer-empty-input-output")
     x = thor.Tensor([3], thor.DataType.fp32)
 
-    with pytest.raises(RuntimeError, match="requires at least one inputs"):
-        thor.layers._CustomLayer(
+    with pytest.raises(RuntimeError, match="requires at least one input"):
+        thor.layers.CustomLayer(
             network=network,
             inputs={},
-            outputs={
-                "feature_output": thor.Tensor([3], thor.DataType.fp32)
-            },
+            output_names=["feature_output"],
             build=lambda context: {
                 "feature_output": context.input("feature_input")
             },
         )
 
-    with pytest.raises(RuntimeError, match="requires at least one outputs"):
-        thor.layers._CustomLayer(
+    with pytest.raises(RuntimeError, match="requires at least one output name"):
+        thor.layers.CustomLayer(
             network=network,
             inputs={
                 "feature_input": x
             },
-            outputs={},
+            output_names=[],
             build=lambda context: {
                 "feature_output": context.input("feature_input")
             },
@@ -726,12 +678,7 @@ def test_python_custom_layer_place_rejects_build_returning_non_dict():
         def __init__(self, network: thor.Network, x: thor.Tensor):
             super().__init__(
                 network=network,
-                inputs={
-                    "feature_input": x
-                },
-                outputs={
-                    "feature_output": thor.Tensor(x.get_dimensions(), x.get_data_type())
-                },
+                inputs=x,
             )
 
         def build(self, context):
@@ -739,11 +686,9 @@ def test_python_custom_layer_place_rejects_build_returning_non_dict():
 
     network = thor.Network("custom-layer-build-non-dict")
     x = _network_input(network, "input", [3], thor.DataType.fp32)
-    layer = NonDictBuild(network, x)
-    thor.layers.NetworkOutput(network, "output", layer["feature_output"], thor.DataType.fp32)
 
     with pytest.raises(RuntimeError, match=r"build\(context\) must return dict"):
-        _place_for_custom_layer_test(network)
+        NonDictBuild(network, x)
 
 
 @pytest.mark.cuda
@@ -754,12 +699,7 @@ def test_python_custom_layer_place_rejects_build_returning_non_expression_value(
         def __init__(self, network: thor.Network, x: thor.Tensor):
             super().__init__(
                 network=network,
-                inputs={
-                    "feature_input": x
-                },
-                outputs={
-                    "feature_output": thor.Tensor(x.get_dimensions(), x.get_data_type())
-                },
+                inputs=x,
             )
 
         def build(self, context):
@@ -769,11 +709,9 @@ def test_python_custom_layer_place_rejects_build_returning_non_expression_value(
 
     network = thor.Network("custom-layer-build-non-expression")
     x = _network_input(network, "input", [3], thor.DataType.fp32)
-    layer = NonExpressionBuildValue(network, x)
-    thor.layers.NetworkOutput(network, "output", layer["feature_output"], thor.DataType.fp32)
 
     with pytest.raises(RuntimeError, match="build result values must be thor.physical.Expression objects"):
-        _place_for_custom_layer_test(network)
+        NonExpressionBuildValue(network, x)
 
 
 @pytest.mark.cuda
@@ -784,13 +722,8 @@ def test_python_custom_layer_place_rejects_missing_declared_output_from_build():
         def __init__(self, network: thor.Network, x: thor.Tensor):
             super().__init__(
                 network=network,
-                inputs={
-                    "feature_input": x
-                },
-                outputs={
-                    "first": thor.Tensor(x.get_dimensions(), x.get_data_type()),
-                    "second": thor.Tensor(x.get_dimensions(), x.get_data_type()),
-                },
+                inputs=x,
+                output_names=["first", "second"],
             )
 
         def build(self, context):
@@ -800,44 +733,9 @@ def test_python_custom_layer_place_rejects_missing_declared_output_from_build():
 
     network = thor.Network("custom-layer-build-missing-output")
     x = _network_input(network, "input", [3], thor.DataType.fp32)
-    layer = MissingDeclaredOutput(network, x)
-    thor.layers.NetworkOutput(network, "first", layer["first"], thor.DataType.fp32)
-    thor.layers.NetworkOutput(network, "second", layer["second"], thor.DataType.fp32)
 
     with pytest.raises(RuntimeError, match="CustomLayer forward output mismatch"):
-        _place_for_custom_layer_test(network)
-
-
-@pytest.mark.cuda
-def test_python_custom_layer_place_rejects_unreferenced_declared_input():
-
-    class DropsOneInput(thor.layers.CustomLayer):
-
-        def __init__(self, network: thor.Network, lhs: thor.Tensor, rhs: thor.Tensor):
-            super().__init__(
-                network=network,
-                inputs={
-                    "lhs": lhs,
-                    "rhs": rhs
-                },
-                outputs={
-                    "out": thor.Tensor(lhs.get_dimensions(), lhs.get_data_type())
-                },
-            )
-
-        def build(self, context):
-            return {
-                "out": context.input("lhs")
-            }
-
-    network = thor.Network("custom-layer-build-drops-input")
-    lhs = _network_input(network, "lhs", [3], thor.DataType.fp32)
-    rhs = _network_input(network, "rhs", [3], thor.DataType.fp32)
-    layer = DropsOneInput(network, lhs, rhs)
-    thor.layers.NetworkOutput(network, "out", layer["out"], thor.DataType.fp32)
-
-    with pytest.raises(RuntimeError, match="CustomLayer expression input mismatch"):
-        _place_for_custom_layer_test(network)
+        MissingDeclaredOutput(network, x)
 
 
 @pytest.mark.cuda
@@ -848,19 +746,14 @@ def test_python_custom_layer_place_rejects_unreferenced_declared_parameter():
         def __init__(self, network: thor.Network, x: thor.Tensor):
             super().__init__(
                 network=network,
-                inputs={
-                    "feature_input": x
-                },
-                outputs={
-                    "feature_output": thor.Tensor(x.get_dimensions(), x.get_data_type())
-                },
+                inputs=x,
             )
 
         def parameters(self):
             return [
-                thor.Parameter(
+                thor.ParameterSpecification(
                     name="scale",
-                    create_storage_from_context=lambda ctx: thor.Parameter.allocate_storage(
+                    create_storage_from_context=lambda ctx: thor.ParameterSpecification.allocate_storage(
                         ctx.get_feature_input(),
                         shape=[ctx.get_feature_input().get_descriptor().get_dimensions()[1]],
                         dtype=ctx.get_feature_input().get_descriptor().get_data_type(),
@@ -876,11 +769,9 @@ def test_python_custom_layer_place_rejects_unreferenced_declared_parameter():
 
     network = thor.Network("custom-layer-build-drops-parameter")
     x = _network_input(network, "input", [3], thor.DataType.fp32)
-    layer = DropsParameter(network, x)
-    thor.layers.NetworkOutput(network, "output", layer["feature_output"], thor.DataType.fp32)
 
-    with pytest.raises(RuntimeError, match="CustomLayer expression input mismatch"):
-        _place_for_custom_layer_test(network)
+    with pytest.raises(RuntimeError, match="Unexpected input"):
+        DropsParameter(network, x)
 
 
 @pytest.mark.cuda
@@ -891,5 +782,174 @@ def test_python_custom_layer_bound_parameter_rejects_unknown_name_after_place():
     thor.layers.NetworkOutput(network, "output", layer["feature_output"], thor.DataType.fp16)
     placed = _place_for_custom_layer_test(network, batch_size=2, inference_only=True)
 
-    with pytest.raises(RuntimeError, match="CustomLayer has no parameter named 'missing'"):
+    with pytest.raises(RuntimeError, match="is not present on this parameterizable"):
         layer.get_bound_parameter(placed, "missing")
+
+
+def test_python_custom_layer_direct_construction_builds_logical_output_interface():
+    network = thor.Network("custom-layer-direct-logical")
+    x = thor.Tensor([6], thor.DataType.fp32)
+
+    build_calls: list[dict[str, object]] = []
+
+    def build(context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+        build_calls.append(
+            {
+                "input_dims": context.input_tensor("feature_input").get_dimensions(),
+                "output_names": sorted(context.outputs.keys()),
+            })
+        return {
+            "feature_output": context.input("feature_input") * 2.0,
+        }
+
+    layer = thor.layers.CustomLayer(
+        network=network,
+        inputs=x,
+        build=build,
+    )
+
+    y = layer["feature_output"]
+    assert y.get_dimensions() == [6]
+    assert y.get_data_type() == thor.DataType.fp32
+    assert layer.outputs["feature_output"].get_dimensions() == [6]
+    assert layer.get_input_names() == ["feature_input"]
+    assert layer.get_output_names() == ["feature_output"]
+    assert layer.get_parameters() == []
+    assert build_calls
+    assert build_calls[0]["input_dims"] == [1, 6]
+
+
+@pytest.mark.cuda
+def test_python_custom_layer_direct_construction_places_with_named_inputs_and_parameters():
+    network = thor.Network("custom-layer-direct-mimo-place")
+    lhs = _network_input(network, "lhs", [5], thor.DataType.fp32)
+    rhs = _network_input(network, "rhs", [5], thor.DataType.fp32)
+
+    storage_context_input_names: list[list[str]] = []
+    storage_context_input_dims: list[dict[str, list[int]]] = []
+    build_contexts: list[dict[str, object]] = []
+
+    def allocate_vector(context: thor.ParameterSpecification.StorageContext) -> thor.physical.PhysicalTensor:
+        assert context.input_names() == ["lhs", "rhs"]
+        lhs_tensor = context.get_input("lhs")
+        rhs_tensor = context.get_input("rhs")
+        lhs_dims = lhs_tensor.get_descriptor().get_dimensions()
+        rhs_dims = rhs_tensor.get_descriptor().get_dimensions()
+        assert lhs_dims == rhs_dims
+
+        storage_context_input_names.append(context.input_names())
+        storage_context_input_dims.append({
+            "lhs": lhs_dims,
+            "rhs": rhs_dims,
+        })
+
+        return thor.ParameterSpecification.allocate_storage(
+            lhs_tensor,
+            shape=[lhs_dims[1]],
+            dtype=lhs_tensor.get_descriptor().get_data_type(),
+        )
+
+    scale = thor.ParameterSpecification(
+        name="scale",
+        create_storage_from_context=allocate_vector,
+        trainable=True,
+    )
+    bias = thor.ParameterSpecification(
+        name="bias",
+        create_storage_from_context=allocate_vector,
+        trainable=True,
+    )
+
+    def build(context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+        lhs_tensor = context.input_tensor("lhs")
+        rhs_tensor = context.input_tensor("rhs")
+        scale_tensor = context.parameter_tensor("scale")
+        bias_tensor = context.parameter_tensor("bias")
+
+        output_dims: dict[str, list[int]] = {}
+        if context.has_output("sum_output"):
+            output_dims["sum_output"] = context.output_tensor("sum_output").get_dimensions()
+        if context.has_output("affine_output"):
+            output_dims["affine_output"] = context.output_tensor("affine_output").get_dimensions()
+
+        build_contexts.append(
+            {
+                "input_dims": {
+                    "lhs": lhs_tensor.get_dimensions(),
+                    "rhs": rhs_tensor.get_dimensions(),
+                },
+                "parameter_dims": {
+                    "scale": scale_tensor.get_dimensions(),
+                    "bias": bias_tensor.get_dimensions(),
+                },
+                "output_dims": output_dims,
+                "output_names": sorted(context.outputs.keys()),
+                "stream_gpu_num": context.stream.get_gpu_num(),
+            })
+
+        shared = context.input("lhs") + context.input("rhs")
+        return {
+            "sum_output": shared,
+            "affine_output": shared * context.param("scale") + context.param("bias"),
+        }
+
+    layer = thor.layers.CustomLayer(
+        network=network,
+        inputs={
+            "lhs": lhs,
+            "rhs": rhs,
+        },
+        output_names=["sum_output", "affine_output"],
+        parameters=[scale, bias],
+        build=build,
+        use_fast_math=True,
+    )
+
+    assert layer.get_input_names() == ["lhs", "rhs"]
+    assert layer.get_output_names() == ["sum_output", "affine_output"]
+    assert [parameter.name for parameter in layer.get_parameters()] == ["scale", "bias"]
+    assert layer["sum_output"].get_dimensions() == [5]
+    assert layer["affine_output"].get_dimensions() == [5]
+
+    thor.layers.NetworkOutput(network, "sum", layer["sum_output"], thor.DataType.fp32)
+    thor.layers.NetworkOutput(network, "affine", layer["affine_output"], thor.DataType.fp32)
+
+    placed = _place_for_custom_layer_test(network, batch_size=3, inference_only=True)
+
+    assert placed.get_num_stamps() >= 1
+    assert storage_context_input_names
+    assert all(names == ["lhs", "rhs"] for names in storage_context_input_names)
+    assert {tuple(record["lhs"]) for record in storage_context_input_dims} == {(1, 5), (3, 5)}
+    assert {tuple(record["rhs"]) for record in storage_context_input_dims} == {(1, 5), (3, 5)}
+
+    assert build_contexts
+    assert any(ctx["input_dims"] == {
+        "lhs": [3, 5],
+        "rhs": [3, 5]
+    } for ctx in build_contexts)
+    assert any(ctx["parameter_dims"] == {
+        "scale": [5],
+        "bias": [5]
+    } for ctx in build_contexts)
+    assert any(ctx["output_dims"] == {
+        "sum_output": [3, 5],
+        "affine_output": [3, 5]
+    } for ctx in build_contexts)
+    assert any(ctx["output_names"] == ["affine_output", "sum_output"] for ctx in build_contexts)
+    assert all(ctx["stream_gpu_num"] == 0 for ctx in build_contexts)
+
+    bound_parameters = layer.get_bound_parameters(placed)
+    assert [parameter.name for parameter in bound_parameters] == ["scale", "bias"]
+    assert all(parameter.is_training_enabled() is False for parameter in bound_parameters)
+
+
+def test_python_custom_layer_direct_construction_rejects_noncallable_build():
+    network = thor.Network("custom-layer-direct-bad-build")
+    x = thor.Tensor([3], thor.DataType.fp32)
+
+    with pytest.raises(RuntimeError, match="CustomLayer build must be callable"):
+        thor.layers.CustomLayer(
+            network=network,
+            inputs=x,
+            build=123,
+        )

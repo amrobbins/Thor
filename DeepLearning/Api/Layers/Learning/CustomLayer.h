@@ -40,7 +40,10 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
 
     const std::vector<std::string>& getInputNames() const { return inputNames; }
     const std::vector<std::string>& getOutputNames() const { return outputNames; }
+    TensorMap getInputInterface(uint32_t interfaceIndex = 0) const;
     TensorMap getOutputInterface(const TensorMap& inputInterface) const;
+    TensorMap getOutputInterfaceByIndex(uint32_t interfaceIndex = 0) const;
+    Tensor getOutput(const std::string& outputName, uint32_t interfaceIndex = 0) const;
     const ThorImplementation::DynamicExpression& getExpression() const { return expr; }
     const std::vector<std::shared_ptr<Parameter>>& getParameters() const override { return parameters; }
     uint64_t getParameterizableId() const override { return getId(); }
@@ -89,6 +92,7 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     void assignOutputInterfaces(const std::vector<TensorMap>& outputInterfaces);
     void validateInputInterfacesMatchExpression() const;
     void validateOutputInterfacesMatchExpression() const;
+    void validateParameterNames() const;
     void validateExpressionCanBindFeatureAndParameterInputs() const;
     static void validateTensorInterface(const TensorMap& tensorInterface, const std::string& what);
     static void validateInterfaceNames(const TensorMap& tensorInterface,
@@ -97,7 +101,7 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     static std::string joinNames(const std::set<std::string>& names);
     static bool interfaceMatches(const TensorMap& subset, const TensorMap& superset);
     void materializeOutputInterfacesFromInputInterfaces();
-    Tensor defaultOutputTensorForInterface(const TensorMap& inputInterface, const std::string& outputName) const;
+    TensorMap inferOutputInterfaceFromInputInterface(const TensorMap& inputInterface) const;
     uint32_t encodeInputConnection(uint32_t interfaceIndex, uint32_t inputPortIndex) const;
     uint32_t encodeOutputConnection(uint32_t interfaceIndex, uint32_t outputPortIndex) const;
 
@@ -183,16 +187,28 @@ class CustomLayer::Builder {
         return *this;
     }
 
+    // Note: parameters are copied so that later mutations to the parameter that was passed in do not
+    //       affect the parameter as it was passed to the builder.
+    //       Once a parameter is bound to a layer, the user needs to interact with a BoundParameter instance instead.
     virtual CustomLayer::Builder& parameter(std::shared_ptr<Parameter> parameter) {
         assert(parameter != nullptr);
-        this->_parameters.push_back(std::move(parameter));
+        this->_parameters.push_back(std::make_shared<Parameter>(*parameter));
         return *this;
     }
 
     virtual CustomLayer::Builder& parameters(std::vector<std::shared_ptr<Parameter>> parameters) {
-        for (const auto& parameter : parameters)
-            assert(parameter != nullptr);
-        this->_parameters = std::move(parameters);
+        assert(this->_parameters.empty());
+        this->_parameters.clear();
+        this->_parameters.reserve(parameters.size());
+
+        for (const auto& parameter : parameters) {
+            if (parameter == nullptr) {
+                throw std::runtime_error("CustomLayer::Builder received a null Parameter.");
+            }
+
+            this->_parameters.push_back(std::make_shared<Parameter>(*parameter));
+        }
+
         return *this;
     }
 

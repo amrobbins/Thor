@@ -245,6 +245,17 @@ class DynamicExpression {
     [[nodiscard]] const std::vector<std::string>& getExpectedInputNames() const { return expected_input_names_; }
     [[nodiscard]] const std::vector<std::string>& getExpectedOutputNames() const { return expected_output_names_; }
 
+    [[nodiscard]] DynamicExpressionBuild build(const TensorMap& inputs, const TensorMap& outputs, Stream& stream) const {
+        validateExpectedTensorNames(inputs, expected_input_names_, "input");
+        if (!outputs.empty()) {
+            validateExpectedTensorNames(outputs, expected_output_names_, "output");
+        }
+
+        DynamicExpressionBuild build = builder_(inputs, outputs, stream);
+        validateBuild(build, outputs);
+        return build;
+    }
+
     [[nodiscard]] PreparedDynamicExpression prepare(const TensorMap& inputs, const TensorMap& outputs, Stream& stream) const {
         validateExpectedTensorNames(inputs, expected_input_names_, "input");
         if (!outputs.empty()) {
