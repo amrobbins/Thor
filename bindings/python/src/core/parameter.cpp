@@ -64,7 +64,7 @@ void bind_parameter(nb::module_& thor) {
     bound_parameter.def("set_training_enabled", &BoundParameter::setTrainingEnabled, "enabled"_a);
     bound_parameter.def("has_optimizer", &BoundParameter::hasOptimizer);
 
-    auto parameter = nb::class_<Parameter>(thor, "Parameter");
+    auto parameter = nb::class_<Parameter>(thor, "ParameterSpecification");
     parameter.attr("__module__") = "thor";
 
     auto storage_context = nb::class_<StorageContext>(parameter, "StorageContext");
@@ -89,8 +89,9 @@ void bind_parameter(nb::module_& thor) {
            DataType dtype,
            std::shared_ptr<Initializer> initializer,
            bool trainable,
-           std::shared_ptr<Optimizer> optimizer) {
-            new (self) Parameter(name, shape, dtype, std::move(initializer), trainable, std::move(optimizer));
+           std::shared_ptr<Optimizer> optimizer,
+           bool training_initially_enabled) {
+            new (self) Parameter(name, shape, dtype, std::move(initializer), trainable, std::move(optimizer), training_initially_enabled);
         },
         "name"_a,
         "shape"_a,
@@ -98,6 +99,7 @@ void bind_parameter(nb::module_& thor) {
         "initializer"_a.none() = nb::none(),
         "trainable"_a = true,
         "optimizer"_a.none() = nb::none(),
+        "training_initially_enabled"_a = true,
         R"nbdoc(
 Create an API parameter with storage attributes determined at parameter definition time.
 
@@ -117,7 +119,8 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
            nb::object create_storage_from_context,
            std::shared_ptr<Initializer> initializer,
            bool trainable,
-           std::shared_ptr<Optimizer> optimizer) {
+           std::shared_ptr<Optimizer> optimizer,
+           bool training_initially_enabled) {
             if (create_storage_from_context.is_none()) {
                 throw std::runtime_error("create_storage_from_context must be provided.");
             }
@@ -137,13 +140,15 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
                 return nb::cast<PhysicalTensor>(result);
             };
 
-            new (self) Parameter(name, std::move(createStorage), std::move(initializer), trainable, std::move(optimizer));
+            new (self) Parameter(
+                name, std::move(createStorage), std::move(initializer), trainable, std::move(optimizer), training_initially_enabled);
         },
         "name"_a,
         "create_storage_from_context"_a,
         "initializer"_a.none() = nb::none(),
         "trainable"_a = true,
         "optimizer"_a.none() = nb::none(),
+        "training_initially_enabled"_a = true,
         R"nbdoc(
 Create an API parameter whose implementation storage is allocated at physical layer compile time.
 

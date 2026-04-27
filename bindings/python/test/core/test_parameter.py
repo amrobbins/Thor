@@ -14,7 +14,7 @@ def test_fixed_shape_parameter_allocate_storage_uses_input_placement_and_request
     shape = [16, 32]
     dtype = thor.DataType.fp32
 
-    parameter = thor.Parameter(
+    parameter = thor.ParameterSpecification(
         name="weights",
         shape=shape,
         dtype=dtype,
@@ -32,7 +32,7 @@ def test_fixed_shape_parameter_allocate_storage_uses_input_placement_and_request
 
 
 def test_fixed_shape_parameter_constructor_defaults_dtype_to_fp32():
-    parameter = thor.Parameter(
+    parameter = thor.ParameterSpecification(
         name="biases",
         shape=[7],
     )
@@ -43,7 +43,7 @@ def test_fixed_shape_parameter_constructor_defaults_dtype_to_fp32():
 
 
 def test_api_parameter_does_not_expose_training_enabled_setter():
-    parameter = thor.Parameter(
+    parameter = thor.ParameterSpecification(
         name="biases",
         shape=[7],
     )
@@ -54,7 +54,7 @@ def test_api_parameter_does_not_expose_training_enabled_setter():
 
 def test_storage_context_accepts_single_tensor_and_uses_feature_input_name():
     input_tensor = _cpu_input(dims=(4, 7))
-    ctx = thor.Parameter.StorageContext(input_tensor)
+    ctx = thor.ParameterSpecification.StorageContext(input_tensor)
 
     assert ctx.input_names() == ["feature_input"]
     assert ctx.has_input("feature_input") is True
@@ -65,7 +65,7 @@ def test_storage_context_accepts_single_tensor_and_uses_feature_input_name():
 def test_storage_context_exposes_named_inputs_from_mapping():
     x = _cpu_input(dims=(4, 7))
     y = _cpu_input(dims=(4, 9))
-    ctx = thor.Parameter.StorageContext({
+    ctx = thor.ParameterSpecification.StorageContext({
         "y": y,
         "x": x,
     })
@@ -80,14 +80,14 @@ def test_storage_context_exposes_named_inputs_from_mapping():
 
 
 def test_storage_context_get_input_raises_for_missing_name():
-    ctx = thor.Parameter.StorageContext(_cpu_input(dims=(4, 7)))
+    ctx = thor.ParameterSpecification.StorageContext(_cpu_input(dims=(4, 7)))
 
     with pytest.raises(RuntimeError, match='No input named "missing"'):
         ctx.get_input("missing")
 
 
 def test_storage_context_get_feature_input_raises_when_multiple_inputs_are_present():
-    ctx = thor.Parameter.StorageContext({
+    ctx = thor.ParameterSpecification.StorageContext({
         "x": _cpu_input(dims=(4, 7)),
         "y": _cpu_input(dims=(4, 9)),
     })
@@ -97,9 +97,9 @@ def test_storage_context_get_feature_input_raises_when_multiple_inputs_are_prese
 
 
 def test_dynamic_parameter_constructor_accepts_context_factory_callable():
-    parameter = thor.Parameter(
+    parameter = thor.ParameterSpecification(
         name="weights",
-        create_storage_from_context=lambda ctx: thor.Parameter.allocate_storage(
+        create_storage_from_context=lambda ctx: thor.ParameterSpecification.allocate_storage(
             ctx.get_feature_input(),
             shape=[ctx.get_feature_input().get_descriptor().get_dimensions()[-1]],
             dtype=ctx.get_feature_input().get_descriptor().get_data_type(),
@@ -115,7 +115,7 @@ def test_dynamic_parameter_constructor_accepts_context_factory_callable():
 
 def test_dynamic_parameter_constructor_rejects_none_factory():
     with pytest.raises(TypeError, match="incompatible function arguments"):
-        thor.Parameter(
+        thor.ParameterSpecification(
             name="weights",
             create_storage_from_context=None,
         )
@@ -123,7 +123,7 @@ def test_dynamic_parameter_constructor_rejects_none_factory():
 
 def test_dynamic_parameter_constructor_rejects_non_callable_factory():
     with pytest.raises(RuntimeError, match="create_storage_from_context must be callable"):
-        thor.Parameter(
+        thor.ParameterSpecification(
             name="weights",
             create_storage_from_context=123,
         )

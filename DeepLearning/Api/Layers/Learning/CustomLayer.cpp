@@ -3,11 +3,67 @@
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
+
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 using namespace std;
 using json = nlohmann::json;
 
 using DynamicExpression = ThorImplementation::DynamicExpression;
+using DataType = ThorImplementation::TensorDescriptor::DataType;
+using PhysicalTensor = ThorImplementation::Tensor;
+using PhysicalTensorMap = std::unordered_map<std::string, PhysicalTensor>;
+using CompiledExecutionStage = ThorImplementation::CompiledExecutionStage;
+using CompiledOutputs = ThorImplementation::CompiledOutputs;
+using CompiledStageOutput = ThorImplementation::CompiledStageOutput;
+
+namespace {
+
+Optional<DataType> stageOutputDType(const CompiledExecutionStage& stage, size_t outputIdx) {
+    switch (stage.kind) {
+        case CompiledExecutionStage::Kind::FusedKernel:
+            return stage.flat->output_dtypes.at(outputIdx);
+        case CompiledExecutionStage::Kind::Reduction:
+            return stage.reduction->output_dtype;
+        case CompiledExecutionStage::Kind::ArgMinMax:
+            return stage.arg_minmax->output_dtype;
+        case CompiledExecutionStage::Kind::Matmul:
+            return stage.matmul->output_dtype;
+        case CompiledExecutionStage::Kind::Convolution:
+            return stage.convolution->output_dtype;
+        case CompiledExecutionStage::Kind::ConvolutionBackward:
+            return stage.convolution_backward->output_dtype;
+        case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
+            return stage.reduce_minmax_backward->output_dtype;
+        case CompiledExecutionStage::Kind::Transpose:
+            return stage.transpose->output_dtypes.at(outputIdx);
+    }
+    return Optional<DataType>::empty();
+}
+
+PhysicalTensor makeFakePlacedTensor(const Thor::Tensor& apiTensor) {
+    std::vector<uint64_t> fakeDims;
+    fakeDims.reserve(apiTensor.getDimensions().size() + 1);
+    fakeDims.push_back(1);
+    for (uint64_t dim : apiTensor.getDimensions()) {
+        fakeDims.push_back(dim);
+    }
+
+    ThorImplementation::TensorPlacement placement(ThorImplementation::TensorPlacement::MemDevices::CPU, 0);
+    ThorImplementation::TensorDescriptor descriptor(apiTensor.getDataType(), fakeDims);
+    return PhysicalTensor(placement, descriptor);
+}
+
+Thor::Tensor logicalTensorFromFakeOutput(const std::vector<uint64_t>& fakeOutputDims, DataType dtype) {
+    std::vector<uint64_t> logicalDims;
+    if (!fakeOutputDims.empty()) {
+        logicalDims.assign(fakeOutputDims.begin() + 1, fakeOutputDims.end());
+    }
+    return Thor::Tensor(dtype, logicalDims);
+}
+
+}  // namespace
 
 namespace Thor {
 
@@ -38,6 +94,7 @@ CustomLayer::CustomLayer(DynamicExpression expr,
 
     validateInputInterfacesMatchExpression();
     validateOutputInterfacesMatchExpression();
+    validateParameterNames();
     validateExpressionCanBindFeatureAndParameterInputs();
 
     for (const TensorMap& inputInterface : inputInterfaces) {
@@ -149,6 +206,24 @@ void CustomLayer::validateOutputInterfacesMatchExpression() const {
     }
 }
 
+void CustomLayer::validateParameterNames() const {
+    std::set<std::string> seen;
+    std::set<std::string> featureInputNames(inputNames.begin(), inputNames.end());
+    for (const auto& parameter : parameters) {
+        if (parameter == nullptr) {
+            throw runtime_error("CustomLayer contains a null Parameter.");
+        }
+
+        const std::string& name = parameter->getName();
+        if (!seen.insert(name).second) {
+            throw runtime_error("CustomLayer received duplicate Parameter name '" + name + "'.");
+        }
+        if (featureInputNames.contains(name)) {
+            throw runtime_error("CustomLayer Parameter name '" + name + "' conflicts with a feature input name.");
+        }
+    }
+}
+
 void CustomLayer::validateExpressionCanBindFeatureAndParameterInputs() const {
     const std::vector<std::string>& expectedInputNames = expr.getExpectedInputNames();
     if (expectedInputNames.empty())
@@ -211,26 +286,75 @@ void CustomLayer::assignInputInterfaces(const std::vector<TensorMap>& inputInter
     }
 }
 
-Tensor CustomLayer::defaultOutputTensorForInterface(const TensorMap& inputInterface, const std::string& outputName) const {
-    auto sameNameInput = inputInterface.find(outputName);
-    if (sameNameInput != inputInterface.end()) {
-        return sameNameInput->second.clone();
+CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const TensorMap& inputInterface) const {
+    PhysicalTensorMap fakeFeatureInputs;
+    for (const auto& [name, apiTensor] : inputInterface) {
+        fakeFeatureInputs.emplace(name, makeFakePlacedTensor(apiTensor));
     }
 
-    // DynamicExpression can infer exact output tensors only after physical GPU tensors/streams exist. The API graph still
-    // needs placeholder edge tensors, so default to the first input port's descriptor. This matches the common elementwise /
-    // broadcast custom-layer case; physical stamping remains the source of truth for the real output descriptor.
-    return inputInterface.at(inputNames.front()).clone();
+    ThorImplementation::Parameter::StorageContext fakeStorageContext(fakeFeatureInputs);
+    PhysicalTensorMap fakeParameterTensors;
+    for (const auto& apiParameter : parameters) {
+        std::shared_ptr<ThorImplementation::Parameter> physicalParameter = apiParameter->stamp();
+        physicalParameter->compileStorageAndOptimizer(fakeStorageContext, Optional<Stream>::empty(), true);
+        Optional<PhysicalTensor> storage = physicalParameter->getStorage();
+        if (!storage.isPresent()) {
+            throw std::runtime_error("CustomLayer failed to infer parameter storage for '" + apiParameter->getName() + "'.");
+        }
+        fakeParameterTensors.emplace(apiParameter->getName(), storage.get());
+    }
+
+    PhysicalTensorMap fakeAllInputs = fakeFeatureInputs;
+    for (const auto& [name, tensor] : fakeParameterTensors) {
+        auto [it, inserted] = fakeAllInputs.emplace(name, tensor);
+        if (!inserted) {
+            throw std::runtime_error("CustomLayer Parameter name '" + name + "' conflicts with a feature input name.");
+        }
+    }
+
+    Stream fakeStream(0, Stream::Priority::REGULAR);
+    ThorImplementation::DynamicExpressionBuild build = expr.build(fakeAllInputs, {}, fakeStream);
+
+    std::unordered_map<std::string, std::vector<uint64_t>> fakeOutputShapes = build.equation->getOutputShapes(build.stamp_inputs);
+    std::shared_ptr<CompiledOutputs> compiledOutputs = build.equation->compileForInputs(build.stamp_inputs, {}, build.tensor_scalar_inputs);
+
+    std::unordered_map<uint32_t, DataType> outputDTypeByValueId;
+    for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
+        for (size_t outputIdx = 0; outputIdx < stage.outputs.size(); ++outputIdx) {
+            outputDTypeByValueId.emplace(stage.outputs[outputIdx].value_id, stageOutputDType(stage, outputIdx).get());
+        }
+    }
+
+    TensorMap inferredOutputs;
+    for (const CompiledStageOutput& finalOutput : compiledOutputs->final_outputs) {
+        auto shapeIt = fakeOutputShapes.find(finalOutput.name);
+        if (shapeIt == fakeOutputShapes.end()) {
+            throw std::runtime_error("CustomLayer failed to infer output shape for '" + finalOutput.name + "'.");
+        }
+        auto dtypeIt = outputDTypeByValueId.find(finalOutput.value_id);
+        if (dtypeIt == outputDTypeByValueId.end()) {
+            throw std::runtime_error("CustomLayer failed to infer output dtype for '" + finalOutput.name + "'.");
+        }
+        inferredOutputs.emplace(finalOutput.name, logicalTensorFromFakeOutput(shapeIt->second, dtypeIt->second));
+    }
+
+    return inferredOutputs;
 }
 
 void CustomLayer::materializeOutputInterfacesFromInputInterfaces() {
+    TensorMap inferredOutputs = inferOutputInterfaceFromInputInterface(inputInterfaces.front());
+
     std::vector<TensorMap> materialized;
     materialized.reserve(inputInterfaces.size());
-
-    for (const TensorMap& inputInterface : inputInterfaces) {
+    for (size_t interfaceIndex = 0; interfaceIndex < inputInterfaces.size(); ++interfaceIndex) {
+        (void)interfaceIndex;
         TensorMap outputInterface;
         for (const std::string& outputName : outputNames) {
-            outputInterface[outputName] = defaultOutputTensorForInterface(inputInterface, outputName);
+            auto it = inferredOutputs.find(outputName);
+            if (it == inferredOutputs.end()) {
+                throw std::runtime_error("CustomLayer failed to infer output tensor for '" + outputName + "'.");
+            }
+            outputInterface[outputName] = it->second.clone();
         }
         materialized.push_back(std::move(outputInterface));
     }
@@ -263,6 +387,33 @@ bool CustomLayer::interfaceMatches(const TensorMap& subset, const TensorMap& sup
             return false;
     }
     return true;
+}
+
+CustomLayer::TensorMap CustomLayer::getInputInterface(uint32_t interfaceIndex) const {
+    if (interfaceIndex >= inputInterfaces.size()) {
+        throw runtime_error("CustomLayer input interface index out of range.");
+    }
+    return inputInterfaces[interfaceIndex];
+}
+
+CustomLayer::TensorMap CustomLayer::getOutputInterfaceByIndex(uint32_t interfaceIndex) const {
+    if (interfaceIndex >= outputInterfaces.size()) {
+        throw runtime_error("CustomLayer output interface index out of range.");
+    }
+    return outputInterfaces[interfaceIndex];
+}
+
+Tensor CustomLayer::getOutput(const std::string& outputName, uint32_t interfaceIndex) const {
+    if (interfaceIndex >= outputInterfaces.size()) {
+        throw runtime_error("CustomLayer output interface index out of range.");
+    }
+
+    const TensorMap& outputInterface = outputInterfaces[interfaceIndex];
+    auto found = outputInterface.find(outputName);
+    if (found == outputInterface.end()) {
+        throw runtime_error("CustomLayer has no output named '" + outputName + "'.");
+    }
+    return found->second;
 }
 
 CustomLayer::TensorMap CustomLayer::getOutputInterface(const TensorMap& inputInterface) const {

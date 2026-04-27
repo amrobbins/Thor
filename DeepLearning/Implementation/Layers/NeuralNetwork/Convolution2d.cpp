@@ -92,6 +92,7 @@ DynamicExpression Convolution2d::buildExpression(
 
         const Tensor& featureInputTensor = inputs.at("feature_input");
         const Tensor& wTensor = inputs.at("weights");
+        assert(wTensor.getPlacement() == placement);
 
         if (featureInputTensor.getDimensions().size() != 4) {
             throw std::runtime_error("Convolution2d expects feature_input to be 4D NCHW.");
@@ -102,6 +103,7 @@ DynamicExpression Convolution2d::buildExpression(
         if (featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
             throw std::runtime_error("Convolution2d input channels must match weight channels.");
         }
+        assert(featureInputTensor.getPlacement() == placement);
 
         const uint64_t expectedOutputRows = (featureInputTensor.getDimensions()[2] + 2 * padH - wTensor.getDimensions()[2]) / strideH + 1;
         const uint64_t expectedOutputCols = (featureInputTensor.getDimensions()[3] + 2 * padW - wTensor.getDimensions()[3]) / strideW + 1;
@@ -117,6 +119,7 @@ DynamicExpression Convolution2d::buildExpression(
                 featureOutputTensor.getDimensions()[3] != expectedOutputCols) {
                 throw std::runtime_error("Convolution2d feature_output shape does not match the implied convolution output shape.");
             }
+            assert(featureOutputTensor.getPlacement() == placement);
         }
 
         const DataType weightsDType = wTensor.getDescriptor().getDataType();

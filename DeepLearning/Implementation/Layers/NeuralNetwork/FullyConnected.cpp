@@ -70,16 +70,20 @@ DynamicExpression FullyConnected::buildExpression(bool hasBias, TensorPlacement 
                                                   Stream& stream) -> DynamicExpressionBuild {
         (void)stream;
 
-        // This is just validation. CustomLayer connects the proper tensors with the contracted names
+        // This is just validation. CustomLayer connects the proper tensors with the contracted names,
+        // for single input single output CustomLayers:
         // (feature_input, feature_output, parameter names)
         const Tensor& featureInputTensor = inputs.at("feature_input");
         const Tensor& wTensor = inputs.at("weights");
         assert(wTensor.getDimensions().size() == 2);
+        assert(wTensor.getPlacement() == placement);
         assert(featureInputTensor.getDimensions()[1] == wTensor.getDimensions()[0]);
+        assert(featureInputTensor.getPlacement() == placement);
         if (outputs.contains("feature_output")) {
             const Tensor& featureOutputTensor = outputs.at("feature_output");
             assert(featureOutputTensor.getDimensions().size() == 2);
             assert(featureOutputTensor.getDimensions()[1] == wTensor.getDimensions()[1]);
+            assert(featureOutputTensor.getPlacement() == placement);
         }
 
         const DataType weightsDType = wTensor.getDescriptor().getDataType();
