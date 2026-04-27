@@ -9,7 +9,7 @@
 
 namespace Thor {
 
-class Parameter;
+class ParameterSpecification;
 class PlacedNetwork;
 
 class Parameterizable {
@@ -19,9 +19,9 @@ class Parameterizable {
     Parameterizable() = default;
 
     virtual uint64_t getParameterizableId() const = 0;
-    virtual const std::vector<std::shared_ptr<Parameter>>& getParameters() const = 0;
+    virtual const std::vector<std::shared_ptr<ParameterSpecification>>& getParameters() const = 0;
 
-    std::shared_ptr<Parameter> getParameter(const std::string& name) const;
+    std::shared_ptr<ParameterSpecification> getParameter(const std::string& name) const;
     BoundParameter getBoundParameter(PlacedNetwork& placedNetwork, const std::string& name) const;
     std::vector<BoundParameter> getBoundParameters(PlacedNetwork& placedNetwork) const;
 };

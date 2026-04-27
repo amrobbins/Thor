@@ -69,7 +69,7 @@ namespace Thor {
 
 CustomLayer::CustomLayer(DynamicExpression expr,
                          const std::vector<TensorMap>& inputInterfaces,
-                         std::vector<std::shared_ptr<Parameter>> parameters,
+                         std::vector<std::shared_ptr<ParameterSpecification>> parameters,
                          bool useFastMath)
     : CustomLayer(std::move(expr), {}, {}, inputInterfaces, {}, std::move(parameters), useFastMath) {}
 
@@ -78,7 +78,7 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          std::vector<std::string> outputNames,
                          const std::vector<TensorMap>& inputInterfaces,
                          const std::vector<TensorMap>& outputInterfaces,
-                         std::vector<std::shared_ptr<Parameter>> parameters,
+                         std::vector<std::shared_ptr<ParameterSpecification>> parameters,
                          bool useFastMath)
     : expr(std::move(expr)), useFastMath(useFastMath), parameters(std::move(parameters)) {
     if (inputNames.empty())
@@ -292,10 +292,10 @@ CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const
         fakeFeatureInputs.emplace(name, makeFakePlacedTensor(apiTensor));
     }
 
-    ThorImplementation::Parameter::StorageContext fakeStorageContext(fakeFeatureInputs);
+    ThorImplementation::PhysicalParameter::StorageContext fakeStorageContext(fakeFeatureInputs);
     PhysicalTensorMap fakeParameterTensors;
     for (const auto& apiParameter : parameters) {
-        std::shared_ptr<ThorImplementation::Parameter> physicalParameter = apiParameter->stamp();
+        std::shared_ptr<ThorImplementation::PhysicalParameter> physicalParameter = apiParameter->stamp();
         physicalParameter->compileStorageAndOptimizer(fakeStorageContext, Optional<Stream>::empty(), true);
         Optional<PhysicalTensor> storage = physicalParameter->getStorage();
         if (!storage.isPresent()) {
@@ -546,7 +546,7 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
         throw runtime_error("CustomLayer::stamp called with a tensor that is not one of its declared inputs.");
     }
 
-    std::vector<std::shared_ptr<ThorImplementation::Parameter>> physicalParameters;
+    std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>> physicalParameters;
     physicalParameters.reserve(parameters.size());
     bool hasTrainableParameter = false;
     for (const auto& parameter : parameters) {

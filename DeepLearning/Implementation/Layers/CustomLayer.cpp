@@ -15,7 +15,7 @@ std::set<std::string> toNameSet(const std::vector<std::string>& names) { return 
 
 CustomLayer::CustomLayer(DynamicExpression expr,
                          const TensorPlacement& placement,
-                         const std::vector<std::shared_ptr<Parameter>>& parameters,
+                         const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                          bool inferenceOnly,
                          int64_t stampedId,
                          bool useFastMath)
@@ -32,7 +32,7 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          std::vector<std::string> inputNames,
                          std::vector<std::string> outputNames,
                          const TensorPlacement& placement,
-                         const std::vector<std::shared_ptr<Parameter>>& parameters,
+                         const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                          bool inferenceOnly,
                          int64_t stampedId,
                          bool useFastMath)
@@ -318,7 +318,7 @@ void CustomLayer::initialize() {
     clearBackwardArrivalBookkeeping();
 }
 
-Parameter::StorageContext CustomLayer::buildParameterStorageContext() const {
+PhysicalParameter::StorageContext CustomLayer::buildParameterStorageContext() const {
     if (applications.empty()) {
         throw runtime_error("CustomLayer requires at least one application before parameter storage can be built.");
     }
@@ -340,7 +340,7 @@ Parameter::StorageContext CustomLayer::buildParameterStorageContext() const {
         namedFeatureInputs.emplace(inputNames[inputPort], featureInputs[flat].get());
     }
 
-    return Parameter::StorageContext(std::move(namedFeatureInputs));
+    return PhysicalParameter::StorageContext(std::move(namedFeatureInputs));
 }
 
 PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t applicationIndex) {
@@ -354,7 +354,7 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t ap
         inputs[inputNames[inputPort]] = featureInputs[flat].get();
     }
 
-    const Parameter::StorageContext parameterStorageContext = buildParameterStorageContext();
+    const PhysicalParameter::StorageContext parameterStorageContext = buildParameterStorageContext();
     for (const auto& param : parameters) {
         if (!param->isStorageInitialized()) {
             param->compileStorageAndOptimizer(parameterStorageContext, gradientUpdateStream, isInferenceOnly());

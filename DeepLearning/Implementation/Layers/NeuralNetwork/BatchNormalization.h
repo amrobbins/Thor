@@ -2,7 +2,7 @@
 
 #include "DeepLearning/Implementation/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
-#include "DeepLearning/Implementation/Parameter/Parameter.h"
+#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 
 // FIXME: More work to do on this, compare to old get it exact.
 

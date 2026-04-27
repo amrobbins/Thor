@@ -14,7 +14,7 @@
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
-#include "DeepLearning/Api/Parameter/Parameter.h"
+#include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace nb = nanobind;
@@ -24,7 +24,7 @@ using namespace std;
 using namespace Thor;
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 using PhysicalTensor = ThorImplementation::Tensor;
-using StorageContext = ThorImplementation::Parameter::StorageContext;
+using StorageContext = ThorImplementation::PhysicalParameter::StorageContext;
 
 namespace {
 
@@ -64,7 +64,7 @@ void bind_parameter(nb::module_& thor) {
     bound_parameter.def("set_training_enabled", &BoundParameter::setTrainingEnabled, "enabled"_a);
     bound_parameter.def("has_optimizer", &BoundParameter::hasOptimizer);
 
-    auto parameter = nb::class_<Parameter>(thor, "ParameterSpecification");
+    auto parameter = nb::class_<ParameterSpecification>(thor, "ParameterSpecification");
     parameter.attr("__module__") = "thor";
 
     auto storage_context = nb::class_<StorageContext>(parameter, "StorageContext");
@@ -83,7 +83,7 @@ void bind_parameter(nb::module_& thor) {
     // Parameter definition time attribute resolution
     parameter.def(
         "__init__",
-        [](Parameter* self,
+        [](ParameterSpecification* self,
            const std::string& name,
            const std::vector<uint64_t>& shape,
            DataType dtype,
@@ -91,7 +91,8 @@ void bind_parameter(nb::module_& thor) {
            bool trainable,
            std::shared_ptr<Optimizer> optimizer,
            bool training_initially_enabled) {
-            new (self) Parameter(name, shape, dtype, std::move(initializer), trainable, std::move(optimizer), training_initially_enabled);
+            new (self) ParameterSpecification(
+                name, shape, dtype, std::move(initializer), trainable, std::move(optimizer), training_initially_enabled);
         },
         "name"_a,
         "shape"_a,
@@ -114,7 +115,7 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
     // Layer compile time attribute resolution
     parameter.def(
         "__init__",
-        [](Parameter* self,
+        [](ParameterSpecification* self,
            const std::string& name,
            nb::object create_storage_from_context,
            std::shared_ptr<Initializer> initializer,
@@ -140,7 +141,7 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
                 return nb::cast<PhysicalTensor>(result);
             };
 
-            new (self) Parameter(
+            new (self) ParameterSpecification(
                 name, std::move(createStorage), std::move(initializer), trainable, std::move(optimizer), training_initially_enabled);
         },
         "name"_a,
@@ -158,7 +159,7 @@ exactly one input is present.
     )nbdoc");
 
     parameter.def_static("allocate_storage",
-                         &Parameter::allocateStorage,
+                         &ParameterSpecification::allocateStorage,
                          "input_tensor"_a,
                          "shape"_a,
                          "dtype"_a,
@@ -166,9 +167,9 @@ exactly one input is present.
 Allocate implementation storage on the same placement as ``input_tensor`` with the requested shape and dtype.
     )nbdoc");
 
-    parameter.def_prop_ro("name", &Parameter::getName);
-    parameter.def_prop_ro("trainable", &Parameter::isTrainable);
-    parameter.def("is_trainable", &Parameter::isTrainable);
-    parameter.def("is_training_initially_enabled", &Parameter::isTrainingInitiallyEnabled);
-    parameter.def("has_optimizer", &Parameter::hasOptimizer);
+    parameter.def_prop_ro("name", &ParameterSpecification::getName);
+    parameter.def_prop_ro("trainable", &ParameterSpecification::isTrainable);
+    parameter.def("is_trainable", &ParameterSpecification::isTrainable);
+    parameter.def("is_training_initially_enabled", &ParameterSpecification::isTrainingInitiallyEnabled);
+    parameter.def("has_optimizer", &ParameterSpecification::hasOptimizer);
 }

@@ -1,12 +1,12 @@
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
 
-#include "DeepLearning/Implementation/Parameter/Parameter.h"
+#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 
 using namespace std;
 
 namespace ThorImplementation {
 
-void Parameterizable::addParameter(const shared_ptr<Parameter> &parameter) {
+void Parameterizable::addParameter(const shared_ptr<PhysicalParameter> &parameter) {
     if (parameter == nullptr)
         throw runtime_error("Null parameter encountered.");
     string paramName = parameter->getName();
@@ -16,7 +16,7 @@ void Parameterizable::addParameter(const shared_ptr<Parameter> &parameter) {
     parameters.push_back(parameter);
 }
 
-shared_ptr<Parameter> Parameterizable::getParameter(const string &name) {
+shared_ptr<PhysicalParameter> Parameterizable::getParameter(const string &name) {
     auto it = parameterIndexByName.find(name);
     if (it == parameterIndexByName.end())
         throw runtime_error("Parameter " + name + " is not a parameter of the parameterizable layer.");
@@ -30,8 +30,8 @@ Tensor Parameterizable::getParameterStorage(const string &name) {
     return parameters[it->second]->getStorage();
 }
 
-unordered_map<string, shared_ptr<Parameter>> Parameterizable::getParameters() {
-    std::unordered_map<std::string, std::shared_ptr<Parameter>> allParams;
+unordered_map<string, shared_ptr<PhysicalParameter>> Parameterizable::getParameters() {
+    std::unordered_map<std::string, std::shared_ptr<PhysicalParameter>> allParams;
     for (const auto &parameter : parameters)
         allParams[parameter->getName()] = parameter;
     return allParams;

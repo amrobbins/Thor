@@ -5,12 +5,12 @@
 #include <string>
 
 namespace Thor {
-class Parameter;
+class ParameterSpecification;
 class PlacedNetwork;
 
 class BoundParameter {
    public:
-    BoundParameter(std::shared_ptr<Parameter> parameter, PlacedNetwork* placedNetwork, uint64_t apiLayerId);
+    BoundParameter(std::shared_ptr<ParameterSpecification> parameter, PlacedNetwork* placedNetwork, uint64_t apiLayerId);
 
     [[nodiscard]] const std::string& getName() const;
     [[nodiscard]] bool isTrainable() const;
@@ -19,7 +19,7 @@ class BoundParameter {
     [[nodiscard]] bool hasOptimizer() const;
 
    private:
-    std::shared_ptr<Parameter> parameter;
+    std::shared_ptr<ParameterSpecification> parameter;
     PlacedNetwork* placedNetwork = nullptr;
     uint64_t apiLayerId = 0;
 };

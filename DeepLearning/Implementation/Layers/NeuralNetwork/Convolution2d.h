@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
-#include "DeepLearning/Implementation/Parameter/Parameter.h"
+#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 
 #include <memory>
 
@@ -39,7 +39,7 @@ class Convolution2d : public CustomLayer {
     static DynamicExpression buildExpression(
         bool hasBias, uint32_t strideH, uint32_t strideW, uint32_t padH, uint32_t padW, const TensorPlacement& placement);
 
-    std::vector<std::shared_ptr<Parameter>> defineParameters(uint32_t numOutputChannels,
+    std::vector<std::shared_ptr<PhysicalParameter>> defineParameters(uint32_t numOutputChannels,
                                                              bool hasBias,
                                                              uint32_t filterWidth,
                                                              uint32_t filterHeight,

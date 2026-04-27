@@ -2,7 +2,7 @@
 
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
-#include "DeepLearning/Api/Parameter/Parameter.h"
+#include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 
 #include <stdexcept>
 
@@ -10,7 +10,7 @@ using namespace std;
 
 namespace Thor {
 
-shared_ptr<Parameter> Parameterizable::getParameter(const std::string& name) const {
+shared_ptr<ParameterSpecification> Parameterizable::getParameter(const std::string& name) const {
     for (const auto& parameter : getParameters()) {
         if (parameter != nullptr && parameter->getName() == name)
             return parameter;

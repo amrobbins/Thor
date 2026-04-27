@@ -9,22 +9,22 @@
 
 namespace ThorImplementation {
 
-class Parameter;
+class PhysicalParameter;
 
 class Parameterizable {
    public:
     Parameterizable() = default;
     virtual ~Parameterizable() = default;
 
-    void addParameter(const std::shared_ptr<Parameter> &parameter);
-    std::shared_ptr<Parameter> getParameter(const std::string &name);
+    void addParameter(const std::shared_ptr<PhysicalParameter> &parameter);
+    std::shared_ptr<PhysicalParameter> getParameter(const std::string &name);
     Tensor getParameterStorage(const std::string &name);
-    std::unordered_map<std::string, std::shared_ptr<Parameter>> getParameters();
+    std::unordered_map<std::string, std::shared_ptr<PhysicalParameter>> getParameters();
 
     std::vector<std::string> listParameters();
 
    protected:
-    std::vector<std::shared_ptr<Parameter>> parameters{};
+    std::vector<std::shared_ptr<PhysicalParameter>> parameters{};
     std::unordered_map<std::string, size_t> parameterIndexByName{};
 };
 
