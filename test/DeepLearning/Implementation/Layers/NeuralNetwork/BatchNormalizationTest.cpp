@@ -111,7 +111,7 @@ vector<float> randomFloatVector(mt19937& rng, uint64_t size, float low, float hi
     return values;
 }
 
-void setParameterTensor(shared_ptr<Parameter> parameter, const vector<float>& values, Stream& stream) {
+void setParameterTensor(shared_ptr<PhysicalParameter> parameter, const vector<float>& values, Stream& stream) {
     ASSERT_NE(parameter, nullptr);
     ASSERT_TRUE(parameter->getStorage().isPresent());
     Tensor deviceTensor = parameter->getStorage();

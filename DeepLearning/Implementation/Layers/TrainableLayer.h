@@ -3,8 +3,8 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
-#include "DeepLearning/Implementation/Parameter/Parameter.h"
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
+#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "Utilities/Common/Optional.h"
 
 namespace ThorImplementation {
@@ -256,7 +256,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     Optional<Stream> getGradientUpdateStream() const { return gradientUpdateStream; }
 
    protected:
-    virtual Parameter::StorageContext buildParameterStorageContext() const {
+    virtual PhysicalParameter::StorageContext buildParameterStorageContext() const {
         Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
         assert(aFeatureInput.isPresent());
 
@@ -267,7 +267,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
                 connectedFeatureInputs.push_back(featureInput.get());
         }
 
-        return Parameter::StorageContext(aFeatureInput.get());
+        return PhysicalParameter::StorageContext(aFeatureInput.get());
     }
 
     void attachGradientUpdateStream() {

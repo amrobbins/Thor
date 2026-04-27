@@ -5,7 +5,7 @@
 namespace ThorImplementation {
 
 namespace {
-class ConvWeightsParameter : public Parameter {
+class ConvWeightsParameter : public PhysicalParameter {
    public:
     ConvWeightsParameter(std::string name,
                          Optional<TensorDescriptor::DataType> storageDataType,
@@ -14,7 +14,7 @@ class ConvWeightsParameter : public Parameter {
                          uint32_t numOutputChannels,
                          uint32_t filterWidth,
                          uint32_t filterHeight)
-        : Parameter(name, trainable),
+        : PhysicalParameter(name, trainable),
           numOutputChannels(numOutputChannels),
           filterWidth(filterWidth),
           filterHeight(filterHeight),
@@ -40,14 +40,14 @@ class ConvWeightsParameter : public Parameter {
     const Optional<TensorDescriptor::DataType> storageDataType;
 };
 
-class ConvBiasesParameter : public Parameter {
+class ConvBiasesParameter : public PhysicalParameter {
    public:
     ConvBiasesParameter(std::string name,
                         Optional<TensorDescriptor::DataType> storageDataType,
                         bool trainable,
                         bool trainingEnabled,
                         uint32_t numOutputChannels)
-        : Parameter(name, trainable), numOutputChannels(numOutputChannels), storageDataType(storageDataType) {}
+        : PhysicalParameter(name, trainable), numOutputChannels(numOutputChannels), storageDataType(storageDataType) {}
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
@@ -154,12 +154,12 @@ DynamicExpression Convolution2d::buildExpression(
     });
 }
 
-std::vector<std::shared_ptr<Parameter>> Convolution2d::defineParameters(uint32_t numOutputChannels,
-                                                                        bool hasBias,
-                                                                        uint32_t filterWidth,
-                                                                        uint32_t filterHeight,
-                                                                        Optional<TensorDescriptor::DataType> weightsDataType) {
-    std::vector<std::shared_ptr<Parameter>> parameters;
+std::vector<std::shared_ptr<PhysicalParameter>> Convolution2d::defineParameters(uint32_t numOutputChannels,
+                                                                                bool hasBias,
+                                                                                uint32_t filterWidth,
+                                                                                uint32_t filterHeight,
+                                                                                Optional<TensorDescriptor::DataType> weightsDataType) {
+    std::vector<std::shared_ptr<PhysicalParameter>> parameters;
     parameters.push_back(
         std::make_shared<ConvWeightsParameter>("weights", weightsDataType, true, true, numOutputChannels, filterWidth, filterHeight));
     if (hasBias) {

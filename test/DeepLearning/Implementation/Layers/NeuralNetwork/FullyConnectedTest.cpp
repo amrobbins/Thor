@@ -120,7 +120,7 @@ vector<float> fullyConnectedReference(const vector<float>& input,
     return output;
 }
 
-void setParameterTensor(shared_ptr<Parameter> parameter, const vector<float>& values, Stream& stream) {
+void setParameterTensor(shared_ptr<PhysicalParameter> parameter, const vector<float>& values, Stream& stream) {
     ASSERT_NE(parameter, nullptr);
     ASSERT_TRUE(parameter->getStorage().isPresent());
     Tensor deviceTensor = parameter->getStorage();

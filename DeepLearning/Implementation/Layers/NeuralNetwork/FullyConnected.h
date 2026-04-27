@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
-#include "DeepLearning/Implementation/Parameter/Parameter.h"
+#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "Utilities/TensorOperations/DeepLearning/Add1dBias.h"
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
@@ -24,9 +24,9 @@ class FullyConnected : public CustomLayer {
 
    private:
     static DynamicExpression buildExpression(bool hasBias, TensorPlacement placement);
-    std::vector<std::shared_ptr<Parameter>> defineParameters(uint32_t numOutputFeatures,
-                                                             bool hasBias,
-                                                             Optional<TensorDescriptor::DataType> weightsDataType);
+    std::vector<std::shared_ptr<PhysicalParameter>> defineParameters(uint32_t numOutputFeatures,
+                                                                     bool hasBias,
+                                                                     Optional<TensorDescriptor::DataType> weightsDataType);
 };
 
 }  // namespace ThorImplementation

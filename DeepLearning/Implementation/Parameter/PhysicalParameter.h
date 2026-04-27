@@ -12,7 +12,7 @@
 
 namespace ThorImplementation {
 
-class Parameter {
+class PhysicalParameter {
    public:
     struct StorageContext {
         std::unordered_map<std::string, Tensor> namedInputs;
@@ -75,13 +75,13 @@ class Parameter {
         }
     };
 
-    virtual ~Parameter() = default;
+    virtual ~PhysicalParameter() = default;
 
-    Parameter(std::string name, bool trainable);  // Later add constraint here
-    Parameter(std::string name,
-              bool trainable,
-              const std::vector<uint64_t> &shape,
-              const TensorDescriptor::DataType dtype);  // Later add constraint here
+    PhysicalParameter(std::string name, bool trainable);  // Later add constraint here
+    PhysicalParameter(std::string name,
+                      bool trainable,
+                      const std::vector<uint64_t> &shape,
+                      const TensorDescriptor::DataType dtype);  // Later add constraint here
 
     // Remember this is called by API layer so that will hand over the optimizer
     // 1. Create storage given featureInput(s) 2. Compile the optimizer

@@ -3,10 +3,10 @@
 namespace ThorImplementation {
 
 namespace {
-class FCWeightsParameter : public Parameter {
+class FCWeightsParameter : public PhysicalParameter {
    public:
     FCWeightsParameter(Optional<TensorDescriptor::DataType> storageDataType, uint32_t numOutputFeatures)
-        : Parameter("weights", true), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
+        : PhysicalParameter("weights", true), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
@@ -26,10 +26,10 @@ class FCWeightsParameter : public Parameter {
     const Optional<TensorDescriptor::DataType> storageDataType;
 };
 
-class FCBiasesParameter : public Parameter {
+class FCBiasesParameter : public PhysicalParameter {
    public:
     FCBiasesParameter(Optional<TensorDescriptor::DataType> storageDataType, uint32_t numOutputFeatures)
-        : Parameter("biases", true), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
+        : PhysicalParameter("biases", true), numOutputFeatures(numOutputFeatures), storageDataType(storageDataType) {}
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
@@ -118,10 +118,10 @@ DynamicExpression FullyConnected::buildExpression(bool hasBias, TensorPlacement 
     });
 }
 
-std::vector<std::shared_ptr<Parameter>> FullyConnected::defineParameters(uint32_t numOutputFeatures,
-                                                                         bool hasBias,
-                                                                         Optional<TensorDescriptor::DataType> weightsDataType) {
-    std::vector<std::shared_ptr<Parameter>> parameters;
+std::vector<std::shared_ptr<PhysicalParameter>> FullyConnected::defineParameters(uint32_t numOutputFeatures,
+                                                                                 bool hasBias,
+                                                                                 Optional<TensorDescriptor::DataType> weightsDataType) {
+    std::vector<std::shared_ptr<PhysicalParameter>> parameters;
     parameters.push_back(std::make_shared<FCWeightsParameter>(weightsDataType, numOutputFeatures));
     if (hasBias)
         parameters.push_back(std::make_shared<FCBiasesParameter>(weightsDataType, numOutputFeatures));

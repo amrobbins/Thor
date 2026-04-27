@@ -1,8 +1,8 @@
-#include "DeepLearning/Api/Parameter/Parameter.h"
+#include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 
-#include "DeepLearning/Implementation/Parameter/Parameter.h"
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
+#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 
 #include <stdexcept>
@@ -14,14 +14,15 @@ using json = nlohmann::json;
 namespace Thor {
 
 namespace {
-class ApiBackedImplementationParameter : public ThorImplementation::Parameter {
+class ApiBackedImplementationParameter : public ThorImplementation::PhysicalParameter {
    public:
     ApiBackedImplementationParameter(std::string name,
                                      bool trainable,
-                                     Thor::Parameter::StorageContextStorageFactory storageContextCreateStorage)
-        : ThorImplementation::Parameter(std::move(name), trainable), storageContextCreateStorage(std::move(storageContextCreateStorage)) {}
+                                     Thor::ParameterSpecification::StorageContextStorageFactory storageContextCreateStorage)
+        : ThorImplementation::PhysicalParameter(std::move(name), trainable),
+          storageContextCreateStorage(std::move(storageContextCreateStorage)) {}
 
-    void createStorage(const ThorImplementation::Parameter::StorageContext &context) override {
+    void createStorage(const ThorImplementation::PhysicalParameter::StorageContext &context) override {
         // Either use the bound function (C++ or python) that gets input tensor context,
         // or when it was not supplied then assert that dtype and shape were supplied and create
         // a tensor co-located with the input tensors having dtype and shape.
@@ -36,22 +37,22 @@ class ApiBackedImplementationParameter : public ThorImplementation::Parameter {
                 throw runtime_error("Parameter.shape was not set for parameter " + name +
                                     " and create_storage_from_context(StorageContext context) was not bound. You need to pick one of those "
                                     "routes to allocate parameter storage.");
-            ThorImplementation::Parameter::createStorage(context);
+            ThorImplementation::PhysicalParameter::createStorage(context);
         }
     }
 
    private:
-    Thor::Parameter::StorageContextStorageFactory storageContextCreateStorage;
+    Thor::ParameterSpecification::StorageContextStorageFactory storageContextCreateStorage;
 };
 }  // namespace
 
-Parameter::Parameter(std::string name,
-                     const std::vector<uint64_t> &shape,
-                     DataType dtype,
-                     std::shared_ptr<Initializer> initializer,
-                     bool trainable,
-                     std::shared_ptr<Optimizer> optimizer,
-                     bool trainingInitiallyEnabled)
+ParameterSpecification::ParameterSpecification(std::string name,
+                                               const std::vector<uint64_t> &shape,
+                                               DataType dtype,
+                                               std::shared_ptr<Initializer> initializer,
+                                               bool trainable,
+                                               std::shared_ptr<Optimizer> optimizer,
+                                               bool trainingInitiallyEnabled)
     : initialized(true),
       name(std::move(name)),
       initializer(std::move(initializer)),
@@ -63,12 +64,12 @@ Parameter::Parameter(std::string name,
     validateReadyForUse();
 }
 
-Parameter::Parameter(std::string name,
-                     StorageContextStorageFactory createStorage,
-                     std::shared_ptr<Initializer> initializer,
-                     bool trainable,
-                     std::shared_ptr<Optimizer> optimizer,
-                     bool trainingInitiallyEnabled)
+ParameterSpecification::ParameterSpecification(std::string name,
+                                               StorageContextStorageFactory createStorage,
+                                               std::shared_ptr<Initializer> initializer,
+                                               bool trainable,
+                                               std::shared_ptr<Optimizer> optimizer,
+                                               bool trainingInitiallyEnabled)
     : initialized(true),
       name(std::move(name)),
       initializer(std::move(initializer)),
@@ -79,7 +80,7 @@ Parameter::Parameter(std::string name,
     validateReadyForUse();
 }
 
-void Parameter::validateShape(const std::vector<uint64_t> &shape) {
+void ParameterSpecification::validateShape(const std::vector<uint64_t> &shape) {
     if (shape.empty())
         throw runtime_error("Parameter shape cannot be empty.");
     for (uint64_t dim : shape) {
@@ -88,7 +89,7 @@ void Parameter::validateShape(const std::vector<uint64_t> &shape) {
     }
 }
 
-void Parameter::validateReadyForUse() const {
+void ParameterSpecification::validateReadyForUse() const {
     if (name.empty())
         throw runtime_error("Parameter name cannot be empty.");
     if (name.length() >= 2 && name[0] == '_' && name[1] == '_')
@@ -97,7 +98,7 @@ void Parameter::validateReadyForUse() const {
         throw runtime_error("Only trainable parameters may have optimizer overrides.");
 }
 
-void Parameter::validateStorageFactoryReadyForStamping() const {
+void ParameterSpecification::validateStorageFactoryReadyForStamping() const {
     if (dtype.isPresent() && shape.isPresent())
         return;
 
@@ -108,7 +109,7 @@ void Parameter::validateStorageFactoryReadyForStamping() const {
 }
 
 // Parameters don't need to be serialized, bound parameters do. That will resolve the trainingInitiallyEnabled vs current state issue.
-json Parameter::architectureJson() const {
+json ParameterSpecification::architectureJson() const {
     json j;
     j["version"] = getVersion();
     j["name"] = name;
@@ -123,10 +124,10 @@ json Parameter::architectureJson() const {
     return j;
 }
 
-json Parameter::serialize(thor_file::TarWriter &archiveWriter,
-                          Stream stream,
-                          bool saveOptimizerState,
-                          ThorImplementation::StampedNetwork &stampedNetwork) const {
+json ParameterSpecification::serialize(thor_file::TarWriter &archiveWriter,
+                                       Stream stream,
+                                       bool saveOptimizerState,
+                                       ThorImplementation::StampedNetwork &stampedNetwork) const {
     json j = architectureJson();
 
     // Below pattern wrong. Get the layer and assert that it casts to a parameterizable.
@@ -153,11 +154,11 @@ json Parameter::serialize(thor_file::TarWriter &archiveWriter,
     return j;
 }
 
-Parameter Parameter::deserialize(const json &j, std::shared_ptr<thor_file::TarReader> &archiveReader) {
+ParameterSpecification ParameterSpecification::deserialize(const json &j, std::shared_ptr<thor_file::TarReader> &archiveReader) {
     if (j.at("version").get<std::string>() != "1.0.0")
         throw std::runtime_error("Unsupported version in Parameter::deserialize: " + j["version"].get<std::string>());
 
-    Parameter deserialized;
+    ParameterSpecification deserialized;
     deserialized.name = j.at("name").get<std::string>();
     deserialized.storage = Tensor::deserialize(j["storage"]);
     deserialized.trainable = j.at("trainable").get<bool>();
@@ -172,28 +173,28 @@ Parameter Parameter::deserialize(const json &j, std::shared_ptr<thor_file::TarRe
     deserialized.initialized = true;
     return deserialized;
 }
-std::string Parameter::getVersion() { return "1.0.0"; }
+std::string ParameterSpecification::getVersion() { return "1.0.0"; }
 
-const std::string &Parameter::getName() const { return name; }
-std::shared_ptr<Initializer> Parameter::getInitializer() const { return initializer; }
+const std::string &ParameterSpecification::getName() const { return name; }
+std::shared_ptr<Initializer> ParameterSpecification::getInitializer() const { return initializer; }
 
-bool Parameter::isTrainable() const { return trainable; }
-bool Parameter::isTrainingInitiallyEnabled() const { return isTrainable() && trainingInitiallyEnabled; }
+bool ParameterSpecification::isTrainable() const { return trainable; }
+bool ParameterSpecification::isTrainingInitiallyEnabled() const { return isTrainable() && trainingInitiallyEnabled; }
 
-bool Parameter::hasOptimizer() const { return optimizer != nullptr; }
-std::shared_ptr<Optimizer> Parameter::getOptimizer() { return optimizer; }
+bool ParameterSpecification::hasOptimizer() const { return optimizer != nullptr; }
+std::shared_ptr<Optimizer> ParameterSpecification::getOptimizer() { return optimizer; }
 
-ThorImplementation::Tensor Parameter::allocateStorage(const ThorImplementation::Tensor &inputTensor,
-                                                      const std::vector<uint64_t> &shape,
-                                                      DataType dtype) {
+ThorImplementation::Tensor ParameterSpecification::allocateStorage(const ThorImplementation::Tensor &inputTensor,
+                                                                   const std::vector<uint64_t> &shape,
+                                                                   DataType dtype) {
     validateShape(shape);
-    return ThorImplementation::Parameter::allocateStorage(inputTensor.getPlacement(), shape, dtype);
+    return ThorImplementation::PhysicalParameter::allocateStorage(inputTensor.getPlacement(), shape, dtype);
 }
 
-std::shared_ptr<ThorImplementation::Parameter> Parameter::stamp() {
+std::shared_ptr<ThorImplementation::PhysicalParameter> ParameterSpecification::stamp() {
     validateStorageFactoryReadyForStamping();
 
-    std::shared_ptr<ThorImplementation::Parameter> physicalParameter;
+    std::shared_ptr<ThorImplementation::PhysicalParameter> physicalParameter;
 
     if (storageContextCreateStorage) {
         physicalParameter = std::make_shared<ApiBackedImplementationParameter>(name, trainable, storageContextCreateStorage);
@@ -201,7 +202,7 @@ std::shared_ptr<ThorImplementation::Parameter> Parameter::stamp() {
         assert(shape.isPresent());
         assert(dtype.isPresent());
 
-        physicalParameter = std::make_shared<ThorImplementation::Parameter>(name, trainable, shape.get(), dtype.get());
+        physicalParameter = std::make_shared<ThorImplementation::PhysicalParameter>(name, trainable, shape.get(), dtype.get());
     }
 
     if (initializer != nullptr) {
@@ -215,7 +216,7 @@ std::shared_ptr<ThorImplementation::Parameter> Parameter::stamp() {
     return physicalParameter;
 }
 
-std::shared_ptr<Parameter> Parameter::Builder::build() {
+std::shared_ptr<ParameterSpecification> ParameterSpecification::Builder::build() {
     assert(!_name.empty());
     assert(_initializer != nullptr);
     assert(_trainable.isPresent());
@@ -226,10 +227,11 @@ std::shared_ptr<Parameter> Parameter::Builder::build() {
         throw runtime_error("Parameter::Builder requires createStorage(StorageContext) to be bound.");
     }
 
-    return std::make_shared<Parameter>(_name, _storageContextCreateStorage, _initializer->clone(), _trainable.get(), _optimizerOverride);
+    return std::make_shared<ParameterSpecification>(
+        _name, _storageContextCreateStorage, _initializer->clone(), _trainable.get(), _optimizerOverride);
 }
 
-Parameter::Builder &Parameter::Builder::name(const std::string &_name) {
+ParameterSpecification::Builder &ParameterSpecification::Builder::name(const std::string &_name) {
     assert(this->_name.empty());
     assert(!_name.empty());
     if (_name.length() >= 2 && _name[0] == '_' && _name[1] == '_')
@@ -238,37 +240,37 @@ Parameter::Builder &Parameter::Builder::name(const std::string &_name) {
     return *this;
 }
 
-Parameter::Builder &Parameter::Builder::initializer(std::shared_ptr<Initializer> &_initializer) {
+ParameterSpecification::Builder &ParameterSpecification::Builder::initializer(std::shared_ptr<Initializer> &_initializer) {
     assert(this->_initializer == nullptr);
     this->_initializer = _initializer->clone();
     return *this;
 }
 
-Parameter::Builder &Parameter::Builder::initializer(std::shared_ptr<Initializer> &&_initializer) {
+ParameterSpecification::Builder &ParameterSpecification::Builder::initializer(std::shared_ptr<Initializer> &&_initializer) {
     assert(this->_initializer == nullptr);
     this->_initializer = _initializer->clone();
     return *this;
 }
 
-Parameter::Builder &Parameter::Builder::trainable(const bool _trainable) {
+ParameterSpecification::Builder &ParameterSpecification::Builder::trainable(const bool _trainable) {
     assert(!this->_trainable.isPresent());
     this->_trainable = _trainable;
     return *this;
 }
 
-Parameter::Builder &Parameter::Builder::optimizer(std::shared_ptr<Optimizer> &_optimizerOverride) {
+ParameterSpecification::Builder &ParameterSpecification::Builder::optimizer(std::shared_ptr<Optimizer> &_optimizerOverride) {
     assert(this->_optimizerOverride == nullptr);
     this->_optimizerOverride = _optimizerOverride;
     return *this;
 }
 
-Parameter::Builder &Parameter::Builder::optimizer(std::shared_ptr<Optimizer> &&_optimizerOverride) {
+ParameterSpecification::Builder &ParameterSpecification::Builder::optimizer(std::shared_ptr<Optimizer> &&_optimizerOverride) {
     assert(this->_optimizerOverride == nullptr);
     this->_optimizerOverride = _optimizerOverride;
     return *this;
 };
 
-Parameter::Builder &Parameter::Builder::createStorage(StorageContextStorageFactory createStorage) {
+ParameterSpecification::Builder &ParameterSpecification::Builder::createStorage(StorageContextStorageFactory createStorage) {
     if (this->_storageContextCreateStorage) {
         throw runtime_error("Parameter::Builder storage factory may only be bound once.");
     }

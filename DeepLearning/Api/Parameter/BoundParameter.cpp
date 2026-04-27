@@ -1,10 +1,10 @@
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
-#include "DeepLearning/Api/Parameter/Parameter.h"
+#include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
-#include "DeepLearning/Implementation/Parameter/Parameter.h"
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
+#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 
 #include <stdexcept>
 
@@ -13,7 +13,7 @@ using namespace std;
 namespace Thor {
 
 namespace {
-std::shared_ptr<ThorImplementation::Parameter> getImplementationParameter(PlacedNetwork* placedNetwork,
+std::shared_ptr<ThorImplementation::PhysicalParameter> getImplementationParameter(PlacedNetwork* placedNetwork,
                                                                           uint64_t apiLayerId,
                                                                           const std::string& parameterName,
                                                                           uint64_t stampIndex) {
@@ -39,7 +39,7 @@ std::shared_ptr<ThorImplementation::Parameter> getImplementationParameter(Placed
 }
 }  // namespace
 
-BoundParameter::BoundParameter(std::shared_ptr<Parameter> parameter, PlacedNetwork* placedNetwork, uint64_t apiLayerId)
+BoundParameter::BoundParameter(std::shared_ptr<ParameterSpecification> parameter, PlacedNetwork* placedNetwork, uint64_t apiLayerId)
     : parameter(std::move(parameter)), placedNetwork(placedNetwork), apiLayerId(apiLayerId) {
     if (this->parameter == nullptr)
         throw runtime_error("Cannot create a BoundParameter from a null Parameter.");
@@ -77,7 +77,7 @@ void BoundParameter::setTrainingEnabled(bool enabled) {
     // Parameters are never serialized - their training enabled state follows the BoundParameter once bound.
     // parameter->trainingInitiallyEnabled = enabled;
     for (uint64_t stampIndex = 0; stampIndex < placedNetwork->getNumStamps(); ++stampIndex) {
-        const shared_ptr<ThorImplementation::Parameter>& boundParameter =
+        const shared_ptr<ThorImplementation::PhysicalParameter>& boundParameter =
             getImplementationParameter(placedNetwork, apiLayerId, parameter->getName(), stampIndex);
         boundParameter->setTrainingEnabled(enabled);
     }

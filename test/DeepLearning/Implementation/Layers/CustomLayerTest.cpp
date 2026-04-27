@@ -176,9 +176,9 @@ class CountingPassthrough : public Layer {
     }
 };
 
-class ContextAwareBiasParameter : public Parameter {
+class ContextAwareBiasParameter : public PhysicalParameter {
    public:
-    ContextAwareBiasParameter() : Parameter("bias", false) {}
+    ContextAwareBiasParameter() : PhysicalParameter("bias", false) {}
 
     size_t seenFeatureInputCount = 0;
     bool sawLhs = false;
@@ -198,10 +198,10 @@ class ContextAwareBiasParameter : public Parameter {
     }
 };
 
-class FixedVectorParameter : public Parameter {
+class FixedVectorParameter : public PhysicalParameter {
    public:
     FixedVectorParameter(std::string name, std::vector<float> initialValues, bool trainable)
-        : Parameter(std::move(name), trainable), initialValues(std::move(initialValues)) {}
+        : PhysicalParameter(std::move(name), trainable), initialValues(std::move(initialValues)) {}
 
     void createStorage(const StorageContext& context) override {
         const Tensor& primary = context.getInput("x");

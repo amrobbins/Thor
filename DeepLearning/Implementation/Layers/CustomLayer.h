@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
-#include "DeepLearning/Implementation/Parameter/Parameter.h"
+#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
 
@@ -20,7 +20,7 @@ class CustomLayer : public TrainableLayer {
     // Backward-compatible single-input single-output form.
     CustomLayer(DynamicExpression expr,
                 const TensorPlacement& placement,
-                const std::vector<std::shared_ptr<Parameter>>& parameters,
+                const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                 bool inferenceOnly,
                 int64_t stampedId = -1,
                 bool useFastMath = false);
@@ -40,7 +40,7 @@ class CustomLayer : public TrainableLayer {
                 std::vector<std::string> inputNames,
                 std::vector<std::string> outputNames,
                 const TensorPlacement& placement,
-                const std::vector<std::shared_ptr<Parameter>>& parameters,
+                const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
                 bool inferenceOnly,
                 int64_t stampedId = -1,
                 bool useFastMath = false);
@@ -77,7 +77,7 @@ class CustomLayer : public TrainableLayer {
 
    protected:
     void compileImpl() override;
-    Parameter::StorageContext buildParameterStorageContext() const override;
+    PhysicalParameter::StorageContext buildParameterStorageContext() const override;
     void pruneUpstreamErrorOutputsForApplication(uint32_t applicationIndex);
 
    private:

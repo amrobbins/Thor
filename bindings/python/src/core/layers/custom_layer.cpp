@@ -17,7 +17,7 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
-#include "DeepLearning/Api/Parameter/Parameter.h"
+#include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Optional.h"
@@ -146,8 +146,8 @@ std::vector<std::string> normalizeOutputNames(nb::object outputNamesObj, const O
     return names;
 }
 
-std::vector<std::shared_ptr<Parameter>> parametersFromPythonObject(nb::object obj) {
-    std::vector<std::shared_ptr<Parameter>> result;
+std::vector<std::shared_ptr<ParameterSpecification>> parametersFromPythonObject(nb::object obj) {
+    std::vector<std::shared_ptr<ParameterSpecification>> result;
     if (obj.is_none()) {
         return result;
     }
@@ -165,7 +165,7 @@ std::vector<std::shared_ptr<Parameter>> parametersFromPythonObject(nb::object ob
     nb::list parameters = nb::cast<nb::list>(obj);
     result.reserve(parameters.size());
     for (nb::handle item : parameters) {
-        result.push_back(nb::cast<std::shared_ptr<Parameter>>(item));
+        result.push_back(nb::cast<std::shared_ptr<ParameterSpecification>>(item));
     }
     return result;
 }
@@ -178,7 +178,7 @@ nb::callable callableFromPythonObject(nb::object obj, const std::string& what) {
     return nb::borrow<nb::callable>(obj);
 }
 
-std::vector<std::string> parameterNames(const std::vector<std::shared_ptr<Parameter>>& parameters) {
+std::vector<std::string> parameterNames(const std::vector<std::shared_ptr<ParameterSpecification>>& parameters) {
     std::vector<std::string> names;
     names.reserve(parameters.size());
     std::set<std::string> seen;
@@ -591,7 +591,7 @@ void bind_custom_layer(nb::module_& layers) {
                 pySelfObj = nb::borrow<nb::object>(pySelf);
             }
 
-            std::vector<std::shared_ptr<Parameter>> parameters;
+            std::vector<std::shared_ptr<ParameterSpecification>> parameters;
             if (parametersObj.is_none()) {
                 nb::gil_scoped_acquire gil;
                 if (!pySelfObj.is_valid()) {

@@ -10,10 +10,10 @@ namespace ThorImplementation {
 namespace {
 using DataType = TensorDescriptor::DataType;
 
-class BNParameter final : public Parameter {
+class BNParameter final : public PhysicalParameter {
    public:
     BNParameter(const string& name, const Optional<TensorDescriptor::DataType>& storageDataType, bool trainable)
-        : Parameter(name, trainable), storageDataType(storageDataType) {}
+        : PhysicalParameter(name, trainable), storageDataType(storageDataType) {}
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();

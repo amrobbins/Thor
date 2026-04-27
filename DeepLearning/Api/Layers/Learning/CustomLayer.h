@@ -2,7 +2,7 @@
 
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
-#include "DeepLearning/Api/Parameter/Parameter.h"
+#include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
@@ -27,7 +27,7 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
 
     CustomLayer(ThorImplementation::DynamicExpression expr,
                 const std::vector<TensorMap>& inputInterfaces,
-                std::vector<std::shared_ptr<Parameter>> parameters = {},
+                std::vector<std::shared_ptr<ParameterSpecification>> parameters = {},
                 bool useFastMath = false);
 
     CustomLayer(ThorImplementation::DynamicExpression expr,
@@ -35,7 +35,7 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
                 std::vector<std::string> outputNames,
                 const std::vector<TensorMap>& inputInterfaces,
                 const std::vector<TensorMap>& outputInterfaces,
-                std::vector<std::shared_ptr<Parameter>> parameters = {},
+                std::vector<std::shared_ptr<ParameterSpecification>> parameters = {},
                 bool useFastMath = false);
 
     const std::vector<std::string>& getInputNames() const { return inputNames; }
@@ -45,7 +45,7 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     TensorMap getOutputInterfaceByIndex(uint32_t interfaceIndex = 0) const;
     Tensor getOutput(const std::string& outputName, uint32_t interfaceIndex = 0) const;
     const ThorImplementation::DynamicExpression& getExpression() const { return expr; }
-    const std::vector<std::shared_ptr<Parameter>>& getParameters() const override { return parameters; }
+    const std::vector<std::shared_ptr<ParameterSpecification>>& getParameters() const override { return parameters; }
     uint64_t getParameterizableId() const override { return getId(); }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
@@ -114,7 +114,7 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     std::vector<TensorMap> inputInterfaces;
     std::vector<TensorMap> outputInterfaces;
 
-    std::vector<std::shared_ptr<Parameter>> parameters;
+    std::vector<std::shared_ptr<ParameterSpecification>> parameters;
 
     // Per-interface readiness is tracked by logical input port, not by tensor, because the same tensor may satisfy
     // several named inputs and/or participate in several input interfaces.
@@ -190,13 +190,13 @@ class CustomLayer::Builder {
     // Note: parameters are copied so that later mutations to the parameter that was passed in do not
     //       affect the parameter as it was passed to the builder.
     //       Once a parameter is bound to a layer, the user needs to interact with a BoundParameter instance instead.
-    virtual CustomLayer::Builder& parameter(std::shared_ptr<Parameter> parameter) {
+    virtual CustomLayer::Builder& parameter(std::shared_ptr<ParameterSpecification> parameter) {
         assert(parameter != nullptr);
-        this->_parameters.push_back(std::make_shared<Parameter>(*parameter));
+        this->_parameters.push_back(std::make_shared<ParameterSpecification>(*parameter));
         return *this;
     }
 
-    virtual CustomLayer::Builder& parameters(std::vector<std::shared_ptr<Parameter>> parameters) {
+    virtual CustomLayer::Builder& parameters(std::vector<std::shared_ptr<ParameterSpecification>> parameters) {
         assert(this->_parameters.empty());
         this->_parameters.clear();
         this->_parameters.reserve(parameters.size());
@@ -206,7 +206,7 @@ class CustomLayer::Builder {
                 throw std::runtime_error("CustomLayer::Builder received a null Parameter.");
             }
 
-            this->_parameters.push_back(std::make_shared<Parameter>(*parameter));
+            this->_parameters.push_back(std::make_shared<ParameterSpecification>(*parameter));
         }
 
         return *this;
@@ -233,7 +233,7 @@ class CustomLayer::Builder {
     std::vector<std::string> _outputNames;
     std::vector<TensorMap> _inputInterfaces;
     std::vector<TensorMap> _outputInterfaces;
-    std::vector<std::shared_ptr<Parameter>> _parameters;
+    std::vector<std::shared_ptr<ParameterSpecification>> _parameters;
     bool _useFastMath = false;
     std::shared_ptr<Optimizer> _layerOptimizer;
 };

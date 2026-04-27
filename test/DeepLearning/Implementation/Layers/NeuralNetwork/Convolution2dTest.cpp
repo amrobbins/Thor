@@ -254,7 +254,7 @@ vector<float> conv2dBiasGradReference(
     return readCpuTensor(biasGradTensor);
 }
 
-void setParameterTensor(shared_ptr<Parameter> parameter, const vector<float>& values, Stream& stream) {
+void setParameterTensor(shared_ptr<PhysicalParameter> parameter, const vector<float>& values, Stream& stream) {
     ASSERT_NE(parameter, nullptr);
     ASSERT_TRUE(parameter->getStorage().isPresent());
     Tensor deviceTensor = parameter->getStorage();
