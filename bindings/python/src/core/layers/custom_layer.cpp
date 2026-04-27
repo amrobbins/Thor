@@ -162,6 +162,96 @@ std::vector<std::string> concatenateInputNames(const std::vector<std::string>& f
     return result;
 }
 
+std::set<std::string> toNameSet(const std::vector<std::string>& names) { return std::set<std::string>(names.begin(), names.end()); }
+
+std::set<std::string> toNameSet(const PhysicalTensorMap& tensors) {
+    std::set<std::string> names;
+    for (const auto& [name, _] : tensors) {
+        names.insert(name);
+    }
+    return names;
+}
+
+std::set<std::string> toNameSet(const std::vector<ThorImplementation::NamedOutput>& outputs) {
+    std::set<std::string> names;
+    for (const auto& output : outputs) {
+        names.insert(output.name);
+    }
+    return names;
+}
+
+void validateCustomLayerExpressionInputs(const std::vector<std::string>& expectedInputNames,
+                                         const std::set<std::string>& actualInputNames) {
+    const std::set<std::string> expectedInputNameSet = toNameSet(expectedInputNames);
+    if (actualInputNames == expectedInputNameSet) {
+        return;
+    }
+
+    std::string expectedInputNamesString;
+    for (const auto& name : expectedInputNameSet) {
+        expectedInputNamesString += name + " ";
+    }
+
+    std::string actualInputNamesString;
+    for (const auto& name : actualInputNames) {
+        actualInputNamesString += name + " ";
+    }
+
+    throw std::runtime_error("CustomLayer expression input mismatch. Expected inputs: " + expectedInputNamesString +
+                             " Actual inputs used by prepared expression: " + actualInputNamesString);
+}
+
+void validateCustomLayerForwardOutputs(const std::vector<std::string>& expectedOutputNames,
+                                       const std::set<std::string>& actualOutputNames) {
+    const std::set<std::string> expectedOutputNameSet = toNameSet(expectedOutputNames);
+    if (actualOutputNames == expectedOutputNameSet) {
+        return;
+    }
+
+    std::string expectedOutputNamesString;
+    for (const auto& name : expectedOutputNameSet) {
+        expectedOutputNamesString += name + " ";
+    }
+
+    std::string actualOutputNamesString;
+    for (const auto& name : actualOutputNames) {
+        actualOutputNamesString += name + " ";
+    }
+
+    throw std::runtime_error("CustomLayer forward output mismatch. Expected outputs: " + expectedOutputNamesString +
+                             " Actual outputs returned by build(context): " + actualOutputNamesString);
+}
+
+bool pythonClassDefinesMethod(nb::handle cls, const char* methodName) {
+    nb::object dict = nb::steal<nb::object>(PyObject_GetAttrString(cls.ptr(), "__dict__"));
+    if (!dict.is_valid()) {
+        throw nb::python_error();
+    }
+
+    int contains = PyMapping_HasKeyString(dict.ptr(), methodName);
+    if (contains < 0) {
+        throw nb::python_error();
+    }
+
+    return contains == 1;
+}
+
+bool hasPythonOverrideInMro(nb::handle owner, const char* methodName) {
+    nb::tuple mro = nb::cast<nb::tuple>(owner.attr("__class__").attr("__mro__"));
+    for (nb::handle clsHandle : mro) {
+        nb::object cls = nb::borrow<nb::object>(clsHandle);
+        if (!pythonClassDefinesMethod(cls, methodName)) {
+            continue;
+        }
+
+        const std::string className = nb::cast<std::string>(cls.attr("__name__"));
+        const std::string moduleName = nb::cast<std::string>(cls.attr("__module__"));
+        return !(className == "CustomLayer" && moduleName == "thor.layers");
+    }
+
+    return false;
+}
+
 std::vector<std::pair<std::string, Expression>> expressionsFromPythonDict(nb::dict mapping) {
     std::vector<std::pair<std::string, Expression>> namedExpressions;
     namedExpressions.reserve(mapping.size());
@@ -298,15 +388,22 @@ DynamicExpression makeDynamicExpressionFromOwner(nb::handle buildOwner,
     return DynamicExpression(
         expectedInputNames,
         outputNames,
-        [buildOwnerRef, featureInputNames = std::move(featureInputNames), parameterNames = std::move(parameterNames), useFastMath](
-            const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
+        [buildOwnerRef,
+         expectedInputNames,
+         outputNames = std::move(outputNames),
+         featureInputNames = std::move(featureInputNames),
+         parameterNames = std::move(parameterNames),
+         useFastMath](const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
             nb::gil_scoped_acquire gil;
 
             CustomLayerBuildContext context(inputs, outputs, featureInputNames, parameterNames, stream, useFastMath);
             nb::object result = buildOwnerRef->get().attr("build")(nb::cast(context));
 
             if (nb::isinstance<DynamicExpressionBuild>(result)) {
-                return nb::cast<DynamicExpressionBuild>(result);
+                DynamicExpressionBuild build = nb::cast<DynamicExpressionBuild>(result);
+                validateCustomLayerExpressionInputs(expectedInputNames, toNameSet(build.stamp_inputs));
+                validateCustomLayerForwardOutputs(outputNames, toNameSet(build.equation->getOutputNames()));
+                return build;
             }
 
             if (!nb::isinstance<nb::dict>(result)) {
@@ -315,6 +412,8 @@ DynamicExpression makeDynamicExpressionFromOwner(nb::handle buildOwner,
             }
 
             Outputs expressionOutputs = Expression::outputs(expressionsFromPythonDict(nb::cast<nb::dict>(result)));
+            validateCustomLayerExpressionInputs(expectedInputNames, expressionOutputs.expression()->getInputNames());
+            validateCustomLayerForwardOutputs(outputNames, toNameSet(expressionOutputs.namedOutputs()));
             return DynamicExpressionBuild{
                 std::make_shared<FusedEquation>(
                     FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum(), useFastMath)),
@@ -337,8 +436,12 @@ DynamicExpression makeDynamicExpression(nb::callable buildCallable,
     return DynamicExpression(
         expectedInputNames,
         outputNames,
-        [buildCallableRef, featureInputNames = std::move(featureInputNames), parameterNames = std::move(parameterNames), useFastMath](
-            const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
+        [buildCallableRef,
+         expectedInputNames,
+         outputNames = std::move(outputNames),
+         featureInputNames = std::move(featureInputNames),
+         parameterNames = std::move(parameterNames),
+         useFastMath](const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
             nb::gil_scoped_acquire gil;
 
             CustomLayerBuildContext context(inputs, outputs, featureInputNames, parameterNames, stream, useFastMath);
@@ -346,7 +449,10 @@ DynamicExpression makeDynamicExpression(nb::callable buildCallable,
             nb::object result = callable(nb::cast(context));
 
             if (nb::isinstance<DynamicExpressionBuild>(result)) {
-                return nb::cast<DynamicExpressionBuild>(result);
+                DynamicExpressionBuild build = nb::cast<DynamicExpressionBuild>(result);
+                validateCustomLayerExpressionInputs(expectedInputNames, toNameSet(build.stamp_inputs));
+                validateCustomLayerForwardOutputs(outputNames, toNameSet(build.equation->getOutputNames()));
+                return build;
             }
 
             if (!nb::isinstance<nb::dict>(result)) {
@@ -355,6 +461,8 @@ DynamicExpression makeDynamicExpression(nb::callable buildCallable,
             }
 
             Outputs expressionOutputs = Expression::outputs(expressionsFromPythonDict(nb::cast<nb::dict>(result)));
+            validateCustomLayerExpressionInputs(expectedInputNames, expressionOutputs.expression()->getInputNames());
+            validateCustomLayerForwardOutputs(outputNames, toNameSet(expressionOutputs.namedOutputs()));
             return DynamicExpressionBuild{
                 std::make_shared<FusedEquation>(
                     FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum(), useFastMath)),
@@ -391,11 +499,14 @@ class PythonCustomLayerRecipe {
         inputNames = inputs.names;
         outputNames = outputs.names;
 
-        nb::object parametersObj = owner.attr("parameters")();
+        nb::object parametersObj = hasPythonOverrideInMro(owner, "parameters") ? owner.attr("parameters")() : nb::list();
 
         std::vector<std::shared_ptr<Parameter>> parameters = parametersFromPython(parametersObj);
         std::vector<std::string> paramNames = parameterNames(parameters);
-        parameters_ = parameters;
+        parameterRefs_.reserve(parameters.size());
+        for (const auto& parameter : parameters) {
+            parameterRefs_.push_back(parameter);
+        }
 
         DynamicExpression expr = makeDynamicExpressionFromOwner(owner, inputNames, outputNames, paramNames, useFastMath);
 
@@ -435,10 +546,23 @@ class PythonCustomLayerRecipe {
 
     const std::vector<std::string>& getInputNames() const { return inputNames; }
     const std::vector<std::string>& getOutputNames() const { return outputNames; }
-    const std::vector<std::shared_ptr<Parameter>>& getParameters() const { return parameters_; }
+
+    std::vector<std::shared_ptr<Parameter>> getParameters() const {
+        std::vector<std::shared_ptr<Parameter>> locked;
+        locked.reserve(parameterRefs_.size());
+        for (const auto& weakParameter : parameterRefs_) {
+            std::shared_ptr<Parameter> parameter = weakParameter.lock();
+            if (parameter == nullptr) {
+                throw std::runtime_error(
+                    "CustomLayer parameter handles are no longer available. The native layer that owns them was already destroyed.");
+            }
+            locked.push_back(std::move(parameter));
+        }
+        return locked;
+    }
 
     BoundParameter getBoundParameter(PlacedNetwork& placedNetwork, const std::string& name) const {
-        for (const auto& parameter : parameters_) {
+        for (const auto& parameter : getParameters()) {
             if (parameter != nullptr && parameter->getName() == name) {
                 return BoundParameter(parameter, &placedNetwork, parameterizableId);
             }
@@ -449,8 +573,9 @@ class PythonCustomLayerRecipe {
 
     std::vector<BoundParameter> getBoundParameters(PlacedNetwork& placedNetwork) const {
         std::vector<BoundParameter> boundParameters;
-        boundParameters.reserve(parameters_.size());
-        for (const auto& parameter : parameters_) {
+        std::vector<std::shared_ptr<Parameter>> parameters = getParameters();
+        boundParameters.reserve(parameters.size());
+        for (const auto& parameter : parameters) {
             if (parameter == nullptr) {
                 throw std::runtime_error("CustomLayer contained a null parameter.");
             }
@@ -465,7 +590,7 @@ class PythonCustomLayerRecipe {
     TensorMap outputInterface;
     std::vector<std::string> inputNames;
     std::vector<std::string> outputNames;
-    std::vector<std::shared_ptr<Parameter>> parameters_;
+    std::vector<std::weak_ptr<Parameter>> parameterRefs_;
     uint64_t parameterizableId = 0;
 };
 
@@ -553,7 +678,7 @@ physical build(context) calls, while the recipe does not own the native layer.
     public_custom_layer.def_prop_ro("outputs", &PythonCustomLayerRecipe::getOutputInterface);
     public_custom_layer.def("get_input_names", &PythonCustomLayerRecipe::getInputNames);
     public_custom_layer.def("get_output_names", &PythonCustomLayerRecipe::getOutputNames);
-    public_custom_layer.def("get_parameters", &PythonCustomLayerRecipe::getParameters, nb::rv_policy::reference_internal);
+    public_custom_layer.def("get_parameters", &PythonCustomLayerRecipe::getParameters);
     public_custom_layer.def("get_bound_parameter", &PythonCustomLayerRecipe::getBoundParameter, "placed_network"_a, "name"_a);
     public_custom_layer.def("get_bound_parameters", &PythonCustomLayerRecipe::getBoundParameters, "placed_network"_a);
 
