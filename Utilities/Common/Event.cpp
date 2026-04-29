@@ -1,5 +1,6 @@
 #include "Event.h"
 #include "Stream.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 Event::Event() : ReferenceCounted() {}
 
@@ -23,10 +24,7 @@ Event::~Event() {
         destroy();
 }
 
-void Event::record(Stream stream) {
-    cudaError_t cudaStatus = cudaEventRecord(getEvent(), stream);
-    assert(cudaStatus == cudaSuccess);
-}
+void Event::record(Stream stream) { CUDA_CHECK(cudaEventRecord(getEvent(), stream)); }
 
 Event::operator cudaEvent_t() {
     assert(!uninitialized());
@@ -46,13 +44,7 @@ int32_t Event::getGpuNum() const {
 void Event::synchronize() {
     assert(!uninitialized());
 
-    cudaError_t cudaStatus;
-    cudaStatus = cudaEventSynchronize(*this);
-    if (cudaStatus != cudaSuccess) {
-        printf("cudaStatus %d\n", cudaStatus);
-        fflush(stdout);
-    }
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaEventSynchronize(*this));
 }
 
 float Event::synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent) {
@@ -61,9 +53,8 @@ float Event::synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent) {
     float milliseconds;
 
     synchronize();
-    cudaError_t cudaStatus;
-    cudaStatus = cudaEventElapsedTime(&milliseconds, startEvent, *this);
-    assert(cudaStatus == cudaSuccess);
+
+    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, startEvent, *this));
     return milliseconds;
 }
 
@@ -74,7 +65,6 @@ void Event::construct(int32_t gpuNum, bool enableTiming, bool expectingHostToWai
 
     ScopedGpu scopedGpu(gpuNum);
 
-    cudaError_t cudaStatus;
     this->gpuNum = gpuNum;
 
     uint32_t flags = 0;
@@ -83,8 +73,7 @@ void Event::construct(int32_t gpuNum, bool enableTiming, bool expectingHostToWai
     if (expectingHostToWaitOnThisOne)
         flags |= cudaEventBlockingSync;
 
-    cudaStatus = cudaEventCreateWithFlags(&cudaEvent, flags);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaEventCreateWithFlags(&cudaEvent, flags));
 }
 
 void Event::copyFrom(const Event &other) {
@@ -96,7 +85,5 @@ void Event::copyFrom(const Event &other) {
 
 void Event::destroy() {
     ScopedGpu scopedGpu(gpuNum);
-    cudaError_t cudaStatus;
-    cudaStatus = cudaEventDestroy(cudaEvent);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaEventDestroy(cudaEvent));
 }

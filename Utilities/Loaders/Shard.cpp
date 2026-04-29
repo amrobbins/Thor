@@ -1,4 +1,5 @@
 #include "Utilities/Loaders/Shard.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 using std::mutex;
 using std::string;
@@ -193,7 +194,6 @@ void Shard::loadExampleAsync(
     uint8_t *buffer, string &label, string &filename, ExampleType exampleType, uint64_t exampleIndex, Stream stream) {
     assert(isOpen());
     assert(buffer != nullptr);
-    cudaError_t cudaStatus;
 
     uint8_t *data;
     LabelCallbackParams *labelCallbackParams = new LabelCallbackParams();
@@ -220,13 +220,11 @@ void Shard::loadExampleAsync(
     }
 
     uint8_t *exampleStart = data + (exampleIndex * exampleSizeInBytes);
-    cudaStatus = cudaMemcpyAsync(buffer, exampleStart, exampleSizeInBytes, cudaMemcpyHostToHost, stream);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaMemcpyAsync(buffer, exampleStart, exampleSizeInBytes, cudaMemcpyHostToHost, stream));
     labelCallbackParams->index = exampleIndex;
     labelCallbackParams->label = &label;
     labelCallbackParams->filename = &filename;
-    cudaStatus = cudaLaunchHostFunc(stream, getLabelCallback, labelCallbackParams);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaLaunchHostFunc(stream, getLabelCallback, labelCallbackParams));
 }
 
 void Shard::shrinkToFit() {

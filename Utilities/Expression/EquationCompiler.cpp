@@ -19,7 +19,53 @@ namespace ThorImplementation {
 
 using DataType = TensorDescriptor::DataType;
 
-// static unordered_map<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache;
+#define NVRTC_CHECK(call)                                                                                                      \
+    do {                                                                                                                       \
+        nvrtcResult err__ = (call);                                                                                            \
+        if (err__ != NVRTC_SUCCESS) {                                                                                          \
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": " + #call + " failed with " + \
+                                     nvrtcGetErrorString(err__) + " (" + std::to_string(static_cast<int>(err__)) + ")");       \
+        }                                                                                                                      \
+    } while (0)
+
+static std::string getNvrtcProgramLog(nvrtcProgram prog) {
+    size_t log_size = 0;
+    nvrtcResult size_res = nvrtcGetProgramLogSize(prog, &log_size);
+    if (size_res != NVRTC_SUCCESS) {
+        return std::string("<failed to query NVRTC log size: ") + nvrtcGetErrorString(size_res) + ">";
+    }
+
+    if (log_size <= 1) {
+        return "";
+    }
+
+    std::string log(log_size, '\0');
+    nvrtcResult log_res = nvrtcGetProgramLog(prog, log.data());
+    if (log_res != NVRTC_SUCCESS) {
+        return std::string("<failed to fetch NVRTC log: ") + nvrtcGetErrorString(log_res) + ">";
+    }
+
+    return log;
+}
+
+static nvrtcResult nvrtcCompileProgramChecked(
+    nvrtcProgram prog, int num_options, const char* const* options, const char* call_text, const char* file, int line) {
+    nvrtcResult res = nvrtcCompileProgram(prog, num_options, options);
+    if (res == NVRTC_SUCCESS) {
+        return res;
+    }
+
+    const std::string log = getNvrtcProgramLog(prog);
+
+    throw std::runtime_error(std::string(file) + ":" + std::to_string(line) + ": " + call_text + " failed with " +
+                             nvrtcGetErrorString(res) + " (" + std::to_string(static_cast<int>(res)) + ")" +
+                             (log.empty() ? "" : "\n" + log));
+}
+
+#define NVRTC_COMPILE_CHECK(prog, num_options, options) \
+    nvrtcCompileProgramChecked(                         \
+        (prog), (num_options), (options), "nvrtcCompileProgram(" #prog ", " #num_options ", " #options ")", __FILE__, __LINE__)
+
 static LruCacheThreadSafe<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache(10'000);
 
 static shared_ptr<CompiledEquation> cacheLookup(const EquationCacheKey& key) {
@@ -46,6 +92,23 @@ static std::string makeSpecializedBroadcastCacheKey(const std::string& cuda_src,
     key += "|src=";
     key += cuda_src;
     return key;
+}
+
+string EquationCompiler::getCudaIncludeDir() {
+    if (const char* p = std::getenv("THOR_CUDA_INCLUDE_DIR")) {
+        if (*p)
+            return std::string(p);
+    }
+
+    if (const char* p = std::getenv("CUDA_HOME")) {
+        return std::string(p) + "/include";
+    }
+
+    if (const char* p = std::getenv("CUDA_PATH")) {
+        return std::string(p) + "/include";
+    }
+
+    return THOR_CUDA_INCLUDE_DIR;  // compile-time fallback from CMake
 }
 
 static void ensureCudaContextCurrent(int device_num) {
@@ -883,21 +946,14 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
 
     string arch = "--gpu-architecture=compute_" + to_string(sig.sm_major) + to_string(sig.sm_minor);
 
-    std::string cuda_include_path = std::string("--include-path=") + THOR_CUDA_INCLUDE_DIR;
+    const std::string cuda_include_dir = getCudaIncludeDir();
+    const std::string cuda_include_path = std::string("--include-path=") + cuda_include_dir;
+
     vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++17", "-fmad=true", cuda_include_path.c_str()};
     if (sig.use_fast_math)
         opts.push_back("--use_fast_math");
 
-    nvrtcResult res = nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
-
-    size_t log_size = 0;
-    NVRTC_CHECK(nvrtcGetProgramLogSize(prog, &log_size));
-    string log(log_size, '\0');
-    if (log_size > 1)
-        NVRTC_CHECK(nvrtcGetProgramLog(prog, log.data()));
-
-    if (res != NVRTC_SUCCESS)
-        throw runtime_error("NVRTC compile failed:\n" + log);
+    NVRTC_COMPILE_CHECK(prog, (int)opts.size(), opts.data());
 
     size_t lto_size = 0;
     NVRTC_CHECK(nvrtcGetLTOIRSize(prog, &lto_size));

@@ -256,19 +256,19 @@ string TarWriter::createArchive(filesystem::path archiveDirectory, bool overwrit
     uint32_t num_shards = archiveShardCreationPlan.size();
 
     // Build base JSON (same across shards except shard_index)
-    // Use ordered_json to keep key ordering stable.
-    nlohmann::ordered_json base;
+    // Use json to keep key ordering stable.
+    nlohmann::json base;
     base["format_version"] = 1;
     base["checksum_alg"] = "crc32_ieee";
     base["archive_id"] = archiveId;  // 32-char “sha-like”
     base["num_shards"] = num_shards;
 
-    nlohmann::ordered_json files = nlohmann::ordered_json::object();
+    nlohmann::json files = nlohmann::json::object();
     for (const auto& kv : archiveIndex) {
         const string& path = kv.first;
         const vector<EntryInfo>& entries = kv.second;
 
-        nlohmann::ordered_json fileEntries = nlohmann::ordered_json::array();
+        nlohmann::json fileEntries = nlohmann::json::array();
         for (const EntryInfo& fileEntry : entries) {
             fileEntries.push_back({
                 {"archive_shard", fileEntry.archiveShard},
@@ -284,7 +284,7 @@ string TarWriter::createArchive(filesystem::path archiveDirectory, bool overwrit
 
     // Append per-shard JSON + footer
     for (uint32_t shard_idx = 0; shard_idx < num_shards; ++shard_idx) {
-        nlohmann::ordered_json indexJ = base;
+        nlohmann::json indexJ = base;
         indexJ["shard_index"] = shard_idx;  // per-shard field differs
 
         const string json_str = indexJ.dump();  // UTF-8

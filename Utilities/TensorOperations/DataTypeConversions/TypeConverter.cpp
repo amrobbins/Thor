@@ -1,4 +1,5 @@
 #include "TypeConverter.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 using namespace ThorImplementation;
 using namespace std;
@@ -33,10 +34,8 @@ void TypeConverter::convertType(void *source,
 
     if (deviceNum == -1) {
         // CPU
-        cudaError_t cudaStatus;
         Args *args = new Args(source, dest, sourceDataType, destDataType, numElements);
-        cudaStatus = cudaLaunchHostFunc(stream.getStream(), cpuConvertType, args);
-        assert(cudaStatus == cudaSuccess);
+        CUDA_CHECK(cudaLaunchHostFunc(stream.getStream(), cpuConvertType, args));
     } else {
         // GPU
         assert(stream.getGpuNum() == deviceNum);

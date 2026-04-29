@@ -27,22 +27,5 @@ class ScopedGpu {
         previousGpuNum = swapActiveDevice(gpuNum);
     }
 
-    static int swapActiveDevice(int newDeviceNum) {
-        int numGpus;
-        cudaError_t cudaStatus;
-
-        cudaStatus = cudaGetDeviceCount(&numGpus);
-        assert(cudaStatus == cudaSuccess);
-        assert(newDeviceNum < numGpus);
-
-        int previousGpuNum;
-        cudaStatus = cudaGetDevice(&previousGpuNum);
-        assert(cudaStatus == cudaSuccess);
-        if (newDeviceNum != previousGpuNum) {
-            cudaStatus = cudaSetDevice(newDeviceNum);
-            assert(cudaStatus == cudaSuccess);
-        }
-
-        return previousGpuNum;
-    }
+    static int swapActiveDevice(int newDeviceNum);
 };

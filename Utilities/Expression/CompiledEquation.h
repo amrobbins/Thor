@@ -3,6 +3,7 @@
 #include <iostream>
 #include <variant>
 
+#include "CudaHelpers.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Expression/Expression.h"
 
@@ -78,7 +79,10 @@ struct CompiledEquation {
 
     ~CompiledEquation() {
         if (module != nullptr) {
-            cuModuleUnload(module);
+            try {
+                CU_CHECK(cuModuleUnload(module));
+            } catch (...) {
+            }
         }
     }
 };

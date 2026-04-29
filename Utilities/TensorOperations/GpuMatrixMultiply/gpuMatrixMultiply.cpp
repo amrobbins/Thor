@@ -1,4 +1,5 @@
 #include "gpuMatrixMultiply.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 using namespace std;
 
@@ -465,10 +466,8 @@ MatrixMultiplyKernelInfo getBestGemmKernel(unsigned int m,
     assert(dataType != DataType::FP16);  // I have not gotten that to work.
 
     cublasStatus_t cublasStatus;
-    cudaError_t cudaStatus;
     cublasLtHandle_t cublasLtHandle;
-    cudaStatus = cudaSetDevice(deviceNum);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaSetDevice(deviceNum));
     cublasStatus = cublasLtCreate(&cublasLtHandle);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
@@ -476,20 +475,16 @@ MatrixMultiplyKernelInfo getBestGemmKernel(unsigned int m,
     float beta = 0.0f;
 
     float *A_d;
-    cudaStatus = cudaMalloc(&A_d, m * k * sizeof(float));
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaMalloc(&A_d, m * k * sizeof(float)));
 
     float *B_d;
-    cudaStatus = cudaMalloc(&B_d, k * n * sizeof(float));
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaMalloc(&B_d, k * n * sizeof(float)));
 
     float *C_d;
-    cudaStatus = cudaMalloc(&C_d, m * n * sizeof(float));
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaMalloc(&C_d, m * n * sizeof(float)));
 
     float *workspace_d;
-    cudaStatus = cudaMalloc(&workspace_d, m * n * sizeof(float));
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaMalloc(&workspace_d, m * n * sizeof(float)));
 
     MatrixMultiplyKernelInfo bestKernelInfo = LtSgemmCustomFind(cublasLtHandle,
                                                                 AElementOrder == ElementOrder::CPP_ROW_MAJOR ? CUBLAS_OP_T : CUBLAS_OP_N,
@@ -526,15 +521,10 @@ MatrixMultiplyKernelInfo getBestGemmKernel(unsigned int m,
     //    CUBLAS_STATUS_LICENSE_ERROR   =16
     //} cublasStatus_t;
 
-    assert(cudaStatus == cudaSuccess);
-    cudaStatus = cudaFree(A_d);
-    assert(cudaStatus == cudaSuccess);
-    cudaStatus = cudaFree(B_d);
-    assert(cudaStatus == cudaSuccess);
-    cudaStatus = cudaFree(C_d);
-    assert(cudaStatus == cudaSuccess);
-    cudaStatus = cudaFree(workspace_d);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaFree(A_d));
+    CUDA_CHECK(cudaFree(B_d));
+    CUDA_CHECK(cudaFree(C_d));
+    CUDA_CHECK(cudaFree(workspace_d));
 
     return bestKernelInfo;
 }
