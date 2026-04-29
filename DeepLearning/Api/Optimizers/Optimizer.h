@@ -73,12 +73,12 @@ class Optimizer {
 
     uint64_t getOriginalId() const { return originalId; }
 
+    virtual std::shared_ptr<Optimizer> clone() const = 0;
+
    protected:
     // Only subclasses can be instantiated
     Optimizer();
     Optimizer(uint64_t originalId);
-
-    virtual std::shared_ptr<Optimizer> clone() const = 0;
 
     void addToNetwork(Network *network);
 

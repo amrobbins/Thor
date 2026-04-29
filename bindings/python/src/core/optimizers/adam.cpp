@@ -73,8 +73,7 @@
 // Adam is an adaptive learning-rate optimizer that combines ideas from momentum and
 // RMSProp by maintaining exponentially decayed moving averages of the gradient
 // (first moment) and of the squared gradient (second moment). These moment estimates
-// are bias-corrected and used to scale the parameter update for each weight (and bias)
-// individually.
+// are bias-corrected and used to scale the parameter update for each parameter individually.
 //
 // Parameters
 // ----------
@@ -114,8 +113,6 @@
 //
 // where ``t`` is the update step count.
 //
-// Bias parameters (if present) are updated in the same way as weights, each with their
-// own moment buffers.
 //
 // Examples
 // --------

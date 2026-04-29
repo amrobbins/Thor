@@ -763,7 +763,7 @@ def test_parallel_branch_and_chain_dependencies_join_correctly(dtype: thor.DataT
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_multi_level_diamond_then_downstream_reduction_synchronizes(dtype: thor.DataType):
-    """
+    r"""
     Exercises a deeper DAG:
 
           shared trunk

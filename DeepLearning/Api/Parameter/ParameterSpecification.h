@@ -99,22 +99,28 @@ class ParameterSpecification {
 class ParameterSpecification::Builder {
    public:
     virtual ~Builder() = default;
-    virtual std::shared_ptr<ParameterSpecification> build();
+    virtual ParameterSpecification build();
 
     virtual ParameterSpecification::Builder& name(const std::string& _name);
     virtual ParameterSpecification::Builder& initializer(std::shared_ptr<Initializer>& _initializer);
     virtual ParameterSpecification::Builder& initializer(std::shared_ptr<Initializer>&& _initializer);
     virtual ParameterSpecification::Builder& trainable(const bool _trainable);
+    virtual ParameterSpecification::Builder& trainingInitiallyEnabled(const bool enabled);
     virtual ParameterSpecification::Builder& optimizer(std::shared_ptr<Optimizer>& _optimizerOverride);
     virtual ParameterSpecification::Builder& optimizer(std::shared_ptr<Optimizer>&& _optimizerOverride);
-    virtual ParameterSpecification::Builder& createStorage(StorageContextStorageFactory createStorage);
+    virtual ParameterSpecification::Builder& createStorage(StorageContextStorageFactory _storageContextCreateStorage);
+    virtual ParameterSpecification::Builder& shape(const std::vector<uint64_t>& _shape);
+    virtual ParameterSpecification::Builder& dtype(const DataType _dtype);
 
    private:
     std::string _name{};
     std::shared_ptr<Initializer> _initializer = nullptr;
     Optional<bool> _trainable = Optional<bool>::empty();
+    Optional<bool> _trainingInitiallyEnabled = Optional<bool>::empty();
     std::shared_ptr<Optimizer> _optimizerOverride = nullptr;
     StorageContextStorageFactory _storageContextCreateStorage = nullptr;
+    std::vector<uint64_t> _shape{};
+    Optional<DataType> _dtype;
 };
 
 }  // namespace Thor
