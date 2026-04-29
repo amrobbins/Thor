@@ -29,7 +29,8 @@ class Adam final : public Optimizer {
     void setBeta2(float beta2);
     void setEpsilon(float epsilon);
 
-    static constexpr float MIN_FP16_EPSILON = 1.0e-4f;
+    Optional<Tensor> getM() { return mBuffer; }
+    Optional<Tensor> getV() { return vBuffer; }
 
    protected:
     float alpha;

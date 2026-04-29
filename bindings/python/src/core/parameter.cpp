@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
@@ -25,6 +26,7 @@ using namespace Thor;
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 using PhysicalTensor = ThorImplementation::Tensor;
 using StorageContext = ThorImplementation::PhysicalParameter::StorageContext;
+using GlorotMode = ThorImplementation::Glorot::Mode;
 
 namespace {
 
@@ -89,10 +91,28 @@ void bind_parameter(nb::module_& thor) {
            DataType dtype,
            std::shared_ptr<Initializer> initializer,
            bool trainable,
-           std::shared_ptr<Optimizer> optimizer,
-           bool training_initially_enabled) {
-            new (self) ParameterSpecification(
-                name, shape, dtype, std::move(initializer), trainable, std::move(optimizer), training_initially_enabled);
+           std::shared_ptr<Optimizer> optimizer_override,
+           optional<bool> training_initially_enabled) {
+            if (initializer == nullptr)
+                initializer = Glorot(GlorotMode::UNIFORM).clone();
+            if (!training_initially_enabled.has_value())
+                training_initially_enabled = trainable;
+
+            ParameterSpecification::Builder builder;
+            builder.name(name)
+                .shape(shape)
+                .dtype(dtype)
+                .trainable(trainable)
+                .trainingInitiallyEnabled(training_initially_enabled.value())
+                .initializer(initializer);
+
+            if (optimizer_override != nullptr) {
+                builder.optimizer(optimizer_override);
+            }
+
+            ParameterSpecification built = builder.build();
+
+            new (self) ParameterSpecification(built);
         },
         "name"_a,
         "shape"_a,
@@ -100,7 +120,7 @@ void bind_parameter(nb::module_& thor) {
         "initializer"_a.none() = nb::none(),
         "trainable"_a = true,
         "optimizer"_a.none() = nb::none(),
-        "training_initially_enabled"_a = true,
+        "training_initially_enabled"_a.none() = nb::none(),
         R"nbdoc(
 Create an API parameter with storage attributes determined at parameter definition time.
 
@@ -120,8 +140,8 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
            nb::object create_storage_from_context,
            std::shared_ptr<Initializer> initializer,
            bool trainable,
-           std::shared_ptr<Optimizer> optimizer,
-           bool training_initially_enabled) {
+           std::shared_ptr<Optimizer> optimizer_override,
+           optional<bool> training_initially_enabled) {
             if (create_storage_from_context.is_none()) {
                 throw std::runtime_error("create_storage_from_context must be provided.");
             }
@@ -141,15 +161,32 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
                 return nb::cast<PhysicalTensor>(result);
             };
 
-            new (self) ParameterSpecification(
-                name, std::move(createStorage), std::move(initializer), trainable, std::move(optimizer), training_initially_enabled);
+            if (initializer == nullptr)
+                initializer = Glorot(GlorotMode::UNIFORM).clone();
+            if (!training_initially_enabled.has_value())
+                training_initially_enabled = trainable;
+
+            ParameterSpecification::Builder builder;
+            builder.name(name)
+                .createStorage(std::move(createStorage))
+                .trainable(trainable)
+                .trainingInitiallyEnabled(training_initially_enabled.value())
+                .initializer(initializer);
+
+            if (optimizer_override != nullptr) {
+                builder.optimizer(optimizer_override);
+            }
+
+            ParameterSpecification built = builder.build();
+
+            new (self) ParameterSpecification(built);
         },
         "name"_a,
         "create_storage_from_context"_a,
         "initializer"_a.none() = nb::none(),
         "trainable"_a = true,
-        "optimizer"_a.none() = nb::none(),
-        "training_initially_enabled"_a = true,
+        "optimizer_override"_a.none() = nb::none(),
+        "training_initially_enabled"_a.none() = nb::none(),
         R"nbdoc(
 Create an API parameter whose implementation storage is allocated at physical layer compile time.
 

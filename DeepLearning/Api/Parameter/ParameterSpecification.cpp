@@ -235,19 +235,49 @@ std::shared_ptr<ThorImplementation::PhysicalParameter> ParameterSpecification::s
     return physicalParameter;
 }
 
-std::shared_ptr<ParameterSpecification> ParameterSpecification::Builder::build() {
+ParameterSpecification ParameterSpecification::Builder::build() {
     assert(!_name.empty());
-    assert(_initializer != nullptr);
     assert(_trainable.isPresent());
-    if (_optimizerOverride != nullptr)
-        assert(_trainable.get() == true);
+    assert(_initializer != nullptr);
 
+    ParameterSpecification p;
+    p.name = _name;
+    p.trainable = _trainable;
+    p.initializer = _initializer->clone();
+    if (p.trainable) {
+        if (_trainingInitiallyEnabled.isEmpty() || _trainingInitiallyEnabled.get() == true)
+            p.trainingInitiallyEnabled = true;
+        else
+            p.trainingInitiallyEnabled = false;
+    } else {
+        if (_trainingInitiallyEnabled.isPresent() && _trainingInitiallyEnabled.get() == true)
+            throw runtime_error("trainingInitiallyEnabled set to true for parameter named " + p.name +
+                                " but the parameter has trainable == false");
+        p.trainingInitiallyEnabled = false;
+    }
+    if (_optimizerOverride == nullptr) {
+        p.optimizer = nullptr;
+    } else {
+        p.optimizer = _optimizerOverride.get()->clone();
+    }
     if (!_storageContextCreateStorage) {
-        throw runtime_error("ParameterSpecification::Builder requires createStorage(StorageContext) to be bound.");
+        if (_dtype.isEmpty()) {
+            throw runtime_error(
+                "ParameterSpecification::Builder when createStorage(StorageContextStorageFactory) is not bound, then a dtype is required, "
+                "but no dtype was specified.");
+        }
+        if (_shape.empty()) {
+            throw runtime_error(
+                "ParameterSpecification::Builder when createStorage(StorageContextStorageFactory) is not bound, then a shape is required, "
+                "but no shape was specified.");
+        }
+        p.dtype = _dtype;
+        p.shape = _shape;
+    } else {
+        p.storageContextCreateStorage = _storageContextCreateStorage;
     }
 
-    return std::make_shared<ParameterSpecification>(
-        _name, _storageContextCreateStorage, _initializer->clone(), _trainable.get(), _optimizerOverride);
+    return p;
 }
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::name(const std::string &_name) {
@@ -277,6 +307,14 @@ ParameterSpecification::Builder &ParameterSpecification::Builder::trainable(cons
     return *this;
 }
 
+ParameterSpecification::Builder &ParameterSpecification::Builder::trainingInitiallyEnabled(const bool enabled) {
+    if (this->_trainingInitiallyEnabled.isPresent()) {
+        throw runtime_error("ParameterSpecification::Builder trainingInitiallyEnabled may only be specified once.");
+    }
+    this->_trainingInitiallyEnabled = enabled;
+    return *this;
+}
+
 ParameterSpecification::Builder &ParameterSpecification::Builder::optimizer(std::shared_ptr<Optimizer> &_optimizerOverride) {
     assert(this->_optimizerOverride == nullptr);
     this->_optimizerOverride = _optimizerOverride;
@@ -289,11 +327,37 @@ ParameterSpecification::Builder &ParameterSpecification::Builder::optimizer(std:
     return *this;
 };
 
-ParameterSpecification::Builder &ParameterSpecification::Builder::createStorage(StorageContextStorageFactory createStorage) {
+ParameterSpecification::Builder &ParameterSpecification::Builder::createStorage(StorageContextStorageFactory _storageContextCreateStorage) {
     if (this->_storageContextCreateStorage) {
         throw runtime_error("ParameterSpecification::Builder storage factory may only be bound once.");
     }
-    this->_storageContextCreateStorage = std::move(createStorage);
+    this->_storageContextCreateStorage = std::move(_storageContextCreateStorage);
+    return *this;
+}
+
+ParameterSpecification::Builder &ParameterSpecification::Builder::shape(const std::vector<uint64_t> &_shape) {
+    if (_shape.empty()) {
+        throw runtime_error("ParameterSpecification::Builder shape may not be empty.");
+    }
+    if (!this->_shape.empty()) {
+        throw runtime_error("ParameterSpecification::Builder shape may only be specified once.");
+    }
+    for (uint32_t i = 0; i < _shape.size(); ++i) {
+        if (_shape[i] == 0) {
+            throw runtime_error("ParameterSpecification::Builder shape may not have dimensions of size zero. Dimension " + to_string(i) +
+                                " is 0.");
+        }
+    }
+
+    this->_shape = _shape;
+    return *this;
+}
+
+ParameterSpecification::Builder &ParameterSpecification::Builder::dtype(const DataType _dtype) {
+    if (this->_dtype.isPresent()) {
+        throw runtime_error("ParameterSpecification::Builder dtype may only be specified once.");
+    }
+    this->_dtype = _dtype;
     return *this;
 }
 
