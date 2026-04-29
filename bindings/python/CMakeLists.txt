@@ -8,16 +8,16 @@ option(THOR_PYTHON_STUBS "Generate typing stubs via nanobind_add_stub()" ON)
 option(THOR_PYTHON_AUTO_INSTALL "Auto-install bindings into the project venv as part of the default build" ON)
 
 # ---- Python interpreter (parent/root should have set Python3_EXECUTABLE to your .venv python) ----
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
+#set(Python3_EXECUTABLE "${Python_EXECUTABLE}" CACHE FILEPATH "Mirror selected Python executable" FORCE)
 
 # Determine site-packages paths for the chosen interpreter
 execute_process(
-        COMMAND "${Python3_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_paths()['platlib'])"
+        COMMAND "${Python_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_paths()['platlib'])"
         OUTPUT_VARIABLE THOR_PY_PLATLIB
         OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 execute_process(
-        COMMAND "${Python3_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
+        COMMAND "${Python_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"
         OUTPUT_VARIABLE THOR_PY_PURELIB
         OUTPUT_STRIP_TRAILING_WHITESPACE
 )
@@ -142,7 +142,7 @@ if __name__ == "__main__":
 
 add_custom_command(
         OUTPUT "${THOR_PY_DEPS_STAMP}"
-        COMMAND "${Python3_EXECUTABLE}" "${THOR_PY_DEPS_SCRIPT}" "${THOR_PYPROJECT_TOML}"
+        COMMAND "${Python_EXECUTABLE}" "${THOR_PY_DEPS_SCRIPT}" "${THOR_PYPROJECT_TOML}"
         COMMAND "${CMAKE_COMMAND}" -E touch "${THOR_PY_DEPS_STAMP}"
         DEPENDS "${THOR_PYPROJECT_TOML}"
         COMMENT "Thor: installing Python deps from pyproject.toml (dependencies + dev) into venv"
@@ -239,7 +239,7 @@ if (THOR_PYTHON_TESTS)
     set(THOR_PY_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test")
 
     add_custom_target(check-python
-            COMMAND "${Python3_EXECUTABLE}" -m pytest
+            COMMAND "${Python_EXECUTABLE}" -m pytest
             -q
             --color=yes
             --code-highlight=yes
@@ -254,17 +254,12 @@ if (THOR_PYTHON_TESTS)
     include(CTest)
     add_test(
             NAME thor_python_pytest
-            COMMAND "${Python3_EXECUTABLE}" -m pytest -q "${THOR_PY_TEST_DIR}"
+            COMMAND "${Python_EXECUTABLE}" -m pytest -q "${THOR_PY_TEST_DIR}"
     )
 endif ()
 
 # ---- Install rules for wheel builds (scikit-build-core) ----
-# scikit-build-core sets SKBUILD_PROJECT_NAME; DESTINATION should be the package dir. :contentReference[oaicite:8]{index=8}
-if (DEFINED SKBUILD_PROJECT_NAME)
-    set(_thor_install_pkg_dir "${SKBUILD_PROJECT_NAME}")
-else ()
-    set(_thor_install_pkg_dir "${THOR_PY_PKG_NAME}")
-endif ()
+set(_thor_install_pkg_dir "${THOR_PY_PKG_NAME}")
 
 # Install the extension into the package directory (thor/_thor*.so)
 install(TARGETS _thor
@@ -308,7 +303,7 @@ add_custom_target(check
         COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_BINARY_DIR}
         $<TARGET_FILE:thor_tests> --gtest_color=yes
         COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_SOURCE_DIR}
-        "${Python3_EXECUTABLE}" -m pytest -q "${THOR_PY_TEST_DIR}"
+        "${Python_EXECUTABLE}" -m pytest -q "${THOR_PY_TEST_DIR}"
         DEPENDS thor_tests ${_thor_py_deps}
         USES_TERMINAL
         VERBATIM

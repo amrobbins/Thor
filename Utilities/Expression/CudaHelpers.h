@@ -1,5 +1,7 @@
 #pragma once
 
+#include <nvrtc.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -12,18 +14,9 @@
 #include <vector>
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/CudaDriver/CudaDrivertApi.h"
 
 namespace ThorImplementation {
-
-#define NVRTC_CHECK(call)                                                                                                             \
-    do {                                                                                                                              \
-        nvrtcResult status = (call);                                                                                                  \
-        if (status != NVRTC_SUCCESS) {                                                                                                \
-            const char* desc = nvrtcGetErrorString(status);                                                                           \
-            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": " + #call + " failed with status " + \
-                                     std::to_string(static_cast<int>(status)) + ": " + (desc ? desc : "<no description>"));           \
-        }                                                                                                                             \
-    } while (0)
 
 #define NVJITLINK_CHECK(handle, call)                                                                                  \
     do {                                                                                                               \
@@ -44,17 +37,18 @@ namespace ThorImplementation {
         }                                                                                                              \
     } while (0)
 
-#define CU_CHECK(call)                                                                                                         \
-    do {                                                                                                                       \
-        CUresult status = (call);                                                                                              \
-        if (status != CUDA_SUCCESS) {                                                                                          \
-            const char* name = nullptr;                                                                                        \
-            const char* desc = nullptr;                                                                                        \
-            cuGetErrorName(status, &name);                                                                                     \
-            cuGetErrorString(status, &desc);                                                                                   \
-            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": " + #call + " failed with " + \
-                                     (name ? name : "<unknown>") + std::string(": ") + (desc ? desc : "<no description>"));    \
-        }                                                                                                                      \
+#define CU_CHECK(call)                                                                                                              \
+    do {                                                                                                                            \
+        auto& cu__ = CudaDriverApi::instance();                                                                                     \
+        CUresult status__ = (cu__.call);                                                                                            \
+        if (status__ != CUDA_SUCCESS) {                                                                                             \
+            const char* name__ = nullptr;                                                                                           \
+            const char* desc__ = nullptr;                                                                                           \
+            (void)cu__.cuGetErrorName(status__, &name__);                                                                           \
+            (void)cu__.cuGetErrorString(status__, &desc__);                                                                         \
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": " + #call + " failed with " +      \
+                                     (name__ ? name__ : "<unknown>") + std::string(": ") + (desc__ ? desc__ : "<no description>")); \
+        }                                                                                                                           \
     } while (0)
 
 #define CUDNN_CHECK(call)                                                                                                             \

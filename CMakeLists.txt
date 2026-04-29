@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 # Prefer Boost's own CMake config instead of the deprecated FindBoost module.
 if (POLICY CMP0167)
-    cmake_policy(SET CMP0167 NEW)
+    cmake_policy(SET CMP0167 OLD)
 endif ()
 
 # Read THOR_VERSION from ThorVersion.h.in
@@ -38,6 +38,44 @@ set(THOR_VERSION_NUMERIC "${CMAKE_MATCH_0}")  # "0.1.1"
 
 # 3) Use numeric for CMake's project version
 project(Thor VERSION ${THOR_VERSION_NUMERIC} LANGUAGES CXX CUDA)
+
+
+# ============================================================
+# Thor Python selection
+# ============================================================
+option(THOR_USE_PROJECT_VENV "Use project .venv Python when present" ON)
+
+set(
+        THOR_PYTHON_EXECUTABLE
+        ""
+        CACHE FILEPATH
+        "Python executable to use for Thor Python bindings. Overrides project .venv detection."
+)
+
+set(_thor_selected_python "")
+
+if (THOR_PYTHON_EXECUTABLE)
+    set(_thor_selected_python "${THOR_PYTHON_EXECUTABLE}")
+elseif (DEFINED Python_EXECUTABLE AND Python_EXECUTABLE)
+    set(_thor_selected_python "${Python_EXECUTABLE}")
+elseif (DEFINED Python3_EXECUTABLE AND Python3_EXECUTABLE)
+    set(_thor_selected_python "${Python3_EXECUTABLE}")
+elseif (THOR_USE_PROJECT_VENV AND EXISTS "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
+    set(_thor_selected_python "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
+endif ()
+
+if (_thor_selected_python)
+    set(Python_EXECUTABLE "${_thor_selected_python}" CACHE FILEPATH "Python executable for Thor bindings" FORCE)
+    set(Python3_EXECUTABLE "${_thor_selected_python}" CACHE FILEPATH "Python3 executable for Thor/dependency CMake" FORCE)
+
+    get_filename_component(_thor_python_prefix "${_thor_selected_python}" DIRECTORY)
+    get_filename_component(_thor_python_prefix "${_thor_python_prefix}" DIRECTORY)
+
+    set(Python_ROOT_DIR "${_thor_python_prefix}" CACHE PATH "Python root for Thor bindings" FORCE)
+    set(Python3_ROOT_DIR "${_thor_python_prefix}" CACHE PATH "Python3 root for Thor/dependency CMake" FORCE)
+
+    message(STATUS "Thor: selected Python = ${_thor_selected_python}")
+endif ()
 
 set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
 set(CMAKE_CUDA_COMPILER_LAUNCHER ccache)
@@ -154,7 +192,7 @@ endif ()
 
 target_link_libraries(Thor PRIVATE
         CUDA::cudart
-        CUDA::cuda_driver
+        # CUDA::cuda_driver
         CUDA::cublas
         CUDA::cublasLt
         CUDA::cusolver
@@ -228,11 +266,18 @@ target_link_libraries(Thor PRIVATE ${GM_LDFLAGS_LIST})
 # ============================================================
 # Boost
 # ============================================================
-set(Boost_MIN_VERSION 1.83)
+set(Boost_USE_STATIC_LIBS OFF)
+set(Boost_USE_MULTITHREADED ON)
+set(Boost_USE_STATIC_RUNTIME OFF)
+set(Boost_NO_BOOST_CMAKE ON)
+
+set(Boost_MIN_VERSION 1.66)
 
 # Use Boost's config package (BoostConfig.cmake), not the old FindBoost module.
-find_package(Boost ${Boost_MIN_VERSION} REQUIRED CONFIG)
-
+find_package(Boost ${Boost_MIN_VERSION} REQUIRED COMPONENTS
+        serialization
+        system
+)
 # Header-only: Boost::boost / Boost::headers gives you the include dirs.
 target_link_libraries(Thor PRIVATE Boost::boost)
 
@@ -313,6 +358,9 @@ FetchContent_Declare(zlibng
 set(ZLIB_COMPAT OFF CACHE BOOL "" FORCE)        # want <zlib-ng.h> + zng_* API
 set(ZLIB_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
 
+# Important for manylinux wheels: avoid libz-ng.so.2 / ZLIB_NG_2.0.0 dynamic dependency.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
 # Compile the CLMUL/VPCLMUL codepaths (runtime dispatch still happens)
 set(WITH_PCLMULQDQ ON CACHE BOOL "" FORCE)
 set(WITH_VPCLMULQDQ ON CACHE BOOL "" FORCE)
@@ -321,15 +369,26 @@ FetchContent_MakeAvailable(zlibng)
 
 # Find the actual target name exported by zlib-ng
 set(ZLIBNG_TARGET "")
-foreach (tgt IN ITEMS zlib-ng::zlib-ng zlibstatic-ng zlib-ng zlibstatic)
+foreach (tgt IN ITEMS
+        zlibstatic-ng
+        zlibstatic
+        zlib-ng::zlib-ng-static
+        zlib-ng::zlib-ng
+        zlib-ng
+)
     if (TARGET ${tgt})
         set(ZLIBNG_TARGET ${tgt})
         break()
     endif ()
 endforeach ()
 
-if (ZLIBNG_TARGET STREQUAL "")
-    message(FATAL_ERROR "Couldn't find zlib-ng CMake target after FetchContent.")
+get_target_property(_zng_type ${ZLIBNG_TARGET} TYPE)
+message(STATUS "Thor: using zlib-ng target ${ZLIBNG_TARGET} of type ${_zng_type}")
+
+if (_zng_type STREQUAL "SHARED_LIBRARY")
+    message(FATAL_ERROR
+            "Thor wheel builds must not link shared zlib-ng because auditwheel rejects ZLIB_NG_* "
+            "symbol versions. Use a static zlib-ng target instead.")
 endif ()
 
 # ---- Hard guarantee at CONFIGURE time (compile-only checks, no linking to CMake targets) ----
@@ -428,24 +487,32 @@ target_compile_options(thor_tests PRIVATE
 # ============================================================
 # Install & Export for find_package()
 # ============================================================
-install(TARGETS Thor
-        EXPORT ThorTargets
-        LIBRARY DESTINATION lib
-        ARCHIVE DESTINATION lib
-        RUNTIME DESTINATION bin
-        INCLUDES DESTINATION include
-)
-install(FILES
-        "${CMAKE_BINARY_DIR}/generated/Thor.h"
-        "${CMAKE_BINARY_DIR}/generated/ThorVersion.h"
-        DESTINATION include
-)
+if (NOT DEFINED SKBUILD_PROJECT_NAME)
+    install(TARGETS Thor
+            EXPORT ThorTargets
+            LIBRARY DESTINATION lib
+            ARCHIVE DESTINATION lib
+            RUNTIME DESTINATION bin
+            INCLUDES DESTINATION include
+    )
+    install(FILES
+            "${CMAKE_BINARY_DIR}/generated/Thor.h"
+            "${CMAKE_BINARY_DIR}/generated/ThorVersion.h"
+            DESTINATION include
+    )
 
-install(EXPORT ThorTargets
-        FILE ThorTargets.cmake
-        NAMESPACE Thor::
-        DESTINATION lib/cmake/Thor
-)
+    install(EXPORT ThorTargets
+            FILE ThorTargets.cmake
+            NAMESPACE Thor::
+            DESTINATION lib/cmake/Thor
+    )
+
+    install(FILES
+            ${CMAKE_BINARY_DIR}/ThorConfig.cmake
+            ${CMAKE_BINARY_DIR}/ThorConfigVersion.cmake
+            DESTINATION lib/cmake/Thor
+    )
+endif ()
 
 include(CMakePackageConfigHelpers)
 write_basic_package_version_file(
@@ -458,12 +525,6 @@ configure_package_config_file(
         ${CMAKE_SOURCE_DIR}/cmake/ThorConfig.cmake.in
         ${CMAKE_BINARY_DIR}/ThorConfig.cmake
         INSTALL_DESTINATION lib/cmake/Thor
-)
-
-install(FILES
-        ${CMAKE_BINARY_DIR}/ThorConfig.cmake
-        ${CMAKE_BINARY_DIR}/ThorConfigVersion.cmake
-        DESTINATION lib/cmake/Thor
 )
 
 include(CheckCXXCompilerFlag)
@@ -509,28 +570,28 @@ add_custom_command(
 add_custom_target(ThorHeader ALL DEPENDS ${CMAKE_BINARY_DIR}/generated/Thor.h)
 add_dependencies(Thor ThorHeader)
 
-set(_thor_venv_python "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
-message(STATUS "Thor: using project venv Python at ${_thor_venv_python}")
 
-# Clear old cached Python detection (3.9, etc.)
-unset(Python3_EXECUTABLE CACHE)
-unset(Python3_LIBRARY CACHE)
-unset(Python3_INCLUDE_DIR CACHE)
-unset(Python_EXECUTABLE CACHE)
-unset(Python_LIBRARY CACHE)
-unset(Python_INCLUDE_DIR CACHE)
-
-set(Python3_EXECUTABLE "${_thor_venv_python}" CACHE FILEPATH "Python3 executable for Thor bindings" FORCE)
-set(Python_EXECUTABLE "${_thor_venv_python}" CACHE FILEPATH "Python executable for Thor bindings (nanobind)" FORCE)
-
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 
 execute_process(
-        COMMAND "${Python3_EXECUTABLE}" -m nanobind --cmake_dir
+        COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
         OUTPUT_VARIABLE nanobind_ROOT
+        RESULT_VARIABLE _thor_nanobind_result
+        ERROR_VARIABLE _thor_nanobind_error
         OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
+if (NOT _thor_nanobind_result EQUAL 0)
+    message(FATAL_ERROR
+            "Failed to locate nanobind using Python executable:\n"
+            "  ${Python_EXECUTABLE}\n"
+            "stderr:\n"
+            "${_thor_nanobind_error}\n"
+            "Install nanobind into that Python environment."
+    )
+endif ()
+
+list(APPEND CMAKE_PREFIX_PATH "${nanobind_ROOT}")
 find_package(nanobind CONFIG REQUIRED)
 
 option(THOR_BUILD_PYTHON "Build Python bindings" ON)

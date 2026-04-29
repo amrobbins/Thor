@@ -61,6 +61,7 @@ class EquationCompiler {
     static std::shared_ptr<CompiledEquation> compileSpecializedBroadcastStage(const CompiledExecutionStage& stage,
                                                                               const EquationSignature& sig,
                                                                               const std::vector<SpecializedBroadcastGroup>& groups);
+    static std::string getCudaIncludeDir();
 };
 
 }  // namespace ThorImplementation

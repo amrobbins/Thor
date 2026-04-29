@@ -7,27 +7,29 @@ requires = [
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "thor"
+name = "thor-cuda"
 dynamic = ["version"]
 description = "Thor deep learning framework (C++/CUDA) Python bindings"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { file = "../../LICENSE" }
 authors = [
     { name = "Andrew Robbins" },
 ]
 dependencies = [
     "numpy>=2.3.4",
-    "ml_dtypes>=0.5.4"
+    "ml_dtypes>=0.5.4",
+    "nvidia-cuda-runtime>=13,<14",
+    "nvidia-cuda-nvrtc>=13,<14",
+    "nvidia-cublas>=13,<14",
+    "nvidia-nvjitlink>=13,<14",
+    "nvidia-cudnn-cu13>=9,<10",
 ]
+readme = { file = "README.md", content-type = "text/markdown" }
 
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: C++",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",

@@ -82,38 +82,13 @@ class Stream : private ReferenceCounted {
         return event;
     }
 
-    void waitEvent(Event event) const {
-        assert(!uninitialized());
+    void waitEvent(Event event) const;
 
-        ScopedGpu scopedGpu(gpuNum);
+    void synchronize() const;
 
-        cudaError_t cudaStatus = cudaStreamWaitEvent(cudaStream, event.getEvent(), 0);
-        assert(cudaStatus == cudaSuccess);
-    }
+    static void deviceSynchronize(int gpuNum);
 
-    void synchronize() const {
-        assert(!uninitialized());
-
-        cudaError_t cudaStatus = cudaStreamSynchronize(cudaStream);
-        if (cudaStatus != cudaSuccess) {
-            printf("cuda error on stream synchronize. cudaStatus = %d : %s\n", cudaStatus, cudaGetErrorString(cudaStatus));
-            fflush(stdout);
-        }
-        assert(cudaStatus == cudaSuccess);
-    }
-
-    static void deviceSynchronize(int gpuNum) {
-        ScopedGpu scopedGpu(gpuNum);
-        cudaError_t cudaStatus = cudaDeviceSynchronize();
-        assert(cudaStatus == cudaSuccess);
-    }
-
-    void enqueueHostFunction(cudaHostFn_t function, std::unique_ptr<HostFunctionArgsBase> &&args) {
-        cudaError_t cudaStatus;
-        cudaStatus = cudaLaunchHostFunc(*this, function, args.get());
-        assert(cudaStatus == cudaSuccess);
-        launchCleanUpHostFunctionArgs(std::move(args));
-    }
+    void enqueueHostFunction(cudaHostFn_t function, std::unique_ptr<HostFunctionArgsBase> &&args);
 
     cudnnHandle_t getCudnnHandle() const {
         assert(!uninitialized());
@@ -202,33 +177,7 @@ class Stream : private ReferenceCounted {
     void launchCleanUpHostFunctionArgs(std::unique_ptr<HostFunctionArgsBase> &&args);
 
    private:
-    void construct(int gpuNum, Priority priority) {
-        ReferenceCounted::initialize();
-
-        cudnnHandle = new Optional<cudnnHandle_t>;
-        cublasHandle = new Optional<cublasHandle_t>;
-        mtx = new std::mutex;
-
-        ScopedGpu scopedGpu(gpuNum);
-        cudaError_t cudaStatus;
-        this->gpuNum = gpuNum;
-
-        // greatestPriority is given the highest priority in terms of execution, and its numerical value is the minimum of the allowed
-        // range.
-        int leastPriority, greatestPriority;
-        cudaStatus = cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority);
-        assert(cudaStatus == cudaSuccess);
-        int priorityValue;
-        if (priority == Priority::HIGH)
-            priorityValue = greatestPriority;
-        else if (priority == Priority::REGULAR)
-            priorityValue = greatestPriority + 1;
-        else
-            priorityValue = greatestPriority + 2;
-
-        cudaStatus = cudaStreamCreateWithPriority(&cudaStream, cudaStreamNonBlocking, priorityValue);
-        assert(cudaStatus == cudaSuccess);
-    }
+    void construct(int gpuNum, Priority priority);
 
     void copyFrom(const Stream &other) {
         *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
@@ -241,41 +190,7 @@ class Stream : private ReferenceCounted {
         mtx = other.mtx;
     }
 
-    void destroy() {
-        // If this is a static stream, it is too late to free cuda resources, or interact with cuda, when it is destroyed.
-        // Doesn't much matter as the program is exiting anyway.
-        if (!isStatic) {
-            ScopedGpu scopedGpu(gpuNum);
-
-            // can't destroy the cudnn handle at the point when the static string is destroyed
-            if (cudnnHandle->isPresent()) {
-                numCudnnHandles -= 1;
-
-                cudnnStatus_t cudnnStatus;
-                cudnnStatus = cudnnDestroy(*cudnnHandle);
-                assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            }
-
-            if (cublasHandle->isPresent()) {
-                numCublasHandles -= 1;
-
-                cublasStatus_t cublasStatus;
-                cublasStatus = cublasDestroy(*cublasHandle);
-                assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-            }
-
-            cudaError_t cudaStatus;
-            cudaStatus = cudaStreamDestroy(cudaStream);
-            assert(cudaStatus == cudaSuccess);
-
-            delete cudnnHandle;
-            cudnnHandle = nullptr;
-            delete cublasHandle;
-            cublasHandle = nullptr;
-        }
-        delete mtx;
-        mtx = nullptr;
-    }
+    void destroy();
 
    private:
     int gpuNum;

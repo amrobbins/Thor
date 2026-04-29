@@ -6,27 +6,69 @@ This wraps the native nanobind extension `thor._thor` and re-exports its public 
 
 from __future__ import annotations
 
+import ctypes
+import os
+from pathlib import Path
+
+
+def _find_site_packages_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _configure_cuda_include_dir() -> None:
+    if "THOR_CUDA_INCLUDE_DIR" in os.environ:
+        return
+
+    here = Path(__file__).resolve()
+    site_packages = _find_site_packages_root()
+
+    candidates = [
+        site_packages / "nvidia" / "cu13" / "include",
+        site_packages / "nvidia" / "cuda_runtime" / "include",
+    ]
+
+    for candidate in candidates:
+        if (candidate / "vector_types.h").exists():
+            os.environ.setdefault("THOR_CUDA_INCLUDE_DIR", str(candidate))
+            return
+
+
+def _preload_cuda_user_space_libs() -> None:
+    site_packages = _find_site_packages_root()
+
+    lib_dirs = [
+        site_packages / "nvidia" / "cu13" / "lib",
+        site_packages / "nvidia" / "cudnn" / "lib",
+    ]
+
+    libs = [
+        "libcudart.so.13",
+        "libnvrtc.so.13",
+        "libnvJitLink.so.13",
+        "libcublas.so.13",
+        "libcublasLt.so.13",
+        "libcusolver.so.13",
+        "libcusparse.so.13",
+        "libnvrtc-builtins.so.13.2",
+        "libcudnn.so.9",
+    ]
+
+    rtld_global = getattr(os, "RTLD_GLOBAL", 0)
+
+    for lib_dir in lib_dirs:
+        if not lib_dir.is_dir():
+            continue
+        for lib in libs:
+            p = lib_dir / lib
+            if p.exists():
+                try:
+                    ctypes.CDLL(str(p), mode=rtld_global)
+                except OSError:
+                    pass
+
+
+_configure_cuda_include_dir()
+_preload_cuda_user_space_libs()
+
 from ._thor import *
 from ._thor import __version__, __git_version__
-
-# from . import _thor as _native
-#
-# # Expose native submodules at the top-level (keeps the old UX: thor.layers, thor.activations, etc.)
-# activations = _native.activations
-# initializers = _native.initializers
-# layers = _native.layers
-# losses = _native.losses
-# metrics = _native.metrics
-# optimizers = _native.optimizers
-#
-# del _native
-
-# Make `import thor.layers` work too (not just attribute access).
-# import sys as _sys
-# _sys.modules[__name__ + ".activations"] = activations
-# _sys.modules[__name__ + ".initializers"] = initializers
-# _sys.modules[__name__ + ".layers"] = layers
-# _sys.modules[__name__ + ".losses"] = losses
-# _sys.modules[__name__ + ".metrics"] = metrics
-# _sys.modules[__name__ + ".optimizers"] = optimizers
-# del _sys

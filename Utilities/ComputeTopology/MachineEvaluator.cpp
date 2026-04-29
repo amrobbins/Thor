@@ -1,4 +1,5 @@
 #include "MachineEvaluator.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 using namespace std;
 
@@ -6,12 +7,9 @@ const int MachineEvaluator::NONE = -10;
 const int MachineEvaluator::CPU_DEVICE_NUM = -1;
 
 MachineEvaluator::MachineEvaluator() {
-    cudaError_t cudaStatus;
-
-    int iNumGpus = (int)numGpus;
-    cudaStatus = cudaGetDeviceCount(&iNumGpus);
+    int iNumGpus;
+    CUDA_CHECK(cudaGetDeviceCount(&iNumGpus));
     numGpus = (unsigned int)iNumGpus;
-    assert(cudaStatus == cudaSuccess);
 
     getDeviceProps();
 
@@ -42,8 +40,7 @@ MachineEvaluator::~MachineEvaluator() {
 
 int MachineEvaluator::getCurrentGpuNum() {
     int curGpuNum;
-    cudaError_t cudaStatus = cudaGetDevice(&curGpuNum);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaGetDevice(&curGpuNum));
     return curGpuNum;
 }
 
@@ -63,15 +60,11 @@ bool MachineEvaluator::isPeerToPeerAvailable(int sourceGpuNum, int destGpuNum) {
 }
 
 void MachineEvaluator::evaluateConnectionSpeeds() {
-    cudaError_t cudaStatus;
-
     int previousGpu;
-    cudaStatus = cudaGetDevice(&previousGpu);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaGetDevice(&previousGpu));
 
     for (unsigned int i = 0; i < numGpus; ++i) {
-        cudaStatus = cudaSetDevice(i);
-        assert(cudaStatus == cudaSuccess);
+        CUDA_CHECK(cudaSetDevice(i));
 
         for (unsigned int j = 0; j < numGpus; ++j) {
             if (i == j)
@@ -79,14 +72,11 @@ void MachineEvaluator::evaluateConnectionSpeeds() {
 
             int perfRank = 0;
             int accessSupported = 0;
-            cudaStatus = cudaDeviceGetP2PAttribute(&accessSupported, cudaDevP2PAttrAccessSupported, i, j);
-            assert(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaDeviceGetP2PAttribute(&accessSupported, cudaDevP2PAttrAccessSupported, i, j));
             if (accessSupported) {
-                cudaStatus = cudaDeviceEnablePeerAccess(j, 0);
-                assert(cudaStatus == cudaSuccess);
+                CUDA_CHECK(cudaDeviceEnablePeerAccess(j, 0));
             }
-            cudaStatus = cudaDeviceGetP2PAttribute(&perfRank, cudaDevP2PAttrPerformanceRank, i, j);
-            assert(cudaStatus == cudaSuccess);
+            CUDA_CHECK(cudaDeviceGetP2PAttribute(&perfRank, cudaDevP2PAttrPerformanceRank, i, j));
 
             GpuConnectionRanking connectionRanking;
             connectionRanking.peerGpuNum = j;
@@ -98,8 +88,7 @@ void MachineEvaluator::evaluateConnectionSpeeds() {
         std::sort(connectionRankings[i].begin(), connectionRankings[i].end());
     }
 
-    cudaStatus = cudaSetDevice(previousGpu);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaSetDevice(previousGpu));
 }
 
 void MachineEvaluator::getGpuTypes() {
@@ -109,23 +98,18 @@ void MachineEvaluator::getGpuTypes() {
 }
 
 void MachineEvaluator::getDeviceProps() {
-    cudaError_t cudaStatus;
-
     int previousGpu;
-    cudaStatus = cudaGetDevice(&previousGpu);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaGetDevice(&previousGpu));
 
     for (unsigned int i = 0; i < numGpus; ++i) {
-        cudaStatus = cudaSetDevice(i);
-        assert(cudaStatus == cudaSuccess);
+        CUDA_CHECK(cudaSetDevice(i));
 
         cudaDeviceProp deviceProp;
         cudaGetDeviceProperties(&deviceProp, i);
         deviceProps.push_back(deviceProp);
     }
 
-    cudaStatus = cudaSetDevice(previousGpu);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaSetDevice(previousGpu));
 }
 
 void MachineEvaluator::getGpuPciBusIds() {
@@ -182,17 +166,13 @@ int MachineEvaluator::getAdjacentLowerGpu(int gpuNum) {
 }
 
 int MachineEvaluator::swapActiveDevice(int newGpuNum) {
-    cudaError_t cudaStatus;
     int deviceCount;
-    cudaStatus = cudaGetDeviceCount(&deviceCount);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
     assert(newGpuNum < deviceCount);
 
     int previousGpuNum;
-    cudaStatus = cudaGetDevice(&previousGpuNum);
-    assert(cudaStatus == cudaSuccess);
-    cudaStatus = cudaSetDevice(newGpuNum);
-    assert(cudaStatus == cudaSuccess);
+    CUDA_CHECK(cudaGetDevice(&previousGpuNum));
+    CUDA_CHECK(cudaSetDevice(newGpuNum));
 
     return previousGpuNum;
 }
@@ -216,7 +196,7 @@ unsigned long MachineEvaluator::getFreeMemBytes(int gpuNum) {
     ScopedGpu scopedGpu(gpuNum);
     size_t freeMemBytes;
     size_t totalMemBytes;
-    cudaMemGetInfo(&freeMemBytes, &totalMemBytes);
+    CUDA_CHECK(cudaMemGetInfo(&freeMemBytes, &totalMemBytes));
     return freeMemBytes;
 }
 

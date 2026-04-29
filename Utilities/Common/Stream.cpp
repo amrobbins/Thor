@@ -1,4 +1,5 @@
 #include "Utilities/Common/Stream.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 using namespace std;
 
@@ -156,4 +157,87 @@ void cleanUpHostFunctionArgs(Stream stream, unique_ptr<HostFunctionArgsBase> &&a
 void Stream::launchCleanUpHostFunctionArgs(unique_ptr<HostFunctionArgsBase> &&args) {
     ThreadJoinQueue::instance().push(thread(&cleanUpHostFunctionArgs, *this, std::move(args)));
     assert(args == nullptr);
+}
+
+void Stream::waitEvent(Event event) const {
+    assert(!uninitialized());
+
+    ScopedGpu scopedGpu(gpuNum);
+
+    CUDA_CHECK(cudaStreamWaitEvent(cudaStream, event.getEvent(), 0));
+}
+
+void Stream::synchronize() const {
+    assert(!uninitialized());
+
+    CUDA_CHECK(cudaStreamSynchronize(cudaStream));
+}
+
+void Stream::deviceSynchronize(int gpuNum) {
+    ScopedGpu scopedGpu(gpuNum);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void Stream::enqueueHostFunction(cudaHostFn_t function, std::unique_ptr<HostFunctionArgsBase> &&args) {
+    CUDA_CHECK(cudaLaunchHostFunc(*this, function, args.get()));
+    launchCleanUpHostFunctionArgs(std::move(args));
+}
+
+void Stream::construct(int gpuNum, Priority priority) {
+    ReferenceCounted::initialize();
+
+    cudnnHandle = new Optional<cudnnHandle_t>;
+    cublasHandle = new Optional<cublasHandle_t>;
+    mtx = new std::mutex;
+
+    ScopedGpu scopedGpu(gpuNum);
+    this->gpuNum = gpuNum;
+
+    // greatestPriority is given the highest priority in terms of execution, and its numerical value is the minimum of the allowed
+    // range.
+    int leastPriority, greatestPriority;
+    CUDA_CHECK(cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
+    int priorityValue;
+    if (priority == Priority::HIGH)
+        priorityValue = greatestPriority;
+    else if (priority == Priority::REGULAR)
+        priorityValue = greatestPriority + 1;
+    else
+        priorityValue = greatestPriority + 2;
+
+    CUDA_CHECK(cudaStreamCreateWithPriority(&cudaStream, cudaStreamNonBlocking, priorityValue));
+}
+
+void Stream::destroy() {
+    // If this is a static stream, it is too late to free cuda resources, or interact with cuda, when it is destroyed.
+    // Doesn't much matter as the program is exiting anyway.
+    if (!isStatic) {
+        ScopedGpu scopedGpu(gpuNum);
+
+        // can't destroy the cudnn handle at the point when the static string is destroyed
+        if (cudnnHandle->isPresent()) {
+            numCudnnHandles -= 1;
+
+            cudnnStatus_t cudnnStatus;
+            cudnnStatus = cudnnDestroy(*cudnnHandle);
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        }
+
+        if (cublasHandle->isPresent()) {
+            numCublasHandles -= 1;
+
+            cublasStatus_t cublasStatus;
+            cublasStatus = cublasDestroy(*cublasHandle);
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        }
+
+        CUDA_CHECK(cudaStreamDestroy(cudaStream));
+
+        delete cudnnHandle;
+        cudnnHandle = nullptr;
+        delete cublasHandle;
+        cublasHandle = nullptr;
+    }
+    delete mtx;
+    mtx = nullptr;
 }
