@@ -297,7 +297,7 @@ CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const
     PhysicalTensorMap fakeParameterTensors;
     for (const auto& apiParameter : parameters) {
         std::shared_ptr<ThorImplementation::PhysicalParameter> physicalParameter = apiParameter->stamp();
-        physicalParameter->compileStorageAndOptimizer(fakeStorageContext, Optional<Stream>::empty(), true);
+        physicalParameter->compileStorage(fakeStorageContext);
         Optional<PhysicalTensor> storage = physicalParameter->getStorage();
         if (!storage.isPresent()) {
             throw std::runtime_error("CustomLayer failed to infer parameter storage for '" + apiParameter->getName() + "'.");

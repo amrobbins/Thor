@@ -10,18 +10,16 @@ UniformRandom::UniformRandom(float maxValue, float minValue) : maxValue(maxValue
     assert(maxValue >= minValue);
 }
 
-Event UniformRandom::initialize() {
+void UniformRandom::initialize(Stream initStream) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    const uint32_t weightsGpuNum = weights.getPlacement().getDeviceNum();
-    Stream initStream = stream.isPresent() ? stream.get() : Stream::getNextGradientUpdateStream(weightsGpuNum);
     Tensor buffer = weights.clone(cpuPlacement);
 
     bool constant = minValue == maxValue;
     if (constant) {
         weights.fill(minValue, initStream);
-        return initStream.putEvent();
+        return;
     }
- uint64_t totalNumWeights = weights.getDescriptor().getTotalNumElements();
+    uint64_t totalNumWeights = weights.getDescriptor().getTotalNumElements();
     uint64_t numProcessors = omp_get_num_procs();
     if (numProcessors > 1)
         numProcessors -= 1;
@@ -58,8 +56,6 @@ Event UniformRandom::initialize() {
     }
 
     weights.copyFromAsync(buffer, initStream);
-    Event tensorInitializedEvent = initStream.putEvent();
-    return tensorInitializedEvent;
 }
 
 shared_ptr<Initializer> UniformRandom::clone() { return make_shared<UniformRandom>(*this); }

@@ -28,6 +28,10 @@ class Sgd final : public Optimizer {
     bool getUseNesterovMomentum() const;
     uint64_t getEpoch() const;
 
+    std::shared_ptr<Optimizer> clone() const override {
+        return std::make_shared<Sgd>(getId(), initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+    }
+
    protected:
     float initialLearningRate;
     float decay;
@@ -37,10 +41,6 @@ class Sgd final : public Optimizer {
     uint64_t currentEpoch = UINT64_MAX;
     uint64_t currentBatch;
     float currentLearningRate;
-
-    Optional<Tensor> momentumBuffer;
-
-    DynamicExpression buildExpression() override;
 };
 
 }  // namespace ThorImplementation

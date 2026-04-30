@@ -1,9 +1,9 @@
 #pragma once
 
-#include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Parameter/Parameterizable.h"
+
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
-#include "Utilities/Common/CudnnHelper.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/StampedEquation.h"
 
@@ -12,18 +12,9 @@
 
 namespace ThorImplementation {
 
-class Optimizer {
+class Optimizer : public Parameterizable {
    public:
     using DataType = TensorDescriptor::DataType;
-
-    // Optimizer(uint64_t id, const Tensor &parameters, DynamicExpression optimizerExpression)
-    //     : parameters(parameters),
-    //       gradientUpdateStream(Stream::getNextGradientUpdateStream(parameters.getPlacement().getDeviceNum())),
-    //       id(id) {
-    //     assert(parameters.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    // }
-
-    // Does physical optimizer take weights and grads in constructor or compile? -> during compile.
 
     Optimizer(uint64_t id) : id(id) {}
 
@@ -83,6 +74,8 @@ class Optimizer {
 
     Optional<Tensor> getWeightsGradient() { return weightsGradient; }
 
+    virtual std::shared_ptr<Optimizer> clone() const = 0;
+
    protected:
     Tensor weights;
     Stream gradientUpdateStream;
@@ -91,7 +84,6 @@ class Optimizer {
     Optional<Tensor> weightsGradient;
 
     std::unique_ptr<StampedExecutionPlan> updateEquationStamped;
-    virtual DynamicExpression buildExpression() = 0;
 
    private:
     const uint64_t id;

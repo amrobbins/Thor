@@ -14,27 +14,26 @@ PhysicalParameter::PhysicalParameter(string name,
                                      const TensorDescriptor::DataType dtype)
     : name(std::move(name)), trainable(trainable), trainingEnabled(trainable), shape(shape), dtype(dtype) {}
 
-void PhysicalParameter::compileStorageAndOptimizer(const StorageContext& context,
-                                                   const Optional<Stream>& gradientUpdateStream,
-                                                   bool inferenceOnly) {
-    this->gradientUpdateStream = gradientUpdateStream;
-    if (inferenceOnly)
-        trainingEnabled = false;
-
+void PhysicalParameter::compileStorage(const StorageContext& context) {
     createStorage(context);
-
-    if (isTrainable() && !inferenceOnly) {
-        assert(hasOptimizer());
-        assert(gradientUpdateStream.isPresent());
-        optimizer->compile(storage, gradientUpdateStream.get());
-    }
     storageInitialized = true;
 }
 
-void PhysicalParameter::compileStorageAndOptimizer(const Tensor& inputTensor,
-                                                   const Optional<Stream>& gradientUpdateStream,
-                                                   bool inferenceOnly) {
-    compileStorageAndOptimizer(StorageContext({{"feature_input", inputTensor}}), gradientUpdateStream, inferenceOnly);
+void PhysicalParameter::compileStorage(const Tensor& inputTensor) { compileStorage(StorageContext({{"feature_input", inputTensor}})); }
+
+void PhysicalParameter::compileOptimizer(const Optional<Stream>& gradientUpdateStream, bool inferenceOnly) {
+    assert(trainable == true);
+    this->inferenceOnly = inferenceOnly;
+    this->gradientUpdateStream = gradientUpdateStream;
+
+    if (isTrainingEnabled()) {
+        assert(hasOptimizer());
+        assert(this->gradientUpdateStream.isPresent());
+        assert(storage.isPresent());
+        if (!optimizer->isCompiled()) {
+            optimizer->compile(storage, this->gradientUpdateStream.get());
+        }
+    }
 }
 
 void PhysicalParameter::compileInitializer(uint64_t fanIn, uint64_t fanOut) {
@@ -42,19 +41,16 @@ void PhysicalParameter::compileInitializer(uint64_t fanIn, uint64_t fanOut) {
         return;
     }
 
-    Stream initStream = gradientUpdateStream.isPresent()
-                            ? gradientUpdateStream.get()
-                            : Stream::getMostRecentGradientUpdateStream(storage.get().getPlacement().getDeviceNum());
-
-    initializer->compile(storage, initStream, fanIn, fanOut);
+    initializer->compile(storage, fanIn, fanOut);
 }
+
+void PhysicalParameter::compileInitializer() { compileInitializer(1, 1); }
 
 void PhysicalParameter::clearStorage() { storage.clear(); }
 
-Event PhysicalParameter::initialize() {
+void PhysicalParameter::initialize(Stream initStream) {
     assert(hasInitializer());
-    Event initReadyEvent = initializer->initialize();
-    return initReadyEvent;
+    initializer->initialize(initStream);
 }
 
 bool PhysicalParameter::applyGradient(uint32_t batchSize) {
@@ -68,11 +64,25 @@ bool PhysicalParameter::applyGradient(uint32_t batchSize) {
 
 bool PhysicalParameter::hasOptimizer() { return optimizer != nullptr; }
 void PhysicalParameter::setOptimizer(Optional<shared_ptr<Optimizer>> newOptimizer) { this->optimizer = newOptimizer; }
+// void PhysicalParameter::setOptimizer(const Optional<shared_ptr<Optimizer>>& newOptimizer) {
+//     if (newOptimizer.isPresent() && newOptimizer.get() != nullptr) {
+//         this->optimizer = newOptimizer.get()->clone();
+//     } else {
+//         this->optimizer = nullptr;
+//     }
+// }
 shared_ptr<Optimizer> PhysicalParameter::getOptimizer() { return optimizer; }
 void PhysicalParameter::clearOptimizer() { optimizer = nullptr; }
 
 bool PhysicalParameter::hasInitializer() { return initializer != nullptr; }
 void PhysicalParameter::setInitializer(Optional<shared_ptr<Initializer>> newInitializer) { this->initializer = newInitializer; }
+// void PhysicalParameter::setInitializer(const Optional<shared_ptr<Initializer>>& newInitializer) {
+//     if (newInitializer.isPresent() && newInitializer.get() != nullptr) {
+//         this->initializer = newInitializer.get()->clone();
+//     } else {
+//         this->initializer = nullptr;
+//     }
+// }
 shared_ptr<Initializer> PhysicalParameter::getInitializer() { return initializer; }
 void PhysicalParameter::clearInitializer() { initializer = nullptr; }
 
@@ -80,7 +90,7 @@ string PhysicalParameter::getName() const { return name; }
 Optional<Tensor> PhysicalParameter::getStorage() { return storage; }
 
 bool PhysicalParameter::isTrainable() const { return trainable; }
-bool PhysicalParameter::isTrainingEnabled() const { return isTrainable() && trainingEnabled; }
+bool PhysicalParameter::isTrainingEnabled() const { return isTrainable() && trainingEnabled && !inferenceOnly; }
 void PhysicalParameter::setTrainingEnabled(bool enabled) {
     assert(isTrainable());
 

@@ -112,11 +112,11 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
 
         shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
         assert(physicalAdam != nullptr);
-        Optional<ThorImplementation::Tensor> m = physicalAdam->getM();
+        Optional<ThorImplementation::Tensor> m = physicalAdam->getParameter("m")->getStorage();
         if (m.isPresent())
             archiveWriter.addArchiveFile(mFile, m);
 
-        Optional<ThorImplementation::Tensor> v = physicalAdam->getV();
+        Optional<ThorImplementation::Tensor> v = physicalAdam->getParameter("v")->getStorage();
         if (v.isPresent())
             archiveWriter.addArchiveFile(vFile, v);
 
@@ -175,8 +175,8 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
     shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
     assert(physicalAdam != nullptr);
 
-    ThorImplementation::Tensor m = physicalAdam->getM();
-    ThorImplementation::Tensor v = physicalAdam->getV();
+    ThorImplementation::Tensor m = physicalAdam->getParameter("m")->getStorage();
+    ThorImplementation::Tensor v = physicalAdam->getParameter("v")->getStorage();
     Stream stream = physicalAdam->getGradientUpdateStream();
 
     // Parameter values are initialized right now, based on 1 of 3 methods:
@@ -191,8 +191,8 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
             stream.waitEvent(sisterOptimizerLoadedEvent);
         shared_ptr<ThorImplementation::Adam> sisterPhysicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(sisterPhysicalOptimizer);
         assert(sisterPhysicalAdam != nullptr);
-        m.copyFromAsync(sisterPhysicalAdam->getM(), stream);
-        v.copyFromAsync(sisterPhysicalAdam->getV(), stream);
+        m.copyFromAsync(sisterPhysicalAdam->getParameter("m")->getStorage(), stream);
+        v.copyFromAsync(sisterPhysicalAdam->getParameter("v")->getStorage(), stream);
     } else if (mFile.isPresent()) {
         assert(vFile.isPresent());
         assert(archiveReader != nullptr);

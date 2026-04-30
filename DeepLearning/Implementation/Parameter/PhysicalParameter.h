@@ -83,14 +83,11 @@ class PhysicalParameter {
                       const std::vector<uint64_t> &shape,
                       const TensorDescriptor::DataType dtype);  // Later add constraint here
 
-    // Remember this is called by API layer so that will hand over the optimizer
-    // 1. Create storage given featureInput(s) 2. Compile the optimizer
-    virtual void compileStorageAndOptimizer(const StorageContext &context,
-                                            const Optional<Stream> &gradientUpdateStream,
-                                            bool inferenceOnly);
-    virtual void compileStorageAndOptimizer(const Tensor &inputTensor, const Optional<Stream> &gradientUpdateStream, bool inferenceOnly);
-
-    void compileInitializer(uint64_t fanIn = 0, uint64_t fanOut = 0);
+    virtual void compileStorage(const StorageContext &context);
+    virtual void compileStorage(const Tensor &inputTensor);
+    void compileInitializer(uint64_t fanIn, uint64_t fanOut);
+    void compileInitializer();
+    virtual void compileOptimizer(const Optional<Stream> &gradientUpdateStream, bool inferenceOnly);
 
     virtual void createStorage(const StorageContext &context);
     static Tensor allocateStorage(const TensorPlacement placement,
@@ -98,7 +95,7 @@ class PhysicalParameter {
                                   const TensorDescriptor::DataType dtype);
     void clearStorage();
 
-    Event initialize();
+    void initialize(Stream initStream);
 
     // Parameters are not responsible for computing output gradient, expressions compute the gradients.
     bool applyGradient(uint32_t batchSize);
@@ -134,6 +131,7 @@ class PhysicalParameter {
     Optional<Tensor> storage;
     const bool trainable;
     bool trainingEnabled;
+    bool inferenceOnly = false;
     bool expressionBased = false;
     bool needExpressionRecompile = false;
 

@@ -14,13 +14,13 @@ class Glorot : public Initializer {
 
     Glorot(Mode mode = Mode::UNIFORM);
 
-    Event initialize() override;
+    void initialize(Stream initStream) override;
 
     std::shared_ptr<Initializer> clone() override;
 
    protected:
-    virtual Event initializeUniform();
-    virtual Event initializeNormal();
+    virtual void initializeUniform(Stream initStream);
+    virtual void initializeNormal(Stream initStream);
 
     const Mode mode;
 };

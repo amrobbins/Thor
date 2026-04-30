@@ -6,19 +6,17 @@ namespace ThorImplementation {
 
 Glorot::Glorot(Mode mode) : mode(mode) { assert(mode == Mode::UNIFORM || mode == Mode::NORMAL); }
 
-Event Glorot::initialize() {
+void Glorot::initialize(Stream initStream) {
     if (mode == Mode::UNIFORM) {
-        return initializeUniform();
+        initializeUniform(initStream);
     } else {
-        return initializeNormal();
+        initializeNormal(initStream);
     }
 }
 
-Event Glorot::initializeUniform() {
+void Glorot::initializeUniform(Stream initStream) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    const uint32_t weightsGpuNum = weights.getPlacement().getDeviceNum();
     Tensor buffer = weights.clone(cpuPlacement);
- Stream initStream = stream.isPresent() ? stream.get() : Stream::getNextGradientUpdateStream(weightsGpuNum);
 
     uint64_t totalNumWeights = weights.getDescriptor().getTotalNumElements();
     uint64_t numProcessors = omp_get_num_procs();
@@ -60,16 +58,11 @@ Event Glorot::initializeUniform() {
     }
 
     weights.copyFromAsync(buffer, initStream);
-    Event tensorInitializedEvent = initStream.putEvent();
-    return tensorInitializedEvent;
 }
 
-Event Glorot::initializeNormal() {
+void Glorot::initializeNormal(Stream initStream) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    const uint32_t weightsGpuNum = weights.getPlacement().getDeviceNum();
     Tensor buffer = weights.clone(cpuPlacement);
-
-    Stream initStream = stream.isPresent() ? stream.get() : Stream::getNextGradientUpdateStream(weightsGpuNum);
 
     float mean = 0.0;
     double variance = 2.0 / static_cast<double>(layerFanIn + layerFanOut);
@@ -109,8 +102,6 @@ Event Glorot::initializeNormal() {
         }
     }
     weights.copyFromAsync(buffer, initStream);
-    Event tensorInitializedEvent = initStream.putEvent();
-    return tensorInitializedEvent;
 }
 
 shared_ptr<Initializer> Glorot::clone() { return make_shared<Glorot>(*this); }

@@ -137,12 +137,12 @@ void CublasMatrixMultiply::gemm(Tensor A,
     assert(ld_B >= B_cols);
     assert(ld_C >= C_cols);
     assert(ld_D >= D_cols);
-    // Check dataType of tensors
-    assert(A.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 ||
-           A.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-    assert(A.getDescriptor().getDataType() == B.getDescriptor().getDataType());
-    assert(A.getDescriptor().getDataType() == C.getDescriptor().getDataType());
-    assert(A.getDescriptor().getDataType() == D.getDescriptor().getDataType());
+    // Check dataType of tensors. This legacy overload supports same-type A/B/C/D only.
+    assert(isSupportedSameDataTypeMatmul(ABCDDataType));
+    assert(A.getDescriptor().getDataType() == ABCDDataType);
+    assert(B.getDescriptor().getDataType() == ABCDDataType);
+    assert(C.getDescriptor().getDataType() == ABCDDataType);
+    assert(D.getDescriptor().getDataType() == ABCDDataType);
     // Check dimensions of tensors
     vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
     vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
@@ -175,8 +175,7 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                         ld_D,
                                         workspace.isPresent());
 
-    cudaDataType_t ABCDDataTypeCuda = mapToCublasDataType(ABCDDataType);
-    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda);
+    OperationType operationType = makeOperationType(ABCDDataType);
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
@@ -199,12 +198,66 @@ void CublasMatrixMultiply::gemm(Tensor A,
 }
 
 cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(TensorDescriptor::DataType dataType) {
-    if (dataType == TensorDescriptor::DataType::FP32)
-        return CUDA_R_32F;
-    else if (dataType == TensorDescriptor::DataType::FP16)
-        return CUDA_R_16F;
-    else
-        assert(false);
+    switch (dataType) {
+        case TensorDescriptor::DataType::FP32:
+            return CUDA_R_32F;
+        case TensorDescriptor::DataType::BF16:
+            return CUDA_R_16BF;
+        case TensorDescriptor::DataType::FP16:
+            return CUDA_R_16F;
+        case TensorDescriptor::DataType::FP8_E4M3:
+            return CUDA_R_8F_E4M3;
+        case TensorDescriptor::DataType::FP8_E5M2:
+            return CUDA_R_8F_E5M2;
+        case TensorDescriptor::DataType::INT8:
+            return CUDA_R_8I;
+        default:
+            assert(false);
+            return CUDA_R_32F;
+    }
+}
+
+bool CublasMatrixMultiply::isSupportedSameDataTypeMatmul(TensorDescriptor::DataType ABCDDataType) {
+    switch (ABCDDataType) {
+        case TensorDescriptor::DataType::FP32:
+        case TensorDescriptor::DataType::BF16:
+        case TensorDescriptor::DataType::FP16:
+        case TensorDescriptor::DataType::INT8:
+            return true;
+        default:
+            return false;
+    }
+}
+
+OperationType CublasMatrixMultiply::makeOperationType(TensorDescriptor::DataType ABCDDataType) {
+    assert(isSupportedSameDataTypeMatmul(ABCDDataType));
+
+    cudaDataType_t ABCDDataTypeCuda = mapToCublasDataType(ABCDDataType);
+    if (ABCDDataType == TensorDescriptor::DataType::INT8) {
+        return OperationType(CUBLAS_COMPUTE_32I, CUDA_R_32F, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda);
+    }
+
+    // Thor keeps alpha/beta as float pointers here, so use the cublasLt 32F-scale rows for fp32, bf16, and fp16.
+    return OperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda);
+}
+
+std::string CublasMatrixMultiply::dataTypeToString(TensorDescriptor::DataType dataType) {
+    switch (dataType) {
+        case TensorDescriptor::DataType::FP32:
+            return "FP32";
+        case TensorDescriptor::DataType::BF16:
+            return "BF16";
+        case TensorDescriptor::DataType::FP16:
+            return "FP16";
+        case TensorDescriptor::DataType::FP8_E4M3:
+            return "FP8_E4M3";
+        case TensorDescriptor::DataType::FP8_E5M2:
+            return "FP8_E5M2";
+        case TensorDescriptor::DataType::INT8:
+            return "INT8";
+        default:
+            return "unsupported";
+    }
 }
 
 // FIXME: This one now just calls gemmUsingH...
@@ -287,12 +340,12 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     assert(ld_B >= B_cols);
     assert(ld_C >= C_cols);
     assert(ld_D >= D_cols);
-    // Check dataType of tensors
-    assert(A.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 ||
-           A.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-    assert(A.getDescriptor().getDataType() == B.getDescriptor().getDataType());
-    assert(A.getDescriptor().getDataType() == C.getDescriptor().getDataType());
-    assert(A.getDescriptor().getDataType() == D.getDescriptor().getDataType());
+    // Check dataType of tensors. This legacy overload supports same-type A/B/C/D only.
+    assert(isSupportedSameDataTypeMatmul(ABCDDataType));
+    assert(A.getDescriptor().getDataType() == ABCDDataType);
+    assert(B.getDescriptor().getDataType() == ABCDDataType);
+    assert(C.getDescriptor().getDataType() == ABCDDataType);
+    assert(D.getDescriptor().getDataType() == ABCDDataType);
     // Check dimensions of tensors
     vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
     vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
@@ -318,7 +371,8 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     cublasLtMatrixLayout_t CDesc;
     cublasLtMatrixLayout_t DDesc;
 
-    cublasStatus = cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    OperationType operationType = makeOperationType(ABCDDataType);
+    cublasStatus = cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
     const cublasLtPointerMode_t cublasPointerMode =
@@ -342,9 +396,8 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     }
 
     cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
-    cudaDataType_t ABCDDataTypeCuda = mapToCublasDataType(ABCDDataType);
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&ADesc, ABCDDataTypeCuda, A_rows, A_cols, ld_A);
+    cublasStatus = cublasLtMatrixLayoutCreate(&ADesc, operationType.ADataType, A_rows, A_cols, ld_A);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -352,7 +405,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&BDesc, ABCDDataTypeCuda, B_rows, B_cols, ld_B);
+    cublasStatus = cublasLtMatrixLayoutCreate(&BDesc, operationType.BDataType, B_rows, B_cols, ld_B);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -360,7 +413,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&CDesc, ABCDDataTypeCuda, C_rows, C_cols, ld_C);
+    cublasStatus = cublasLtMatrixLayoutCreate(&CDesc, operationType.CDataType, C_rows, C_cols, ld_C);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -368,7 +421,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&DDesc, ABCDDataTypeCuda, D_rows, D_cols, ld_D);
+    cublasStatus = cublasLtMatrixLayoutCreate(&DDesc, operationType.DDataType, D_rows, D_cols, ld_D);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -390,7 +443,6 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                                         ld_D,
                                         false);
 
-    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda);
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
     // If there is already a known kernel, use it. Otherwise, a heuristic search will be performed and the kernel remembered.
@@ -619,7 +671,8 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     cublasLtMatrixLayout_t CDesc;
     cublasLtMatrixLayout_t DDesc;
 
-    cublasStatus = cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    OperationType operationType = makeOperationType(ABCDDataType);
+    cublasStatus = cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
     const cublasLtPointerMode_t hostPointerMode = CUBLASLT_POINTER_MODE_HOST;
@@ -642,9 +695,8 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     }
 
     cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
-    cudaDataType_t ABCDDataTypeCuda = mapToCublasDataType(ABCDDataType);
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&ADesc, ABCDDataTypeCuda, A_rows, A_cols, ld_A);
+    cublasStatus = cublasLtMatrixLayoutCreate(&ADesc, operationType.ADataType, A_rows, A_cols, ld_A);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -652,7 +704,7 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&BDesc, ABCDDataTypeCuda, B_rows, B_cols, ld_B);
+    cublasStatus = cublasLtMatrixLayoutCreate(&BDesc, operationType.BDataType, B_rows, B_cols, ld_B);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -660,7 +712,7 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&CDesc, ABCDDataTypeCuda, C_rows, C_cols, ld_C);
+    cublasStatus = cublasLtMatrixLayoutCreate(&CDesc, operationType.CDataType, C_rows, C_cols, ld_C);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -668,7 +720,7 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&DDesc, ABCDDataTypeCuda, D_rows, D_cols, ld_D);
+    cublasStatus = cublasLtMatrixLayoutCreate(&DDesc, operationType.DDataType, D_rows, D_cols, ld_D);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -690,7 +742,6 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
                                         ld_D,
                                         false);
 
-    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda);
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
     cublasLtMatmulPreference_t searchPreferences;
@@ -863,8 +914,7 @@ void CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
                                                        ldC,
                                                        ldD,
                                                        false);
-        cudaDataType_t ABCDataTypeCuda = mapToCublasDataType(ABCDataType);
-        OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
+        OperationType operationType = makeOperationType(ABCDataType);
         CublasKernelRequirement noWorkspaceCublasKernelRequirement(kernelRequirementNoWorkspace, operationType);
         KernelRequirement kernelRequirementWithWorkspace(MachineEvaluator::instance().getGpuType(gpuNum),
                                                          rowsA,
@@ -910,7 +960,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
 
     assert(gpuNum >= 0);
     assert(gpuNum < (int)MachineEvaluator::instance().getNumGpus());
-    assert(ABCDataType == TensorDescriptor::DataType::FP32 || ABCDataType == TensorDescriptor::DataType::FP16);
+    assert(isSupportedSameDataTypeMatmul(ABCDataType));
 
     // Ensure the operation is legal
     // The number of C and D columns is specified by the sizes of A and B, so verify A and B
@@ -975,8 +1025,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                         ldD,
                                         allowWorkspaces);
 
-    cudaDataType_t ABCDataTypeCuda = mapToCublasDataType(ABCDataType);
-    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
+    OperationType operationType = makeOperationType(ABCDataType);
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
@@ -1514,8 +1563,7 @@ unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
                                         ldD,
                                         true);
 
-    cudaDataType_t ABCDataTypeCuda = mapToCublasDataType(ABCDataType);
-    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
+    OperationType operationType = makeOperationType(ABCDataType);
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
@@ -1543,11 +1591,10 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
     KernelRequirement kernelRequirement(
         gpuType, rowsA, colsA, rowsB, colsB, transposeA, transposeB, transposeC, ldA, ldB, ldC, ldD, workspaceAllowed);
 
-    cudaDataType_t ABCDataTypeCuda = mapToCublasDataType(ABCDataType);
-    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
+    OperationType operationType = makeOperationType(ABCDataType);
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
-    string ABCDataTypeString = ABCDataType == TensorDescriptor::DataType::FP32 ? "FP32" : "FP16";
+    string ABCDataTypeString = dataTypeToString(ABCDataType);
 
     auto optimalKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement);
     if (!optimalKernel.has_value()) {

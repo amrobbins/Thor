@@ -12,6 +12,7 @@
 
 #include <assert.h>
 #include <atomic>
+#include <stdexcept>
 #include <utility>
 
 namespace ThorImplementation {
@@ -148,37 +149,25 @@ class CublasKernel : private ReferenceCounted {
         assert(ADimensions.size() == 2);
         assert(ADimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsA);
         assert(ADimensions[1] == ldA);
-        if (A.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-            assert(cublasKernelRequirement->operationType.ADataType == CUDA_R_32F);
-        else
-            assert(cublasKernelRequirement->operationType.ADataType == CUDA_R_16F);
+        assert(mapTensorDataTypeToCublasDataType(A.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.ADataType);
 
         std::vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
         assert(BDimensions.size() == 2);
         assert(BDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsB);
         assert(BDimensions[1] == ldB);
-        if (B.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-            assert(cublasKernelRequirement->operationType.BDataType == CUDA_R_32F);
-        else
-            assert(cublasKernelRequirement->operationType.BDataType == CUDA_R_16F);
+        assert(mapTensorDataTypeToCublasDataType(B.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.BDataType);
 
         std::vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
         assert(CDimensions.size() == 2);
         assert(CDimensions[0] == rowsC);
         assert(CDimensions[1] == ldC);
-        if (C.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-            assert(cublasKernelRequirement->operationType.CDataType == CUDA_R_32F);
-        else
-            assert(cublasKernelRequirement->operationType.CDataType == CUDA_R_16F);
+        assert(mapTensorDataTypeToCublasDataType(C.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.CDataType);
 
         std::vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
         assert(DDimensions.size() == 2);
         assert(DDimensions[0] == rowsC);
         assert(DDimensions[1] == ldD);
-        if (D.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-            assert(cublasKernelRequirement->operationType.DDataType == CUDA_R_32F);
-        else
-            assert(cublasKernelRequirement->operationType.DDataType == CUDA_R_16F);
+        assert(mapTensorDataTypeToCublasDataType(D.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.DDataType);
 
         assert(C.getMemPtr() != A.getMemPtr());
         assert(C.getMemPtr() != B.getMemPtr());
@@ -317,6 +306,26 @@ class CublasKernel : private ReferenceCounted {
     cublasLtMatrixLayout_t *DDesc;
 
     std::string gpuType;
+
+    static cudaDataType_t mapTensorDataTypeToCublasDataType(TensorDescriptor::DataType dataType) {
+        switch (dataType) {
+            case TensorDescriptor::DataType::FP32:
+                return CUDA_R_32F;
+            case TensorDescriptor::DataType::BF16:
+                return CUDA_R_16BF;
+            case TensorDescriptor::DataType::FP16:
+                return CUDA_R_16F;
+            case TensorDescriptor::DataType::FP8_E4M3:
+                return CUDA_R_8F_E4M3;
+            case TensorDescriptor::DataType::FP8_E5M2:
+                return CUDA_R_8F_E5M2;
+            case TensorDescriptor::DataType::INT8:
+                return CUDA_R_8I;
+            default:
+                assert(false);
+                return CUDA_R_32F;
+        }
+    }
 
     static std::map<cublasLtMatmulTile_t, std::string> tileEnumToString;
 

@@ -5,6 +5,8 @@
 
 #include <unordered_map>
 
+#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
+
 namespace ThorImplementation {
 
 class Adam final : public Optimizer {
@@ -29,8 +31,7 @@ class Adam final : public Optimizer {
     void setBeta2(float beta2);
     void setEpsilon(float epsilon);
 
-    Optional<Tensor> getM() { return mBuffer; }
-    Optional<Tensor> getV() { return vBuffer; }
+    std::shared_ptr<Optimizer> clone() const override { return std::make_shared<Adam>(getId(), alpha, beta1, beta2, epsilon); }
 
    protected:
     float alpha;
@@ -38,16 +39,6 @@ class Adam final : public Optimizer {
     float beta2;
     float epsilon;
     float t;
-
-    Optional<Tensor> mBuffer;
-    Optional<Tensor> vBuffer;
-
-    Optional<std::string> mFile;
-    Optional<std::string> vFile;
-    Optional<std::string> mBiasFile;
-    Optional<std::string> vBiasFile;
-
-    DynamicExpression buildExpression() override { assert(false); /*using compile not dynamic expression, fixme*/ };
 };
 
 }  // namespace ThorImplementation
