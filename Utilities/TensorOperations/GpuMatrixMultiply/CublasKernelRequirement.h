@@ -6,6 +6,8 @@
 
 #include <assert.h>
 #include <atomic>
+#include <cstddef>
+#include <functional>
 #include <utility>
 
 struct KernelRequirement {
@@ -118,6 +120,86 @@ struct hash<KernelRequirement> {
 };
 }  // namespace std
 
+inline bool isCublasLtFp8CudaType(cudaDataType_t dataType) { return dataType == CUDA_R_8F_E4M3 || dataType == CUDA_R_8F_E5M2; }
+
+inline bool isCublasLtFloatingCudaType(cudaDataType_t dataType) {
+    return dataType == CUDA_R_32F || dataType == CUDA_R_16BF || dataType == CUDA_R_16F || isCublasLtFp8CudaType(dataType);
+}
+
+inline bool isCublasLtFp8DTypeAllowed(cudaDataType_t ADataType,
+                                      cudaDataType_t BDataType,
+                                      cudaDataType_t CDataType,
+                                      cudaDataType_t DDataType) {
+    if (!isCublasLtFp8CudaType(ADataType) || !isCublasLtFp8CudaType(BDataType)) {
+        return false;
+    }
+
+    // The cublasLt FP8 table lists E4M3/E4M3, E4M3/E5M2, and E5M2/E4M3 inputs.
+    // E5M2/E5M2 is intentionally not accepted here.
+    if (ADataType == CUDA_R_8F_E5M2 && BDataType == CUDA_R_8F_E5M2) {
+        return false;
+    }
+
+    if (CDataType == CUDA_R_32F) {
+        return DDataType == CUDA_R_32F;
+    }
+
+    if (CDataType == CUDA_R_16BF || CDataType == CUDA_R_16F) {
+        if (DDataType == CDataType) {
+            return true;
+        }
+        if (DDataType == CUDA_R_8F_E4M3) {
+            return true;
+        }
+        if (DDataType == CUDA_R_8F_E5M2) {
+            return ADataType != CUDA_R_8F_E4M3 || BDataType != CUDA_R_8F_E4M3;
+        }
+    }
+
+    return false;
+}
+
+inline bool isSupportedCublasLtOperationType(cublasComputeType_t computeDataType,
+                                             cudaDataType_t scaleDataType,
+                                             cudaDataType_t ADataType,
+                                             cudaDataType_t BDataType,
+                                             cudaDataType_t CDataType,
+                                             cudaDataType_t DDataType) {
+    // Keep this wrapper float-scale compatible. The public CublasMatrixMultiply API passes alpha/beta as float pointers,
+    // so do not admit 16F scale or 32I scale operation types here.
+    if (scaleDataType != CUDA_R_32F) {
+        return false;
+    }
+
+    if (computeDataType == CUBLAS_COMPUTE_32F || computeDataType == CUBLAS_COMPUTE_32F_PEDANTIC ||
+        computeDataType == CUBLAS_COMPUTE_32F_FAST_16F || computeDataType == CUBLAS_COMPUTE_32F_FAST_16BF ||
+        computeDataType == CUBLAS_COMPUTE_32F_FAST_TF32) {
+        if (ADataType == CUDA_R_32F && BDataType == CUDA_R_32F && CDataType == CUDA_R_32F && DDataType == CUDA_R_32F) {
+            return true;
+        }
+
+        if ((ADataType == CUDA_R_16F || ADataType == CUDA_R_16BF) && ADataType == BDataType &&
+            (CDataType == ADataType || CDataType == CUDA_R_32F) && CDataType == DDataType) {
+            return true;
+        }
+
+        if (ADataType == CUDA_R_8I && BDataType == CUDA_R_8I && CDataType == CUDA_R_32F && DDataType == CUDA_R_32F) {
+            return true;
+        }
+
+        if (isCublasLtFp8CudaType(ADataType) || isCublasLtFp8CudaType(BDataType) || isCublasLtFp8CudaType(DDataType)) {
+            return computeDataType == CUBLAS_COMPUTE_32F && isCublasLtFp8DTypeAllowed(ADataType, BDataType, CDataType, DDataType);
+        }
+    }
+
+    if (computeDataType == CUBLAS_COMPUTE_32I || computeDataType == CUBLAS_COMPUTE_32I_PEDANTIC) {
+        // Regular-layout IMMA, float alpha/beta variant: int8 input and int8 C/D.
+        return ADataType == CUDA_R_8I && BDataType == CUDA_R_8I && CDataType == CUDA_R_8I && DDataType == CUDA_R_8I;
+    }
+
+    return false;
+}
+
 struct OperationType {
     OperationType(cublasComputeType_t computeDataType,
                   cudaDataType_t scaleDataType,
@@ -131,16 +213,7 @@ struct OperationType {
           BDataType(BDataType),
           CDataType(CDataType),
           DDataType(DDataType) {
-        // Below is exactly the bounds of current support - well it was at one time
-        assert(computeDataType == CUBLAS_COMPUTE_32F);
-        assert(scaleDataType == CUDA_R_32F);
-        assert(ADataType == CUDA_R_32F || ADataType == CUDA_R_16F);
-        assert(BDataType == CUDA_R_32F || BDataType == CUDA_R_16F);
-        assert(CDataType == CUDA_R_32F || CDataType == CUDA_R_16F);
-        assert(DDataType == CUDA_R_32F || DDataType == CUDA_R_16F);
-        assert(ADataType == BDataType);
-        assert(ADataType == CDataType);
-        assert(ADataType == DDataType);
+        assert(isSupportedCublasLtOperationType(computeDataType, scaleDataType, ADataType, BDataType, CDataType, DDataType));
     }
 
     const cublasComputeType_t computeDataType;
@@ -176,14 +249,18 @@ namespace std {
 template <>
 struct hash<OperationType> {
     std::size_t operator()(const OperationType &o) const {
-        size_t hashValue = 0;
-        hashValue |= o.computeDataType == CUBLAS_COMPUTE_32F ? 7 : 13;
-        hashValue |= o.scaleDataType == CUDA_R_32F ? 50 : 70;
-        hashValue |= o.ADataType == CUDA_R_32F ? 500 : 900;
-        hashValue |= o.BDataType == CUDA_R_32F ? 2000 : 3400;
-        hashValue |= o.CDataType == CUDA_R_32F ? 10000 : 30000;
-        hashValue |= o.DDataType == CUDA_R_32F ? 40000 : 55000;
-        return hashValue;
+        std::size_t seed = 0;
+        auto hashCombine = [&seed](auto value) {
+            std::size_t h = std::hash<int>()(static_cast<int>(value));
+            seed ^= h + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+        };
+        hashCombine(o.computeDataType);
+        hashCombine(o.scaleDataType);
+        hashCombine(o.ADataType);
+        hashCombine(o.BDataType);
+        hashCombine(o.CDataType);
+        hashCombine(o.DDataType);
+        return seed;
     }
 };
 

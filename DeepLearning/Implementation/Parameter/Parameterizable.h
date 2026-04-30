@@ -4,12 +4,12 @@
 #include <string>
 #include <vector>
 
-#include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace ThorImplementation {
 
 class PhysicalParameter;
+class Optimizer;
 
 class Parameterizable {
    public:
@@ -17,7 +17,10 @@ class Parameterizable {
     virtual ~Parameterizable() = default;
 
     void addParameter(const std::shared_ptr<PhysicalParameter> &parameter);
+    bool hasParameter(const std::string &name);
     std::shared_ptr<PhysicalParameter> getParameter(const std::string &name);
+    void dropParameter(const std::string &name);
+
     Tensor getParameterStorage(const std::string &name);
     std::unordered_map<std::string, std::shared_ptr<PhysicalParameter>> getParameters();
 

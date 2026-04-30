@@ -383,6 +383,9 @@ class CublasMatrixMultiply {
     CublasMatrixMultiply() : optimalKernels(MAX_KERNEL_CACHE_OCCUPANCY), knownHeuristicAlgorithms(MAX_KERNEL_CACHE_OCCUPANCY) {}
 
     cudaDataType_t mapToCublasDataType(TensorDescriptor::DataType dataType);
+    OperationType makeOperationType(TensorDescriptor::DataType ABCDDataType);
+    bool isSupportedSameDataTypeMatmul(TensorDescriptor::DataType ABCDDataType);
+    std::string dataTypeToString(TensorDescriptor::DataType dataType);
 
     bool chooseOptimalGemmKernel(int gpuNum,
                                  int rowsA,

@@ -91,6 +91,7 @@ Tensor copyTensorToCpu(const Tensor& tensor, Stream& stream) {
 
 void expectAllClose(
     const vector<float>& actual, const vector<float>& expected, float atol = 2e-2f, float rtol = 2e-2f, string paramName = "") {
+    uint32_t count = 0;
     ASSERT_EQ(actual.size(), expected.size());
     for (uint64_t i = 0; i < actual.size(); ++i) {
         const float diff = fabs(actual[i] - expected[i]);
@@ -98,6 +99,10 @@ void expectAllClose(
         if (!paramName.empty())
             paramName += " ";
         EXPECT_LE(diff, tol) << paramName << "mismatch at index " << i << ": actual=" << actual[i] << ", expected=" << expected[i];
+        if (diff > tol)
+            count += 1;
+        if (count == 10)
+            break;
     }
 }
 
@@ -802,6 +807,7 @@ TEST(FullyConnected, DirectBackwardConnectionNumericalThreePasses) {
             biases = fc.getParameter("biases")->getStorage();
 
         Stream stream = fc.getStreams()[0];
+        stream.deviceSynchronize(0);  // FIXME
 
         const vector<float> initialWeightValues =
             randomFloatVector(rng, static_cast<uint64_t>(numInputFeatures) * numOutputFeatures, -0.5f, 0.5f);

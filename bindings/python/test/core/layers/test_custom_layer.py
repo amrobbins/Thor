@@ -392,7 +392,7 @@ def test_python_custom_layer_place_invokes_build_with_physical_context():
     assert bound_weights.has_optimizer() is False
     assert bound_weights.is_training_enabled() is False
     bound_weights.set_training_enabled(True)
-    assert bound_weights.is_training_enabled() is True
+    assert bound_weights.is_training_enabled() is False  # Was compiled for inference only, cannot enable training
     bound_weights.set_training_enabled(False)
     assert bound_weights.is_training_enabled() is False
 
@@ -400,7 +400,7 @@ def test_python_custom_layer_place_invokes_build_with_physical_context():
     assert bound_biases.name == "biases"
     assert bound_biases.is_training_enabled() is False
     bound_biases.set_training_enabled(True)
-    assert bound_biases.is_training_enabled() is True
+    assert bound_biases.is_training_enabled() is False  # Was compiled for inference only, cannot enable training
     bound_biases.set_training_enabled(False)
     assert bound_biases.is_training_enabled() is False
 

@@ -357,7 +357,11 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t ap
     const PhysicalParameter::StorageContext parameterStorageContext = buildParameterStorageContext();
     for (const auto& param : parameters) {
         if (!param->isStorageInitialized()) {
-            param->compileStorageAndOptimizer(parameterStorageContext, gradientUpdateStream, isInferenceOnly());
+            param->compileStorage(parameterStorageContext);
+        }
+        if (param->isTrainable()) {
+            // Must compile optimizer every time to properly toggle parameter trainability
+            param->compileOptimizer(gradientUpdateStream, isInferenceOnly());
         }
 
         Optional<Tensor> paramStorage = param->getStorage();

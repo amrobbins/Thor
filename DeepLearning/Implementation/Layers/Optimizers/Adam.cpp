@@ -1,4 +1,8 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
+
+#include "DeepLearning/Implementation/Initializers/Initializer.h"
+#include "DeepLearning/Implementation/Initializers/ZerosInitializer.h"
+#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 
@@ -22,6 +26,30 @@ void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
     const DataType weightsDType = weights.getDescriptor().getDataType();
     const int32_t gpuNum = weights.getPlacement().getDeviceNum();
 
+    if (!hasParameter("m")) {
+        assert(!hasParameter("v"));
+        shared_ptr<PhysicalParameter> mParameter = make_shared<PhysicalParameter>("m", false, weights.getDimensions(), DataType::FP32);
+        shared_ptr<PhysicalParameter> vParameter = make_shared<PhysicalParameter>("v", false, weights.getDimensions(), DataType::FP32);
+        shared_ptr<Initializer> paramInitializer = make_shared<ZerosInitializer>();
+
+        mParameter->setInitializer(paramInitializer->clone());
+        addParameter(mParameter);
+        mParameter->compileStorage(weights);
+        mParameter->compileInitializer();
+
+        vParameter->setInitializer(paramInitializer->clone());
+        addParameter(vParameter);
+        vParameter->compileStorage(weights);
+        vParameter->compileInitializer();
+
+        assert(mParameter->getStorage().isPresent());
+        assert(vParameter->getStorage().isPresent());
+        mParameter->initialize(gradientUpdateStream);
+        vParameter->initialize(gradientUpdateStream);
+    }
+    shared_ptr<PhysicalParameter> mParameter = getParameter("m");
+    shared_ptr<PhysicalParameter> vParameter = getParameter("v");
+
     auto alphaT = Expression::runtimeScalar("alphaT", DataType::FP32, DataType::FP32);
     auto invBatchLossScale = Expression::runtimeScalar("invBatchLossScale", DataType::FP32, DataType::FP32);
 
@@ -36,20 +64,10 @@ void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
     stampInputs["gradient"] = weightsGradient;
     stampOutputs["weights"] = weights;
 
-    // Allocate Adam state once, same shape/device as weights, moments always fp32.
-    if (mBuffer.isEmpty()) {
-        mBuffer = weights.clone(DataType::FP32);
-        mBuffer.get().memsetAsync(gradientUpdateStream, 0);
-    }
-    if (vBuffer.isEmpty()) {
-        vBuffer = weights.clone(DataType::FP32);
-        vBuffer.get().memsetAsync(gradientUpdateStream, 0);
-    }
-
-    stampInputs["m_in"] = mBuffer;
-    stampInputs["v_in"] = vBuffer;
-    stampOutputs["m"] = mBuffer;
-    stampOutputs["v"] = vBuffer;
+    stampInputs["m_in"] = mParameter->getStorage().get();
+    stampInputs["v_in"] = vParameter->getStorage().get();
+    stampOutputs["m"] = mParameter->getStorage().get();
+    stampOutputs["v"] = vParameter->getStorage().get();
 
     // Regular Adam:
     // m_{t+1} = beta1 * m_t + (1 - beta1) * g_t

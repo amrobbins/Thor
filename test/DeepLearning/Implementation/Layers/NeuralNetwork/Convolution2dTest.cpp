@@ -94,10 +94,15 @@ Tensor copyTensorToCpu(const Tensor& tensor, Stream& stream) {
 void expectAllClose(
     const vector<float>& actual, const vector<float>& expected, float atol = 2e-2f, float rtol = 2e-2f, const string& paramName = "") {
     ASSERT_EQ(actual.size(), expected.size());
+    uint32_t count = 0;
     for (uint64_t i = 0; i < actual.size(); ++i) {
         const float diff = fabs(actual[i] - expected[i]);
         const float tol = atol + rtol * fabs(expected[i]);
         EXPECT_LE(diff, tol) << paramName << " mismatch at index " << i << ": actual=" << actual[i] << ", expected=" << expected[i];
+        if (diff > tol)
+            count += 1;
+        if (count == 10)
+            break;
     }
 }
 

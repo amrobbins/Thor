@@ -48,10 +48,10 @@ BatchNormalization::BatchNormalization(const TensorPlacement& placement,
     : TrainableLayer(placement, inferenceOnly, stampedId),
       exponentialRunningAverageFactor(exponentialRunningAverageFactor.isPresent() ? exponentialRunningAverageFactor.get() : 0.05),
       epsilon(epsilon.isPresent() ? epsilon.get() : 0.0001) {
-    addParameter(make_shared<BNParameter>("weights", storageDataType, true));
-    addParameter(make_shared<BNParameter>("biases", storageDataType, true));
-    addParameter(make_shared<BNParameter>("running_mean", storageDataType, false));
-    addParameter(make_shared<BNParameter>("running_variance", storageDataType, false));
+    addParameter(make_shared<BNParameter>("weights", DataType::FP32, true));
+    addParameter(make_shared<BNParameter>("biases", DataType::FP32, true));
+    addParameter(make_shared<BNParameter>("running_mean", DataType::FP32, false));
+    addParameter(make_shared<BNParameter>("running_variance", DataType::FP32, false));
 
     itemsObserved = numItemsObserved;
 }
@@ -106,15 +106,14 @@ void BatchNormalization::compileImpl() {
 
     for (const auto& parameter : parameters) {
         if (!parameter->isStorageInitialized()) {
-            string paramName = parameter->getName();
-            bool trainable = paramName == "weights" || paramName == "biases";
-            bool inferenceOnly = isInferenceOnly();
-            parameter->compileStorageAndOptimizer(input, gradientUpdateStream, inferenceOnly || !trainable);
+            parameter->compileStorage(input);
+            parameter->compileInitializer(getFanIn(), getFanOut());
         }
-        parameter->compileInitializer(getFanIn(), getFanOut());
+        if (parameter->isTrainable()) {
+            parameter->compileOptimizer(gradientUpdateStream, isInferenceOnly());
+        }
     }
 
-    // FIXME: Check what cudnn batch norm supports, it may be only fp32
     weights = getParameter("weights")->getStorage();
     biases = getParameter("biases")->getStorage();
     resultRunningMean = getParameter("running_mean")->getStorage();
@@ -142,10 +141,14 @@ void BatchNormalization::compileImpl() {
     cudnnDataType_t cudnnDataType;
     if (input.getDataType() == DataType::FP16)
         cudnnDataType = CUDNN_DATA_HALF;
+    else if (input.getDataType() == DataType::BF16)
+        cudnnDataType = CUDNN_DATA_BFLOAT16;
     else if (input.getDataType() == DataType::FP32)
         cudnnDataType = CUDNN_DATA_FLOAT;
     else
-        assert(false);
+        throw runtime_error(
+            "BatchNormalization only supports input tensors of FP32, FP16 and BF16."
+            " Please convert the input tensor to one of those before connecting it as the input to a BatchNormalization layer.");
 
     cleanup();
 
@@ -267,8 +270,8 @@ void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
     }
 }
 
-// Error in is up-to-date by the end of the data stream.
-// Gradient update stream must wait for that, and gradient accumulation must be performed on the gradient stream, for serialization.
+// Error in is up-to-date by the end of the gradient stream.
+// Gradient accumulation must be performed on the gradient stream, for serialization.
 Optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
                                                                                  bool clearWeightsGradientFirstIfFused) {
     if (errorInputs[connectionNumber].isEmpty())

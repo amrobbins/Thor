@@ -41,6 +41,12 @@ void writeCpuTensor(Tensor& tensor, const vector<float>& values) {
     ASSERT_EQ(tensorNumel(tensor), values.size());
 
     switch (tensor.getDataType()) {
+        case DataType::BF16: {
+            auto* ptr = static_cast<__nv_bfloat16*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                ptr[i] = __float2bfloat16(values[i]);
+            break;
+        }
         case DataType::FP16: {
             auto* ptr = static_cast<half*>(tensor.getMemPtr());
             for (uint64_t i = 0; i < values.size(); ++i)
@@ -66,6 +72,12 @@ vector<float> readCpuTensor(const Tensor& tensor) {
 
     vector<float> values(tensorNumel(tensor));
     switch (tensor.getDataType()) {
+        case DataType::BF16: {
+            const auto* ptr = static_cast<const __nv_bfloat16*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                values[i] = __bfloat162float(ptr[i]);
+            break;
+        }
         case DataType::FP16: {
             const auto* ptr = static_cast<const half*>(tensor.getMemPtr());
             for (uint64_t i = 0; i < values.size(); ++i)
@@ -405,6 +417,39 @@ BatchNormDirectBackwardReference computeBatchNormDirectBackwardReference(const v
     ref.biasesAfter =
         adamFirstUpdatedWeightsReference(biasValues, ref.biasesGrad, batchSize, lossScalingFactor, alpha, beta1, beta2, adamEpsilon);
     return ref;
+}
+
+float bnFeatureTolerance(DataType dataType) {
+    switch (dataType) {
+        case DataType::BF16:
+            return 3e-2f;
+        case DataType::FP16:
+            return 3e-3f;
+        default:
+            return 3e-4f;
+    }
+}
+
+float bnStatsTolerance(DataType dataType) {
+    switch (dataType) {
+        case DataType::BF16:
+            return 1e-2f;
+        case DataType::FP16:
+            return 3e-3f;
+        default:
+            return 3e-4f;
+    }
+}
+
+float bnBackwardTolerance(DataType dataType) {
+    switch (dataType) {
+        case DataType::BF16:
+            return 4e-2f;
+        case DataType::FP16:
+            return 5e-3f;
+        default:
+            return 9e-4f;
+    }
 }
 
 }  // namespace
@@ -1098,4 +1143,323 @@ TEST(BatchNormalization, DirectBackwardSpatialNumericalWithSgd) {
     expectAllClose(actualBiasesGrad, reference.biasesGrad, 9e-4f, 9e-4f, "biasesGrad");
     expectAllClose(actualWeightsAfter, reference.weightsAfter, 9e-4f, 9e-4f, "weightsAfter");
     expectAllClose(actualBiasesAfter, reference.biasesAfter, 9e-4f, 9e-4f, "biasesAfter");
+}
+
+void runBatchNormalizationParametersStayFp32ForInputType(DataType dataType) {
+    const uint64_t batchSize = 4;
+    const uint64_t numChannels = 5;
+
+    TensorDescriptor featureInDescriptor(dataType, {batchSize, numChannels});
+    NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
+    BatchNormalization bn(gpuPlacement, false, 0);
+    NetworkOutput no(cpuPlacement);
+
+    bn.setOptimizer("weights", make_shared<Adam>(4000, 0.001f, 0.9f, 0.999f, 1e-7f));
+    bn.setOptimizer("biases", make_shared<Adam>(4001, 0.001f, 0.9f, 0.999f, 1e-7f));
+
+    ni.connectToNextLayer(&bn);
+    bn.connectToNextLayer(&no);
+    compileAndInitialize(ni, bn, no);
+
+    ASSERT_EQ(bn.listParameters(), (vector<string>{"weights", "biases", "running_mean", "running_variance"}));
+
+    ASSERT_TRUE(bn.getParameter("weights")->getStorage().isPresent());
+    ASSERT_TRUE(bn.getParameter("biases")->getStorage().isPresent());
+    ASSERT_TRUE(bn.getParameter("running_mean")->getStorage().isPresent());
+    ASSERT_TRUE(bn.getParameter("running_variance")->getStorage().isPresent());
+
+    Tensor weights = bn.getParameter("weights")->getStorage();
+    Tensor biases = bn.getParameter("biases")->getStorage();
+    Tensor runningMean = bn.getParameter("running_mean")->getStorage();
+    Tensor runningVariance = bn.getParameter("running_variance")->getStorage();
+
+    EXPECT_EQ(weights.getDimensions(), (vector<uint64_t>{numChannels}));
+    EXPECT_EQ(biases.getDimensions(), (vector<uint64_t>{numChannels}));
+    EXPECT_EQ(runningMean.getDimensions(), (vector<uint64_t>{numChannels}));
+    EXPECT_EQ(runningVariance.getDimensions(), (vector<uint64_t>{numChannels}));
+
+    EXPECT_EQ(weights.getDataType(), DataType::FP32);
+    EXPECT_EQ(biases.getDataType(), DataType::FP32);
+    EXPECT_EQ(runningMean.getDataType(), DataType::FP32);
+    EXPECT_EQ(runningVariance.getDataType(), DataType::FP32);
+}
+
+TEST(BatchNormalization, ParametersStayFp32ForFp16Input) { runBatchNormalizationParametersStayFp32ForInputType(DataType::FP16); }
+
+TEST(BatchNormalization, ParametersStayFp32ForBf16Input) { runBatchNormalizationParametersStayFp32ForInputType(DataType::BF16); }
+
+void runBatchNormalizationDirectForwardTrainingSpatialNumericalForInputType(DataType dataType) {
+    const uint64_t batchSize = 2;
+    const uint64_t numChannels = 3;
+    const uint64_t height = 2;
+    const uint64_t width = 2;
+
+    const vector<float> inputValues = {
+        1.0f,   -1.0f, 0.5f,  2.0f,   -0.25f, 1.5f,  -1.5f, 0.75f, 2.5f,  -0.5f, 0.0f,  1.0f,
+        -1.25f, 0.25f, 1.75f, -0.75f, 0.5f,   -2.0f, 1.0f,  0.25f, -1.0f, 0.5f,  -0.5f, 1.5f,
+    };
+    const vector<float> weightValues = {1.1f, -0.7f, 0.35f};
+    const vector<float> biasValues = {0.15f, -0.2f, 0.8f};
+    const vector<float> runningMeanBefore = {0.5f, -0.25f, 1.2f};
+    const vector<float> runningVarianceBefore = {1.5f, 0.75f, 2.25f};
+
+    TensorDescriptor featureInDescriptor(dataType, {batchSize, numChannels, height, width});
+    Tensor featureIn_h(cpuPlacement, featureInDescriptor);
+    writeCpuTensor(featureIn_h, inputValues);
+
+    const vector<float> referenceInputValues = readCpuTensor(featureIn_h);
+
+    NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
+    BatchNormalization bn(gpuPlacement, false, 0);
+    NetworkOutput no(cpuPlacement);
+
+    bn.setOptimizer("weights", make_shared<Adam>(4000, 0.001f, 0.9f, 0.999f, 1e-7f));
+    bn.setOptimizer("biases", make_shared<Adam>(4001, 0.001f, 0.9f, 0.999f, 1e-7f));
+
+    ni.connectToNextLayer(&bn);
+    bn.connectToNextLayer(&no);
+    compileAndInitialize(ni, bn, no);
+
+    Stream stream = bn.getStreams()[0];
+    setParameterTensor(bn.getParameter("weights"), weightValues, stream);
+    setParameterTensor(bn.getParameter("biases"), biasValues, stream);
+    setParameterTensor(bn.getParameter("running_mean"), runningMeanBefore, stream);
+    setParameterTensor(bn.getParameter("running_variance"), runningVarianceBefore, stream);
+
+    ni.forward(featureIn_h, false, batchSize);
+    no.getOutputReadyEvent().synchronize();
+
+    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput());
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
+    const vector<float> actualRunningVariance = readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+
+    const BatchNormForwardReference reference = batchNormForwardTrainingReference(referenceInputValues,
+                                                                                  weightValues,
+                                                                                  biasValues,
+                                                                                  runningMeanBefore,
+                                                                                  runningVarianceBefore,
+                                                                                  batchSize,
+                                                                                  numChannels,
+                                                                                  height,
+                                                                                  width,
+                                                                                  1.0,
+                                                                                  bn.getEpsilon());
+
+    const float featureTol = bnFeatureTolerance(dataType);
+    const float statsTol = bnStatsTolerance(dataType);
+
+    expectAllClose(actualFeatureOut, reference.featureOut, featureTol, featureTol, "featureOut");
+    expectAllClose(actualRunningMean, reference.runningMeanAfter, statsTol, statsTol, "runningMean");
+    expectAllClose(actualRunningVariance, reference.runningVarianceAfter, statsTol, statsTol, "runningVariance");
+}
+
+TEST(BatchNormalization, DirectForwardTrainingSpatialNumericalFp16Input) {
+    runBatchNormalizationDirectForwardTrainingSpatialNumericalForInputType(DataType::FP16);
+}
+
+TEST(BatchNormalization, DirectForwardTrainingSpatialNumericalBf16Input) {
+    runBatchNormalizationDirectForwardTrainingSpatialNumericalForInputType(DataType::BF16);
+}
+
+void runBatchNormalizationDirectForwardInferenceSpatialNumericalForInputType(DataType dataType) {
+    const uint64_t batchSize = 2;
+    const uint64_t numChannels = 3;
+    const uint64_t height = 2;
+    const uint64_t width = 2;
+
+    const vector<float> inputValues = {
+        0.75f,  -1.0f, 0.5f,  1.25f,  -0.25f, 1.5f,  -1.5f, 0.75f, 2.0f,  -0.5f, 0.0f,  1.0f,
+        -1.25f, 0.25f, 1.75f, -0.75f, 0.5f,   -2.0f, 1.0f,  0.25f, -1.0f, 0.5f,  -0.5f, 1.5f,
+    };
+    const vector<float> weightValues = {1.1f, -0.7f, 0.35f};
+    const vector<float> biasValues = {0.15f, -0.2f, 0.8f};
+    const vector<float> runningMean = {0.5f, -0.25f, 1.2f};
+    const vector<float> runningVariance = {1.5f, 0.75f, 2.25f};
+
+    TensorDescriptor featureInDescriptor(dataType, {batchSize, numChannels, height, width});
+    Tensor featureIn_h(cpuPlacement, featureInDescriptor);
+    writeCpuTensor(featureIn_h, inputValues);
+
+    const vector<float> referenceInputValues = readCpuTensor(featureIn_h);
+
+    NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
+    BatchNormalization bn(gpuPlacement, true, 0);
+    NetworkOutput no(cpuPlacement);
+
+    bn.setOptimizer("weights", make_shared<Adam>(4000, 0.001f, 0.9f, 0.999f, 1e-7f));
+    bn.setOptimizer("biases", make_shared<Adam>(4001, 0.001f, 0.9f, 0.999f, 1e-7f));
+
+    ni.connectToNextLayer(&bn);
+    bn.connectToNextLayer(&no);
+    compileAndInitialize(ni, bn, no);
+
+    Stream stream = bn.getStreams()[0];
+    setParameterTensor(bn.getParameter("weights"), weightValues, stream);
+    setParameterTensor(bn.getParameter("biases"), biasValues, stream);
+    setParameterTensor(bn.getParameter("running_mean"), runningMean, stream);
+    setParameterTensor(bn.getParameter("running_variance"), runningVariance, stream);
+
+    ni.forward(featureIn_h, true, batchSize);
+    no.getOutputReadyEvent().synchronize();
+
+    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput());
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
+    const vector<float> actualRunningVariance = readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+
+    const vector<float> expectedFeatureOut = batchNormForwardInferenceReference(referenceInputValues,
+                                                                                weightValues,
+                                                                                biasValues,
+                                                                                runningMean,
+                                                                                runningVariance,
+                                                                                batchSize,
+                                                                                numChannels,
+                                                                                height,
+                                                                                width,
+                                                                                bn.getEpsilon());
+
+    const float featureTol = bnFeatureTolerance(dataType);
+
+    expectAllClose(actualFeatureOut, expectedFeatureOut, featureTol, featureTol, "featureOut");
+    expectAllClose(actualRunningMean, runningMean, 2e-6f, 2e-6f, "runningMean");
+    expectAllClose(actualRunningVariance, runningVariance, 2e-6f, 2e-6f, "runningVariance");
+}
+
+TEST(BatchNormalization, DirectForwardInferenceSpatialNumericalFp16Input) {
+    runBatchNormalizationDirectForwardInferenceSpatialNumericalForInputType(DataType::FP16);
+}
+
+TEST(BatchNormalization, DirectForwardInferenceSpatialNumericalBf16Input) {
+    runBatchNormalizationDirectForwardInferenceSpatialNumericalForInputType(DataType::BF16);
+}
+
+void runBatchNormalizationDirectBackwardSpatialNumericalWithSgdForInputType(DataType dataType) {
+    const uint64_t batchSize = 3;
+    const uint64_t numChannels = 2;
+    const uint64_t height = 2;
+    const uint64_t width = 2;
+    const float learningRate = 0.01f;
+
+    mt19937 rng(9999);
+    const vector<float> inputValues = randomFloatVector(rng, batchSize * numChannels * height * width, -1.0f, 1.0f);
+    const vector<float> weightValues = randomFloatVector(rng, numChannels, -0.6f, 0.6f);
+    const vector<float> biasValues = randomFloatVector(rng, numChannels, -0.4f, 0.4f);
+    const vector<float> runningMeanBefore = randomFloatVector(rng, numChannels, -0.5f, 0.5f);
+    const vector<float> runningVarianceBefore = randomFloatVector(rng, numChannels, 0.5f, 2.0f);
+    const vector<float> errorInputValues = randomFloatVector(rng, batchSize * numChannels * height * width, -0.75f, 0.75f);
+
+    TensorDescriptor featureInDescriptor(dataType, {batchSize, numChannels, height, width});
+    Tensor featureIn_h(cpuPlacement, featureInDescriptor);
+    writeCpuTensor(featureIn_h, inputValues);
+
+    const vector<float> referenceInputValues = readCpuTensor(featureIn_h);
+
+    NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
+    GradientRivet gr1, gr2;
+    BatchNormalization bn(gpuPlacement, false, 0);
+    NetworkOutput no(cpuPlacement);
+
+    shared_ptr<Sgd> sgdWeights = make_shared<Sgd>(5000, learningRate, 0.0f, 0.0f, false);
+    shared_ptr<Sgd> sgdBiases = make_shared<Sgd>(5001, learningRate, 0.0f, 0.0f, false);
+    bn.setOptimizer("weights", sgdWeights);
+    bn.setOptimizer("biases", sgdBiases);
+
+    ni.connectToNextLayer(&gr1);
+    gr1.connectToNextLayer(&bn);
+    bn.connectToNextLayer(&gr2);
+    gr2.connectToNextLayer(&no);
+
+    ni.compile();
+    gr1.compile();
+    bn.compile();
+    gr2.compile();
+    no.compile();
+    ni.initialize();
+    gr1.initialize();
+    bn.initialize();
+    gr2.initialize();
+    no.initialize();
+
+    Stream stream = bn.getStreams()[0];
+    setParameterTensor(bn.getParameter("weights"), weightValues, stream);
+    setParameterTensor(bn.getParameter("biases"), biasValues, stream);
+    setParameterTensor(bn.getParameter("running_mean"), runningMeanBefore, stream);
+    setParameterTensor(bn.getParameter("running_variance"), runningVarianceBefore, stream);
+
+    ni.forward(featureIn_h, false, batchSize);
+    no.getOutputReadyEvent().synchronize();
+
+    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput());
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
+    const vector<float> actualRunningVariance = readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+
+    ASSERT_GT(bn.getErrorInputs().size(), 0);
+    ASSERT_TRUE(bn.getErrorInputs()[0].isPresent());
+    ASSERT_GT(bn.getErrorOutputs().size(), 0);
+    ASSERT_TRUE(bn.getErrorOutputs()[0].isPresent());
+    ASSERT_TRUE(bn.getGradientUpdateStream().isPresent());
+
+    Tensor bnErrorInput = bn.getErrorInputs()[0];
+    Tensor bnErrorOutput = bn.getErrorOutputs()[0];
+    Stream gradientUpdateStream = bn.getGradientUpdateStream();
+
+    Tensor bnErrorInput_h = bnErrorInput.clone(cpuPlacement);
+    writeCpuTensor(bnErrorInput_h, errorInputValues);
+
+    const vector<float> referenceErrorInputValues = readCpuTensor(bnErrorInput_h);
+
+    bnErrorInput.copyFromAsync(bnErrorInput_h, stream);
+    bn.backward(bnErrorInput, batchSize);
+
+    Tensor bnErrorOutput_h = copyTensorToCpu(bnErrorOutput, gradientUpdateStream);
+
+    ASSERT_TRUE(sgdWeights->getWeightsGradient().isPresent());
+    ASSERT_TRUE(sgdBiases->getWeightsGradient().isPresent());
+
+    Tensor weightsGrad_h = copyTensorToCpu(sgdWeights->getWeightsGradient().get(), gradientUpdateStream);
+    Tensor biasesGrad_h = copyTensorToCpu(sgdBiases->getWeightsGradient().get(), gradientUpdateStream);
+    Tensor weightsAfter_h = copyTensorToCpu(bn.getParameter("weights")->getStorage(), gradientUpdateStream);
+    Tensor biasesAfter_h = copyTensorToCpu(bn.getParameter("biases")->getStorage(), gradientUpdateStream);
+
+    const vector<float> actualErrorOut = readCpuTensor(bnErrorOutput_h);
+    const vector<float> actualWeightsGrad = readCpuTensor(weightsGrad_h);
+    const vector<float> actualBiasesGrad = readCpuTensor(biasesGrad_h);
+    const vector<float> actualWeightsAfter = readCpuTensor(weightsAfter_h);
+    const vector<float> actualBiasesAfter = readCpuTensor(biasesAfter_h);
+
+    const float lossScalingFactor = Loss::getLossScalingFactor();
+    const BatchNormDirectBackwardSgdReference reference = computeBatchNormDirectBackwardSgdReference(referenceInputValues,
+                                                                                                     weightValues,
+                                                                                                     biasValues,
+                                                                                                     runningMeanBefore,
+                                                                                                     runningVarianceBefore,
+                                                                                                     referenceErrorInputValues,
+                                                                                                     batchSize,
+                                                                                                     numChannels,
+                                                                                                     height,
+                                                                                                     width,
+                                                                                                     1.0,
+                                                                                                     bn.getEpsilon(),
+                                                                                                     lossScalingFactor,
+                                                                                                     learningRate);
+
+    const float featureTol = bnFeatureTolerance(dataType);
+    const float statsTol = bnStatsTolerance(dataType);
+    const float backwardTol = bnBackwardTolerance(dataType);
+
+    expectAllClose(actualFeatureOut, reference.featureOut, featureTol, featureTol, "featureOut");
+    expectAllClose(actualRunningMean, reference.runningMeanAfter, statsTol, statsTol, "runningMean");
+    expectAllClose(actualRunningVariance, reference.runningVarianceAfter, statsTol, statsTol, "runningVariance");
+    expectAllClose(actualErrorOut, reference.errorOut, backwardTol, backwardTol, "errorOut");
+    expectAllClose(actualWeightsGrad, reference.weightsGrad, backwardTol, backwardTol, "weightsGrad");
+    expectAllClose(actualBiasesGrad, reference.biasesGrad, backwardTol, backwardTol, "biasesGrad");
+    expectAllClose(actualWeightsAfter, reference.weightsAfter, backwardTol, backwardTol, "weightsAfter");
+    expectAllClose(actualBiasesAfter, reference.biasesAfter, backwardTol, backwardTol, "biasesAfter");
+}
+
+TEST(BatchNormalization, DirectBackwardSpatialNumericalWithSgdFp16Input) {
+    runBatchNormalizationDirectBackwardSpatialNumericalWithSgdForInputType(DataType::FP16);
+}
+
+TEST(BatchNormalization, DirectBackwardSpatialNumericalWithSgdBf16Input) {
+    runBatchNormalizationDirectBackwardSpatialNumericalWithSgdForInputType(DataType::BF16);
 }

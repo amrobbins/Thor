@@ -8,7 +8,7 @@ class UniformRandom : public Initializer {
    public:
     UniformRandom(float maxValue, float minValue);
 
-    Event initialize() override;
+    void initialize(Stream initStream) override;
 
     std::shared_ptr<Initializer> clone() override;
 
