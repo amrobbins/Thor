@@ -60,6 +60,266 @@ const float CublasMatrixMultiply::ALPHA_NEGATE = -1.0f;
 const float CublasMatrixMultiply::BETA_ACCUMULATE = 1.0f;
 const float CublasMatrixMultiply::BETA_CLEAR = 0.0f;
 
+namespace {
+
+void setTensorwideFp8ScaleMode(cublasLtMatmulDesc_t operationDesc, cublasLtMatmulDescAttributes_t attribute) {
+    const cublasLtMatmulMatrixScale_t scaleMode = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
+    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, attribute, &scaleMode, sizeof(scaleMode)));
+}
+
+void setFp8ScalePointerIfPresent(cublasLtMatmulDesc_t operationDesc,
+                                 cublasLtMatmulDescAttributes_t attribute,
+                                 const float *scaleDevicePointer) {
+    if (scaleDevicePointer != nullptr) {
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, attribute, &scaleDevicePointer, sizeof(scaleDevicePointer)));
+    }
+}
+
+void setFp8AmaxPointerIfPresent(cublasLtMatmulDesc_t operationDesc, cublasLtMatmulDescAttributes_t attribute, float *amaxDevicePointer) {
+    if (amaxDevicePointer != nullptr) {
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, attribute, &amaxDevicePointer, sizeof(amaxDevicePointer)));
+    }
+}
+
+bool usesFp8ColumnMajorLtPath(const OperationType &operationType) { return isCublasLtFp8OperationType(operationType); }
+
+uint64_t cudaDataTypeSizeInBytes(cudaDataType_t dataType) {
+    switch (dataType) {
+        case CUDA_R_32F:
+            return 4;
+        case CUDA_R_16BF:
+        case CUDA_R_16F:
+            return 2;
+        case CUDA_R_8F_E4M3:
+        case CUDA_R_8F_E5M2:
+        case CUDA_R_8I:
+            return 1;
+        default:
+            assert(false);
+            return 1;
+    }
+}
+
+cudaDataType_t getLtADescDataType(const OperationType &operationType) {
+    return usesFp8ColumnMajorLtPath(operationType) ? operationType.BDataType : operationType.ADataType;
+}
+
+cudaDataType_t getLtBDescDataType(const OperationType &operationType) {
+    return usesFp8ColumnMajorLtPath(operationType) ? operationType.ADataType : operationType.BDataType;
+}
+
+CublasMatrixMultiply::Fp8MatmulScales getLtFp8Scales(const OperationType &operationType, CublasMatrixMultiply::Fp8MatmulScales fp8Scales) {
+    if (!usesFp8ColumnMajorLtPath(operationType)) {
+        return fp8Scales;
+    }
+    return CublasMatrixMultiply::Fp8MatmulScales::tensorwide(fp8Scales.BScaleDevicePointer,
+                                                             fp8Scales.AScaleDevicePointer,
+                                                             fp8Scales.CScaleDevicePointer,
+                                                             fp8Scales.DScaleDevicePointer,
+                                                             fp8Scales.DAmaxDevicePointer);
+}
+
+bool fp8NeedsRowMajorTransposeWorkspace(const OperationType &operationType, bool transposeA, bool transposeB) {
+    return usesFp8ColumnMajorLtPath(operationType) && (transposeA || !transposeB);
+}
+
+uint64_t fp8RowMajorTransposeWorkspaceUpperBoundBytes(
+    const OperationType &operationType, int rowsA, int colsA, int rowsB, int colsB, bool transposeA, bool transposeB) {
+    if (!fp8NeedsRowMajorTransposeWorkspace(operationType, transposeA, transposeB)) {
+        return 0;
+    }
+
+    uint64_t bytes = 0;
+    if (transposeA) {
+        bytes += static_cast<uint64_t>(rowsA) * static_cast<uint64_t>(colsA) * cudaDataTypeSizeInBytes(operationType.ADataType);
+    }
+    if (!transposeB) {
+        bytes += static_cast<uint64_t>(rowsB) * static_cast<uint64_t>(colsB) * cudaDataTypeSizeInBytes(operationType.BDataType);
+    }
+    // Match CublasKernel's conservative workspace alignment between temporary regions.
+    return bytes + 512;
+}
+
+void validateFp8RowMajorGemmShapeAndLayoutOrThrow(const OperationType &operationType,
+                                                  int32_t rowsA,
+                                                  int32_t colsA,
+                                                  int32_t rowsB,
+                                                  int32_t colsB,
+                                                  int32_t ldA,
+                                                  int32_t ldB,
+                                                  int32_t ldC,
+                                                  int32_t ldD,
+                                                  bool transposeA,
+                                                  bool transposeB,
+                                                  const std::string &context) {
+    if (!usesFp8ColumnMajorLtPath(operationType)) {
+        return;
+    }
+
+    const int32_t k = transposeA ? rowsA : colsA;
+    const int32_t n = transposeB ? rowsB : colsB;
+
+    if ((n % 2) != 0) {
+        throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires even N.");
+    }
+    if ((k % 2) != 0) {
+        throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires even K.");
+    }
+    if (ldA != colsA) {
+        throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires packed A: ldA must equal colsA.");
+    }
+    if (ldB != colsB) {
+        throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires packed B: ldB must equal colsB.");
+    }
+    if (ldC != n) {
+        throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires packed C: ldC must equal N.");
+    }
+    if (ldD != n) {
+        throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires packed D: ldD must equal N.");
+    }
+}
+
+void configureTensorwideFp8Scales(cublasLtMatmulDesc_t operationDesc,
+                                  const OperationType &operationType,
+                                  const CublasMatrixMultiply::Fp8MatmulScales &fp8Scales) {
+    const cudaDataType_t ltADataType = getLtADescDataType(operationType);
+    const cudaDataType_t ltBDataType = getLtBDescDataType(operationType);
+    const CublasMatrixMultiply::Fp8MatmulScales ltFp8Scales = getLtFp8Scales(operationType, fp8Scales);
+
+    if (!ltFp8Scales.hasAnyScalePointer() && !isCublasLtFp8CudaType(ltADataType) && !isCublasLtFp8CudaType(ltBDataType) &&
+        !isCublasLtFp8CudaType(operationType.CDataType) && !isCublasLtFp8CudaType(operationType.DDataType)) {
+        return;
+    }
+
+    if (isCublasLtFp8CudaType(ltADataType)) {
+        setTensorwideFp8ScaleMode(operationDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE);
+    }
+    if (isCublasLtFp8CudaType(ltBDataType)) {
+        setTensorwideFp8ScaleMode(operationDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE);
+    }
+    if (isCublasLtFp8CudaType(operationType.CDataType) || ltFp8Scales.hasCScale()) {
+        setTensorwideFp8ScaleMode(operationDesc, CUBLASLT_MATMUL_DESC_C_SCALE_MODE);
+    }
+    if (isCublasLtFp8CudaType(operationType.DDataType)) {
+        setTensorwideFp8ScaleMode(operationDesc, CUBLASLT_MATMUL_DESC_D_SCALE_MODE);
+    }
+
+    setFp8ScalePointerIfPresent(operationDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, ltFp8Scales.AScaleDevicePointer);
+    setFp8ScalePointerIfPresent(operationDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, ltFp8Scales.BScaleDevicePointer);
+    setFp8ScalePointerIfPresent(operationDesc, CUBLASLT_MATMUL_DESC_C_SCALE_POINTER, ltFp8Scales.CScaleDevicePointer);
+
+    if (isCublasLtFp8CudaType(operationType.DDataType)) {
+        setFp8ScalePointerIfPresent(operationDesc, CUBLASLT_MATMUL_DESC_D_SCALE_POINTER, ltFp8Scales.DScaleDevicePointer);
+        setFp8AmaxPointerIfPresent(operationDesc, CUBLASLT_MATMUL_DESC_AMAX_D_POINTER, ltFp8Scales.DAmaxDevicePointer);
+    }
+}
+
+void configureLtOperationTransposes(
+    cublasLtMatmulDesc_t operationDesc, const OperationType &operationType, bool transposeA, bool transposeB, bool transposeC) {
+    if (usesFp8ColumnMajorLtPath(operationType)) {
+        // cuBLASLt exposes the usable FP8 kernels as column-major TN.  With row-major Thor buffers,
+        // this computes D^T = (op(B))^T * (op(A))^T while preserving the public D = op(A) * op(B) API.
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose)));
+        return;
+    }
+
+    if (transposeA) {
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose)));
+    }
+    if (transposeB) {
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose)));
+    }
+    if (transposeC) {
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSC, &transpose, sizeof(transpose)));
+    }
+}
+
+void createLtMatrixLayoutsForRowMajorGemm(cublasLtMatrixLayout_t *ADesc,
+                                          cublasLtMatrixLayout_t *BDesc,
+                                          cublasLtMatrixLayout_t *CDesc,
+                                          cublasLtMatrixLayout_t *DDesc,
+                                          const OperationType &operationType,
+                                          const int32_t A_rows,
+                                          const int32_t A_cols,
+                                          const int32_t B_rows,
+                                          const int32_t B_cols,
+                                          const int32_t C_rows,
+                                          const int32_t C_cols,
+                                          const int32_t D_rows,
+                                          const int32_t D_cols,
+                                          const int32_t ld_A,
+                                          const int32_t ld_B,
+                                          const int32_t ld_C,
+                                          const int32_t ld_D,
+                                          bool transposeA,
+                                          bool transposeB) {
+    int64_t ld;
+
+    if (usesFp8ColumnMajorLtPath(operationType)) {
+        const cublasLtOrder_t columnMajorOrder = CUBLASLT_ORDER_COL;
+
+        // Internal cuBLASLt A operand is X=(op(B))^T, presented as column-major X^T and used with TRANSA=T.
+        const int32_t internalARowMajorRows = transposeB ? B_rows : B_cols;
+        const int32_t internalARowMajorCols = transposeB ? B_cols : B_rows;
+        const int32_t internalALd = transposeB ? ld_B : B_rows;
+
+        CHECK_CUBLAS(cublasLtMatrixLayoutCreate(
+            ADesc, getLtADescDataType(operationType), internalARowMajorCols, internalARowMajorRows, internalALd));
+        CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+        ld = internalALd;
+        CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+        // Internal cuBLASLt B operand is Y=op(A), presented as column-major Y^T and used with TRANSB=N.
+        const int32_t internalBRowMajorRows = transposeA ? A_cols : A_rows;
+        const int32_t internalBRowMajorCols = transposeA ? A_rows : A_cols;
+        const int32_t internalBLd = transposeA ? A_rows : ld_A;
+
+        CHECK_CUBLAS(cublasLtMatrixLayoutCreate(
+            BDesc, getLtBDescDataType(operationType), internalBRowMajorCols, internalBRowMajorRows, internalBLd));
+        CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+        ld = internalBLd;
+        CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+        CHECK_CUBLAS(cublasLtMatrixLayoutCreate(CDesc, operationType.CDataType, C_cols, C_rows, ld_C));
+        CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+        ld = ld_C;
+        CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+        CHECK_CUBLAS(cublasLtMatrixLayoutCreate(DDesc, operationType.DDataType, D_cols, D_rows, ld_D));
+        CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
+        ld = ld_D;
+        CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+        return;
+    }
+
+    const cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
+
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(ADesc, operationType.ADataType, A_rows, A_cols, ld_A));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
+    ld = ld_A;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(BDesc, operationType.BDataType, B_rows, B_cols, ld_B));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
+    ld = ld_B;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(CDesc, operationType.CDataType, C_rows, C_cols, ld_C));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
+    ld = ld_C;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(DDesc, operationType.DDataType, D_rows, D_cols, ld_D));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
+    ld = ld_D;
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+}
+}  // namespace
+
 // This variant allows non-packed matrices
 void CublasMatrixMultiply::multiply(Tensor A,
                                     Tensor B,
@@ -180,6 +440,44 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                 const MatmulDataTypes dataTypes,
                                 Stream stream,
                                 CublasScalarPointerMode pointerMode) {
+    gemm(A,
+         B,
+         C,
+         D,
+         workspace,
+         A_rows,
+         A_cols,
+         B_rows,
+         B_cols,
+         transposeA,
+         transposeB,
+         transposeC,
+         alpha,
+         beta,
+         dataTypes,
+         Fp8MatmulScales::none(),
+         stream,
+         pointerMode);
+}
+
+void CublasMatrixMultiply::gemm(Tensor A,
+                                Tensor B,
+                                Tensor C,
+                                Tensor D,
+                                Optional<Tensor> workspace,
+                                const int32_t A_rows,
+                                const int32_t A_cols,
+                                const int32_t B_rows,
+                                const int32_t B_cols,
+                                bool transposeA,
+                                bool transposeB,
+                                bool transposeC,
+                                const float *alpha,
+                                const float *beta,
+                                const MatmulDataTypes dataTypes,
+                                const Fp8MatmulScales fp8Scales,
+                                Stream stream,
+                                CublasScalarPointerMode pointerMode) {
     assert(A.getDimensions().size() == 2);
     assert(B.getDimensions().size() == 2);
     assert(C.getDimensions().size() == 2);
@@ -208,6 +506,7 @@ void CublasMatrixMultiply::gemm(Tensor A,
     assert(ld_C >= C_cols);
     assert(ld_D >= D_cols);
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::gemm");
+    validateFp8MatmulScaleConfigurationOrThrow(dataTypes, fp8Scales, "CublasMatrixMultiply::gemm");
     assert(A.getDescriptor().getDataType() == dataTypes.A);
     assert(B.getDescriptor().getDataType() == dataTypes.B);
     assert(C.getDescriptor().getDataType() == dataTypes.C);
@@ -245,6 +544,11 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                         workspace.isPresent());
 
     OperationType operationType = makeOperationType(dataTypes);
+    validateFp8RowMajorGemmShapeAndLayoutOrThrow(
+        operationType, A_rows, A_cols, B_rows, B_cols, ld_A, ld_B, ld_C, ld_D, transposeA, transposeB, "CublasMatrixMultiply::gemm");
+    if (!workspace.isPresent() && fp8NeedsRowMajorTransposeWorkspace(operationType, transposeA, transposeB)) {
+        throw std::runtime_error("CublasMatrixMultiply::gemm FP8 row-major path requires a workspace tensor for temporary A/B transposes.");
+    }
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
@@ -255,15 +559,15 @@ void CublasMatrixMultiply::gemm(Tensor A,
     // Check byte size of workspace
     if (workspace.isPresent()) {
         bool kernelWillRunOnGpu;
-        size_t workspaceSizeInBytes = cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
+        size_t workspaceSizeInBytes = cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales);
         assert(kernelWillRunOnGpu);
 
         if (workspaceSizeInBytes > 0)
-            assert(cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu) <=
+            assert(cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales) <=
                    workspace.get().getDescriptor().getArraySizeInBytes());
     }
 
-    cublasKernel.executeKernel(A, B, C, D, ld_A, ld_B, ld_C, ld_D, workspace, alpha, beta, stream, pointerMode);
+    cublasKernel.executeKernel(A, B, C, D, ld_A, ld_B, ld_C, ld_D, workspace, alpha, beta, stream, pointerMode, fp8Scales);
 }
 
 cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(TensorDescriptor::DataType dataType) {
@@ -398,32 +702,63 @@ bool CublasMatrixMultiply::isFp8DataType(TensorDescriptor::DataType dataType) {
     return dataType == TensorDescriptor::DataType::FP8_E4M3 || dataType == TensorDescriptor::DataType::FP8_E5M2;
 }
 
-bool CublasMatrixMultiply::isUnsupportedFp8InputsWithFp32Output(MatmulDataTypes dataTypes) {
+bool CublasMatrixMultiply::isFp8Matmul(MatmulDataTypes dataTypes) {
+    return isFp8DataType(dataTypes.A) || isFp8DataType(dataTypes.B) || isFp8DataType(dataTypes.C) || isFp8DataType(dataTypes.D);
+}
+
+bool CublasMatrixMultiply::isFp8InputsWithFp32Output(MatmulDataTypes dataTypes) {
     return (isFp8DataType(dataTypes.A) || isFp8DataType(dataTypes.B)) && dataTypes.C == TensorDescriptor::DataType::FP32 &&
            dataTypes.D == TensorDescriptor::DataType::FP32;
 }
 
-std::string CublasMatrixMultiply::unsupportedMatmulDataTypesMessage(MatmulDataTypes dataTypes, const std::string &context) {
-    std::string message = context + ": unsupported cuBLASLt GEMM data type combination " + dataTypesToString(dataTypes) + ".";
+bool CublasMatrixMultiply::hasRequiredExplicitFp8Scales(MatmulDataTypes dataTypes, Fp8MatmulScales fp8Scales) {
+    if (!isFp8InputsWithFp32Output(dataTypes)) {
+        return true;
+    }
 
-    if (isUnsupportedFp8InputsWithFp32Output(dataTypes)) {
+    return fp8Scales.hasAScale() && fp8Scales.hasBScale();
+}
+
+std::string CublasMatrixMultiply::unsupportedMatmulDataTypesMessage(MatmulDataTypes dataTypes, const std::string &context) {
+    return context + ": unsupported cuBLASLt GEMM data type combination " + dataTypesToString(dataTypes) +
+           ". Supported Thor cuBLASLt matmul/GEMM dtypes are FP32, FP16, BF16, selected INT8 paths, and selected FP8 paths. "
+           "FP8 input GEMM with FP32 C/D output additionally requires explicit tensorwide FP8 scale pointers.";
+}
+
+std::string CublasMatrixMultiply::unsupportedFp8ScaleConfigurationMessage(MatmulDataTypes dataTypes,
+                                                                          Fp8MatmulScales fp8Scales,
+                                                                          const std::string &context) {
+    std::string message =
+        context + ": FP8 GEMM scale configuration is incomplete for data type combination " + dataTypesToString(dataTypes) + ".";
+
+    if (isFp8InputsWithFp32Output(dataTypes)) {
         message +=
-            " Thor does not support FP8 input GEMM with FP32 C/D output through its current row-major cuBLASLt path. "
-            "cuBLASLt does not provide a usable heuristic for this Thor descriptor combination on supported FP8 devices. "
-            "Cast the FP8 inputs to FP16 or BF16 before matmul/GEMM, or request an FP16/BF16 output, until Thor adds the additional "
-            "cuBLASLt FP8 scaling/layout support needed for this path.";
-    } else {
-        message +=
-            " Supported Thor cuBLASLt matmul/GEMM dtypes are FP32, FP16, BF16, selected INT8 paths, and selected FP8 paths that "
-            "do not use FP32 C/D output.";
+            " FP8 input GEMM with FP32 C/D output requires explicit tensorwide device scale pointers for A and B. "
+            "Pass CublasMatrixMultiply::Fp8MatmulScales::tensorwide(aScaleDevicePtr, bScaleDevicePtr, ...) to the scale-aware "
+            "heuristic GEMM/matmul API. Missing:";
+        if (!fp8Scales.hasAScale()) {
+            message += " A_SCALE_POINTER";
+        }
+        if (!fp8Scales.hasBScale()) {
+            message += " B_SCALE_POINTER";
+        }
+        message += ".";
     }
 
     return message;
 }
 
 void CublasMatrixMultiply::validateMatmulDataTypesOrThrow(MatmulDataTypes dataTypes, const std::string &context) {
-    if (!isSupportedMatmulDataTypes(dataTypes) || isUnsupportedFp8InputsWithFp32Output(dataTypes)) {
+    if (!isSupportedMatmulDataTypes(dataTypes)) {
         throw std::invalid_argument(unsupportedMatmulDataTypesMessage(dataTypes, context));
+    }
+}
+
+void CublasMatrixMultiply::validateFp8MatmulScaleConfigurationOrThrow(MatmulDataTypes dataTypes,
+                                                                      Fp8MatmulScales fp8Scales,
+                                                                      const std::string &context) {
+    if (!hasRequiredExplicitFp8Scales(dataTypes, fp8Scales)) {
+        throw std::invalid_argument(unsupportedFp8ScaleConfigurationMessage(dataTypes, fp8Scales, context));
     }
 }
 
@@ -458,6 +793,24 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                               const bool negate,
                                                               const MatmulDataTypes dataTypes,
                                                               Stream stream) {
+    multiplyUsingHeuristicKernelChoice(
+        A, B, C, A_rows, A_cols, B_rows, B_cols, transposeA, transposeB, accumulate, negate, dataTypes, Fp8MatmulScales::none(), stream);
+}
+
+void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
+                                                              Tensor B,
+                                                              Tensor C,
+                                                              const int32_t A_rows,
+                                                              const int32_t A_cols,
+                                                              const int32_t B_rows,
+                                                              const int32_t B_cols,
+                                                              bool transposeA,
+                                                              bool transposeB,
+                                                              const bool accumulate,
+                                                              const bool negate,
+                                                              const MatmulDataTypes dataTypes,
+                                                              const Fp8MatmulScales fp8Scales,
+                                                              Stream stream) {
     const float *alpha = negate ? &ALPHA_NEGATE : &ALPHA_NO_SCALE;
     const float *beta = accumulate ? &BETA_ACCUMULATE : &BETA_CLEAR;
 
@@ -475,6 +828,7 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                    alpha,
                                    beta,
                                    dataTypes,
+                                   fp8Scales,
                                    stream,
                                    CublasScalarPointerMode::Host);
 }
@@ -516,6 +870,41 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                                    pointerMode);
 }
 
+void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(Tensor A,
+                                                          Tensor B,
+                                                          Tensor C,
+                                                          Tensor D,
+                                                          const int32_t A_rows,
+                                                          const int32_t A_cols,
+                                                          const int32_t B_rows,
+                                                          const int32_t B_cols,
+                                                          bool transposeA,
+                                                          bool transposeB,
+                                                          bool transposeC,
+                                                          const float *alpha,
+                                                          const float *beta,
+                                                          const MatmulDataTypes dataTypes,
+                                                          Stream stream,
+                                                          CublasScalarPointerMode pointerMode) {
+    gemmUsingHeuristicKernelChoice(A,
+                                   B,
+                                   C,
+                                   D,
+                                   A_rows,
+                                   A_cols,
+                                   B_rows,
+                                   B_cols,
+                                   transposeA,
+                                   transposeB,
+                                   transposeC,
+                                   alpha,
+                                   beta,
+                                   dataTypes,
+                                   Fp8MatmulScales::none(),
+                                   stream,
+                                   pointerMode);
+}
+
 void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     Tensor A,
     Tensor B,
@@ -533,6 +922,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     const float *alpha,
     const float *beta,
     const MatmulDataTypes dataTypes,
+    const Fp8MatmulScales fp8Scales,
     Stream stream,
     CublasScalarPointerMode pointerMode) {
     assert(A.getDimensions().size() == 2);
@@ -563,6 +953,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     assert(ld_D >= D_cols);
     assert(!(C == D) || dataTypes.C == dataTypes.D);
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::gemmUsingHeuristicKernelChoice");
+    validateFp8MatmulScaleConfigurationOrThrow(dataTypes, fp8Scales, "CublasMatrixMultiply::gemmUsingHeuristicKernelChoice");
     assert(A.getDescriptor().getDataType() == dataTypes.A);
     assert(B.getDescriptor().getDataType() == dataTypes.B);
     assert(C.getDescriptor().getDataType() == dataTypes.C);
@@ -591,45 +982,49 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     cublasLtMatrixLayout_t DDesc;
 
     OperationType operationType = makeOperationType(dataTypes);
+    validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
+                                                 A_rows,
+                                                 A_cols,
+                                                 B_rows,
+                                                 B_cols,
+                                                 ld_A,
+                                                 ld_B,
+                                                 ld_C,
+                                                 ld_D,
+                                                 transposeA,
+                                                 transposeB,
+                                                 "CublasMatrixMultiply::gemmUsingHeuristicKernelChoice");
     CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType));
     const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
     const cublasLtPointerMode_t cublasPointerMode =
         (pointerMode == CublasScalarPointerMode::Device) ? CUBLASLT_POINTER_MODE_DEVICE : CUBLASLT_POINTER_MODE_HOST;
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &cublasPointerMode, sizeof(cublasPointerMode)));
-    if (transposeA) {
-        cublasOperation_t transpose = CUBLAS_OP_T;
-        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose)));
+    configureTensorwideFp8Scales(operationDesc, operationType, fp8Scales);
+    if (fp8NeedsRowMajorTransposeWorkspace(operationType, transposeA, transposeB)) {
+        throw std::runtime_error(
+            "CublasMatrixMultiply::gemmUsingHeuristicKernelChoice FP8 row-major path requires chooseOptimalGemmKernel/gemm with workspace "
+            "when temporary A/B transposes are needed.");
     }
-    if (transposeB) {
-        cublasOperation_t transpose = CUBLAS_OP_T;
-        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose)));
-    }
-    if (transposeC) {
-        cublasOperation_t transpose = CUBLAS_OP_T;
-        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSC, &transpose, sizeof(transpose)));
-    }
-
-    cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
-
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&ADesc, operationType.ADataType, A_rows, A_cols, ld_A));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
-    int64_t ld = ld_A;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&BDesc, operationType.BDataType, B_rows, B_cols, ld_B));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
-    ld = ld_B;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&CDesc, operationType.CDataType, C_rows, C_cols, ld_C));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
-
-    ld = ld_C;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&DDesc, operationType.DDataType, D_rows, D_cols, ld_D));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
-
-    ld = ld_D;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+    configureLtOperationTransposes(operationDesc, operationType, transposeA, transposeB, transposeC);
+    createLtMatrixLayoutsForRowMajorGemm(&ADesc,
+                                         &BDesc,
+                                         &CDesc,
+                                         &DDesc,
+                                         operationType,
+                                         A_rows,
+                                         A_cols,
+                                         B_rows,
+                                         B_cols,
+                                         C_rows,
+                                         C_cols,
+                                         D_rows,
+                                         D_cols,
+                                         ld_A,
+                                         ld_B,
+                                         ld_C,
+                                         ld_D,
+                                         transposeA,
+                                         transposeB);
 
     KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(stream.getGpuNum()),
                                         A_rows,
@@ -647,6 +1042,9 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
+    const void *ltA = usesFp8ColumnMajorLtPath(operationType) ? B.getMemPtr() : A.getMemPtr();
+    const void *ltB = usesFp8ColumnMajorLtPath(operationType) ? A.getMemPtr() : B.getMemPtr();
+
     // If there is already a known kernel, use it. Otherwise, a heuristic search will be performed and the kernel remembered.
     if (auto optimalKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement); optimalKernel.has_value()) {
         cublasLtMatmulAlgo_t algorithm = optimalKernel->getAlgorithm(stream.getGpuNum());
@@ -654,9 +1052,9 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
         CHECK_CUBLAS(cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                     operationDesc,
                                     alpha,
-                                    A.getMemPtr(),
+                                    ltA,
                                     ADesc,
-                                    B.getMemPtr(),
+                                    ltB,
                                     BDesc,
                                     beta,
                                     C.getMemPtr(),
@@ -682,9 +1080,9 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
         CHECK_CUBLAS(cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                     operationDesc,
                                     alpha,
-                                    A.getMemPtr(),
+                                    ltA,
                                     ADesc,
-                                    B.getMemPtr(),
+                                    ltB,
                                     BDesc,
                                     beta,
                                     C.getMemPtr(),
@@ -743,9 +1141,9 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
         cublasStatus_t cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                                      operationDesc,
                                                      alpha,
-                                                     A.getMemPtr(),
+                                                     ltA,
                                                      ADesc,
-                                                     B.getMemPtr(),
+                                                     ltB,
                                                      BDesc,
                                                      beta,
                                                      C.getMemPtr(),
@@ -781,9 +1179,9 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
             cublasStatus_t cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                                          operationDesc,
                                                          alpha,
-                                                         A.getMemPtr(),
+                                                         ltA,
                                                          ADesc,
-                                                         B.getMemPtr(),
+                                                         ltB,
                                                          BDesc,
                                                          beta,
                                                          C.getMemPtr(),
@@ -829,7 +1227,8 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
                                                                    const int32_t ld_D,
                                                                    const uint64_t maxWorkspaceSize,
                                                                    const float maxWaves,
-                                                                   const MatmulDataTypes dataTypes) {
+                                                                   const MatmulDataTypes dataTypes,
+                                                                   const Fp8MatmulScales fp8Scales) {
     ScopedGpu scopedGpu(gpuNum);
     cublasStatus_t cublasStatus;
 
@@ -853,6 +1252,7 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     assert(B_rows > 0);
     assert(B_cols > 0);
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::getHeuristicGemmKernels");
+    validateFp8MatmulScaleConfigurationOrThrow(dataTypes, fp8Scales, "CublasMatrixMultiply::getHeuristicGemmKernels");
 
     cublasLtMatmulDesc_t operationDesc;
     cublasLtMatrixLayout_t ADesc;
@@ -861,47 +1261,44 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     cublasLtMatrixLayout_t DDesc;
 
     OperationType operationType = makeOperationType(dataTypes);
+    validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
+                                                 A_rows,
+                                                 A_cols,
+                                                 B_rows,
+                                                 B_cols,
+                                                 ld_A,
+                                                 ld_B,
+                                                 ld_C,
+                                                 ld_D,
+                                                 transposeA,
+                                                 transposeB,
+                                                 "CublasMatrixMultiply::getHeuristicGemmKernels");
     CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType));
 
     const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
     const cublasLtPointerMode_t hostPointerMode = CUBLASLT_POINTER_MODE_HOST;
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &hostPointerMode, sizeof(hostPointerMode)));
-
-    if (transposeA) {
-        cublasOperation_t transpose = CUBLAS_OP_T;
-        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose)));
-    }
-    if (transposeB) {
-        cublasOperation_t transpose = CUBLAS_OP_T;
-        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose)));
-    }
-    if (transposeC) {
-        cublasOperation_t transpose = CUBLAS_OP_T;
-        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSC, &transpose, sizeof(transpose)));
-    }
-
-    cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
-
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&ADesc, operationType.ADataType, A_rows, A_cols, ld_A));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
-    int64_t ld = ld_A;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&BDesc, operationType.BDataType, B_rows, B_cols, ld_B));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
-
-    ld = ld_B;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&CDesc, operationType.CDataType, C_rows, C_cols, ld_C));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
-
-    ld = ld_C;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&DDesc, operationType.DDataType, D_rows, D_cols, ld_D));
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
-
-    ld = ld_D;
-    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+    configureTensorwideFp8Scales(operationDesc, operationType, fp8Scales);
+    configureLtOperationTransposes(operationDesc, operationType, transposeA, transposeB, transposeC);
+    createLtMatrixLayoutsForRowMajorGemm(&ADesc,
+                                         &BDesc,
+                                         &CDesc,
+                                         &DDesc,
+                                         operationType,
+                                         A_rows,
+                                         A_cols,
+                                         B_rows,
+                                         B_cols,
+                                         C_rows,
+                                         C_cols,
+                                         D_rows,
+                                         D_cols,
+                                         ld_A,
+                                         ld_B,
+                                         ld_C,
+                                         ld_D,
+                                         transposeA,
+                                         transposeB);
 
     KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(gpuNum),
                                         A_rows,
@@ -1075,13 +1472,76 @@ void CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
                                                    bool transposeC,
                                                    MatmulDataTypes dataTypes,
                                                    bool printResults) {
-    bool bestKernelHasWorkspace = chooseOptimalGemmKernel(
-        gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, dataTypes, true, printResults);
+    chooseOptimalGemmKernel(gpuNum,
+                            rowsA,
+                            colsA,
+                            rowsB,
+                            colsB,
+                            ldA,
+                            ldB,
+                            ldC,
+                            ldD,
+                            transposeA,
+                            transposeB,
+                            transposeC,
+                            dataTypes,
+                            Fp8MatmulScales::none(),
+                            printResults);
+}
+
+void CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
+                                                   int rowsA,
+                                                   int colsA,
+                                                   int rowsB,
+                                                   int colsB,
+                                                   int ldA,
+                                                   int ldB,
+                                                   int ldC,
+                                                   int ldD,
+                                                   bool transposeA,
+                                                   bool transposeB,
+                                                   bool transposeC,
+                                                   MatmulDataTypes dataTypes,
+                                                   const Fp8MatmulScales fp8Scales,
+                                                   bool printResults) {
+    const OperationType operationType = makeOperationType(dataTypes);
+    const bool fp8TemporaryWorkspaceRequired = fp8NeedsRowMajorTransposeWorkspace(operationType, transposeA, transposeB);
+
+    bool bestKernelHasWorkspace = chooseOptimalGemmKernel(gpuNum,
+                                                          rowsA,
+                                                          colsA,
+                                                          rowsB,
+                                                          colsB,
+                                                          ldA,
+                                                          ldB,
+                                                          ldC,
+                                                          ldD,
+                                                          transposeA,
+                                                          transposeB,
+                                                          transposeC,
+                                                          dataTypes,
+                                                          fp8Scales,
+                                                          true,
+                                                          printResults);
 
     // If the best kernel did not have a workspace, then it will be used for the no workspace version of the computation also
-    if (bestKernelHasWorkspace) {
-        chooseOptimalGemmKernel(
-            gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, dataTypes, false, printResults);
+    if (bestKernelHasWorkspace && !fp8TemporaryWorkspaceRequired) {
+        chooseOptimalGemmKernel(gpuNum,
+                                rowsA,
+                                colsA,
+                                rowsB,
+                                colsB,
+                                ldA,
+                                ldB,
+                                ldC,
+                                ldD,
+                                transposeA,
+                                transposeB,
+                                transposeC,
+                                dataTypes,
+                                fp8Scales,
+                                false,
+                                printResults);
 
         // The heuristic that is being used to choose kernels tries to get a kernel as close as possible to 1 wave,
         // for smaller operations this can be achieved by adding a workspace, but this doesn't create a faster kernel.
@@ -1101,7 +1561,6 @@ void CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
                                                        ldC,
                                                        ldD,
                                                        false);
-        OperationType operationType = makeOperationType(dataTypes);
         CublasKernelRequirement noWorkspaceCublasKernelRequirement(kernelRequirementNoWorkspace, operationType);
         KernelRequirement kernelRequirementWithWorkspace(MachineEvaluator::instance().getGpuType(gpuNum),
                                                          rowsA,
@@ -1141,6 +1600,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                    const bool transposeB,
                                                    const bool transposeC,
                                                    const MatmulDataTypes dataTypes,
+                                                   const Fp8MatmulScales fp8Scales,
                                                    const bool allowWorkspaces,
                                                    const bool printResults) {
     lock_guard<mutex> lck(CublasMatrixMultiply::instance().mtx);
@@ -1148,6 +1608,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     assert(gpuNum >= 0);
     assert(gpuNum < (int)MachineEvaluator::instance().getNumGpus());
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::chooseOptimalGemmKernel");
+    validateFp8MatmulScaleConfigurationOrThrow(dataTypes, fp8Scales, "CublasMatrixMultiply::chooseOptimalGemmKernel");
 
     // Ensure the operation is legal
     // The number of C and D columns is specified by the sizes of A and B, so verify A and B
@@ -1216,13 +1677,31 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                         allowWorkspaces);
 
     OperationType operationType = makeOperationType(dataTypes);
+    validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
+                                                 rowsA,
+                                                 colsA,
+                                                 rowsB,
+                                                 colsB,
+                                                 ldA,
+                                                 ldB,
+                                                 ldC,
+                                                 ldD,
+                                                 transposeA,
+                                                 transposeB,
+                                                 "CublasMatrixMultiply::chooseOptimalGemmKernel");
+    const uint64_t fp8TemporaryWorkspaceSizeInBytes =
+        fp8RowMajorTransposeWorkspaceUpperBoundBytes(operationType, rowsA, colsA, rowsB, colsB, transposeA, transposeB);
+    if (!allowWorkspaces && fp8TemporaryWorkspaceSizeInBytes > 0) {
+        throw std::runtime_error(
+            "CublasMatrixMultiply::chooseOptimalGemmKernel FP8 row-major path requires workspace for temporary A/B transposes.");
+    }
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
     // Will only evaluate kernel once per gpu type
     if (auto optimalKernel = optimalKernels.get(cublasKernelRequirement); optimalKernel.has_value()) {
         bool kernelWillRunOnGpu;
-        unsigned int workspaceSizeInBytes = optimalKernel->getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
+        unsigned int workspaceSizeInBytes = optimalKernel->getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales);
         assert(kernelWillRunOnGpu);
         return workspaceSizeInBytes > 0 ? true : false;
     }
@@ -1237,7 +1716,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                    static_cast<uint64_t>(rowsB) * ldB * B_ELEMENT_SIZE,
                                    static_cast<uint64_t>(rowsC) * ldC * C_ELEMENT_SIZE,
                                    static_cast<uint64_t>(rowsD) * ldD * D_ELEMENT_SIZE});
-    const uint64_t maxAllowedWorkspaceSizeInBytes = allowWorkspaces ? maxMatrixBytes : 0;
+    const uint64_t maxCublasWorkspaceSizeInBytes = allowWorkspaces ? maxMatrixBytes : 0;
+    const uint64_t maxAllowedWorkspaceSizeInBytes = allowWorkspaces ? maxMatrixBytes + fp8TemporaryWorkspaceSizeInBytes : 0;
     float maxWaves = 0.0f;
     vector<CublasKernel> preCheckedKernels;
     preCheckedKernels = getHeuristicGemmKernels(initialContestantCount,
@@ -1254,10 +1734,11 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                 ldC,
                                                 ldD,
                                                 // When set to 0, no workspace allowed:
-                                                maxAllowedWorkspaceSizeInBytes,
+                                                maxCublasWorkspaceSizeInBytes,
                                                 // When set to 0.0f, any number of waves allowed:
                                                 maxWaves,
-                                                dataTypes);
+                                                dataTypes,
+                                                fp8Scales);
 
     vector<CublasKernel> kernels;
     uint64_t maxWorkspaceSizeInBytes = 0;
@@ -1265,7 +1746,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
         bool kernelWillRunOnGpu;
         CublasKernel cublasKernel = preCheckedKernels[i];
 
-        unsigned long workspaceSizeInBytes = cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
+        unsigned long workspaceSizeInBytes = cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales);
         if (!kernelWillRunOnGpu) {
             continue;
         }
@@ -1286,7 +1767,10 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
 
     if (printResults)
         printf("%ld selected initial contestants\n", kernels.size());
-    assert(!kernels.empty());
+    if (kernels.empty()) {
+        throw std::runtime_error(
+            "CublasMatrixMultiply::chooseOptimalGemmKernel could not find any cuBLASLt kernel candidates for this descriptor.");
+    }
 
     /**
      * All fully specified kernels that will be tried are now contained in the kernels vector.
@@ -1374,7 +1858,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
         for (unsigned int i = 0; i < kernels.size() && (abs(TARGET_WAVES - kernels[i].getWavesCount(gpuNum)) <= maxWavesDiff ||
                                                         prunedKernels.size() < initialContestantCount);
              ++i) {
-            cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], D[0], workspace[0], &ONE, &ZERO, stream);
+            cublasStatus = kernels[i].runWithoutChecks(
+                A[0], B[0], C[0], D[0], workspace[0], &ONE, &ZERO, stream, CublasScalarPointerMode::Host, fp8Scales);
             if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
                 stream.synchronize();
                 prunedKernels.push_back(kernels[i]);
@@ -1388,7 +1873,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
         const float ONE = 1.0f;
         const float ZERO = 0.0f;
         for (unsigned int i = 0; i < kernels.size(); ++i) {
-            cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], D[0], workspace[0], &ONE, &ZERO, stream);
+            cublasStatus = kernels[i].runWithoutChecks(
+                A[0], B[0], C[0], D[0], workspace[0], &ONE, &ZERO, stream, CublasScalarPointerMode::Host, fp8Scales);
             if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
                 stream.synchronize();
                 prunedKernels.push_back(kernels[i]);
@@ -1399,7 +1885,10 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
 
     if (printResults)
         printf("got %ld kernels\n", kernels.size());
-    assert(!kernels.empty());
+    if (kernels.empty()) {
+        throw std::runtime_error(
+            "CublasMatrixMultiply::chooseOptimalGemmKernel could not find any cuBLASLt kernel candidates for this descriptor.");
+    }
 
     int tensorInstance = 0;
     int workspaceInstance = 0;
@@ -1410,8 +1899,16 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     const float ONE = 1.0f;
     const float ZERO = 0.0f;
     for (int i = 0; i < 5; ++i) {
-        kernels[rand() % kernels.size()].runWithoutChecks(
-            A[tensorInstance], B[tensorInstance], C[tensorInstance], D[tensorInstance], workspace[workspaceInstance], &ONE, &ZERO, stream);
+        kernels[rand() % kernels.size()].runWithoutChecks(A[tensorInstance],
+                                                          B[tensorInstance],
+                                                          C[tensorInstance],
+                                                          D[tensorInstance],
+                                                          workspace[workspaceInstance],
+                                                          &ONE,
+                                                          &ZERO,
+                                                          stream,
+                                                          CublasScalarPointerMode::Host,
+                                                          fp8Scales);
         tensorInstance += 1;
         if (tensorInstance >= numInstances)
             tensorInstance = 0;
@@ -1437,7 +1934,9 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                               workspace[workspaceInstance],
                                                               &ONE,
                                                               &ZERO,
-                                                              stream);
+                                                              stream,
+                                                              CublasScalarPointerMode::Host,
+                                                              fp8Scales);
             tensorInstance += 1;
             if (tensorInstance >= numInstances)
                 tensorInstance = 0;
@@ -1453,8 +1952,16 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     // Run all kernels 10 times and measure performance of each
     // But first put some initial work in the stream so that all timed work will be queued before running
     for (int i = 0; i < 5; ++i) {
-        kernels[rand() % kernels.size()].runWithoutChecks(
-            A[tensorInstance], B[tensorInstance], C[tensorInstance], D[tensorInstance], workspace[workspaceInstance], &ONE, &ZERO, stream);
+        kernels[rand() % kernels.size()].runWithoutChecks(A[tensorInstance],
+                                                          B[tensorInstance],
+                                                          C[tensorInstance],
+                                                          D[tensorInstance],
+                                                          workspace[workspaceInstance],
+                                                          &ONE,
+                                                          &ZERO,
+                                                          stream,
+                                                          CublasScalarPointerMode::Host,
+                                                          fp8Scales);
         tensorInstance += 1;
         if (tensorInstance >= numInstances)
             tensorInstance = 0;
@@ -1480,7 +1987,9 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                                workspace[workspaceInstance],
                                                                &ONE,
                                                                &ZERO,
-                                                               stream));
+                                                               stream,
+                                                               CublasScalarPointerMode::Host,
+                                                               fp8Scales));
 
             tensorInstance += 1;
             if (tensorInstance >= numInstances)
@@ -1538,7 +2047,9 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                                    workspace[workspaceInstance],
                                                                    &ONE,
                                                                    &ZERO,
-                                                                   stream));
+                                                                   stream,
+                                                                   CublasScalarPointerMode::Host,
+                                                                   fp8Scales));
             tensorInstance += 1;
             if (tensorInstance >= numInstances)
                 tensorInstance = 0;
@@ -1583,7 +2094,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     assert(!bestKernel.getErrorFlag());
     bestKernel.unstashRunStats();
     bool kernelWillRunOnGpu;
-    bool bestKernelHasWorkspace = bestKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu) > 0;
+    bool bestKernelHasWorkspace = bestKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales) > 0;
     assert(kernelWillRunOnGpu);
 
     optimalKernels.put(cublasKernelRequirement, bestKernel);
@@ -1771,7 +2282,40 @@ unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
                                                                bool transposeC,
                                                                MatmulDataTypes dataTypes,
                                                                bool &kernelWillRunOnGpu) {
+    return getGemmWorkspaceSizeInBytes(gpuNum,
+                                       rowsA,
+                                       colsA,
+                                       rowsB,
+                                       colsB,
+                                       ldA,
+                                       ldB,
+                                       ldC,
+                                       ldD,
+                                       transposeA,
+                                       transposeB,
+                                       transposeC,
+                                       dataTypes,
+                                       Fp8MatmulScales::none(),
+                                       kernelWillRunOnGpu);
+}
+
+unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
+                                                               int rowsA,
+                                                               int colsA,
+                                                               int rowsB,
+                                                               int colsB,
+                                                               int ldA,
+                                                               int ldB,
+                                                               int ldC,
+                                                               int ldD,
+                                                               bool transposeA,
+                                                               bool transposeB,
+                                                               bool transposeC,
+                                                               MatmulDataTypes dataTypes,
+                                                               Fp8MatmulScales fp8Scales,
+                                                               bool &kernelWillRunOnGpu) {
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::getGemmWorkspaceSizeInBytes");
+    validateFp8MatmulScaleConfigurationOrThrow(dataTypes, fp8Scales, "CublasMatrixMultiply::getGemmWorkspaceSizeInBytes");
 
     KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(gpuNum),
                                         rowsA,
@@ -1788,12 +2332,24 @@ unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
                                         true);
 
     OperationType operationType = makeOperationType(dataTypes);
+    validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
+                                                 rowsA,
+                                                 colsA,
+                                                 rowsB,
+                                                 colsB,
+                                                 ldA,
+                                                 ldB,
+                                                 ldC,
+                                                 ldD,
+                                                 transposeA,
+                                                 transposeB,
+                                                 "CublasMatrixMultiply::getGemmWorkspaceSizeInBytes");
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
     auto optimalKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement);
     assert(optimalKernel.has_value());
-    unsigned int workspaceSize = optimalKernel->getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
+    unsigned int workspaceSize = optimalKernel->getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales);
 
     return workspaceSize;
 }
@@ -1846,6 +2402,18 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
         gpuType, rowsA, colsA, rowsB, colsB, transposeA, transposeB, transposeC, ldA, ldB, ldC, ldD, workspaceAllowed);
 
     OperationType operationType = makeOperationType(dataTypes);
+    validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
+                                                 rowsA,
+                                                 colsA,
+                                                 rowsB,
+                                                 colsB,
+                                                 ldA,
+                                                 ldB,
+                                                 ldC,
+                                                 ldD,
+                                                 transposeA,
+                                                 transposeB,
+                                                 "CublasMatrixMultiply::getOptimalKernelTime");
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
     string dataTypesString = dataTypesToString(dataTypes);
@@ -1857,7 +2425,7 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
             "gpuType " +
             gpuType + " rowsA " + std::to_string(rowsA) + " colsA " + std::to_string(colsA) + " colsB " + std::to_string(colsB) +
             " dataTypes " + dataTypesString;
-        throw(CublasMatrixMultiply::Youreusingitwrong(message));
+        throw(runtime_error(message));
     }
     double averageRunTimeMilliseconds = optimalKernel->getAverageRunTimeMilliseconds();
 

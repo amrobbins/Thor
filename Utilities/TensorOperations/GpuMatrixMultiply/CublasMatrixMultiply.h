@@ -63,6 +63,8 @@ class CublasMatrixMultiply {
         // bool operator==(const MatmulDataTypes &other) const = default;
     };
 
+    using Fp8MatmulScales = CublasFp8MatmulScales;
+
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
     // accumulate=true computes C += A * B. accumulate=false computes C = A * B.
@@ -155,6 +157,24 @@ class CublasMatrixMultiply {
               const MatmulDataTypes dataTypes,
               Stream stream,
               CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+    void gemm(Tensor A,
+              Tensor B,
+              Tensor C,
+              Tensor D,
+              Optional<Tensor> workspace,
+              const int32_t A_rows,
+              const int32_t A_cols,
+              const int32_t B_rows,
+              const int32_t B_cols,
+              bool transposeA,
+              bool transposeB,
+              bool transposeC,
+              const float *alpha,
+              const float *beta,
+              const MatmulDataTypes dataTypes,
+              const Fp8MatmulScales fp8Scales,
+              Stream stream,
+              CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
 
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
@@ -191,6 +211,20 @@ class CublasMatrixMultiply {
                                             const bool accumulate,
                                             const bool negate,
                                             const MatmulDataTypes dataTypes,
+                                            Stream stream);
+    void multiplyUsingHeuristicKernelChoice(Tensor A,
+                                            Tensor B,
+                                            Tensor C,
+                                            const int32_t A_rows,
+                                            const int32_t A_cols,
+                                            const int32_t B_rows,
+                                            const int32_t B_cols,
+                                            bool transposeA,
+                                            bool transposeB,
+                                            const bool accumulate,
+                                            const bool negate,
+                                            const MatmulDataTypes dataTypes,
+                                            const Fp8MatmulScales fp8Scales,
                                             Stream stream);
 
     // This exposes the full GEMM functionality using an optimal kernel
@@ -237,6 +271,23 @@ class CublasMatrixMultiply {
                                         const float *alpha,
                                         const float *beta,
                                         const MatmulDataTypes dataTypes,
+                                        Stream stream,
+                                        CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+    void gemmUsingHeuristicKernelChoice(Tensor A,
+                                        Tensor B,
+                                        Tensor C,
+                                        Tensor D,
+                                        const int32_t A_rows,
+                                        const int32_t A_cols,
+                                        const int32_t B_rows,
+                                        const int32_t B_cols,
+                                        bool transposeA,
+                                        bool transposeB,
+                                        bool transposeC,
+                                        const float *alpha,
+                                        const float *beta,
+                                        const MatmulDataTypes dataTypes,
+                                        const Fp8MatmulScales fp8Scales,
                                         Stream stream,
                                         CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
 
@@ -402,6 +453,21 @@ class CublasMatrixMultiply {
                                  const bool transposeC,
                                  const MatmulDataTypes dataTypes,
                                  const bool printResults = false);
+    void chooseOptimalGemmKernel(const int gpuNum,
+                                 const int rowsA,
+                                 const int colsA,
+                                 const int rowsB,
+                                 const int colsB,
+                                 const int ldA,
+                                 const int ldB,
+                                 const int ldC,
+                                 const int ldD,
+                                 const bool transposeA,
+                                 const bool transposeB,
+                                 const bool transposeC,
+                                 const MatmulDataTypes dataTypes,
+                                 const Fp8MatmulScales fp8Scales,
+                                 const bool printResults = false);
 
     inline unsigned int getMatrixMultiplyWorkspaceSizeInBytes(int gpuNum,
                                                               int rowsA,
@@ -461,6 +527,21 @@ class CublasMatrixMultiply {
                                              bool transposeB,
                                              bool transposeC,
                                              MatmulDataTypes dataTypes,
+                                             bool &kernelWillRunOnGpu);
+    unsigned int getGemmWorkspaceSizeInBytes(int gpuNum,
+                                             int rowsA,
+                                             int colsA,
+                                             int rowsB,
+                                             int colsB,
+                                             int ldA,
+                                             int ldB,
+                                             int ldC,
+                                             int ldD,
+                                             bool transposeA,
+                                             bool transposeB,
+                                             bool transposeC,
+                                             MatmulDataTypes dataTypes,
+                                             Fp8MatmulScales fp8Scales,
                                              bool &kernelWillRunOnGpu);
 
     // getOptimalKernelTime(...) will give you the average time the kernel took when chooseOptimalMatrixMultiplyKernel was called for the
@@ -536,16 +617,6 @@ class CublasMatrixMultiply {
     LruCacheThreadSafe<CublasKernelRequirement, cublasLtMatmulAlgo_t> knownHeuristicAlgorithms;
     std::mutex mtx;
 
-    class Youreusingitwrong : public std::exception {
-       public:
-        Youreusingitwrong(std::string message) { this->message = message; }
-
-        virtual const char *what() const throw() { return message.c_str(); }
-
-       private:
-        std::string message;
-    };
-
     static constexpr std::size_t MAX_KERNEL_CACHE_OCCUPANCY = 25000;
     CublasMatrixMultiply() : optimalKernels(MAX_KERNEL_CACHE_OCCUPANCY), knownHeuristicAlgorithms(MAX_KERNEL_CACHE_OCCUPANCY) {}
 
@@ -555,7 +626,11 @@ class CublasMatrixMultiply {
     bool isSupportedMatmulDataTypes(MatmulDataTypes dataTypes);
     bool isSupportedSameDataTypeMatmul(TensorDescriptor::DataType ABCDDataType);
     bool isFp8DataType(TensorDescriptor::DataType dataType);
-    bool isUnsupportedFp8InputsWithFp32Output(MatmulDataTypes dataTypes);
+    bool isFp8Matmul(MatmulDataTypes dataTypes);
+    bool isFp8InputsWithFp32Output(MatmulDataTypes dataTypes);
+    bool hasRequiredExplicitFp8Scales(MatmulDataTypes dataTypes, Fp8MatmulScales fp8Scales);
+    std::string unsupportedFp8ScaleConfigurationMessage(MatmulDataTypes dataTypes, Fp8MatmulScales fp8Scales, const std::string &context);
+    void validateFp8MatmulScaleConfigurationOrThrow(MatmulDataTypes dataTypes, Fp8MatmulScales fp8Scales, const std::string &context);
     std::string unsupportedMatmulDataTypesMessage(MatmulDataTypes dataTypes, const std::string &context);
     void validateMatmulDataTypesOrThrow(MatmulDataTypes dataTypes, const std::string &context);
     std::string dataTypeToString(TensorDescriptor::DataType dataType);
@@ -574,6 +649,7 @@ class CublasMatrixMultiply {
                                  bool transposeB,
                                  bool transposeC,
                                  MatmulDataTypes dataTypes,
+                                 Fp8MatmulScales fp8Scales,
                                  bool allowWorkspaces,
                                  bool printResults);
 
@@ -605,7 +681,8 @@ class CublasMatrixMultiply {
                                                       const uint64_t maxWorkspaceSize,
                                                       // When set to 0.0f, any number of waves allowed:
                                                       const float maxWaves,
-                                                      const MatmulDataTypes dataTypes);
+                                                      const MatmulDataTypes dataTypes,
+                                                      const Fp8MatmulScales fp8Scales);
 
     inline std::vector<CublasKernel> getHeuristicMatrixMultiplyKernels(int numChoices,
                                                                        int gpuNum,
@@ -636,7 +713,8 @@ class CublasMatrixMultiply {
                                        colsC,
                                        maxWorkspaceSize,
                                        maxWaves,
-                                       MatmulDataTypes::same(ABCDataType));
+                                       MatmulDataTypes::same(ABCDataType),
+                                       Fp8MatmulScales::none());
     }
 };
 
