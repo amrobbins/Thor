@@ -554,6 +554,10 @@ class CublasMatrixMultiply {
     OperationType makeOperationType(TensorDescriptor::DataType ABCDDataType);
     bool isSupportedMatmulDataTypes(MatmulDataTypes dataTypes);
     bool isSupportedSameDataTypeMatmul(TensorDescriptor::DataType ABCDDataType);
+    bool isFp8DataType(TensorDescriptor::DataType dataType);
+    bool isUnsupportedFp8InputsWithFp32Output(MatmulDataTypes dataTypes);
+    std::string unsupportedMatmulDataTypesMessage(MatmulDataTypes dataTypes, const std::string &context);
+    void validateMatmulDataTypesOrThrow(MatmulDataTypes dataTypes, const std::string &context);
     std::string dataTypeToString(TensorDescriptor::DataType dataType);
     std::string dataTypesToString(MatmulDataTypes dataTypes);
 

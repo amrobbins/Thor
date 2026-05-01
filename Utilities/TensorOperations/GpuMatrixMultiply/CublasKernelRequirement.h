@@ -141,7 +141,10 @@ inline bool isCublasLtFp8DTypeAllowed(cudaDataType_t ADataType,
     }
 
     if (CDataType == CUDA_R_32F) {
-        return DDataType == CUDA_R_32F;
+        // NVIDIA documents FP8 inputs with FP32 C/D, but Thor's current row-major cuBLASLt path does not provide
+        // the additional FP8 scaling/layout attributes needed to obtain a usable heuristic for that descriptor.
+        // Keep this disabled until first-class FP8 matmul support is implemented end-to-end.
+        return false;
     }
 
     if (CDataType == CUDA_R_16BF || CDataType == CUDA_R_16F) {

@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include <cuda_bf16.h>
@@ -1839,7 +1840,7 @@ TEST(CublasMatrixMultiply, OperationTypeTableIncludesExpandedFloatAndFp8Combinat
     EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF));
     EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_32F, CUDA_R_32F));
 
-    EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_8F_E4M3, CUDA_R_8F_E4M3, CUDA_R_32F, CUDA_R_32F));
+    EXPECT_FALSE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_8F_E4M3, CUDA_R_8F_E4M3, CUDA_R_32F, CUDA_R_32F));
     EXPECT_TRUE(
         isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_8F_E4M3, CUDA_R_8F_E5M2, CUDA_R_16BF, CUDA_R_8F_E4M3));
     EXPECT_TRUE(
@@ -1929,4 +1930,85 @@ TEST(CublasMatrixMultiply, HeuristicGemmSupportsBf16InputsAndFp32Output) {
     stream.synchronize();
 
     assertFp32MatrixClose(D_h, expected, m, n, ldD, 0.20f);
+}
+
+TEST(CublasMatrixMultiply, HeuristicGemmRejectsFp8InputsAndFp32OutputInTNLayoutWithFirstClassError) {
+    constexpr int gpuNum = 0;
+    if (!gpuSupportsFp8TensorCores(gpuNum)) {
+        GTEST_SKIP() << "FP8 tensors require an FP8-capable GPU for this runtime validation test.";
+    }
+
+    ScopedGpu scopedGpu(gpuNum);
+    Stream stream(gpuNum);
+
+    constexpr int m = 16;
+    constexpr int n = 16;
+    constexpr int k = 16;
+    constexpr int rowsA = k;
+    constexpr int colsA = m;
+    constexpr int rowsB = k;
+    constexpr int colsB = n;
+    constexpr int ldA = colsA;
+    constexpr int ldB = colsB;
+    constexpr int ldC = colsB;
+    constexpr int ldD = colsB;
+    constexpr bool transposeA = true;
+    constexpr bool transposeB = false;
+    constexpr bool transposeC = false;
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, gpuNum);
+
+    TensorDescriptor ADescriptor(DataType::FP8_E4M3, {static_cast<uint64_t>(rowsA), static_cast<uint64_t>(ldA)});
+    TensorDescriptor BDescriptor(DataType::FP8_E5M2, {static_cast<uint64_t>(rowsB), static_cast<uint64_t>(ldB)});
+    TensorDescriptor CDescriptor(DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(ldC)});
+    TensorDescriptor DDescriptor(DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(ldD)});
+
+    Tensor A(cpuPlacement, ADescriptor);
+    Tensor B(cpuPlacement, BDescriptor);
+    Tensor C(cpuPlacement, CDescriptor);
+    Tensor D(cpuPlacement, DDescriptor);
+    Tensor A_d(gpuPlacement, ADescriptor);
+    Tensor B_d(gpuPlacement, BDescriptor);
+    Tensor C_d(gpuPlacement, CDescriptor);
+    Tensor D_d(gpuPlacement, DDescriptor);
+
+    fillPaddedMatrix<__nv_fp8_e4m3>(A, rowsA, colsA, ldA, 0.125f, -0.125f, 0.0f);
+    fillPaddedMatrix<__nv_fp8_e5m2>(B, rowsB, colsB, ldB, -0.125f, 0.0625f, 0.25f);
+    fillPaddedMatrix<float>(C, m, n, ldC, 0.015625f, -0.03125f, 0.25f);
+    fillPaddedMatrix<float>(D, m, n, ldD, 0.0f, 0.0f, -999.0f);
+
+    A_d.copyFromAsync(A, stream);
+    B_d.copyFromAsync(B, stream);
+    C_d.copyFromAsync(C, stream);
+    D_d.copyFromAsync(D, stream);
+    stream.synchronize();
+
+    constexpr float alpha = 1.0f;
+    constexpr float beta = 0.5f;
+
+    try {
+        CublasMatrixMultiply::instance().gemmUsingHeuristicKernelChoice(
+            A_d,
+            B_d,
+            C_d,
+            D_d,
+            rowsA,
+            colsA,
+            rowsB,
+            colsB,
+            transposeA,
+            transposeB,
+            transposeC,
+            &alpha,
+            &beta,
+            CublasMatmulDTypes{DataType::FP8_E4M3, DataType::FP8_E5M2, DataType::FP32, DataType::FP32},
+            stream);
+        FAIL() << "Expected FP8-input / FP32-output GEMM to be rejected before cuBLASLt heuristic lookup.";
+    } catch (const std::invalid_argument &e) {
+        const std::string message(e.what());
+        EXPECT_NE(message.find("FP8 input GEMM with FP32 C/D output"), std::string::npos) << message;
+        EXPECT_NE(message.find("{A=FP8_E4M3, B=FP8_E5M2, C=FP32, D=FP32}"), std::string::npos) << message;
+        EXPECT_NE(message.find("Cast the FP8 inputs to FP16 or BF16"), std::string::npos) << message;
+    }
 }
