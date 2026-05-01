@@ -254,7 +254,11 @@ struct CompiledMatmul {
     const double beta;
     const uint32_t alpha_input_slot;
     const uint32_t beta_input_slot;
+    // Retained as the promoted/common input dtype for older code paths and diagnostics.
     const TensorDescriptor::DataType input_dtype;
+    const TensorDescriptor::DataType lhs_dtype;
+    const TensorDescriptor::DataType rhs_dtype;
+    const TensorDescriptor::DataType aux_dtype;
     const TensorDescriptor::DataType output_dtype;
     const TensorDescriptor::DataType compute_dtype;
 
@@ -269,6 +273,9 @@ struct CompiledMatmul {
                    uint32_t alpha_input_slot,
                    uint32_t beta_input_slot,
                    TensorDescriptor::DataType input_dtype,
+                   TensorDescriptor::DataType lhs_dtype,
+                   TensorDescriptor::DataType rhs_dtype,
+                   TensorDescriptor::DataType aux_dtype,
                    TensorDescriptor::DataType output_dtype,
                    Optional<TensorDescriptor::DataType> compute_dtype)
         : op(op),
@@ -280,6 +287,9 @@ struct CompiledMatmul {
           alpha_input_slot(alpha_input_slot),
           beta_input_slot(beta_input_slot),
           input_dtype(input_dtype),
+          lhs_dtype(lhs_dtype),
+          rhs_dtype(rhs_dtype),
+          aux_dtype(aux_dtype),
           output_dtype(output_dtype),
           compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : output_dtype) {}
 };

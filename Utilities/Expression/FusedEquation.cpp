@@ -4022,8 +4022,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         throw std::runtime_error("stampMatmul(lhs, rhs, ...) called for a non-matmul stage.");
     }
 
-    Tensor adaptedLhs = adaptMatmulInputDTypeIfNeeded(lhs, compiledStage->input_dtype, stream);
-    Tensor adaptedRhs = adaptMatmulInputDTypeIfNeeded(rhs, compiledStage->input_dtype, stream);
+    Tensor adaptedLhs = adaptMatmulInputDTypeIfNeeded(lhs, compiledStage->lhs_dtype, stream);
+    Tensor adaptedRhs = adaptMatmulInputDTypeIfNeeded(rhs, compiledStage->rhs_dtype, stream);
 
     std::vector<std::vector<uint64_t>> stage_input_dims(2);
     stage_input_dims[0] = adaptedLhs.getDimensions();
@@ -4108,9 +4108,9 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         throw std::runtime_error("stampMatmul(lhs, rhs, addend, ...) called for a non-gemm stage.");
     }
 
-    Tensor adaptedLhs = adaptMatmulInputDTypeIfNeeded(lhs, compiledStage->input_dtype, stream);
-    Tensor adaptedRhs = adaptMatmulInputDTypeIfNeeded(rhs, compiledStage->input_dtype, stream);
-    Tensor adaptedAddend = adaptMatmulInputDTypeIfNeeded(addend, compiledStage->input_dtype, stream);
+    Tensor adaptedLhs = adaptMatmulInputDTypeIfNeeded(lhs, compiledStage->lhs_dtype, stream);
+    Tensor adaptedRhs = adaptMatmulInputDTypeIfNeeded(rhs, compiledStage->rhs_dtype, stream);
+    Tensor adaptedAddend = adaptMatmulInputDTypeIfNeeded(addend, compiledStage->aux_dtype, stream);
 
     std::vector<std::vector<uint64_t>> stage_input_dims(3);
     stage_input_dims[0] = adaptedLhs.getDimensions();

@@ -1,3 +1,5 @@
+import subprocess
+
 import numpy as np
 import pytest
 import thor
@@ -8,6 +10,59 @@ MATMUL_DTYPES = [
     # thor.DataType.bf16,
     thor.DataType.fp32,
 ]
+
+
+def _gpu_compute_capability(gpu_num: int = 0) -> tuple[int, int] | None:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                f"--id={gpu_num}",
+                "--query-gpu=compute_cap",
+                "--format=csv,noheader",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=3,
+            check=True,
+        )
+    except Exception:
+        return None
+
+    lines = (result.stdout or "").strip().splitlines()
+    if not lines:
+        return None
+    line = lines[0].strip()
+    if not line:
+        return None
+
+    try:
+        major_s, minor_s = line.split(".", 1)
+        return int(major_s), int(minor_s)
+    except Exception:
+        return None
+
+
+def _gpu_supports_bf16_matmul(gpu_num: int = 0) -> bool:
+    capability = _gpu_compute_capability(gpu_num)
+    if capability is None:
+        return False
+    major, _minor = capability
+    return major >= 8
+
+
+def _gpu_supports_fp8_matmul(gpu_num: int = 0) -> bool:
+    capability = _gpu_compute_capability(gpu_num)
+    if capability is None:
+        return False
+    major, minor = capability
+    return major >= 9 or (major == 8 and minor >= 9)
+
+
+def _assert_allclose_fp32_output(got: np.ndarray, expected: np.ndarray, rtol: float, atol: float):
+    assert got.dtype == np.float32
+    np.testing.assert_allclose(got.astype(np.float32), expected.astype(np.float32), rtol=rtol, atol=atol)
 
 
 def _cpu_tensor(shape: list[int], dtype: thor.DataType) -> PhysicalTensor:
@@ -60,6 +115,121 @@ def _copy_to_host(tensor: PhysicalTensor, dtype: thor.DataType, stream: Stream) 
     host.copy_from_async(tensor, stream)
     stream.synchronize()
     return host.numpy().copy()
+
+
+@pytest.mark.cuda
+def test_matmul_bf16_inputs_fp32_output_numerical():
+    if not _gpu_supports_bf16_matmul(0):
+        pytest.skip("BF16 GEMM kernels require an Ampere-or-newer GPU.")
+
+    a = ex.input("a")
+    b = ex.input("b")
+    eq = ex.compile(ex.matmul(a, b, output_dtype=thor.DataType.fp32), device_num=0)
+
+    a_dtype = thor.DataType.bf16
+    b_dtype = thor.DataType.bf16
+    output_dtype = thor.DataType.fp32
+
+    a_np = np.array(
+        [[0.25, -0.5, 1.0, -1.25], [1.5, 0.75, -0.25, 0.5], [-1.0, 1.25, 0.375, -0.75]],
+        dtype=np.float32,
+    ).astype(_numpy_storage_dtype(a_dtype))
+    b_np = np.array(
+        [
+            [1.0, -0.25, 0.5, 1.25, -1.5], [-0.75, 0.5, -1.0, 0.25, 1.0], [0.375, -1.25, 0.75, -0.5, 0.625],
+            [1.5, 0.25, -0.375, 1.0, -0.875]
+        ],
+        dtype=np.float32,
+    ).astype(_numpy_storage_dtype(b_dtype))
+
+    expected = a_np.astype(np.float32) @ b_np.astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, a_dtype, stream),
+        "b": _host_to_gpu(b_np, b_dtype, stream),
+    }
+
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(lhsT=0,rhsT=0,auxT=0)"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), output_dtype, stream)
+    _assert_allclose_fp32_output(got, expected, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.cuda
+def test_gemm_fp16_inputs_fp32_addend_and_output_numerical():
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    eq = ex.compile(ex.gemm(a, b, c, alpha=0.75, beta=-1.25, output_dtype=thor.DataType.fp32), device_num=0)
+
+    ab_dtype = thor.DataType.fp16
+    c_dtype = thor.DataType.fp32
+    output_dtype = thor.DataType.fp32
+
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32).astype(_numpy_storage_dtype(ab_dtype))
+    b_np = np.array(
+        [[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]],
+        dtype=np.float32,
+    ).astype(_numpy_storage_dtype(ab_dtype))
+    c_np = np.array([[0.25, -1.0, 2.0, 0.5], [1.25, 0.75, -0.5, 3.0]], dtype=np.float32)
+
+    expected = (a_np.astype(np.float32) @ b_np.astype(np.float32)) * 0.75 + c_np * -1.25
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, ab_dtype, stream),
+        "b": _host_to_gpu(b_np, ab_dtype, stream),
+        "c": _host_to_gpu(c_np, c_dtype, stream),
+    }
+
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(lhsT=0,rhsT=0,auxT=0)"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), output_dtype, stream)
+    _assert_allclose_fp32_output(got, expected, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.cuda
+def test_operator_gemm_pattern_preserves_fp16_inputs_fp32_addend_and_output_numerical():
+    a = ex.input("a")
+    b = ex.input("b")
+    c = ex.input("c")
+    eq = ex.compile((a @ b) * 0.5 + c * -0.25, device_num=0)
+
+    ab_dtype = thor.DataType.fp16
+    c_dtype = thor.DataType.fp32
+    output_dtype = thor.DataType.fp32
+
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32).astype(_numpy_storage_dtype(ab_dtype))
+    b_np = np.array(
+        [[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]],
+        dtype=np.float32,
+    ).astype(_numpy_storage_dtype(ab_dtype))
+    c_np = np.array([[0.25, -1.0, 2.0, 0.5], [1.25, 0.75, -0.5, 3.0]], dtype=np.float32)
+
+    expected = (a_np.astype(np.float32) @ b_np.astype(np.float32)) * 0.5 + c_np * -0.25
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, ab_dtype, stream),
+        "b": _host_to_gpu(b_np, ab_dtype, stream),
+        "c": _host_to_gpu(c_np, c_dtype, stream),
+    }
+
+    # This guards the GEMM pattern path, not just the explicit ex.gemm API.
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(lhsT=0,rhsT=0,auxT=0)"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), output_dtype, stream)
+    _assert_allclose_fp32_output(got, expected, rtol=2e-2, atol=2e-2)
 
 
 @pytest.mark.cuda
