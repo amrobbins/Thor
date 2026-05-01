@@ -5,6 +5,7 @@
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelOptions.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelRequirement.h"
+#include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
 
 #include <cublasLt.h>
 #include <cuda.h>
@@ -13,6 +14,7 @@
 #include <assert.h>
 #include <atomic>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace ThorImplementation {
@@ -110,7 +112,8 @@ class CublasKernel : private ReferenceCounted {
                        const float *alpha,
                        const float *beta,
                        Stream stream,
-                       CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host) {
+                       CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
+                       CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) {
         executeKernel(A,
                       B,
                       C,
@@ -123,7 +126,8 @@ class CublasKernel : private ReferenceCounted {
                       alpha,
                       beta,
                       stream,
-                      pointerMode);
+                      pointerMode,
+                      fp8Scales);
     }
 
     void executeKernel(Tensor A,
@@ -138,7 +142,8 @@ class CublasKernel : private ReferenceCounted {
                        const float *alpha,
                        const float *beta,
                        Stream stream,
-                       CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host) {
+                       CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
+                       CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) {
         assert(!uninitialized());
 
         uint64_t rowsC = cublasKernelRequirement->kernelRequirement.transposeA == false ? cublasKernelRequirement->kernelRequirement.rowsA
@@ -172,7 +177,7 @@ class CublasKernel : private ReferenceCounted {
         assert(C.getMemPtr() != A.getMemPtr());
         assert(C.getMemPtr() != B.getMemPtr());
 
-        assert(runWithoutChecks(A, B, C, D, workspace, alpha, beta, stream, pointerMode) == CUBLAS_STATUS_SUCCESS);
+        assert(runWithoutChecks(A, B, C, D, workspace, alpha, beta, stream, pointerMode, fp8Scales) == CUBLAS_STATUS_SUCCESS);
     }
 
     inline cublasStatus_t runWithoutChecks(Tensor A,
@@ -183,26 +188,89 @@ class CublasKernel : private ReferenceCounted {
                                            const float *alpha,
                                            const float *beta,
                                            Stream stream,
-                                           CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host) {
+                                           CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
+                                           CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) {
         assert(!uninitialized());
         ScopedGpu scopedGpu(stream.getGpuNum());
 
-        size_t workspaceSizeInBytes = 0;
         bool kernelWillRunOnGpu;
-        size_t requiredWorkspaceSize = getWorkspaceSizeInBytes(stream.getGpuNum(), kernelWillRunOnGpu);
+        const size_t requiredWorkspaceSize = getWorkspaceSizeInBytes(stream.getGpuNum(), kernelWillRunOnGpu, fp8Scales);
         assert(kernelWillRunOnGpu);
-        if (workspace.isPresent() && requiredWorkspaceSize > 0) {
-            workspaceSizeInBytes = workspace.get().getDescriptor().getArraySizeInBytes();
+
+        if (requiredWorkspaceSize > 0 && !workspace.isPresent()) {
+            throw std::runtime_error("CublasKernel::runWithoutChecks requires a workspace tensor for this cuBLASLt kernel.");
         }
-        assert(workspaceSizeInBytes >= requiredWorkspaceSize);
+        if (workspace.isPresent()) {
+            assert(workspace.get().getDescriptor().getArraySizeInBytes() >= requiredWorkspaceSize);
+        }
+
+        cublasLtMatmulDesc_t operationDesc = getOperationDesc(pointerMode);
+        configureTensorwideFp8Scales(operationDesc, fp8Scales);
+
+        const void *ltA = A.getMemPtr();
+        const void *ltB = B.getMemPtr();
+        void *ltWorkspace = nullptr;
+        size_t ltWorkspaceSizeInBytes = cublasKernelOptions->workspaceSizeInBytes;
+
+        if (usesFp8ColumnMajorLtPath()) {
+            validateFp8RowMajorGemmShapeAndLayoutOrThrow("CublasKernel::runWithoutChecks");
+
+            if (fp8NeedsTransposedAWorkspace() &&
+                cublasKernelRequirement->kernelRequirement.ldA != cublasKernelRequirement->kernelRequirement.colsA) {
+                throw std::runtime_error(
+                    "CublasKernel FP8 row-major TN path currently requires contiguous A rows when A must be materialized transposed.");
+            }
+            if (fp8NeedsTransposedBWorkspace() &&
+                cublasKernelRequirement->kernelRequirement.ldB != cublasKernelRequirement->kernelRequirement.colsB) {
+                throw std::runtime_error(
+                    "CublasKernel FP8 row-major TN path currently requires contiguous B rows when B must be materialized transposed.");
+            }
+
+            void *workspaceBase = requiredWorkspaceSize > 0 ? workspace.get().getMemPtr() : nullptr;
+
+            // Internal FP8 cuBLASLt uses column-major TN.  The first cuBLASLt operand is derived from external B,
+            // and the second cuBLASLt operand is derived from external A, so the row-major public contract still computes
+            // D = alpha * op(A) * op(B) + beta * C.
+            if (fp8NeedsTransposedBWorkspace()) {
+                void *transposedB = addBytes(workspaceBase, fp8TransposedBWorkspaceOffsetInBytes());
+                launchMatrixTransposeByType(transposedB,
+                                            B.getMemPtr(),
+                                            static_cast<uint32_t>(cublasKernelRequirement->kernelRequirement.rowsB),
+                                            static_cast<uint32_t>(cublasKernelRequirement->kernelRequirement.colsB),
+                                            thorDataTypeForCudaDataType(cublasKernelRequirement->operationType.BDataType),
+                                            thorDataTypeForCudaDataType(cublasKernelRequirement->operationType.BDataType),
+                                            stream);
+                ltA = transposedB;
+            } else {
+                ltA = B.getMemPtr();
+            }
+
+            if (fp8NeedsTransposedAWorkspace()) {
+                void *transposedA = addBytes(workspaceBase, fp8TransposedAWorkspaceOffsetInBytes());
+                launchMatrixTransposeByType(transposedA,
+                                            A.getMemPtr(),
+                                            static_cast<uint32_t>(cublasKernelRequirement->kernelRequirement.rowsA),
+                                            static_cast<uint32_t>(cublasKernelRequirement->kernelRequirement.colsA),
+                                            thorDataTypeForCudaDataType(cublasKernelRequirement->operationType.ADataType),
+                                            thorDataTypeForCudaDataType(cublasKernelRequirement->operationType.ADataType),
+                                            stream);
+                ltB = transposedA;
+            } else {
+                ltB = A.getMemPtr();
+            }
+
+            ltWorkspace = ltWorkspaceSizeInBytes > 0 ? addBytes(workspaceBase, cublasWorkspaceOffsetInBytes()) : nullptr;
+        } else {
+            ltWorkspace = ltWorkspaceSizeInBytes > 0 ? workspace.get().getMemPtr() : nullptr;
+        }
 
         cublasStatus_t cublasStatus;
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                      getOperationDesc(pointerMode),
+                                      operationDesc,
                                       alpha,
-                                      A.getMemPtr(),
+                                      ltA,
                                       *ADesc,
-                                      B.getMemPtr(),
+                                      ltB,
                                       *BDesc,
                                       beta,
                                       C.getMemPtr(),
@@ -210,8 +278,8 @@ class CublasKernel : private ReferenceCounted {
                                       D.getMemPtr(),
                                       *DDesc,
                                       &cublasKernelOptions->algorithm,
-                                      requiredWorkspaceSize > 0 ? workspace.get().getMemPtr() : nullptr,
-                                      requiredWorkspaceSize > 0 ? workspace.get().getDescriptor().getArraySizeInBytes() : 0,
+                                      ltWorkspace,
+                                      ltWorkspaceSizeInBytes,
                                       stream);
         return cublasStatus;
     }
@@ -259,14 +327,18 @@ class CublasKernel : private ReferenceCounted {
         return description;
     }
 
-    unsigned long getWorkspaceSizeInBytes(int gpuNum, bool &kernelWillRunOnGpu) {
+    unsigned long getWorkspaceSizeInBytes(int gpuNum,
+                                          bool &kernelWillRunOnGpu,
+                                          CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) {
         assert(!uninitialized());
 
         cublasStatus_t cublasStatus;
         cublasLtMatmulHeuristicResult_t result;
+        cublasLtMatmulDesc_t operationDesc = getOperationDesc(CublasScalarPointerMode::Host);
+        configureTensorwideFp8Scales(operationDesc, fp8Scales);
 
         cublasStatus = cublasLtMatmulAlgoCheck(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
-                                               getOperationDesc(CublasScalarPointerMode::Host),
+                                               operationDesc,
                                                *ADesc,
                                                *BDesc,
                                                *CDesc,
@@ -279,7 +351,7 @@ class CublasKernel : private ReferenceCounted {
             kernelWillRunOnGpu = true;
         }
 
-        return cublasKernelOptions->workspaceSizeInBytes;
+        return totalWorkspaceSizeInBytes();
     }
 
     CublasKernelRequirement getCublasKernelRequirement() {
@@ -329,6 +401,199 @@ class CublasKernel : private ReferenceCounted {
 
     static std::map<cublasLtMatmulTile_t, std::string> tileEnumToString;
 
+    static void setTensorwideFp8ScaleMode(cublasLtMatmulDesc_t desc, cublasLtMatmulDescAttributes_t attribute) {
+        const cublasLtMatmulMatrixScale_t scaleMode = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
+        cublasStatus_t cublasStatus = cublasLtMatmulDescSetAttribute(desc, attribute, &scaleMode, sizeof(scaleMode));
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    }
+
+    static void setFp8ScalePointerIfPresent(cublasLtMatmulDesc_t desc,
+                                            cublasLtMatmulDescAttributes_t attribute,
+                                            const float *scaleDevicePointer) {
+        if (scaleDevicePointer != nullptr) {
+            cublasStatus_t cublasStatus = cublasLtMatmulDescSetAttribute(desc, attribute, &scaleDevicePointer, sizeof(scaleDevicePointer));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        }
+    }
+
+    static void setFp8AmaxPointerIfPresent(cublasLtMatmulDesc_t desc, cublasLtMatmulDescAttributes_t attribute, float *amaxDevicePointer) {
+        if (amaxDevicePointer != nullptr) {
+            cublasStatus_t cublasStatus = cublasLtMatmulDescSetAttribute(desc, attribute, &amaxDevicePointer, sizeof(amaxDevicePointer));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        }
+    }
+
+    static constexpr size_t WORKSPACE_ALIGNMENT_BYTES = 256;
+
+    static size_t alignWorkspaceSize(size_t value) { return (value + WORKSPACE_ALIGNMENT_BYTES - 1) & ~(WORKSPACE_ALIGNMENT_BYTES - 1); }
+
+    static void *addBytes(void *ptr, size_t byteOffset) { return static_cast<void *>(static_cast<unsigned char *>(ptr) + byteOffset); }
+
+    static const void *addBytes(const void *ptr, size_t byteOffset) {
+        return static_cast<const void *>(static_cast<const unsigned char *>(ptr) + byteOffset);
+    }
+
+    static size_t cudaDataTypeSizeInBytes(cudaDataType_t dataType) {
+        switch (dataType) {
+            case CUDA_R_32F:
+                return 4;
+            case CUDA_R_16BF:
+            case CUDA_R_16F:
+                return 2;
+            case CUDA_R_8F_E4M3:
+            case CUDA_R_8F_E5M2:
+            case CUDA_R_8I:
+                return 1;
+            default:
+                assert(false);
+                return 1;
+        }
+    }
+
+    static TensorDescriptor::DataType thorDataTypeForCudaDataType(cudaDataType_t dataType) {
+        switch (dataType) {
+            case CUDA_R_32F:
+                return TensorDescriptor::DataType::FP32;
+            case CUDA_R_16BF:
+                return TensorDescriptor::DataType::BF16;
+            case CUDA_R_16F:
+                return TensorDescriptor::DataType::FP16;
+            case CUDA_R_8F_E4M3:
+                return TensorDescriptor::DataType::FP8_E4M3;
+            case CUDA_R_8F_E5M2:
+                return TensorDescriptor::DataType::FP8_E5M2;
+            case CUDA_R_8I:
+                return TensorDescriptor::DataType::INT8;
+            default:
+                assert(false);
+                return TensorDescriptor::DataType::UINT8;
+        }
+    }
+
+    bool usesFp8ColumnMajorLtPath() const { return isCublasLtFp8OperationType(cublasKernelRequirement->operationType); }
+
+    cudaDataType_t getLtADescDataType() const {
+        return usesFp8ColumnMajorLtPath() ? cublasKernelRequirement->operationType.BDataType
+                                          : cublasKernelRequirement->operationType.ADataType;
+    }
+
+    cudaDataType_t getLtBDescDataType() const {
+        return usesFp8ColumnMajorLtPath() ? cublasKernelRequirement->operationType.ADataType
+                                          : cublasKernelRequirement->operationType.BDataType;
+    }
+
+    CublasFp8MatmulScales getLtFp8Scales(CublasFp8MatmulScales fp8Scales) const {
+        if (!usesFp8ColumnMajorLtPath()) {
+            return fp8Scales;
+        }
+        return CublasFp8MatmulScales::tensorwide(fp8Scales.BScaleDevicePointer,
+                                                 fp8Scales.AScaleDevicePointer,
+                                                 fp8Scales.CScaleDevicePointer,
+                                                 fp8Scales.DScaleDevicePointer,
+                                                 fp8Scales.DAmaxDevicePointer);
+    }
+
+    bool fp8NeedsTransposedAWorkspace() const {
+        return usesFp8ColumnMajorLtPath() && cublasKernelRequirement->kernelRequirement.transposeA;
+    }
+
+    bool fp8NeedsTransposedBWorkspace() const {
+        return usesFp8ColumnMajorLtPath() && !cublasKernelRequirement->kernelRequirement.transposeB;
+    }
+
+    void validateFp8RowMajorGemmShapeAndLayoutOrThrow(const std::string &context) const {
+        if (!usesFp8ColumnMajorLtPath()) {
+            return;
+        }
+
+        const KernelRequirement &kr = cublasKernelRequirement->kernelRequirement;
+        const int n = kr.transposeB ? kr.rowsB : kr.colsB;
+        const int k = kr.transposeA ? kr.rowsA : kr.colsA;
+
+        if ((n % 2) != 0) {
+            throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires even N.");
+        }
+        if ((k % 2) != 0) {
+            throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires even K.");
+        }
+        if (kr.ldA != kr.colsA) {
+            throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires packed A: ldA must equal colsA.");
+        }
+        if (kr.ldB != kr.colsB) {
+            throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires packed B: ldB must equal colsB.");
+        }
+        if (kr.ldC != n) {
+            throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires packed C: ldC must equal N.");
+        }
+        if (kr.ldD != n) {
+            throw std::runtime_error(context + " FP8 row-major cuBLASLt path requires packed D: ldD must equal N.");
+        }
+    }
+
+    size_t fp8TransposedAWorkspaceSizeInBytes() const {
+        if (!fp8NeedsTransposedAWorkspace()) {
+            return 0;
+        }
+        return static_cast<size_t>(cublasKernelRequirement->kernelRequirement.rowsA) *
+               static_cast<size_t>(cublasKernelRequirement->kernelRequirement.colsA) *
+               cudaDataTypeSizeInBytes(cublasKernelRequirement->operationType.ADataType);
+    }
+
+    size_t fp8TransposedBWorkspaceSizeInBytes() const {
+        if (!fp8NeedsTransposedBWorkspace()) {
+            return 0;
+        }
+        return static_cast<size_t>(cublasKernelRequirement->kernelRequirement.rowsB) *
+               static_cast<size_t>(cublasKernelRequirement->kernelRequirement.colsB) *
+               cudaDataTypeSizeInBytes(cublasKernelRequirement->operationType.BDataType);
+    }
+
+    size_t fp8TransposedAWorkspaceOffsetInBytes() const { return 0; }
+
+    size_t fp8TransposedBWorkspaceOffsetInBytes() const { return alignWorkspaceSize(fp8TransposedAWorkspaceSizeInBytes()); }
+
+    size_t cublasWorkspaceOffsetInBytes() const {
+        return fp8TransposedBWorkspaceOffsetInBytes() + alignWorkspaceSize(fp8TransposedBWorkspaceSizeInBytes());
+    }
+
+    size_t totalWorkspaceSizeInBytes() const {
+        return cublasWorkspaceOffsetInBytes() + static_cast<size_t>(cublasKernelOptions->workspaceSizeInBytes);
+    }
+
+    void configureTensorwideFp8Scales(cublasLtMatmulDesc_t desc, CublasFp8MatmulScales fp8Scales) {
+        const OperationType &operationType = cublasKernelRequirement->operationType;
+        const cudaDataType_t ltADataType = getLtADescDataType();
+        const cudaDataType_t ltBDataType = getLtBDescDataType();
+        const CublasFp8MatmulScales ltFp8Scales = getLtFp8Scales(fp8Scales);
+
+        if (!ltFp8Scales.hasAnyScalePointer() && !isCublasLtFp8CudaType(ltADataType) && !isCublasLtFp8CudaType(ltBDataType) &&
+            !isCublasLtFp8CudaType(operationType.CDataType) && !isCublasLtFp8CudaType(operationType.DDataType)) {
+            return;
+        }
+
+        if (isCublasLtFp8CudaType(ltADataType)) {
+            setTensorwideFp8ScaleMode(desc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE);
+        }
+        if (isCublasLtFp8CudaType(ltBDataType)) {
+            setTensorwideFp8ScaleMode(desc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE);
+        }
+        if (isCublasLtFp8CudaType(operationType.CDataType) || ltFp8Scales.hasCScale()) {
+            setTensorwideFp8ScaleMode(desc, CUBLASLT_MATMUL_DESC_C_SCALE_MODE);
+        }
+        if (isCublasLtFp8CudaType(operationType.DDataType)) {
+            setTensorwideFp8ScaleMode(desc, CUBLASLT_MATMUL_DESC_D_SCALE_MODE);
+        }
+
+        setFp8ScalePointerIfPresent(desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, ltFp8Scales.AScaleDevicePointer);
+        setFp8ScalePointerIfPresent(desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, ltFp8Scales.BScaleDevicePointer);
+        setFp8ScalePointerIfPresent(desc, CUBLASLT_MATMUL_DESC_C_SCALE_POINTER, ltFp8Scales.CScaleDevicePointer);
+
+        if (isCublasLtFp8CudaType(operationType.DDataType)) {
+            setFp8ScalePointerIfPresent(desc, CUBLASLT_MATMUL_DESC_D_SCALE_POINTER, ltFp8Scales.DScaleDevicePointer);
+            setFp8AmaxPointerIfPresent(desc, CUBLASLT_MATMUL_DESC_AMAX_D_POINTER, ltFp8Scales.DAmaxDevicePointer);
+        }
+    }
+
     void allocateCublasResources() {
         assert(!uninitialized());
 
@@ -341,6 +606,16 @@ class CublasKernel : private ReferenceCounted {
             const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
             cublasStatus = cublasLtMatmulDescSetAttribute(*desc, pointerModeAttribute, &pointerMode, sizeof(pointerMode));
             assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+            if (usesFp8ColumnMajorLtPath()) {
+                // For FP8, cuBLASLt exposes the usable kernels as column-major TN.  CublasKernel keeps Thor's
+                // external row-major API by making cuBLASLt compute D^T = (op(B))^T * (op(A))^T.
+                cublasOperation_t transpose = CUBLAS_OP_T;
+                cublasStatus = cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose));
+                assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+                return;
+            }
+
             if (cublasKernelRequirement->kernelRequirement.transposeA) {
                 cublasOperation_t transpose = CUBLAS_OP_T;
                 cublasStatus = cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose));
@@ -363,10 +638,73 @@ class CublasKernel : private ReferenceCounted {
         createOperationDesc(CUBLASLT_POINTER_MODE_HOST, operationDescHost);
         createOperationDesc(CUBLASLT_POINTER_MODE_DEVICE, operationDescDevice);
 
-        cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
         int64_t ld;
 
         ADesc = new cublasLtMatrixLayout_t;
+        BDesc = new cublasLtMatrixLayout_t;
+        CDesc = new cublasLtMatrixLayout_t;
+        DDesc = new cublasLtMatrixLayout_t;
+
+        if (usesFp8ColumnMajorLtPath()) {
+            const KernelRequirement &kr = cublasKernelRequirement->kernelRequirement;
+            const cublasLtOrder_t columnMajorOrder = CUBLASLT_ORDER_COL;
+
+            // Internal cuBLASLt A operand is the row-major matrix X=(op(B))^T presented as column-major X^T.
+            const int internalARowMajorRows = kr.transposeB ? kr.rowsB : kr.colsB;
+            const int internalARowMajorCols = kr.transposeB ? kr.colsB : kr.rowsB;
+            const int internalALd = kr.transposeB ? kr.ldB : kr.rowsB;
+
+            cublasStatus =
+                cublasLtMatrixLayoutCreate(ADesc, getLtADescDataType(), internalARowMajorCols, internalARowMajorRows, internalALd);
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            cublasStatus =
+                cublasLtMatrixLayoutSetAttribute(*ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            ld = internalALd;
+            cublasStatus = cublasLtMatrixLayoutSetAttribute(*ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+            // Internal cuBLASLt B operand is the row-major matrix Y=op(A) presented as column-major Y^T.
+            const int internalBRowMajorRows = kr.transposeA ? kr.colsA : kr.rowsA;
+            const int internalBRowMajorCols = kr.transposeA ? kr.rowsA : kr.colsA;
+            const int internalBLd = kr.transposeA ? kr.rowsA : kr.ldA;
+
+            cublasStatus =
+                cublasLtMatrixLayoutCreate(BDesc, getLtBDescDataType(), internalBRowMajorCols, internalBRowMajorRows, internalBLd);
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            cublasStatus =
+                cublasLtMatrixLayoutSetAttribute(*BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            ld = internalBLd;
+            cublasStatus = cublasLtMatrixLayoutSetAttribute(*BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+            const int rowsD = kr.transposeA ? kr.colsA : kr.rowsA;
+            const int colsD = kr.transposeB ? kr.rowsB : kr.colsB;
+
+            cublasStatus = cublasLtMatrixLayoutCreate(CDesc, cublasKernelRequirement->operationType.CDataType, colsD, rowsD, kr.ldC);
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            cublasStatus =
+                cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            ld = kr.ldC;
+            cublasStatus = cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+            cublasStatus = cublasLtMatrixLayoutCreate(DDesc, cublasKernelRequirement->operationType.DDataType, colsD, rowsD, kr.ldD);
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            cublasStatus =
+                cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            ld = kr.ldD;
+            cublasStatus = cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+            return;
+        }
+
+        cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
+
         cublasStatus = cublasLtMatrixLayoutCreate(ADesc,
                                                   cublasKernelRequirement->operationType.ADataType,
                                                   cublasKernelRequirement->kernelRequirement.rowsA,
@@ -379,7 +717,6 @@ class CublasKernel : private ReferenceCounted {
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
-        BDesc = new cublasLtMatrixLayout_t;
         cublasStatus = cublasLtMatrixLayoutCreate(BDesc,
                                                   cublasKernelRequirement->operationType.BDataType,
                                                   cublasKernelRequirement->kernelRequirement.rowsB,
@@ -397,7 +734,6 @@ class CublasKernel : private ReferenceCounted {
         int colsC = cublasKernelRequirement->kernelRequirement.transposeB == false ? cublasKernelRequirement->kernelRequirement.colsB
                                                                                    : cublasKernelRequirement->kernelRequirement.rowsB;
 
-        CDesc = new cublasLtMatrixLayout_t;
         cublasStatus = cublasLtMatrixLayoutCreate(
             CDesc, cublasKernelRequirement->operationType.CDataType, rowsC, colsC, cublasKernelRequirement->kernelRequirement.ldC);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -407,7 +743,6 @@ class CublasKernel : private ReferenceCounted {
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
-        DDesc = new cublasLtMatrixLayout_t;
         cublasStatus = cublasLtMatrixLayoutCreate(
             DDesc, cublasKernelRequirement->operationType.DDataType, rowsC, colsC, cublasKernelRequirement->kernelRequirement.ldD);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -425,6 +760,7 @@ class CublasKernel : private ReferenceCounted {
         this->cublasKernelOptions = new CublasKernelOptions(cublasKernelOptions);
         this->gpuType = gpuType;
 
+        validateFp8RowMajorGemmShapeAndLayoutOrThrow("CublasKernel::construct");
         allocateCublasResources();
     }
 

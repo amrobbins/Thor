@@ -126,6 +126,33 @@ inline bool isCublasLtFloatingCudaType(cudaDataType_t dataType) {
     return dataType == CUDA_R_32F || dataType == CUDA_R_16BF || dataType == CUDA_R_16F || isCublasLtFp8CudaType(dataType);
 }
 
+struct CublasFp8MatmulScales {
+    const float *AScaleDevicePointer = nullptr;
+    const float *BScaleDevicePointer = nullptr;
+    const float *CScaleDevicePointer = nullptr;
+    const float *DScaleDevicePointer = nullptr;
+    float *DAmaxDevicePointer = nullptr;
+
+    bool hasAScale() const { return AScaleDevicePointer != nullptr; }
+    bool hasBScale() const { return BScaleDevicePointer != nullptr; }
+    bool hasCScale() const { return CScaleDevicePointer != nullptr; }
+    bool hasDScale() const { return DScaleDevicePointer != nullptr; }
+    bool hasDAmax() const { return DAmaxDevicePointer != nullptr; }
+
+    bool hasAnyScalePointer() const { return hasAScale() || hasBScale() || hasCScale() || hasDScale() || hasDAmax(); }
+
+    static CublasFp8MatmulScales none() { return CublasFp8MatmulScales{}; }
+
+    static CublasFp8MatmulScales tensorwide(const float *AScaleDevicePointer,
+                                            const float *BScaleDevicePointer,
+                                            const float *CScaleDevicePointer = nullptr,
+                                            const float *DScaleDevicePointer = nullptr,
+                                            float *DAmaxDevicePointer = nullptr) {
+        return CublasFp8MatmulScales{
+            AScaleDevicePointer, BScaleDevicePointer, CScaleDevicePointer, DScaleDevicePointer, DAmaxDevicePointer};
+    }
+};
+
 inline bool isCublasLtFp8DTypeAllowed(cudaDataType_t ADataType,
                                       cudaDataType_t BDataType,
                                       cudaDataType_t CDataType,
@@ -141,10 +168,7 @@ inline bool isCublasLtFp8DTypeAllowed(cudaDataType_t ADataType,
     }
 
     if (CDataType == CUDA_R_32F) {
-        // NVIDIA documents FP8 inputs with FP32 C/D, but Thor's current row-major cuBLASLt path does not provide
-        // the additional FP8 scaling/layout attributes needed to obtain a usable heuristic for that descriptor.
-        // Keep this disabled until first-class FP8 matmul support is implemented end-to-end.
-        return false;
+        return DDataType == CUDA_R_32F;
     }
 
     if (CDataType == CUDA_R_16BF || CDataType == CUDA_R_16F) {
@@ -231,6 +255,11 @@ struct OperationType {
                BDataType == other.BDataType && CDataType == other.CDataType && DDataType == other.DDataType;
     }
 };
+
+inline bool isCublasLtFp8OperationType(const OperationType &operationType) {
+    return isCublasLtFp8CudaType(operationType.ADataType) || isCublasLtFp8CudaType(operationType.BDataType) ||
+           isCublasLtFp8CudaType(operationType.CDataType) || isCublasLtFp8CudaType(operationType.DDataType);
+}
 
 struct CublasKernelRequirement {
    public:
