@@ -1,6 +1,8 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
+#include <stdexcept>
+
 //-----------------------------------------------
 //
 // A = | B0Fin0   B0Fin1   B0Fin2  ... |
@@ -205,7 +207,7 @@ void CublasMatrixMultiply::gemm(Tensor A,
     assert(ld_B >= B_cols);
     assert(ld_C >= C_cols);
     assert(ld_D >= D_cols);
-    assert(isSupportedMatmulDataTypes(dataTypes));
+    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::gemm");
     assert(A.getDescriptor().getDataType() == dataTypes.A);
     assert(B.getDescriptor().getDataType() == dataTypes.B);
     assert(C.getDescriptor().getDataType() == dataTypes.C);
@@ -353,7 +355,7 @@ OperationType CublasMatrixMultiply::makeOperationType(TensorDescriptor::DataType
 }
 
 OperationType CublasMatrixMultiply::makeOperationType(MatmulDataTypes dataTypes) {
-    assert(isSupportedMatmulDataTypes(dataTypes));
+    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::makeOperationType");
 
     const cudaDataType_t ADataType = mapToCublasDataType(dataTypes.A);
     const cudaDataType_t BDataType = mapToCublasDataType(dataTypes.B);
@@ -390,6 +392,39 @@ std::string CublasMatrixMultiply::dataTypeToString(TensorDescriptor::DataType da
 std::string CublasMatrixMultiply::dataTypesToString(MatmulDataTypes dataTypes) {
     return std::string("{A=") + dataTypeToString(dataTypes.A) + ", B=" + dataTypeToString(dataTypes.B) +
            ", C=" + dataTypeToString(dataTypes.C) + ", D=" + dataTypeToString(dataTypes.D) + "}";
+}
+
+bool CublasMatrixMultiply::isFp8DataType(TensorDescriptor::DataType dataType) {
+    return dataType == TensorDescriptor::DataType::FP8_E4M3 || dataType == TensorDescriptor::DataType::FP8_E5M2;
+}
+
+bool CublasMatrixMultiply::isUnsupportedFp8InputsWithFp32Output(MatmulDataTypes dataTypes) {
+    return (isFp8DataType(dataTypes.A) || isFp8DataType(dataTypes.B)) && dataTypes.C == TensorDescriptor::DataType::FP32 &&
+           dataTypes.D == TensorDescriptor::DataType::FP32;
+}
+
+std::string CublasMatrixMultiply::unsupportedMatmulDataTypesMessage(MatmulDataTypes dataTypes, const std::string &context) {
+    std::string message = context + ": unsupported cuBLASLt GEMM data type combination " + dataTypesToString(dataTypes) + ".";
+
+    if (isUnsupportedFp8InputsWithFp32Output(dataTypes)) {
+        message +=
+            " Thor does not support FP8 input GEMM with FP32 C/D output through its current row-major cuBLASLt path. "
+            "cuBLASLt does not provide a usable heuristic for this Thor descriptor combination on supported FP8 devices. "
+            "Cast the FP8 inputs to FP16 or BF16 before matmul/GEMM, or request an FP16/BF16 output, until Thor adds the additional "
+            "cuBLASLt FP8 scaling/layout support needed for this path.";
+    } else {
+        message +=
+            " Supported Thor cuBLASLt matmul/GEMM dtypes are FP32, FP16, BF16, selected INT8 paths, and selected FP8 paths that "
+            "do not use FP32 C/D output.";
+    }
+
+    return message;
+}
+
+void CublasMatrixMultiply::validateMatmulDataTypesOrThrow(MatmulDataTypes dataTypes, const std::string &context) {
+    if (!isSupportedMatmulDataTypes(dataTypes) || isUnsupportedFp8InputsWithFp32Output(dataTypes)) {
+        throw std::invalid_argument(unsupportedMatmulDataTypesMessage(dataTypes, context));
+    }
 }
 
 // FIXME: This one now just calls gemmUsingH...
@@ -527,7 +562,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     assert(ld_C >= C_cols);
     assert(ld_D >= D_cols);
     assert(!(C == D) || dataTypes.C == dataTypes.D);
-    assert(isSupportedMatmulDataTypes(dataTypes));
+    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::gemmUsingHeuristicKernelChoice");
     assert(A.getDescriptor().getDataType() == dataTypes.A);
     assert(B.getDescriptor().getDataType() == dataTypes.B);
     assert(C.getDescriptor().getDataType() == dataTypes.C);
@@ -662,9 +697,13 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                                     stream));
 
         CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
+
         CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
+
         CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
+
         CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
+
         CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 
         return;
@@ -672,6 +711,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
 
     cublasLtMatmulPreference_t searchPreferences;
     CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&searchPreferences));
+
     CHECK_CUBLAS(cublasLtMatmulPreferenceInit(searchPreferences));
 
     // cublasLtMatmulPreferenceAttributes_t attribute = CUBLASLT_MATMUL_PREF_IMPL_MASK;
@@ -812,6 +852,7 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     assert(A_cols > 0);
     assert(B_rows > 0);
     assert(B_cols > 0);
+    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::getHeuristicGemmKernels");
 
     cublasLtMatmulDesc_t operationDesc;
     cublasLtMatrixLayout_t ADesc;
@@ -1106,7 +1147,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
 
     assert(gpuNum >= 0);
     assert(gpuNum < (int)MachineEvaluator::instance().getNumGpus());
-    assert(isSupportedMatmulDataTypes(dataTypes));
+    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::chooseOptimalGemmKernel");
 
     // Ensure the operation is legal
     // The number of C and D columns is specified by the sizes of A and B, so verify A and B
@@ -1730,6 +1771,8 @@ unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
                                                                bool transposeC,
                                                                MatmulDataTypes dataTypes,
                                                                bool &kernelWillRunOnGpu) {
+    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::getGemmWorkspaceSizeInBytes");
+
     KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(gpuNum),
                                         rowsA,
                                         colsA,

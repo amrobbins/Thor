@@ -233,6 +233,37 @@ def test_operator_gemm_pattern_preserves_fp16_inputs_fp32_addend_and_output_nume
 
 
 @pytest.mark.cuda
+def test_matmul_fp8_inputs_fp32_output_tn_rejected_with_first_class_error():
+    if not _gpu_supports_fp8_matmul(0):
+        pytest.skip("FP8 tensors require an FP8-capable GPU for this runtime validation test.")
+
+    a = ex.input("a")
+    b = ex.input("b")
+    eq = ex.compile(ex.matmul(a, b, transpose_a=True, output_dtype=thor.DataType.fp32), device_num=0)
+
+    a_dtype = thor.DataType.fp8_e4m3
+    b_dtype = thor.DataType.fp8_e5m2
+
+    m = 16
+    n = 16
+    k = 16
+    a_np = (((np.arange(k * m, dtype=np.float32).reshape(k, m) % 11) - 5.0) / 8.0).astype(_numpy_storage_dtype(a_dtype))
+    b_np = (((np.arange(k * n, dtype=np.float32).reshape(k, n) % 13) - 6.0) / 8.0).astype(_numpy_storage_dtype(b_dtype))
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, a_dtype, stream),
+        "b": _host_to_gpu(b_np, b_dtype, stream),
+    }
+
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(lhsT=1,rhsT=0,auxT=0)"]
+
+    with pytest.raises(Exception, match="FP8 input GEMM with FP32 C/D output"):
+        stamped = eq.stamp(inputs_gpu, stream)
+        stamped.run()
+
+
+@pytest.mark.cuda
 @pytest.mark.parametrize("dtype", MATMUL_DTYPES)
 def test_matmul_dunder_numerical(dtype: thor.DataType):
     a = ex.input("a")
