@@ -485,6 +485,10 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
     const int32_t b_cols = static_cast<int32_t>(rhs_dims[1]);
 
     if (compiled_matmul->op == ExprOp::MATMUL) {
+        const CublasMatrixMultiply::MatmulDataTypes dataTypes{lhs.getDescriptor().getDataType(),
+                                                              rhs.getDescriptor().getDataType(),
+                                                              output.getDescriptor().getDataType(),
+                                                              output.getDescriptor().getDataType()};
         CublasMatrixMultiply::instance().multiply(lhs,
                                                   rhs,
                                                   output,
@@ -497,7 +501,7 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                   compiled_matmul->transpose_rhs,
                                                   false,
                                                   false,
-                                                  compiled_matmul->output_dtype,
+                                                  dataTypes,
                                                   run_stream);
         return;
     }
@@ -522,6 +526,10 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                                       beta_host_scratch,
                                                                       run_stream);
 
+    const CublasMatrixMultiply::MatmulDataTypes dataTypes{lhs.getDescriptor().getDataType(),
+                                                          rhs.getDescriptor().getDataType(),
+                                                          addend.get().getDescriptor().getDataType(),
+                                                          output.getDescriptor().getDataType()};
     CublasMatrixMultiply::instance().gemm(lhs,
                                           rhs,
                                           addend.get(),
@@ -536,7 +544,7 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                           compiled_matmul->transpose_aux,
                                           resolved_scales.alpha.ptr,
                                           resolved_scales.beta.ptr,
-                                          compiled_matmul->output_dtype,
+                                          dataTypes,
                                           run_stream,
                                           resolved_scales.pointer_mode);
 }
@@ -935,6 +943,18 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     const int32_t ld_d = leadingDimensionForStoredMatrix(output);
     const int32_t ld_c = addend.isPresent() ? leadingDimensionForStoredMatrix(addend.get()) : ld_d;
 
+    const CublasMatrixMultiply::MatmulDataTypes dataTypes{
+        lhs.getDescriptor().getDataType(),
+        rhs.getDescriptor().getDataType(),
+        addend.isPresent() ? addend.get().getDescriptor().getDataType() : output.getDescriptor().getDataType(),
+        output.getDescriptor().getDataType()};
+
+    if (dataTypes.A != compiled_matmul->lhs_dtype || dataTypes.B != compiled_matmul->rhs_dtype ||
+        dataTypes.C != (compiled_matmul->op == ExprOp::GEMM ? compiled_matmul->aux_dtype : compiled_matmul->output_dtype) ||
+        dataTypes.D != compiled_matmul->output_dtype) {
+        throw std::runtime_error("buildMatmul tensor dtypes do not match the compiled matmul dtype plan.");
+    }
+
     MatmulCacheKey key(compiled_matmul->op,
                        a_rows,
                        a_cols,
@@ -947,7 +967,10 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                        compiled_matmul->transpose_lhs,
                        compiled_matmul->transpose_rhs,
                        compiled_matmul->transpose_aux,
-                       compiled_matmul->output_dtype,
+                       dataTypes.A,
+                       dataTypes.B,
+                       dataTypes.C,
+                       dataTypes.D,
                        device_num);
 
     std::shared_ptr<BuiltMatmul> hit = cacheLookup(key);
@@ -969,7 +992,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                            ld_d,
                                                                            compiled_matmul->transpose_lhs,
                                                                            compiled_matmul->transpose_rhs,
-                                                                           compiled_matmul->output_dtype);
+                                                                           dataTypes);
         built->workspace_bytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(device_num,
                                                                                                         a_rows,
                                                                                                         a_cols,
@@ -980,7 +1003,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                                                         ld_d,
                                                                                                         compiled_matmul->transpose_lhs,
                                                                                                         compiled_matmul->transpose_rhs,
-                                                                                                        compiled_matmul->output_dtype,
+                                                                                                        dataTypes,
                                                                                                         kernelWillRunOnGpu);
     } else {
         CublasMatrixMultiply::instance().chooseOptimalGemmKernel(device_num,
@@ -995,7 +1018,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                  compiled_matmul->transpose_lhs,
                                                                  compiled_matmul->transpose_rhs,
                                                                  compiled_matmul->transpose_aux,
-                                                                 compiled_matmul->output_dtype);
+                                                                 dataTypes);
         built->workspace_bytes = CublasMatrixMultiply::instance().getGemmWorkspaceSizeInBytes(device_num,
                                                                                               a_rows,
                                                                                               a_cols,
@@ -1008,7 +1031,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                                               compiled_matmul->transpose_lhs,
                                                                                               compiled_matmul->transpose_rhs,
                                                                                               compiled_matmul->transpose_aux,
-                                                                                              compiled_matmul->output_dtype,
+                                                                                              dataTypes,
                                                                                               kernelWillRunOnGpu);
     }
 

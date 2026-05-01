@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 //-----------------------------------------------
 //
@@ -72,6 +73,36 @@ void CublasMatrixMultiply::multiply(Tensor A,
                                     const bool negate,
                                     const TensorDescriptor::DataType ABCDataType,
                                     Stream stream) {
+    multiply(A,
+             B,
+             C,
+             workspace,
+             A_rows,
+             A_cols,
+             B_rows,
+             B_cols,
+             transposeA,
+             transposeB,
+             accumulate,
+             negate,
+             MatmulDataTypes::same(ABCDataType),
+             stream);
+}
+
+void CublasMatrixMultiply::multiply(Tensor A,
+                                    Tensor B,
+                                    Tensor C,
+                                    Optional<Tensor> workspace,
+                                    const int32_t A_rows,
+                                    const int32_t A_cols,
+                                    const int32_t B_rows,
+                                    const int32_t B_cols,
+                                    bool transposeA,
+                                    bool transposeB,
+                                    const bool accumulate,
+                                    const bool negate,
+                                    const MatmulDataTypes dataTypes,
+                                    Stream stream) {
     const float *alpha = negate ? &ALPHA_NEGATE : &ALPHA_NO_SCALE;
     const float *beta = accumulate ? &BETA_ACCUMULATE : &BETA_CLEAR;
 
@@ -89,7 +120,7 @@ void CublasMatrixMultiply::multiply(Tensor A,
          false,
          alpha,
          beta,
-         ABCDataType,
+         dataTypes,
          stream,
          CublasScalarPointerMode::Host);
 }
@@ -111,6 +142,42 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                 const TensorDescriptor::DataType ABCDDataType,
                                 Stream stream,
                                 CublasScalarPointerMode pointerMode) {
+    gemm(A,
+         B,
+         C,
+         D,
+         workspace,
+         A_rows,
+         A_cols,
+         B_rows,
+         B_cols,
+         transposeA,
+         transposeB,
+         transposeC,
+         alpha,
+         beta,
+         MatmulDataTypes::same(ABCDDataType),
+         stream,
+         pointerMode);
+}
+
+void CublasMatrixMultiply::gemm(Tensor A,
+                                Tensor B,
+                                Tensor C,
+                                Tensor D,
+                                Optional<Tensor> workspace,
+                                const int32_t A_rows,
+                                const int32_t A_cols,
+                                const int32_t B_rows,
+                                const int32_t B_cols,
+                                bool transposeA,
+                                bool transposeB,
+                                bool transposeC,
+                                const float *alpha,
+                                const float *beta,
+                                const MatmulDataTypes dataTypes,
+                                Stream stream,
+                                CublasScalarPointerMode pointerMode) {
     assert(A.getDimensions().size() == 2);
     assert(B.getDimensions().size() == 2);
     assert(C.getDimensions().size() == 2);
@@ -128,6 +195,7 @@ void CublasMatrixMultiply::gemm(Tensor A,
     assert(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
 
     assert(!(C == D && transposeC));
+    assert(!(C == D) || dataTypes.C == dataTypes.D);
 
     assert(A_rows > 0);
     assert(A_cols > 0);
@@ -137,26 +205,25 @@ void CublasMatrixMultiply::gemm(Tensor A,
     assert(ld_B >= B_cols);
     assert(ld_C >= C_cols);
     assert(ld_D >= D_cols);
-    // Check dataType of tensors. This legacy overload supports same-type A/B/C/D only.
-    assert(isSupportedSameDataTypeMatmul(ABCDDataType));
-    assert(A.getDescriptor().getDataType() == ABCDDataType);
-    assert(B.getDescriptor().getDataType() == ABCDDataType);
-    assert(C.getDescriptor().getDataType() == ABCDDataType);
-    assert(D.getDescriptor().getDataType() == ABCDDataType);
+    assert(isSupportedMatmulDataTypes(dataTypes));
+    assert(A.getDescriptor().getDataType() == dataTypes.A);
+    assert(B.getDescriptor().getDataType() == dataTypes.B);
+    assert(C.getDescriptor().getDataType() == dataTypes.C);
+    assert(D.getDescriptor().getDataType() == dataTypes.D);
     // Check dimensions of tensors
     vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
     vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
     vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
     vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
     assert(ADimensions.size() == 2);
-    assert(ADimensions[0] == (uint32_t)A_rows);
-    assert(ADimensions[1] == (uint32_t)ld_A);
-    assert(BDimensions[0] == (uint32_t)B_rows);
-    assert(BDimensions[1] == (uint32_t)ld_B);
-    assert(CDimensions[0] == (uint32_t)C_rows);
-    assert(CDimensions[1] == (uint32_t)ld_C);
-    assert(DDimensions[0] == (uint32_t)D_rows);
-    assert(DDimensions[1] == (uint32_t)ld_D);
+    assert(ADimensions[0] == static_cast<uint32_t>(A_rows));
+    assert(ADimensions[1] == static_cast<uint32_t>(ld_A));
+    assert(BDimensions[0] == static_cast<uint32_t>(B_rows));
+    assert(BDimensions[1] == static_cast<uint32_t>(ld_B));
+    assert(CDimensions[0] == static_cast<uint32_t>(C_rows));
+    assert(CDimensions[1] == static_cast<uint32_t>(ld_C));
+    assert(DDimensions[0] == static_cast<uint32_t>(D_rows));
+    assert(DDimensions[1] == static_cast<uint32_t>(ld_D));
 
     int gpuNum = stream.getGpuNum();
     ScopedGpu scopedGpu(gpuNum);
@@ -175,7 +242,7 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                         ld_D,
                                         workspace.isPresent());
 
-    OperationType operationType = makeOperationType(ABCDDataType);
+    OperationType operationType = makeOperationType(dataTypes);
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
@@ -217,28 +284,88 @@ cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(TensorDescriptor::DataT
     }
 }
 
-bool CublasMatrixMultiply::isSupportedSameDataTypeMatmul(TensorDescriptor::DataType ABCDDataType) {
-    switch (ABCDDataType) {
+bool CublasMatrixMultiply::isSupportedMatmulDataTypes(MatmulDataTypes dataTypes) {
+    switch (dataTypes.A) {
         case TensorDescriptor::DataType::FP32:
         case TensorDescriptor::DataType::BF16:
         case TensorDescriptor::DataType::FP16:
+        case TensorDescriptor::DataType::FP8_E4M3:
+        case TensorDescriptor::DataType::FP8_E5M2:
         case TensorDescriptor::DataType::INT8:
-            return true;
+            break;
         default:
             return false;
     }
+
+    switch (dataTypes.B) {
+        case TensorDescriptor::DataType::FP32:
+        case TensorDescriptor::DataType::BF16:
+        case TensorDescriptor::DataType::FP16:
+        case TensorDescriptor::DataType::FP8_E4M3:
+        case TensorDescriptor::DataType::FP8_E5M2:
+        case TensorDescriptor::DataType::INT8:
+            break;
+        default:
+            return false;
+    }
+
+    switch (dataTypes.C) {
+        case TensorDescriptor::DataType::FP32:
+        case TensorDescriptor::DataType::BF16:
+        case TensorDescriptor::DataType::FP16:
+        case TensorDescriptor::DataType::FP8_E4M3:
+        case TensorDescriptor::DataType::FP8_E5M2:
+        case TensorDescriptor::DataType::INT8:
+            break;
+        default:
+            return false;
+    }
+
+    switch (dataTypes.D) {
+        case TensorDescriptor::DataType::FP32:
+        case TensorDescriptor::DataType::BF16:
+        case TensorDescriptor::DataType::FP16:
+        case TensorDescriptor::DataType::FP8_E4M3:
+        case TensorDescriptor::DataType::FP8_E5M2:
+        case TensorDescriptor::DataType::INT8:
+            break;
+        default:
+            return false;
+    }
+
+    const cudaDataType_t ADataType = mapToCublasDataType(dataTypes.A);
+    const cudaDataType_t BDataType = mapToCublasDataType(dataTypes.B);
+    const cudaDataType_t CDataType = mapToCublasDataType(dataTypes.C);
+    const cudaDataType_t DDataType = mapToCublasDataType(dataTypes.D);
+
+    const bool allInt8 = dataTypes.A == TensorDescriptor::DataType::INT8 && dataTypes.B == TensorDescriptor::DataType::INT8 &&
+                         dataTypes.C == TensorDescriptor::DataType::INT8 && dataTypes.D == TensorDescriptor::DataType::INT8;
+    const cublasComputeType_t computeType = allInt8 ? CUBLAS_COMPUTE_32I : CUBLAS_COMPUTE_32F;
+    return isSupportedCublasLtOperationType(computeType, CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
+}
+
+bool CublasMatrixMultiply::isSupportedSameDataTypeMatmul(TensorDescriptor::DataType ABCDDataType) {
+    return isSupportedMatmulDataTypes(MatmulDataTypes::same(ABCDDataType));
 }
 
 OperationType CublasMatrixMultiply::makeOperationType(TensorDescriptor::DataType ABCDDataType) {
-    assert(isSupportedSameDataTypeMatmul(ABCDDataType));
+    return makeOperationType(MatmulDataTypes::same(ABCDDataType));
+}
 
-    cudaDataType_t ABCDDataTypeCuda = mapToCublasDataType(ABCDDataType);
-    if (ABCDDataType == TensorDescriptor::DataType::INT8) {
-        return OperationType(CUBLAS_COMPUTE_32I, CUDA_R_32F, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda);
-    }
+OperationType CublasMatrixMultiply::makeOperationType(MatmulDataTypes dataTypes) {
+    assert(isSupportedMatmulDataTypes(dataTypes));
 
-    // Thor keeps alpha/beta as float pointers here, so use the cublasLt 32F-scale rows for fp32, bf16, and fp16.
-    return OperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda);
+    const cudaDataType_t ADataType = mapToCublasDataType(dataTypes.A);
+    const cudaDataType_t BDataType = mapToCublasDataType(dataTypes.B);
+    const cudaDataType_t CDataType = mapToCublasDataType(dataTypes.C);
+    const cudaDataType_t DDataType = mapToCublasDataType(dataTypes.D);
+
+    const bool allInt8 = dataTypes.A == TensorDescriptor::DataType::INT8 && dataTypes.B == TensorDescriptor::DataType::INT8 &&
+                         dataTypes.C == TensorDescriptor::DataType::INT8 && dataTypes.D == TensorDescriptor::DataType::INT8;
+    const cublasComputeType_t computeType = allInt8 ? CUBLAS_COMPUTE_32I : CUBLAS_COMPUTE_32F;
+
+    // Thor's GEMM scale plumbing passes alpha/beta as float host/device pointers, so the cublasLt scale type is CUDA_R_32F.
+    return OperationType(computeType, CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
 }
 
 std::string CublasMatrixMultiply::dataTypeToString(TensorDescriptor::DataType dataType) {
@@ -260,6 +387,11 @@ std::string CublasMatrixMultiply::dataTypeToString(TensorDescriptor::DataType da
     }
 }
 
+std::string CublasMatrixMultiply::dataTypesToString(MatmulDataTypes dataTypes) {
+    return std::string("{A=") + dataTypeToString(dataTypes.A) + ", B=" + dataTypeToString(dataTypes.B) +
+           ", C=" + dataTypeToString(dataTypes.C) + ", D=" + dataTypeToString(dataTypes.D) + "}";
+}
+
 // FIXME: This one now just calls gemmUsingH...
 void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                               Tensor B,
@@ -273,6 +405,23 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                               const bool accumulate,
                                                               const bool negate,
                                                               const TensorDescriptor::DataType ABCDataType,
+                                                              Stream stream) {
+    multiplyUsingHeuristicKernelChoice(
+        A, B, C, A_rows, A_cols, B_rows, B_cols, transposeA, transposeB, accumulate, negate, MatmulDataTypes::same(ABCDataType), stream);
+}
+
+void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
+                                                              Tensor B,
+                                                              Tensor C,
+                                                              const int32_t A_rows,
+                                                              const int32_t A_cols,
+                                                              const int32_t B_rows,
+                                                              const int32_t B_cols,
+                                                              bool transposeA,
+                                                              bool transposeB,
+                                                              const bool accumulate,
+                                                              const bool negate,
+                                                              const MatmulDataTypes dataTypes,
                                                               Stream stream) {
     const float *alpha = negate ? &ALPHA_NEGATE : &ALPHA_NO_SCALE;
     const float *beta = accumulate ? &BETA_ACCUMULATE : &BETA_CLEAR;
@@ -290,7 +439,7 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                    false,
                                    alpha,
                                    beta,
-                                   ABCDataType,
+                                   dataTypes,
                                    stream,
                                    CublasScalarPointerMode::Host);
 }
@@ -312,6 +461,43 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     const float *alpha,
     const float *beta,
     const TensorDescriptor::DataType ABCDDataType,
+    Stream stream,
+    CublasScalarPointerMode pointerMode) {
+    gemmUsingHeuristicKernelChoice(A,
+                                   B,
+                                   C,
+                                   D,
+                                   A_rows,
+                                   A_cols,
+                                   B_rows,
+                                   B_cols,
+                                   transposeA,
+                                   transposeB,
+                                   transposeC,
+                                   alpha,
+                                   beta,
+                                   MatmulDataTypes::same(ABCDDataType),
+                                   stream,
+                                   pointerMode);
+}
+
+void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
+    Tensor A,
+    Tensor B,
+    Tensor C,
+    Tensor D,
+    const int32_t A_rows,
+    const int32_t A_cols,
+    const int32_t B_rows,
+    const int32_t B_cols,
+    // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two adjacent rows in
+    // memory. Some slots at the end of a row may be unused.
+    bool transposeA,
+    bool transposeB,
+    bool transposeC,
+    const float *alpha,
+    const float *beta,
+    const MatmulDataTypes dataTypes,
     Stream stream,
     CublasScalarPointerMode pointerMode) {
     assert(A.getDimensions().size() == 2);
@@ -340,30 +526,28 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     assert(ld_B >= B_cols);
     assert(ld_C >= C_cols);
     assert(ld_D >= D_cols);
-    // Check dataType of tensors. This legacy overload supports same-type A/B/C/D only.
-    assert(isSupportedSameDataTypeMatmul(ABCDDataType));
-    assert(A.getDescriptor().getDataType() == ABCDDataType);
-    assert(B.getDescriptor().getDataType() == ABCDDataType);
-    assert(C.getDescriptor().getDataType() == ABCDDataType);
-    assert(D.getDescriptor().getDataType() == ABCDDataType);
+    assert(!(C == D) || dataTypes.C == dataTypes.D);
+    assert(isSupportedMatmulDataTypes(dataTypes));
+    assert(A.getDescriptor().getDataType() == dataTypes.A);
+    assert(B.getDescriptor().getDataType() == dataTypes.B);
+    assert(C.getDescriptor().getDataType() == dataTypes.C);
+    assert(D.getDescriptor().getDataType() == dataTypes.D);
     // Check dimensions of tensors
     vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
     vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
     vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
     vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
     assert(ADimensions.size() == 2);
-    assert(ADimensions[0] == (uint32_t)A_rows);
-    assert(ADimensions[1] == (uint32_t)ld_A);
-    assert(BDimensions[0] == (uint32_t)B_rows);
-    assert(BDimensions[1] == (uint32_t)ld_B);
-    assert(CDimensions[0] == (uint32_t)C_rows);
-    assert(CDimensions[1] == (uint32_t)ld_C);
-    assert(DDimensions[0] == (uint32_t)D_rows);
-    assert(DDimensions[1] == (uint32_t)ld_D);
+    assert(ADimensions[0] == static_cast<uint32_t>(A_rows));
+    assert(ADimensions[1] == static_cast<uint32_t>(ld_A));
+    assert(BDimensions[0] == static_cast<uint32_t>(B_rows));
+    assert(BDimensions[1] == static_cast<uint32_t>(ld_B));
+    assert(CDimensions[0] == static_cast<uint32_t>(C_rows));
+    assert(CDimensions[1] == static_cast<uint32_t>(ld_C));
+    assert(DDimensions[0] == static_cast<uint32_t>(D_rows));
+    assert(DDimensions[1] == static_cast<uint32_t>(ld_D));
 
     ScopedGpu scopedGpu(stream.getGpuNum());
-
-    cublasStatus_t cublasStatus;
 
     cublasLtMatmulDesc_t operationDesc;
     cublasLtMatrixLayout_t ADesc;
@@ -371,63 +555,46 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     cublasLtMatrixLayout_t CDesc;
     cublasLtMatrixLayout_t DDesc;
 
-    OperationType operationType = makeOperationType(ABCDDataType);
-    cublasStatus = cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    OperationType operationType = makeOperationType(dataTypes);
+    CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType));
     const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
     const cublasLtPointerMode_t cublasPointerMode =
         (pointerMode == CublasScalarPointerMode::Device) ? CUBLASLT_POINTER_MODE_DEVICE : CUBLASLT_POINTER_MODE_HOST;
-    cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &cublasPointerMode, sizeof(cublasPointerMode));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &cublasPointerMode, sizeof(cublasPointerMode)));
     if (transposeA) {
         cublasOperation_t transpose = CUBLAS_OP_T;
-        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose)));
     }
     if (transposeB) {
         cublasOperation_t transpose = CUBLAS_OP_T;
-        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose)));
     }
     if (transposeC) {
         cublasOperation_t transpose = CUBLAS_OP_T;
-        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSC, &transpose, sizeof(transpose));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSC, &transpose, sizeof(transpose)));
     }
 
     cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&ADesc, operationType.ADataType, A_rows, A_cols, ld_A);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&ADesc, operationType.ADataType, A_rows, A_cols, ld_A));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
     int64_t ld = ld_A;
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&BDesc, operationType.BDataType, B_rows, B_cols, ld_B);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&BDesc, operationType.BDataType, B_rows, B_cols, ld_B));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
     ld = ld_B;
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&CDesc, operationType.CDataType, C_rows, C_cols, ld_C));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&CDesc, operationType.CDataType, C_rows, C_cols, ld_C);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     ld = ld_C;
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&DDesc, operationType.DDataType, D_rows, D_cols, ld_D));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&DDesc, operationType.DDataType, D_rows, D_cols, ld_D);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     ld = ld_D;
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
 
     KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(stream.getGpuNum()),
                                         A_rows,
@@ -449,95 +616,82 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     if (auto optimalKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement); optimalKernel.has_value()) {
         cublasLtMatmulAlgo_t algorithm = optimalKernel->getAlgorithm(stream.getGpuNum());
 
-        cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                      operationDesc,
-                                      alpha,
-                                      A.getMemPtr(),
-                                      ADesc,
-                                      B.getMemPtr(),
-                                      BDesc,
-                                      beta,
-                                      C.getMemPtr(),
-                                      CDesc,
-                                      D.getMemPtr(),
-                                      DDesc,
-                                      &algorithm,
-                                      nullptr,
-                                      0,
-                                      stream);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                    operationDesc,
+                                    alpha,
+                                    A.getMemPtr(),
+                                    ADesc,
+                                    B.getMemPtr(),
+                                    BDesc,
+                                    beta,
+                                    C.getMemPtr(),
+                                    CDesc,
+                                    D.getMemPtr(),
+                                    DDesc,
+                                    &algorithm,
+                                    nullptr,
+                                    0,
+                                    stream));
 
-        cublasStatus = cublasLtMatrixLayoutDestroy(DDesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        cublasStatus = cublasLtMatrixLayoutDestroy(CDesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        cublasStatus = cublasLtMatrixLayoutDestroy(BDesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        cublasStatus = cublasLtMatrixLayoutDestroy(ADesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        cublasStatus = cublasLtMatmulDescDestroy(operationDesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
+        CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 
         return;
     } else if (auto heuristicAlgorithm = CublasMatrixMultiply::instance().knownHeuristicAlgorithms.get(cublasKernelRequirement);
                heuristicAlgorithm.has_value()) {
         cublasLtMatmulAlgo_t algorithm = *heuristicAlgorithm;
 
-        cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                      operationDesc,
-                                      alpha,
-                                      A.getMemPtr(),
-                                      ADesc,
-                                      B.getMemPtr(),
-                                      BDesc,
-                                      beta,
-                                      C.getMemPtr(),
-                                      CDesc,
-                                      D.getMemPtr(),
-                                      DDesc,
-                                      &algorithm,
-                                      nullptr,
-                                      0,
-                                      stream);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                    operationDesc,
+                                    alpha,
+                                    A.getMemPtr(),
+                                    ADesc,
+                                    B.getMemPtr(),
+                                    BDesc,
+                                    beta,
+                                    C.getMemPtr(),
+                                    CDesc,
+                                    D.getMemPtr(),
+                                    DDesc,
+                                    &algorithm,
+                                    nullptr,
+                                    0,
+                                    stream));
 
-        cublasStatus = cublasLtMatrixLayoutDestroy(DDesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        cublasStatus = cublasLtMatrixLayoutDestroy(CDesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        cublasStatus = cublasLtMatrixLayoutDestroy(BDesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        cublasStatus = cublasLtMatrixLayoutDestroy(ADesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        cublasStatus = cublasLtMatmulDescDestroy(operationDesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
+        CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
+        CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 
         return;
     }
 
     cublasLtMatmulPreference_t searchPreferences;
-    cublasStatus = cublasLtMatmulPreferenceCreate(&searchPreferences);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatmulPreferenceInit(searchPreferences);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&searchPreferences));
+    CHECK_CUBLAS(cublasLtMatmulPreferenceInit(searchPreferences));
+
     // cublasLtMatmulPreferenceAttributes_t attribute = CUBLASLT_MATMUL_PREF_IMPL_MASK;
     // cublasLtNumericalImplFlags_t computeType = CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_TYPE_MASK |
-    // CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_32F; cublasStatus = cublasLtMatmulPreferenceSetAttribute(searchPreferences, attribute,
+    // CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_32F; CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(searchPreferences, attribute,
     // &computeType, sizeof(computeType)); assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
     int returnedAlgoCount;
     vector<cublasLtMatmulHeuristicResult_t> results(30);
-    cublasStatus = cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                                  operationDesc,
-                                                  ADesc,
-                                                  BDesc,
-                                                  CDesc,
-                                                  DDesc,
-                                                  searchPreferences,
-                                                  30,
-                                                  results.data(),
-                                                  &returnedAlgoCount);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                                operationDesc,
+                                                ADesc,
+                                                BDesc,
+                                                CDesc,
+                                                DDesc,
+                                                searchPreferences,
+                                                30,
+                                                results.data(),
+                                                &returnedAlgoCount));
+
     results.resize(returnedAlgoCount);
 
     // Algorithms aren't guaranteed to run, so find the first one that does and then return.
@@ -546,22 +700,22 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
         // have seen kernels that say wavesCount == 0 that sporadically fail.
         if (!(results[i].wavesCount > 0.0f))
             continue;
-        cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                      operationDesc,
-                                      alpha,
-                                      A.getMemPtr(),
-                                      ADesc,
-                                      B.getMemPtr(),
-                                      BDesc,
-                                      beta,
-                                      C.getMemPtr(),
-                                      CDesc,
-                                      D.getMemPtr(),
-                                      DDesc,
-                                      &(results[i].algo),
-                                      nullptr,
-                                      0,
-                                      stream);
+        cublasStatus_t cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                                     operationDesc,
+                                                     alpha,
+                                                     A.getMemPtr(),
+                                                     ADesc,
+                                                     B.getMemPtr(),
+                                                     BDesc,
+                                                     beta,
+                                                     C.getMemPtr(),
+                                                     CDesc,
+                                                     D.getMemPtr(),
+                                                     DDesc,
+                                                     &(results[i].algo),
+                                                     nullptr,
+                                                     0,
+                                                     stream);
         if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
             kernelLaunchedSuccessfully = true;
             CublasMatrixMultiply::instance().knownHeuristicAlgorithms.put(cublasKernelRequirement, results[i].algo);
@@ -570,36 +724,36 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
 
     if (!kernelLaunchedSuccessfully) {
         results = vector<cublasLtMatmulHeuristicResult_t>(10000);
-        cublasStatus = cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                                      operationDesc,
-                                                      ADesc,
-                                                      BDesc,
-                                                      CDesc,
-                                                      DDesc,
-                                                      searchPreferences,
-                                                      10000,
-                                                      results.data(),
-                                                      &returnedAlgoCount);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                                    operationDesc,
+                                                    ADesc,
+                                                    BDesc,
+                                                    CDesc,
+                                                    DDesc,
+                                                    searchPreferences,
+                                                    10000,
+                                                    results.data(),
+                                                    &returnedAlgoCount));
+
         results.resize(returnedAlgoCount);
 
         for (int i = 0; i < returnedAlgoCount && !kernelLaunchedSuccessfully; ++i) {
-            cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                          operationDesc,
-                                          alpha,
-                                          A.getMemPtr(),
-                                          ADesc,
-                                          B.getMemPtr(),
-                                          BDesc,
-                                          beta,
-                                          C.getMemPtr(),
-                                          CDesc,
-                                          D.getMemPtr(),
-                                          DDesc,
-                                          &(results[i].algo),
-                                          nullptr,
-                                          0,
-                                          stream);
+            cublasStatus_t cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                                         operationDesc,
+                                                         alpha,
+                                                         A.getMemPtr(),
+                                                         ADesc,
+                                                         B.getMemPtr(),
+                                                         BDesc,
+                                                         beta,
+                                                         C.getMemPtr(),
+                                                         CDesc,
+                                                         D.getMemPtr(),
+                                                         DDesc,
+                                                         &(results[i].algo),
+                                                         nullptr,
+                                                         0,
+                                                         stream);
             if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
                 kernelLaunchedSuccessfully = true;
                 // FIXME: may need an algo per gpu
@@ -612,18 +766,12 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
 
     assert(kernelLaunchedSuccessfully);
 
-    cublasStatus = cublasLtMatmulPreferenceDestroy(searchPreferences);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutDestroy(DDesc);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutDestroy(CDesc);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutDestroy(BDesc);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutDestroy(ADesc);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatmulDescDestroy(operationDesc);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(searchPreferences));
+    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
+    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
+    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
+    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
+    CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 }
 
 vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t numChoices,
@@ -641,7 +789,7 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
                                                                    const int32_t ld_D,
                                                                    const uint64_t maxWorkspaceSize,
                                                                    const float maxWaves,
-                                                                   const TensorDescriptor::DataType ABCDDataType) {
+                                                                   const MatmulDataTypes dataTypes) {
     ScopedGpu scopedGpu(gpuNum);
     cublasStatus_t cublasStatus;
 
@@ -671,62 +819,48 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     cublasLtMatrixLayout_t CDesc;
     cublasLtMatrixLayout_t DDesc;
 
-    OperationType operationType = makeOperationType(ABCDDataType);
-    cublasStatus = cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    OperationType operationType = makeOperationType(dataTypes);
+    CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType));
+
     const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
     const cublasLtPointerMode_t hostPointerMode = CUBLASLT_POINTER_MODE_HOST;
-    cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &hostPointerMode, sizeof(hostPointerMode));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &hostPointerMode, sizeof(hostPointerMode)));
+
     if (transposeA) {
         cublasOperation_t transpose = CUBLAS_OP_T;
-        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose)));
     }
     if (transposeB) {
         cublasOperation_t transpose = CUBLAS_OP_T;
-        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose)));
     }
     if (transposeC) {
         cublasOperation_t transpose = CUBLAS_OP_T;
-        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSC, &transpose, sizeof(transpose));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSC, &transpose, sizeof(transpose)));
     }
 
     cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&ADesc, operationType.ADataType, A_rows, A_cols, ld_A);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&ADesc, operationType.ADataType, A_rows, A_cols, ld_A));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
     int64_t ld = ld_A;
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&BDesc, operationType.BDataType, B_rows, B_cols, ld_B);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&BDesc, operationType.BDataType, B_rows, B_cols, ld_B));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
+
     ld = ld_B;
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&CDesc, operationType.CDataType, C_rows, C_cols, ld_C));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&CDesc, operationType.CDataType, C_rows, C_cols, ld_C);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     ld = ld_C;
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&DDesc, operationType.DDataType, D_rows, D_cols, ld_D));
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
 
-    cublasStatus = cublasLtMatrixLayoutCreate(&DDesc, operationType.DDataType, D_rows, D_cols, ld_D);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     ld = ld_D;
-    cublasStatus = cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
 
     KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(gpuNum),
                                         A_rows,
@@ -745,30 +879,27 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
     cublasLtMatmulPreference_t searchPreferences;
-    cublasStatus = cublasLtMatmulPreferenceCreate(&searchPreferences);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatmulPreferenceInit(searchPreferences);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatmulPreferenceSetAttribute(
-        searchPreferences, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &maxWorkspaceSize, sizeof(maxWorkspaceSize));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus =
-        cublasLtMatmulPreferenceSetAttribute(searchPreferences, CUBLASLT_MATMUL_PREF_MAX_WAVES_COUNT, &maxWaves, sizeof(maxWaves));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&searchPreferences));
+    CHECK_CUBLAS(cublasLtMatmulPreferenceInit(searchPreferences));
+
+    CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+        searchPreferences, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &maxWorkspaceSize, sizeof(maxWorkspaceSize)));
+    CHECK_CUBLAS(
+        cublasLtMatmulPreferenceSetAttribute(searchPreferences, CUBLASLT_MATMUL_PREF_MAX_WAVES_COUNT, &maxWaves, sizeof(maxWaves)));
 
     int returnedAlgoCount;
     vector<cublasLtMatmulHeuristicResult_t> rawResults(numChoices);
-    cublasStatus = cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
-                                                  operationDesc,
-                                                  ADesc,
-                                                  BDesc,
-                                                  CDesc,
-                                                  DDesc,
-                                                  searchPreferences,
-                                                  numChoices,
-                                                  rawResults.data(),
-                                                  &returnedAlgoCount);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
+                                                operationDesc,
+                                                ADesc,
+                                                BDesc,
+                                                CDesc,
+                                                DDesc,
+                                                searchPreferences,
+                                                numChoices,
+                                                rawResults.data(),
+                                                &returnedAlgoCount));
+
     rawResults.resize(returnedAlgoCount);
 
     vector<CublasKernel> results;
@@ -796,47 +927,38 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
         int32_t algoId = 0;
         cublasStatus =
             cublasLtMatmulAlgoConfigGetAttribute(&rawResults[i].algo, CUBLASLT_ALGO_CONFIG_ID, &algoId, sizeof(algoId), &sizeWritten);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
         uint32_t tileId = 0;
         cublasStatus =
             cublasLtMatmulAlgoConfigGetAttribute(&rawResults[i].algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tileId, sizeof(tileId), &sizeWritten);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
         uint32_t splitK = 0;
-        cublasStatus = cublasLtMatmulAlgoConfigGetAttribute(
-            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &splitK, sizeof(splitK), &sizeWritten);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulAlgoConfigGetAttribute(
+            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &splitK, sizeof(splitK), &sizeWritten));
 
         uint32_t reductionFlag = 0;
-        cublasStatus = cublasLtMatmulAlgoConfigGetAttribute(
-            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &reductionFlag, sizeof(reductionFlag), &sizeWritten);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulAlgoConfigGetAttribute(
+            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &reductionFlag, sizeof(reductionFlag), &sizeWritten));
 
         uint32_t swizzleType = 0;
-        cublasStatus = cublasLtMatmulAlgoConfigGetAttribute(
-            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, &swizzleType, sizeof(swizzleType), &sizeWritten);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulAlgoConfigGetAttribute(
+            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, &swizzleType, sizeof(swizzleType), &sizeWritten));
 
         uint32_t customOptionValue = 0;
-        cublasStatus = cublasLtMatmulAlgoConfigGetAttribute(
-            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, &customOptionValue, sizeof(customOptionValue), &sizeWritten);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulAlgoConfigGetAttribute(
+            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, &customOptionValue, sizeof(customOptionValue), &sizeWritten));
 
         uint32_t stagesId = 0;
-        cublasStatus = cublasLtMatmulAlgoConfigGetAttribute(
-            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &stagesId, sizeof(stagesId), &sizeWritten);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulAlgoConfigGetAttribute(
+            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &stagesId, sizeof(stagesId), &sizeWritten));
 
         uint16_t innerShapeId = 0;
-        cublasStatus = cublasLtMatmulAlgoConfigGetAttribute(
-            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID, &innerShapeId, sizeof(innerShapeId), &sizeWritten);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulAlgoConfigGetAttribute(
+            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID, &innerShapeId, sizeof(innerShapeId), &sizeWritten));
 
         uint16_t clusterShapeId = 0;
-        cublasStatus = cublasLtMatmulAlgoConfigGetAttribute(
-            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID, &clusterShapeId, sizeof(clusterShapeId), &sizeWritten);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulAlgoConfigGetAttribute(
+            &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID, &clusterShapeId, sizeof(clusterShapeId), &sizeWritten));
 
         CublasKernelOptions cublasKernelOptions(rawResults[i].algo,
                                                 algoId,
@@ -854,18 +976,12 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
         results.push_back(cublasKernel);
     }
 
-    cublasStatus = cublasLtMatmulPreferenceDestroy(searchPreferences);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutDestroy(DDesc);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutDestroy(CDesc);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutDestroy(BDesc);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatrixLayoutDestroy(ADesc);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasStatus = cublasLtMatmulDescDestroy(operationDesc);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(searchPreferences));
+    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
+    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
+    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
+    CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
+    CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 
     return results;
 }
@@ -888,13 +1004,43 @@ void CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
                                                    bool transposeC,
                                                    TensorDescriptor::DataType ABCDataType,
                                                    bool printResults) {
+    chooseOptimalGemmKernel(gpuNum,
+                            rowsA,
+                            colsA,
+                            rowsB,
+                            colsB,
+                            ldA,
+                            ldB,
+                            ldC,
+                            ldD,
+                            transposeA,
+                            transposeB,
+                            transposeC,
+                            MatmulDataTypes::same(ABCDataType),
+                            printResults);
+}
+
+void CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
+                                                   int rowsA,
+                                                   int colsA,
+                                                   int rowsB,
+                                                   int colsB,
+                                                   int ldA,
+                                                   int ldB,
+                                                   int ldC,
+                                                   int ldD,
+                                                   bool transposeA,
+                                                   bool transposeB,
+                                                   bool transposeC,
+                                                   MatmulDataTypes dataTypes,
+                                                   bool printResults) {
     bool bestKernelHasWorkspace = chooseOptimalGemmKernel(
-        gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, ABCDataType, true, printResults);
+        gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, dataTypes, true, printResults);
 
     // If the best kernel did not have a workspace, then it will be used for the no workspace version of the computation also
     if (bestKernelHasWorkspace) {
         chooseOptimalGemmKernel(
-            gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, ABCDataType, false, printResults);
+            gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, dataTypes, false, printResults);
 
         // The heuristic that is being used to choose kernels tries to get a kernel as close as possible to 1 wave,
         // for smaller operations this can be achieved by adding a workspace, but this doesn't create a faster kernel.
@@ -914,7 +1060,7 @@ void CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
                                                        ldC,
                                                        ldD,
                                                        false);
-        OperationType operationType = makeOperationType(ABCDataType);
+        OperationType operationType = makeOperationType(dataTypes);
         CublasKernelRequirement noWorkspaceCublasKernelRequirement(kernelRequirementNoWorkspace, operationType);
         KernelRequirement kernelRequirementWithWorkspace(MachineEvaluator::instance().getGpuType(gpuNum),
                                                          rowsA,
@@ -953,14 +1099,14 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                    const bool transposeA,
                                                    const bool transposeB,
                                                    const bool transposeC,
-                                                   const TensorDescriptor::DataType ABCDataType,
+                                                   const MatmulDataTypes dataTypes,
                                                    const bool allowWorkspaces,
                                                    const bool printResults) {
     lock_guard<mutex> lck(CublasMatrixMultiply::instance().mtx);
 
     assert(gpuNum >= 0);
     assert(gpuNum < (int)MachineEvaluator::instance().getNumGpus());
-    assert(isSupportedSameDataTypeMatmul(ABCDataType));
+    assert(isSupportedMatmulDataTypes(dataTypes));
 
     // Ensure the operation is legal
     // The number of C and D columns is specified by the sizes of A and B, so verify A and B
@@ -1004,7 +1150,10 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     constexpr int finalRun = 20;
 
     constexpr long ONE_HUNDRED_MEGS = 134217728;
-    const int ELEMENT_SIZE = TensorDescriptor::getElementSizeInBytes(ABCDataType);
+    const int A_ELEMENT_SIZE = TensorDescriptor::getElementSizeInBytes(dataTypes.A);
+    const int B_ELEMENT_SIZE = TensorDescriptor::getElementSizeInBytes(dataTypes.B);
+    const int C_ELEMENT_SIZE = TensorDescriptor::getElementSizeInBytes(dataTypes.C);
+    const int D_ELEMENT_SIZE = TensorDescriptor::getElementSizeInBytes(dataTypes.D);
 
     string gpuType = MachineEvaluator::instance().getGpuType(gpuNum);
     ScopedGpu scopedGpu(gpuNum);
@@ -1025,7 +1174,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                         ldD,
                                         allowWorkspaces);
 
-    OperationType operationType = makeOperationType(ABCDataType);
+    OperationType operationType = makeOperationType(dataTypes);
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
@@ -1040,14 +1189,14 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     assert(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
 
     const int32_t rowsC = (transposeA == false ? rowsA : colsA);
-    const int32_t colsC = (transposeB == false ? colsB : rowsB);
     int32_t rowsD = rowsC;
-    int32_t colsD = colsC;
 
     // Get the expected best kernels
-    uint64_t maxElements = max({rowsA * colsA, rowsB * colsB, rowsC * colsC, rowsD * colsD});
-    const uint64_t maxAllowedWorkspaceSizeInBytes =
-        allowWorkspaces ? maxElements * TensorDescriptor::getElementSizeInBytes(ABCDataType) : 0;
+    uint64_t maxMatrixBytes = max({static_cast<uint64_t>(rowsA) * ldA * A_ELEMENT_SIZE,
+                                   static_cast<uint64_t>(rowsB) * ldB * B_ELEMENT_SIZE,
+                                   static_cast<uint64_t>(rowsC) * ldC * C_ELEMENT_SIZE,
+                                   static_cast<uint64_t>(rowsD) * ldD * D_ELEMENT_SIZE});
+    const uint64_t maxAllowedWorkspaceSizeInBytes = allowWorkspaces ? maxMatrixBytes : 0;
     float maxWaves = 0.0f;
     vector<CublasKernel> preCheckedKernels;
     preCheckedKernels = getHeuristicGemmKernels(initialContestantCount,
@@ -1067,7 +1216,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                 maxAllowedWorkspaceSizeInBytes,
                                                 // When set to 0.0f, any number of waves allowed:
                                                 maxWaves,
-                                                ABCDataType);
+                                                dataTypes);
 
     vector<CublasKernel> kernels;
     uint64_t maxWorkspaceSizeInBytes = 0;
@@ -1124,7 +1273,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     stream.synchronize();
 
     // Allocate a lot of memory, to ensure subsequent calls are not benefiting from cache hits
-    long memPerInstance = (rowsA * ldA + rowsB * ldB + initialRowsC * ldC) * ELEMENT_SIZE;
+    long memPerInstance =
+        rowsA * ldA * A_ELEMENT_SIZE + rowsB * ldB * B_ELEMENT_SIZE + initialRowsC * ldC * C_ELEMENT_SIZE + rowsD * ldD * D_ELEMENT_SIZE;
     long totalMatrixMemory = minl(totalGpuMem * 0.4, maxl(ONE_HUNDRED_MEGS, 10 * memPerInstance));
     long numInstances = minl(totalMatrixMemory / memPerInstance, 5000);
     assert(numInstances > 0);
@@ -1142,18 +1292,22 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     vector<Tensor> A;
     vector<Tensor> B;
     vector<Tensor> C;
+    vector<Tensor> D;
     vector<Tensor> workspace;
     A.reserve(numInstances);
     B.reserve(numInstances);
     C.reserve(numInstances);
+    D.reserve(numInstances);
     workspace.reserve(numWorkspaceInstances);
     for (int i = 0; i < numInstances; ++i) {
         A.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                       TensorDescriptor(ABCDataType, {(uint64_t)rowsA, (uint64_t)ldA}));
+                       TensorDescriptor(dataTypes.A, {(uint64_t)rowsA, (uint64_t)ldA}));
         B.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                       TensorDescriptor(ABCDataType, {(uint64_t)rowsB, (uint64_t)ldB}));
+                       TensorDescriptor(dataTypes.B, {(uint64_t)rowsB, (uint64_t)ldB}));
         C.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                       TensorDescriptor(ABCDataType, {(uint64_t)initialRowsC, (uint64_t)ldC}));
+                       TensorDescriptor(dataTypes.C, {(uint64_t)initialRowsC, (uint64_t)ldC}));
+        D.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                       TensorDescriptor(dataTypes.D, {(uint64_t)rowsD, (uint64_t)ldD}));
     }
     for (int i = 0; i < numWorkspaceInstances; ++i) {
         workspace.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
@@ -1179,7 +1333,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
         for (unsigned int i = 0; i < kernels.size() && (abs(TARGET_WAVES - kernels[i].getWavesCount(gpuNum)) <= maxWavesDiff ||
                                                         prunedKernels.size() < initialContestantCount);
              ++i) {
-            cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], C[0], workspace[0], &ONE, &ZERO, stream);
+            cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], D[0], workspace[0], &ONE, &ZERO, stream);
             if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
                 stream.synchronize();
                 prunedKernels.push_back(kernels[i]);
@@ -1193,7 +1347,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
         const float ONE = 1.0f;
         const float ZERO = 0.0f;
         for (unsigned int i = 0; i < kernels.size(); ++i) {
-            cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], C[0], workspace[0], &ONE, &ZERO, stream);
+            cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], D[0], workspace[0], &ONE, &ZERO, stream);
             if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
                 stream.synchronize();
                 prunedKernels.push_back(kernels[i]);
@@ -1216,7 +1370,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     const float ZERO = 0.0f;
     for (int i = 0; i < 5; ++i) {
         kernels[rand() % kernels.size()].runWithoutChecks(
-            A[tensorInstance], B[tensorInstance], C[tensorInstance], C[tensorInstance], workspace[workspaceInstance], &ONE, &ZERO, stream);
+            A[tensorInstance], B[tensorInstance], C[tensorInstance], D[tensorInstance], workspace[workspaceInstance], &ONE, &ZERO, stream);
         tensorInstance += 1;
         if (tensorInstance >= numInstances)
             tensorInstance = 0;
@@ -1238,7 +1392,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
             kernels[rand() % kernels.size()].runWithoutChecks(A[tensorInstance],
                                                               B[tensorInstance],
                                                               C[tensorInstance],
-                                                              C[tensorInstance],
+                                                              D[tensorInstance],
                                                               workspace[workspaceInstance],
                                                               &ONE,
                                                               &ZERO,
@@ -1259,7 +1413,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     // But first put some initial work in the stream so that all timed work will be queued before running
     for (int i = 0; i < 5; ++i) {
         kernels[rand() % kernels.size()].runWithoutChecks(
-            A[tensorInstance], B[tensorInstance], C[tensorInstance], C[tensorInstance], workspace[workspaceInstance], &ONE, &ZERO, stream);
+            A[tensorInstance], B[tensorInstance], C[tensorInstance], D[tensorInstance], workspace[workspaceInstance], &ONE, &ZERO, stream);
         tensorInstance += 1;
         if (tensorInstance >= numInstances)
             tensorInstance = 0;
@@ -1278,15 +1432,15 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     for (int run = 0; run < initialRun; ++run) {
         for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
             startEvents[kernelIndex].push_back(stream.putEvent(true));
-            cublasStatus = kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
-                                                                 B[tensorInstance],
-                                                                 C[tensorInstance],
-                                                                 C[tensorInstance],
-                                                                 workspace[workspaceInstance],
-                                                                 &ONE,
-                                                                 &ZERO,
-                                                                 stream);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            CHECK_CUBLAS(kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
+                                                               B[tensorInstance],
+                                                               C[tensorInstance],
+                                                               D[tensorInstance],
+                                                               workspace[workspaceInstance],
+                                                               &ONE,
+                                                               &ZERO,
+                                                               stream));
+
             tensorInstance += 1;
             if (tensorInstance >= numInstances)
                 tensorInstance = 0;
@@ -1331,19 +1485,19 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     for (unsigned int i = 0; i < kernels.size(); ++i)
         kernels[i].stashRunStats();
 
-    cublasStatus = CUBLAS_STATUS_SUCCESS;
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     for (int run = 0; run < finalRun; ++run) {
         for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
             startEvents[kernelIndex].push_back(stream.putEvent(true));
             if (!kernels[kernelIndex].getErrorFlag())
-                cublasStatus = kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
-                                                                     B[tensorInstance],
-                                                                     C[tensorInstance],
-                                                                     C[tensorInstance],
-                                                                     workspace[workspaceInstance],
-                                                                     &ONE,
-                                                                     &ZERO,
-                                                                     stream);
+                CHECK_CUBLAS(kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
+                                                                   B[tensorInstance],
+                                                                   C[tensorInstance],
+                                                                   D[tensorInstance],
+                                                                   workspace[workspaceInstance],
+                                                                   &ONE,
+                                                                   &ZERO,
+                                                                   stream));
             tensorInstance += 1;
             if (tensorInstance >= numInstances)
                 tensorInstance = 0;
@@ -1366,8 +1520,6 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                        maxWorkspaceSizeInBytes);
                 printf("%s\n", kernels[checkIndex].toString(gpuNum).c_str());
             }
-
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
         }
     }
     for (int run = 0; run < finalRun; ++run) {
@@ -1442,17 +1594,16 @@ void CublasMatrixMultiply::getSupportedCublasAlgorithms(const OperationType &ope
         numRequestedAlgos *= 2;
         allSupportedAlgorithmIds = vector<int>(numRequestedAlgos);
 
-        cublasStatus = cublasLtMatmulAlgoGetIds(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
-                                                operationType.computeDataType,
-                                                operationType.scaleDataType,
-                                                operationType.ADataType,
-                                                operationType.BDataType,
-                                                operationType.CDataType,
-                                                operationType.DDataType,
-                                                numRequestedAlgos,
-                                                allSupportedAlgorithmIds.data(),
-                                                &numReturnedAlgos);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        CHECK_CUBLAS(cublasLtMatmulAlgoGetIds(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
+                                              operationType.computeDataType,
+                                              operationType.scaleDataType,
+                                              operationType.ADataType,
+                                              operationType.BDataType,
+                                              operationType.CDataType,
+                                              operationType.DDataType,
+                                              numRequestedAlgos,
+                                              allSupportedAlgorithmIds.data(),
+                                              &numReturnedAlgos));
     }
 
     for (int i = 0; i < numReturnedAlgos; ++i) {
@@ -1549,6 +1700,36 @@ unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
                                                                bool transposeC,
                                                                TensorDescriptor::DataType ABCDataType,
                                                                bool &kernelWillRunOnGpu) {
+    return getGemmWorkspaceSizeInBytes(gpuNum,
+                                       rowsA,
+                                       colsA,
+                                       rowsB,
+                                       colsB,
+                                       ldA,
+                                       ldB,
+                                       ldC,
+                                       ldD,
+                                       transposeA,
+                                       transposeB,
+                                       transposeC,
+                                       MatmulDataTypes::same(ABCDataType),
+                                       kernelWillRunOnGpu);
+}
+
+unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
+                                                               int rowsA,
+                                                               int colsA,
+                                                               int rowsB,
+                                                               int colsB,
+                                                               int ldA,
+                                                               int ldB,
+                                                               int ldC,
+                                                               int ldD,
+                                                               bool transposeA,
+                                                               bool transposeB,
+                                                               bool transposeC,
+                                                               MatmulDataTypes dataTypes,
+                                                               bool &kernelWillRunOnGpu) {
     KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(gpuNum),
                                         rowsA,
                                         colsA,
@@ -1563,7 +1744,7 @@ unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
                                         ldD,
                                         true);
 
-    OperationType operationType = makeOperationType(ABCDataType);
+    OperationType operationType = makeOperationType(dataTypes);
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
@@ -1588,13 +1769,43 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
                                                   bool transposeC,
                                                   TensorDescriptor::DataType ABCDataType,
                                                   bool workspaceAllowed) {
+    return getOptimalKernelTime(gpuType,
+                                rowsA,
+                                colsA,
+                                rowsB,
+                                colsB,
+                                ldA,
+                                ldB,
+                                ldC,
+                                ldD,
+                                transposeA,
+                                transposeB,
+                                transposeC,
+                                MatmulDataTypes::same(ABCDataType),
+                                workspaceAllowed);
+}
+
+double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
+                                                  int rowsA,
+                                                  int colsA,
+                                                  int rowsB,
+                                                  int colsB,
+                                                  int ldA,
+                                                  int ldB,
+                                                  int ldC,
+                                                  int ldD,
+                                                  bool transposeA,
+                                                  bool transposeB,
+                                                  bool transposeC,
+                                                  MatmulDataTypes dataTypes,
+                                                  bool workspaceAllowed) {
     KernelRequirement kernelRequirement(
         gpuType, rowsA, colsA, rowsB, colsB, transposeA, transposeB, transposeC, ldA, ldB, ldC, ldD, workspaceAllowed);
 
-    OperationType operationType = makeOperationType(ABCDataType);
+    OperationType operationType = makeOperationType(dataTypes);
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
-    string ABCDataTypeString = dataTypeToString(ABCDataType);
+    string dataTypesString = dataTypesToString(dataTypes);
 
     auto optimalKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement);
     if (!optimalKernel.has_value()) {
@@ -1602,7 +1813,7 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
             "CublasMatrixMultiply::getOptimalKernelTime() : Kernel time is not known because kernel time has not been measured for "
             "gpuType " +
             gpuType + " rowsA " + std::to_string(rowsA) + " colsA " + std::to_string(colsA) + " colsB " + std::to_string(colsB) +
-            "dataType " + ABCDataTypeString;
+            " dataTypes " + dataTypesString;
         throw(CublasMatrixMultiply::Youreusingitwrong(message));
     }
     double averageRunTimeMilliseconds = optimalKernel->getAverageRunTimeMilliseconds();
@@ -1624,6 +1835,36 @@ double CublasMatrixMultiply::getOptimalKernelTime(int gpuNum,
                                                   bool transposeC,
                                                   TensorDescriptor::DataType ABCDataType,
                                                   bool workspaceAllowed) {
+    return getOptimalKernelTime(gpuNum,
+                                rowsA,
+                                colsA,
+                                rowsB,
+                                colsB,
+                                ldA,
+                                ldB,
+                                ldC,
+                                ldD,
+                                transposeA,
+                                transposeB,
+                                transposeC,
+                                MatmulDataTypes::same(ABCDataType),
+                                workspaceAllowed);
+}
+
+double CublasMatrixMultiply::getOptimalKernelTime(int gpuNum,
+                                                  int rowsA,
+                                                  int colsA,
+                                                  int rowsB,
+                                                  int colsB,
+                                                  int ldA,
+                                                  int ldB,
+                                                  int ldC,
+                                                  int ldD,
+                                                  bool transposeA,
+                                                  bool transposeB,
+                                                  bool transposeC,
+                                                  MatmulDataTypes dataTypes,
+                                                  bool workspaceAllowed) {
     return getOptimalKernelTime(MachineEvaluator::instance().getGpuType(gpuNum),
                                 rowsA,
                                 colsA,
@@ -1636,6 +1877,6 @@ double CublasMatrixMultiply::getOptimalKernelTime(int gpuNum,
                                 transposeA,
                                 transposeB,
                                 transposeC,
-                                ABCDataType,
+                                dataTypes,
                                 workspaceAllowed);
 }

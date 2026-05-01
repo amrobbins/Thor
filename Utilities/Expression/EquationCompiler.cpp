@@ -1202,6 +1202,58 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
 
     const DataType logical_input_dtype = promoteTensorValueDTypes(input_dtypes);
     const DataType supported_input_dtype = toSupportedInputDType(node.op, logical_input_dtype);
+    const DataType supported_lhs_dtype = toSupportedInputDType(node.op, lhs_input.input_tensor_dtype.get());
+    const DataType supported_rhs_dtype = toSupportedInputDType(node.op, rhs_input.input_tensor_dtype.get());
+    const DataType raw_supported_aux_dtype =
+        aux_input != nullptr ? toSupportedInputDType(node.op, aux_input->input_tensor_dtype.get()) : node.output_dtype.get();
+
+    auto is_fp8_dtype = [](DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2; };
+    auto supports_fp8_matmul_plan = [&](DataType lhs_dtype, DataType rhs_dtype, DataType aux_dtype, DataType output_dtype) {
+        if (!is_fp8_dtype(lhs_dtype) || !is_fp8_dtype(rhs_dtype)) {
+            return false;
+        }
+        if (lhs_dtype == DataType::FP8_E5M2 && rhs_dtype == DataType::FP8_E5M2) {
+            return false;
+        }
+        if (aux_dtype == DataType::FP32) {
+            return output_dtype == DataType::FP32;
+        }
+        if (aux_dtype == DataType::BF16 || aux_dtype == DataType::FP16) {
+            if (output_dtype == aux_dtype || output_dtype == DataType::FP8_E4M3) {
+                return true;
+            }
+            if (output_dtype == DataType::FP8_E5M2) {
+                return lhs_dtype != DataType::FP8_E4M3 || rhs_dtype != DataType::FP8_E4M3;
+            }
+        }
+        return false;
+    };
+    auto supports_regular_matmul_plan = [](DataType lhs_dtype, DataType rhs_dtype, DataType output_dtype) {
+        if (lhs_dtype != rhs_dtype) {
+            return false;
+        }
+        if (lhs_dtype == DataType::FP32) {
+            return output_dtype == DataType::FP32;
+        }
+        if (lhs_dtype == DataType::FP16 || lhs_dtype == DataType::BF16) {
+            return output_dtype == lhs_dtype || output_dtype == DataType::FP32;
+        }
+        return false;
+    };
+
+    DataType compiled_lhs_dtype = supported_lhs_dtype;
+    DataType compiled_rhs_dtype = supported_rhs_dtype;
+    DataType compiled_aux_dtype = node.output_dtype.get();
+
+    if (supports_fp8_matmul_plan(supported_lhs_dtype, supported_rhs_dtype, raw_supported_aux_dtype, node.output_dtype.get())) {
+        compiled_aux_dtype = raw_supported_aux_dtype;
+    } else if (!supports_regular_matmul_plan(supported_lhs_dtype, supported_rhs_dtype, node.output_dtype.get())) {
+        // Preserve the old safe behavior for combinations cublasLt does not directly expose as mixed A/B types:
+        // cast both matrix inputs and the optional addend to the resolved output dtype so A/B/C/D form a regular plan.
+        compiled_lhs_dtype = node.output_dtype.get();
+        compiled_rhs_dtype = node.output_dtype.get();
+        compiled_aux_dtype = node.output_dtype.get();
+    }
 
     double alpha_scale = node.alpha_fp;
     double beta_scale = node.beta_fp;
@@ -1217,6 +1269,9 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
                                        alpha_input_slot,
                                        beta_input_slot,
                                        supported_input_dtype,
+                                       compiled_lhs_dtype,
+                                       compiled_rhs_dtype,
+                                       compiled_aux_dtype,
                                        node.output_dtype.get(),
                                        node.compute_dtype);
 }

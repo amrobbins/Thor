@@ -100,7 +100,10 @@ struct MatmulCacheKey {
     const bool transpose_a;
     const bool transpose_b;
     const bool transpose_c;
-    const TensorDescriptor::DataType data_dtype;
+    const TensorDescriptor::DataType a_dtype;
+    const TensorDescriptor::DataType b_dtype;
+    const TensorDescriptor::DataType c_dtype;
+    const TensorDescriptor::DataType d_dtype;
     const int device_num;
 
     bool operator==(const MatmulCacheKey& other) const = default;
@@ -117,7 +120,10 @@ struct MatmulCacheKey {
                    bool transpose_a,
                    bool transpose_b,
                    bool transpose_c,
-                   TensorDescriptor::DataType data_dtype,
+                   TensorDescriptor::DataType a_dtype,
+                   TensorDescriptor::DataType b_dtype,
+                   TensorDescriptor::DataType c_dtype,
+                   TensorDescriptor::DataType d_dtype,
                    int device_num)
         : op(op),
           a_rows(a_rows),
@@ -131,7 +137,10 @@ struct MatmulCacheKey {
           transpose_a(transpose_a),
           transpose_b(transpose_b),
           transpose_c(transpose_c),
-          data_dtype(data_dtype),
+          a_dtype(a_dtype),
+          b_dtype(b_dtype),
+          c_dtype(c_dtype),
+          d_dtype(d_dtype),
           device_num(device_num) {}
 };
 
@@ -647,7 +656,10 @@ struct hash<ThorImplementation::MatmulCacheKey> {
         hashCombine(h, hash<bool>{}(k.transpose_a));
         hashCombine(h, hash<bool>{}(k.transpose_b));
         hashCombine(h, hash<bool>{}(k.transpose_c));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.data_dtype));
+        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.a_dtype));
+        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.b_dtype));
+        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.c_dtype));
+        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.d_dtype));
         hashCombine(h, hash<int>{}(k.device_num));
         return h;
     }

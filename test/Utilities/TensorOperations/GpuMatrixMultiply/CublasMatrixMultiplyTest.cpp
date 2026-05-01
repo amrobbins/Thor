@@ -5,6 +5,13 @@
 #include "gtest/gtest.h"
 #include "omp.h"
 
+#include <cmath>
+#include <cstdint>
+#include <vector>
+
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+
 using std::string;
 
 using namespace ThorImplementation;
@@ -1673,4 +1680,253 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
             }
         }
     }
+}
+
+namespace {
+
+using CublasMatmulDTypes = CublasMatrixMultiply::MatmulDataTypes;
+using DataType = TensorDescriptor::DataType;
+
+bool gpuComputeCapabilityAtLeast(int gpuNum, int requiredMajor, int requiredMinor) {
+    cudaDeviceProp prop;
+    cudaError_t status = cudaGetDeviceProperties(&prop, gpuNum);
+    if (status != cudaSuccess) {
+        return false;
+    }
+    if (prop.major != requiredMajor) {
+        return prop.major > requiredMajor;
+    }
+    return prop.minor >= requiredMinor;
+}
+
+bool gpuSupportsBf16TensorCores(int gpuNum) {
+    // BF16 tensor core GEMM kernels are Ampere+.
+    return gpuComputeCapabilityAtLeast(gpuNum, 8, 0);
+}
+
+bool gpuSupportsFp8TensorCores(int gpuNum) {
+    // FP8 tensor core GEMM kernels are Hopper/Ada+ in practice. This keeps the
+    // runtime tests from failing on older CI GPUs that still compile the FP8 types.
+    cudaDeviceProp prop;
+    cudaError_t status = cudaGetDeviceProperties(&prop, gpuNum);
+    if (status != cudaSuccess) {
+        return false;
+    }
+    return prop.major >= 9 || (prop.major == 8 && prop.minor >= 9);
+}
+
+template <typename T>
+T testValueFromFloat(float value);
+
+template <>
+float testValueFromFloat<float>(float value) {
+    return value;
+}
+
+template <>
+half testValueFromFloat<half>(float value) {
+    return __float2half(value);
+}
+
+template <>
+__nv_bfloat16 testValueFromFloat<__nv_bfloat16>(float value) {
+    return __float2bfloat16(value);
+}
+
+template <>
+__nv_fp8_e4m3 testValueFromFloat<__nv_fp8_e4m3>(float value) {
+    return __nv_fp8_e4m3(value);
+}
+
+template <>
+__nv_fp8_e5m2 testValueFromFloat<__nv_fp8_e5m2>(float value) {
+    return __nv_fp8_e5m2(value);
+}
+
+template <typename T>
+float testValueToFloat(T value) {
+    return static_cast<float>(value);
+}
+
+template <>
+float testValueToFloat<float>(float value) {
+    return value;
+}
+
+template <>
+float testValueToFloat<half>(half value) {
+    return __half2float(value);
+}
+
+template <>
+float testValueToFloat<__nv_bfloat16>(__nv_bfloat16 value) {
+    return __bfloat162float(value);
+}
+
+template <typename T>
+void fillPaddedMatrix(Tensor &tensor, int rows, int cols, int ld, float rowScale, float colScale, float offset) {
+    T *mem = reinterpret_cast<T *>(tensor.getMemPtr());
+    for (int row = 0; row < rows; ++row) {
+        for (int col = 0; col < ld; ++col) {
+            float value = 0.0f;
+            if (col < cols) {
+                value = offset + rowScale * static_cast<float>((row % 7) - 3) + colScale * static_cast<float>((col % 5) - 2);
+            }
+            mem[row * ld + col] = testValueFromFloat<T>(value);
+        }
+    }
+}
+
+template <typename TA, typename TB, typename TC>
+std::vector<float> referenceGemm(const Tensor &A,
+                                 const Tensor &B,
+                                 const Tensor &C,
+                                 int rowsA,
+                                 int colsA,
+                                 int rowsB,
+                                 int colsB,
+                                 int ldA,
+                                 int ldB,
+                                 int ldC,
+                                 bool transposeA,
+                                 bool transposeB,
+                                 float alpha,
+                                 float beta) {
+    const TA *a = reinterpret_cast<const TA *>(A.getMemPtr());
+    const TB *b = reinterpret_cast<const TB *>(B.getMemPtr());
+    const TC *c = reinterpret_cast<const TC *>(C.getMemPtr());
+
+    const int rowsD = transposeA ? colsA : rowsA;
+    const int colsD = transposeB ? rowsB : colsB;
+    const int inner = transposeA ? rowsA : colsA;
+
+    std::vector<float> expected(static_cast<size_t>(rowsD) * static_cast<size_t>(colsD), 0.0f);
+
+    for (int row = 0; row < rowsD; ++row) {
+        for (int col = 0; col < colsD; ++col) {
+            float accum = 0.0f;
+            for (int k = 0; k < inner; ++k) {
+                const float av = transposeA ? testValueToFloat(a[k * ldA + row]) : testValueToFloat(a[row * ldA + k]);
+                const float bv = transposeB ? testValueToFloat(b[col * ldB + k]) : testValueToFloat(b[k * ldB + col]);
+                accum += av * bv;
+            }
+            expected[static_cast<size_t>(row) * static_cast<size_t>(colsD) + static_cast<size_t>(col)] =
+                alpha * accum + beta * testValueToFloat(c[row * ldC + col]);
+        }
+    }
+
+    return expected;
+}
+
+void assertFp32MatrixClose(const Tensor &D, const std::vector<float> &expected, int rows, int cols, int ld, float tolerance) {
+    const float *d = reinterpret_cast<const float *>(D.getMemPtr());
+    for (int row = 0; row < rows; ++row) {
+        for (int col = 0; col < cols; ++col) {
+            const float got = d[row * ld + col];
+            const float want = expected[static_cast<size_t>(row) * static_cast<size_t>(cols) + static_cast<size_t>(col)];
+            ASSERT_NEAR(got, want, tolerance) << "row=" << row << " col=" << col;
+        }
+    }
+}
+
+}  // namespace
+
+TEST(CublasMatrixMultiply, OperationTypeTableIncludesExpandedFloatAndFp8Combinations) {
+    EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_32F, CUDA_R_32F, CUDA_R_32F, CUDA_R_32F));
+
+    EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_16F));
+    EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F, CUDA_R_32F));
+    EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF));
+    EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_32F, CUDA_R_32F));
+
+    EXPECT_TRUE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_8F_E4M3, CUDA_R_8F_E4M3, CUDA_R_32F, CUDA_R_32F));
+    EXPECT_TRUE(
+        isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_8F_E4M3, CUDA_R_8F_E5M2, CUDA_R_16BF, CUDA_R_8F_E4M3));
+    EXPECT_TRUE(
+        isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_8F_E5M2, CUDA_R_8F_E4M3, CUDA_R_16F, CUDA_R_8F_E5M2));
+
+    EXPECT_FALSE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_64F, CUDA_R_64F, CUDA_R_64F, CUDA_R_64F, CUDA_R_64F, CUDA_R_64F));
+    EXPECT_FALSE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_8F_E5M2, CUDA_R_8F_E5M2, CUDA_R_16F, CUDA_R_16F));
+    EXPECT_FALSE(isSupportedCublasLtOperationType(CUBLAS_COMPUTE_32F, CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_16F));
+}
+
+TEST(CublasMatrixMultiply, HeuristicGemmSupportsBf16InputsAndFp32Output) {
+    constexpr int gpuNum = 0;
+    if (!gpuSupportsBf16TensorCores(gpuNum)) {
+        GTEST_SKIP() << "BF16 GEMM kernels require an Ampere-or-newer GPU.";
+    }
+
+    ScopedGpu scopedGpu(gpuNum);
+    Stream stream(gpuNum);
+
+    constexpr int m = 32;
+    constexpr int n = 24;
+    constexpr int k = 40;
+    constexpr int rowsA = m;
+    constexpr int colsA = k;
+    constexpr int rowsB = k;
+    constexpr int colsB = n;
+    constexpr int ldA = colsA;
+    constexpr int ldB = colsB;
+    constexpr int ldC = colsB;
+    constexpr int ldD = colsB;
+    constexpr bool transposeA = false;
+    constexpr bool transposeB = false;
+    constexpr bool transposeC = false;
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, gpuNum);
+
+    TensorDescriptor ADescriptor(DataType::BF16, {static_cast<uint64_t>(rowsA), static_cast<uint64_t>(ldA)});
+    TensorDescriptor BDescriptor(DataType::BF16, {static_cast<uint64_t>(rowsB), static_cast<uint64_t>(ldB)});
+    TensorDescriptor CDescriptor(DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(ldC)});
+    TensorDescriptor DDescriptor(DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(ldD)});
+
+    Tensor A(cpuPlacement, ADescriptor);
+    Tensor B(cpuPlacement, BDescriptor);
+    Tensor C(cpuPlacement, CDescriptor);
+    Tensor D(cpuPlacement, DDescriptor);
+    Tensor A_d(gpuPlacement, ADescriptor);
+    Tensor B_d(gpuPlacement, BDescriptor);
+    Tensor C_d(gpuPlacement, CDescriptor);
+    Tensor D_d(gpuPlacement, DDescriptor);
+    Tensor D_h(cpuPlacement, DDescriptor);
+
+    fillPaddedMatrix<__nv_bfloat16>(A, rowsA, colsA, ldA, 0.125f, -0.0625f, 0.25f);
+    fillPaddedMatrix<__nv_bfloat16>(B, rowsB, colsB, ldB, -0.09375f, 0.15625f, -0.125f);
+    fillPaddedMatrix<float>(C, m, n, ldC, 0.03125f, -0.046875f, 0.5f);
+    fillPaddedMatrix<float>(D, m, n, ldD, 0.0f, 0.0f, -999.0f);
+
+    constexpr float alpha = 0.75f;
+    constexpr float beta = -1.25f;
+    std::vector<float> expected = referenceGemm<__nv_bfloat16, __nv_bfloat16, float>(
+        A, B, C, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, alpha, beta);
+
+    A_d.copyFromAsync(A, stream);
+    B_d.copyFromAsync(B, stream);
+    C_d.copyFromAsync(C, stream);
+    D_d.copyFromAsync(D, stream);
+    stream.synchronize();
+
+    CublasMatrixMultiply::instance().gemmUsingHeuristicKernelChoice(
+        A_d,
+        B_d,
+        C_d,
+        D_d,
+        rowsA,
+        colsA,
+        rowsB,
+        colsB,
+        transposeA,
+        transposeB,
+        transposeC,
+        &alpha,
+        &beta,
+        CublasMatmulDTypes{DataType::BF16, DataType::BF16, DataType::FP32, DataType::FP32},
+        stream);
+
+    D_h.copyFromAsync(D_d, stream);
+    stream.synchronize();
+
+    assertFp32MatrixClose(D_h, expected, m, n, ldD, 0.20f);
 }

@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <cublas_v2.h>
+
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/CudaDriver/CudaDrivertApi.h"
 
@@ -75,6 +77,18 @@ namespace ThorImplementation {
                                      (name__ ? name__ : "cudaErrorUnknown") + " (" + std::to_string(static_cast<int>(err__)) + \
                                      "): " + (desc__ ? desc__ : "<no description>"));                                          \
         }                                                                                                                      \
+    } while (0)
+
+#define CHECK_CUBLAS(call)                                                                                                             \
+    do {                                                                                                                               \
+        cublasStatus_t status__ = (call);                                                                                              \
+        if (status__ != CUBLAS_STATUS_SUCCESS) {                                                                                       \
+            const char* name__ = cublasGetStatusName(status__);                                                                        \
+            const char* desc__ = cublasGetStatusString(status__);                                                                      \
+            throw std::runtime_error(std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": " + #call + " failed with " +         \
+                                     (name__ ? name__ : "CUBLAS_STATUS_UNKNOWN") + " (" + std::to_string(static_cast<int>(status__)) + \
+                                     "): " + (desc__ ? desc__ : "<no description>"));                                                  \
+        }                                                                                                                              \
     } while (0)
 
 }  // namespace ThorImplementation
