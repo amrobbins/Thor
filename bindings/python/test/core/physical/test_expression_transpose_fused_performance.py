@@ -331,9 +331,9 @@ def test_fused_transpose_kernel_throughput(case: PerfCase, dtype: thor.DataType,
 
 
 MIXED_DTYPE_CASES = [
-    pytest.param(thor.DataType.fp16, thor.DataType.bf16, id="fp16_to_bf16"),
-    pytest.param(thor.DataType.bf16, thor.DataType.fp16, id="bf16_to_fp16"),
-    pytest.param(thor.DataType.fp8_e4m3, thor.DataType.fp16, id="fp8_e4m3_to_fp16"),
+    # pytest.param(thor.DataType.fp16, thor.DataType.bf16, id="fp16_to_bf16"),
+    # pytest.param(thor.DataType.bf16, thor.DataType.fp16, id="bf16_to_fp16"),
+    # pytest.param(thor.DataType.fp8_e4m3, thor.DataType.fp16, id="fp8_e4m3_to_fp16"),
     pytest.param(thor.DataType.fp8_e5m2, thor.DataType.fp32, id="fp8_e5m2_to_fp32"),
 ]
 

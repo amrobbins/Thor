@@ -749,6 +749,16 @@ static bool supportsFp8ToBf16Float2TransposedVectorization(const PhysicalExpress
     return true;
 }
 
+static bool shouldUseDecoupledLineVectorizedTranspose(const Optional<DataType>& maybe_tensor_input_dtype, DataType output_dtype) {
+    if (!maybe_tensor_input_dtype.isPresent()) {
+        return false;
+    }
+
+    const uint32_t input_pack_scalars = transposePackScalars(maybe_tensor_input_dtype.get());
+    const uint32_t output_pack_scalars = transposePackScalars(output_dtype);
+    return (input_pack_scalars != output_pack_scalars) && (std::max(input_pack_scalars, output_pack_scalars) > 1U);
+}
+
 static uint32_t dataTypeStorageBytes(DataType dtype) {
     switch (dtype) {
         case DataType::FP8_E4M3:
@@ -808,7 +818,12 @@ uint32_t CudaSourceEmitter::tiledTransposePackScalars(const PhysicalExecutionSta
     }
 
     const CompiledStageOutput& output = requireSingleTransposedMaterializedOutput(stage);
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+    const Optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
+    if (shouldUseDecoupledLineVectorizedTranspose(maybe_tensor_input_dtype, output_dtype)) {
+        return 1;
+    }
     return transposePackScalars(output_dtype);
 }
 
@@ -818,7 +833,12 @@ uint32_t CudaSourceEmitter::tiledTransposePackScalars(const CompiledExecutionSta
     }
 
     const CompiledStageOutput& output = requireSingleTransposedMaterializedOutput(stage);
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+    const Optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
+    if (shouldUseDecoupledLineVectorizedTranspose(maybe_tensor_input_dtype, output_dtype)) {
+        return 1;
+    }
     return transposePackScalars(output_dtype);
 }
 
@@ -1338,7 +1358,8 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
                                    const std::string& suffix,
                                    const std::string& indent,
                                    const std::string& flat_chunk_lane_expr = "",
-                                   uint32_t flat_elements_per_thread = 0) {
+                                   uint32_t flat_elements_per_thread = 0,
+                                   const std::function<std::string(uint32_t)>& input_slot_value = {}) {
     const ExprNode& n = expr.nodes[node_idx];
     const DataType emitted_dtype = emittedScalarNodeValueDType(n);
     const std::string output_type = scalarStorageType(emitted_dtype);
@@ -1355,14 +1376,19 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
     switch (n.op) {
         case ExprOp::INPUT: {
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
-            const std::string input_expr =
-                flat_chunk_lane_expr.empty()
-                    ? ("in" + std::to_string(n.input_slot) + "[" + idx_expr + "]")
-                    : emitChunkLaneReadExpr("in" + std::to_string(n.input_slot) + "_chunk",
-                                            chunkScalarTypeForBytes(dataTypeStorageBytes(input_tensor_dtype) * flat_elements_per_thread),
-                                            input_tensor_dtype,
-                                            flat_chunk_lane_expr,
-                                            "in" + std::to_string(n.input_slot) + "_chunk_data");
+            std::string input_expr;
+            if (input_slot_value) {
+                input_expr = input_slot_value(n.input_slot);
+            } else {
+                input_expr = flat_chunk_lane_expr.empty()
+                                 ? ("in" + std::to_string(n.input_slot) + "[" + idx_expr + "]")
+                                 : emitChunkLaneReadExpr(
+                                       "in" + std::to_string(n.input_slot) + "_chunk",
+                                       chunkScalarTypeForBytes(dataTypeStorageBytes(input_tensor_dtype) * flat_elements_per_thread),
+                                       input_tensor_dtype,
+                                       flat_chunk_lane_expr,
+                                       "in" + std::to_string(n.input_slot) + "_chunk_data");
+            }
             ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
                << castScalarExpr(input_expr, input_tensor_dtype, emitted_dtype) << ";\n";
             return;
@@ -2695,6 +2721,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     const bool emit_packed_vectorized_path = emit_homogeneous_packed_vectorized_path || emit_mixed_two_byte_float2_path ||
                                              emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path ||
                                              emit_cross_width_half2_path || emit_fp8_to_bf16_float2_path;
+    const bool emit_decoupled_line_vectorized_path = shouldUseDecoupledLineVectorizedTranspose(maybe_tensor_input_dtype, output_dtype);
     const std::string index_type = emittedIndexType(use_uint32_index_math);
     std::ostringstream ss;
     emitRequiredHeaders(stage.expr, ss);
@@ -2720,6 +2747,139 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << ", ";
     }
     ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols) {\n";
+
+    if (emit_decoupled_line_vectorized_path) {
+        const DataType input_dtype = maybe_tensor_input_dtype.get();
+        const uint32_t read_pack_scalars = transposePackScalars(input_dtype);
+        const uint32_t write_pack_scalars = transposePackScalars(output_dtype);
+        const std::string input_type = scalarStorageType(input_dtype);
+
+        ss << "  constexpr unsigned int READ_PACK_SCALARS = " << read_pack_scalars << "U;\n";
+        ss << "  constexpr unsigned int WRITE_PACK_SCALARS = " << write_pack_scalars << "U;\n";
+        ss << "  constexpr unsigned int TILE_COL_SCALARS = TILE_DIM;\n";
+        if (read_pack_scalars > 1) {
+            ss << "  using InputPack = " << transposePackType(input_dtype) << ";\n";
+        }
+        if (write_pack_scalars > 1) {
+            ss << "  using OutputPack = " << transposePackType(output_dtype) << ";\n";
+        }
+        ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_COL_SCALARS + 1];\n";
+        ss << "  const " << index_type << " rowStart = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM;\n";
+        ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
+        ss << "  const unsigned int threadLinear = threadIdx.y * TILE_DIM + threadIdx.x;\n\n";
+
+        ss << "  constexpr unsigned int READ_PACKS_PER_ROW = TILE_COL_SCALARS / READ_PACK_SCALARS;\n";
+        ss << "  constexpr unsigned int READ_TASKS_PER_TILE = TILE_DIM * READ_PACKS_PER_ROW;\n";
+        ss << "  for (unsigned int readTask = threadLinear; readTask < READ_TASKS_PER_TILE; readTask += TILE_DIM * BLOCK_ROWS) {\n";
+        ss << "    const unsigned int localRow = readTask / READ_PACKS_PER_ROW;\n";
+        ss << "    const unsigned int localReadPackCol = readTask - localRow * READ_PACKS_PER_ROW;\n";
+        ss << "    const " << index_type << " logicalRow = rowStart + static_cast<" << index_type << ">(localRow);\n";
+        ss << "    const " << index_type << " logicalColBase = colStart + static_cast<" << index_type
+           << ">(localReadPackCol) * READ_PACK_SCALARS;\n";
+        ss << "    const " << index_type << " idx_base = logicalRow * numCols + logicalColBase;\n";
+
+        auto emit_flat_scalar_lanes = [&](const std::string& base_indent, const std::string& idx_expr_base, bool use_loaded_chunks) {
+            for (uint32_t lane = 0; lane < read_pack_scalars; ++lane) {
+                const std::string suffix = "_dl" + std::to_string(lane);
+                ss << base_indent << "{\n";
+                ss << base_indent << "  const unsigned int LANE = " << lane << "U;\n";
+                ss << base_indent << "  const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
+                if (!use_loaded_chunks) {
+                    ss << base_indent << "  const " << index_type << " logicalCol = logicalColBase + "
+                       << emitUnsignedLiteral(lane, use_uint32_index_math) << ";\n";
+                    ss << base_indent << "  if (logicalCol < numCols) {\n";
+                    ss << base_indent << "    const " << index_type << " idx = logicalRow * numCols + logicalCol;\n";
+                    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+                        if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                            continue;
+                        }
+                        emitScalarNodeSuffixed(ss, stage.expr, node_idx, "idx", suffix, base_indent + "    ");
+                    }
+                    ss << base_indent << "    tile[localRow][LOCAL_COL] = "
+                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                    ss << base_indent << "  }\n";
+                } else {
+                    const std::string lane_idx_expr = idx_expr_base + " + " + emitUnsignedLiteral(lane, use_uint32_index_math);
+                    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+                        if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                            continue;
+                        }
+                        emitScalarNodeSuffixed(
+                            ss, stage.expr, node_idx, lane_idx_expr, suffix, base_indent + "  ", std::to_string(lane), read_pack_scalars);
+                    }
+                    ss << base_indent << "  tile[localRow][LOCAL_COL] = "
+                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                }
+                ss << base_indent << "}\n";
+            }
+        };
+
+        if (read_pack_scalars > 1) {
+            ss << "    const bool inputPackedLoadOk = (logicalRow < numRows) && (logicalColBase + READ_PACK_SCALARS <= numCols) &&\n";
+            ss << "                                   ((idx_base % READ_PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
+               << ");\n";
+            ss << "    if (inputPackedLoadOk) {\n";
+            for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
+                if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor) {
+                    continue;
+                }
+                ss << "      const InputPack in" << i << "_chunk = reinterpret_cast<const InputPack*>(in" << i << " + idx_base)[0];\n";
+                ss << "      const " << input_type << "* in" << i << "_chunk_data = reinterpret_cast<const " << input_type << "*>(&in" << i
+                   << "_chunk);\n";
+            }
+            emit_flat_scalar_lanes("      ", "idx_base", true);
+            ss << "    } else if (logicalRow < numRows) {\n";
+            emit_flat_scalar_lanes("      ", "idx_base", false);
+            ss << "    }\n";
+        } else {
+            ss << "    if (logicalRow < numRows) {\n";
+            emit_flat_scalar_lanes("      ", "idx_base", false);
+            ss << "    }\n";
+        }
+        ss << "  }\n\n";
+        ss << "  __syncthreads();\n\n";
+
+        ss << "  constexpr unsigned int WRITE_PACKS_PER_ROW = TILE_DIM / WRITE_PACK_SCALARS;\n";
+        ss << "  constexpr unsigned int WRITE_TASKS_PER_TILE = TILE_COL_SCALARS * WRITE_PACKS_PER_ROW;\n";
+        ss << "  for (unsigned int writeTask = threadLinear; writeTask < WRITE_TASKS_PER_TILE; writeTask += TILE_DIM * BLOCK_ROWS) {\n";
+        ss << "    const unsigned int localOutRow = writeTask / WRITE_PACKS_PER_ROW;\n";
+        ss << "    const unsigned int localOutPackCol = writeTask - localOutRow * WRITE_PACKS_PER_ROW;\n";
+        ss << "    const " << index_type << " outputRow = colStart + static_cast<" << index_type << ">(localOutRow);\n";
+        ss << "    const " << index_type << " outputColBase = rowStart + static_cast<" << index_type
+           << ">(localOutPackCol) * WRITE_PACK_SCALARS;\n";
+        if (write_pack_scalars > 1) {
+            ss << "    OutputPack output_pack{};\n";
+            ss << "    " << output_type << "* output_pack_data = reinterpret_cast<" << output_type << "*>(&output_pack);\n";
+            ss << "    for (unsigned int lane = 0; lane < WRITE_PACK_SCALARS; ++lane) {\n";
+            ss << "      const " << index_type << " outputCol = outputColBase + static_cast<" << index_type << ">(lane);\n";
+            ss << "      if (outputRow < numCols && outputCol < numRows) {\n";
+            ss << "        output_pack_data[lane] = tile[localOutPackCol * WRITE_PACK_SCALARS + lane][localOutRow];\n";
+            ss << "      }\n";
+            ss << "    }\n";
+            ss << "    const " << index_type << " out_base_idx = outputRow * numRows + outputColBase;\n";
+            ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + WRITE_PACK_SCALARS <= numRows) &&\n";
+            ss << "                                     ((out_base_idx % WRITE_PACK_SCALARS) == "
+               << emitUnsignedLiteral(0, use_uint32_index_math) << ");\n";
+            ss << "    if (outputPackedStoreOk) {\n";
+            ss << "      OutputPack* out_ptr = reinterpret_cast<OutputPack*>(out0 + out_base_idx);\n";
+            ss << "      *out_ptr = output_pack;\n";
+            ss << "    } else if (outputRow < numCols) {\n";
+            ss << "      for (unsigned int lane = 0; lane < WRITE_PACK_SCALARS; ++lane) {\n";
+            ss << "        const " << index_type << " outputCol = outputColBase + static_cast<" << index_type << ">(lane);\n";
+            ss << "        if (outputCol < numRows) {\n";
+            ss << "          out0[outputRow * numRows + outputCol] = output_pack_data[lane];\n";
+            ss << "        }\n";
+            ss << "      }\n";
+            ss << "    }\n";
+        } else {
+            ss << "    if (outputRow < numCols && outputColBase < numRows) {\n";
+            ss << "      out0[outputRow * numRows + outputColBase] = tile[localOutPackCol][localOutRow];\n";
+            ss << "    }\n";
+        }
+        ss << "  }\n";
+        ss << "}\n";
+        return ss.str();
+    }
 
     if (emit_packed_low_precision_path) {
         const DataType dtype = output_dtype;
@@ -2747,8 +2907,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "  const " << index_type << " rowStart = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM;\n";
         ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int packedCol = threadIdx.x;\n";
-        ss << "  const " << index_type << " logicalColBase = colStart + static_cast<" << index_type
-           << ">(packedCol) * PACK_SCALARS;\n";
+        ss << "  const " << index_type << " logicalColBase = colStart + static_cast<" << index_type << ">(packedCol) * PACK_SCALARS;\n";
         if (emit_packed_vectorized_path) {
             for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
                 const ExprNode& node = stage.expr.nodes[node_idx];
@@ -2769,7 +2928,8 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "    const " << index_type << " logicalRow = rowStart + threadIdx.y + j;\n";
         ss << "    const " << index_type << " idx_base = logicalRow * numCols + logicalColBase;\n";
         ss << "    const bool inputPackedLoadOk = (logicalRow < numRows) && (logicalColBase + PACK_SCALARS <= numCols) &&\n";
-        ss << "                                   ((idx_base % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math) << ");\n";
+        ss << "                                   ((idx_base % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
+           << ");\n";
         ss << "    Pack output_pack{};\n";
         if (emit_packed_vectorized_path) {
             ss << "    if (inputPackedLoadOk) {\n";
@@ -2863,7 +3023,8 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "    }\n";
         ss << "    const " << index_type << " out_base_idx = outputRow * numRows + outputColBase;\n";
         ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + PACK_SCALARS <= numRows) &&\n";
-        ss << "                                     ((out_base_idx % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math) << ");\n";
+        ss << "                                     ((out_base_idx % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
+           << ");\n";
         ss << "    if (outputPackedStoreOk) {\n";
         ss << "      Pack* out_ptr = reinterpret_cast<Pack*>(out0 + out_base_idx);\n";
         ss << "      *out_ptr = output_pack;\n";
@@ -3040,6 +3201,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
     const std::string output_type = scalarStorageType(output_dtype);
     const bool emit_packed_low_precision_path = transposePackScalars(output_dtype) > 1;
+    const Optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
+    const bool emit_decoupled_line_vectorized_path = shouldUseDecoupledLineVectorizedTranspose(maybe_tensor_input_dtype, output_dtype);
     const Optional<DataType> maybe_vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
     const bool emit_fp8_vectorized_pair_path = emit_packed_low_precision_path && isFp8DType(output_dtype) &&
                                                maybe_vectorized_dtype.isPresent() && maybe_vectorized_dtype.get() == output_dtype;
@@ -3085,6 +3248,181 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     }
     ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols) {\n";
 
+    if (emit_decoupled_line_vectorized_path) {
+        const DataType input_dtype = maybe_tensor_input_dtype.get();
+        const uint32_t read_pack_scalars = transposePackScalars(input_dtype);
+        const uint32_t write_pack_scalars = transposePackScalars(output_dtype);
+        const std::string input_type = scalarStorageType(input_dtype);
+
+        ss << "  constexpr unsigned int READ_PACK_SCALARS = " << read_pack_scalars << "U;\n";
+        ss << "  constexpr unsigned int WRITE_PACK_SCALARS = " << write_pack_scalars << "U;\n";
+        ss << "  constexpr unsigned int TILE_COL_SCALARS = TILE_DIM;\n";
+        if (read_pack_scalars > 1) {
+            ss << "  using InputPack = " << transposePackType(input_dtype) << ";\n";
+        }
+        if (write_pack_scalars > 1) {
+            ss << "  using OutputPack = " << transposePackType(output_dtype) << ";\n";
+        }
+        ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_COL_SCALARS + 1];\n";
+        ss << "  const " << index_type << " rowStart = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM;\n";
+        ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
+        ss << "  const unsigned int threadLinear = threadIdx.y * TILE_DIM + threadIdx.x;\n\n";
+
+        ss << "  constexpr unsigned int READ_PACKS_PER_ROW = TILE_COL_SCALARS / READ_PACK_SCALARS;\n";
+        ss << "  constexpr unsigned int READ_TASKS_PER_TILE = TILE_DIM * READ_PACKS_PER_ROW;\n";
+        ss << "  for (unsigned int readTask = threadLinear; readTask < READ_TASKS_PER_TILE; readTask += TILE_DIM * BLOCK_ROWS) {\n";
+        ss << "    const unsigned int localRow = readTask / READ_PACKS_PER_ROW;\n";
+        ss << "    const unsigned int localReadPackCol = readTask - localRow * READ_PACKS_PER_ROW;\n";
+        ss << "    const " << index_type << " logicalRow = rowStart + static_cast<" << index_type << ">(localRow);\n";
+        ss << "    const " << index_type << " logicalColBase = colStart + static_cast<" << index_type
+           << ">(localReadPackCol) * READ_PACK_SCALARS;\n";
+        ss << "    const " << index_type << " logical_idx_base = static_cast<" << index_type << ">(logicalRow) * static_cast<" << index_type
+           << ">(numCols) + static_cast<" << index_type << ">(logicalColBase);\n";
+
+        auto emit_broadcast_offsets = [&](const std::vector<size_t>& used_indices,
+                                          const std::string& logical_idx_expr,
+                                          const std::string& suffix,
+                                          const std::string& indent) {
+            for (size_t used_i : used_indices) {
+                const uint32_t input_slot = group.used_input_slots[used_i];
+                ss << indent << index_type << " in" << input_slot << "_offset" << suffix << " = "
+                   << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
+            }
+            if (!group.active_axes.empty()) {
+                ss << "\n";
+                emitSpecializedBroadcastOffsetMath(ss, group, used_indices, logical_idx_expr, suffix, indent, use_uint32_index_math);
+                ss << "\n";
+            }
+        };
+
+        std::vector<size_t> native_vector_indices;
+        native_vector_indices.reserve(group.used_input_slots.size());
+        for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+            if (group.used_input_load_kinds.at(used_i) == SpecializedInputLoadKind::NativeVector) {
+                native_vector_indices.push_back(used_i);
+            }
+        }
+
+        if (read_pack_scalars > 1) {
+            emit_broadcast_offsets(all_used_indices, "logical_idx_base", "_base", "    ");
+            ss << "    bool inputPackedLoadOk = (logicalRow < numRows) && (logicalColBase + READ_PACK_SCALARS <= numCols);\n";
+            for (size_t used_i : native_vector_indices) {
+                const uint32_t input_slot = group.used_input_slots[used_i];
+                ss << "    inputPackedLoadOk = inputPackedLoadOk && ((in" << input_slot
+                   << "_offset_base % READ_PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math) << ");\n";
+            }
+            ss << "    if (inputPackedLoadOk) {\n";
+            for (size_t used_i : native_vector_indices) {
+                const uint32_t input_slot = group.used_input_slots[used_i];
+                ss << "      const InputPack in" << input_slot << "_chunk = reinterpret_cast<const InputPack*>(in" << input_slot << " + in"
+                   << input_slot << "_offset_base)[0];\n";
+                ss << "      const " << input_type << "* in" << input_slot << "_chunk_data = reinterpret_cast<const " << input_type
+                   << "*>(&in" << input_slot << "_chunk);\n";
+            }
+            for (uint32_t lane = 0; lane < read_pack_scalars; ++lane) {
+                const std::string suffix = "_dbl" + std::to_string(lane);
+                const std::string lane_literal = emitUnsignedLiteral(lane, use_uint32_index_math);
+                ss << "      {\n";
+                ss << "        const unsigned int LANE = " << lane << "U;\n";
+                ss << "        const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
+                ss << "        const " << index_type << " logical_idx = logical_idx_base + " << lane_literal << ";\n";
+                emit_broadcast_offsets(scalar_pack_indices, "logical_idx", "", "        ");
+                auto input_value = [&](uint32_t input_slot) -> std::string {
+                    const auto kind_it = input_load_kind_by_slot.find(input_slot);
+                    if (kind_it == input_load_kind_by_slot.end()) {
+                        throw std::runtime_error("Missing input load kind for decoupled transposed broadcast input.");
+                    }
+                    if (kind_it->second == SpecializedInputLoadKind::NativeVector) {
+                        return "in" + std::to_string(input_slot) + "_chunk_data[" + std::to_string(lane) + "]";
+                    }
+                    return "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset]";
+                };
+                for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+                    if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                        continue;
+                    }
+                    emitScalarNodeSuffixed(ss, stage.expr, node_idx, "logical_idx", suffix, "        ", "", 0, input_value);
+                }
+                ss << "        tile[localRow][LOCAL_COL] = "
+                   << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                ss << "      }\n";
+            }
+            ss << "    } else if (logicalRow < numRows) {\n";
+        } else {
+            ss << "    if (logicalRow < numRows) {\n";
+        }
+
+        for (uint32_t lane = 0; lane < read_pack_scalars; ++lane) {
+            const std::string suffix = "_dbs" + std::to_string(lane);
+            const std::string lane_literal = emitUnsignedLiteral(lane, use_uint32_index_math);
+            ss << "      {\n";
+            ss << "        const unsigned int LANE = " << lane << "U;\n";
+            ss << "        const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
+            ss << "        const " << index_type << " logicalCol = logicalColBase + " << lane_literal << ";\n";
+            ss << "        if (logicalCol < numCols) {\n";
+            ss << "          const " << index_type << " logical_idx = static_cast<" << index_type << ">(logicalRow) * static_cast<"
+               << index_type << ">(numCols) + static_cast<" << index_type << ">(logicalCol);\n";
+            emit_broadcast_offsets(all_used_indices, "logical_idx", "", "          ");
+            auto input_value = [&](uint32_t input_slot) -> std::string {
+                return "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset]";
+            };
+            for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+                if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                    continue;
+                }
+                emitScalarNodeSuffixed(ss, stage.expr, node_idx, "logical_idx", suffix, "          ", "", 0, input_value);
+            }
+            ss << "          tile[localRow][LOCAL_COL] = "
+               << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+            ss << "        }\n";
+            ss << "      }\n";
+        }
+        ss << "    }\n";
+        ss << "  }\n\n";
+        ss << "  __syncthreads();\n\n";
+
+        ss << "  constexpr unsigned int WRITE_PACKS_PER_ROW = TILE_DIM / WRITE_PACK_SCALARS;\n";
+        ss << "  constexpr unsigned int WRITE_TASKS_PER_TILE = TILE_COL_SCALARS * WRITE_PACKS_PER_ROW;\n";
+        ss << "  for (unsigned int writeTask = threadLinear; writeTask < WRITE_TASKS_PER_TILE; writeTask += TILE_DIM * BLOCK_ROWS) {\n";
+        ss << "    const unsigned int localOutRow = writeTask / WRITE_PACKS_PER_ROW;\n";
+        ss << "    const unsigned int localOutPackCol = writeTask - localOutRow * WRITE_PACKS_PER_ROW;\n";
+        ss << "    const " << index_type << " outputRow = colStart + static_cast<" << index_type << ">(localOutRow);\n";
+        ss << "    const " << index_type << " outputColBase = rowStart + static_cast<" << index_type
+           << ">(localOutPackCol) * WRITE_PACK_SCALARS;\n";
+        if (write_pack_scalars > 1) {
+            ss << "    OutputPack output_pack{};\n";
+            ss << "    " << output_type << "* output_pack_data = reinterpret_cast<" << output_type << "*>(&output_pack);\n";
+            ss << "    for (unsigned int lane = 0; lane < WRITE_PACK_SCALARS; ++lane) {\n";
+            ss << "      const " << index_type << " outputCol = outputColBase + static_cast<" << index_type << ">(lane);\n";
+            ss << "      if (outputRow < numCols && outputCol < numRows) {\n";
+            ss << "        output_pack_data[lane] = tile[localOutPackCol * WRITE_PACK_SCALARS + lane][localOutRow];\n";
+            ss << "      }\n";
+            ss << "    }\n";
+            ss << "    const " << index_type << " out_base_idx = outputRow * numRows + outputColBase;\n";
+            ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + WRITE_PACK_SCALARS <= numRows) &&\n";
+            ss << "                                     ((out_base_idx % WRITE_PACK_SCALARS) == "
+               << emitUnsignedLiteral(0, use_uint32_index_math) << ");\n";
+            ss << "    if (outputPackedStoreOk) {\n";
+            ss << "      OutputPack* out_ptr = reinterpret_cast<OutputPack*>(out0 + out_base_idx);\n";
+            ss << "      *out_ptr = output_pack;\n";
+            ss << "    } else if (outputRow < numCols) {\n";
+            ss << "      for (unsigned int lane = 0; lane < WRITE_PACK_SCALARS; ++lane) {\n";
+            ss << "        const " << index_type << " outputCol = outputColBase + static_cast<" << index_type << ">(lane);\n";
+            ss << "        if (outputCol < numRows) {\n";
+            ss << "          out0[outputRow * numRows + outputCol] = output_pack_data[lane];\n";
+            ss << "        }\n";
+            ss << "      }\n";
+            ss << "    }\n";
+        } else {
+            ss << "    if (outputRow < numCols && outputColBase < numRows) {\n";
+            ss << "      out0[outputRow * numRows + outputColBase] = tile[localOutPackCol][localOutRow];\n";
+            ss << "    }\n";
+        }
+        ss << "  }\n";
+        ss << "}\n";
+        return ss.str();
+    }
+
     if (emit_packed_low_precision_path) {
         const uint32_t pack_scalars = transposePackScalars(output_dtype);
         const std::string pack_type = transposePackType(output_dtype);
@@ -3100,8 +3438,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "  const " << index_type << " rowStart = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM;\n";
         ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int packedCol = threadIdx.x;\n";
-        ss << "  const " << index_type << " logicalColBase = colStart + static_cast<" << index_type
-           << ">(packedCol) * PACK_SCALARS;\n";
+        ss << "  const " << index_type << " logicalColBase = colStart + static_cast<" << index_type << ">(packedCol) * PACK_SCALARS;\n";
         if (emit_fp8_vectorized_pair_path) {
             for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
                 const ExprNode& node = stage.expr.nodes[node_idx];
@@ -3246,7 +3583,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
            << ">(numRows) +\n";
         ss << "                                     static_cast<" << index_type << ">(outputColBase);\n";
         ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + PACK_SCALARS <= numRows) &&\n";
-        ss << "                                     ((out_base_idx % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math) << ");\n";
+        ss << "                                     ((out_base_idx % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
+           << ");\n";
         ss << "    if (outputPackedStoreOk) {\n";
         ss << "      Pack* out_ptr = reinterpret_cast<Pack*>(out0 + out_base_idx);\n";
         ss << "      *out_ptr = output_pack;\n";
