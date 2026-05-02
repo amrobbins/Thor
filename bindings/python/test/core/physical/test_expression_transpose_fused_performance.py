@@ -15,12 +15,12 @@ GPU_NUM = int(os.getenv("THOR_EXPR_PERF_GPU", "0"))
 # These fall back to the existing expression-performance env vars when present.
 WARMUP_ITERS = int(os.getenv(
     "THOR_EXPR_TRANSPOSE_PERF_WARMUP_ITERS",
-    os.getenv("THOR_EXPR_PERF_WARMUP_ITERS", "1"),
+    os.getenv("THOR_EXPR_PERF_WARMUP_ITERS", "25"),
 ))
 MEASURE_ITERS = int(
     os.getenv(
         "THOR_EXPR_TRANSPOSE_PERF_MEASURE_ITERS",
-        os.getenv("THOR_EXPR_PERF_MEASURE_ITERS", "1"),
+        os.getenv("THOR_EXPR_PERF_MEASURE_ITERS", "200"),
     ))
 
 # Match the large flat-performance suite's element count for the main aligned
@@ -331,9 +331,9 @@ def test_fused_transpose_kernel_throughput(case: PerfCase, dtype: thor.DataType,
 
 
 MIXED_DTYPE_CASES = [
-    # pytest.param(thor.DataType.fp16, thor.DataType.bf16, id="fp16_to_bf16"),
-    # pytest.param(thor.DataType.bf16, thor.DataType.fp16, id="bf16_to_fp16"),
-    # pytest.param(thor.DataType.fp8_e4m3, thor.DataType.fp16, id="fp8_e4m3_to_fp16"),
+    pytest.param(thor.DataType.fp16, thor.DataType.bf16, id="fp16_to_bf16"),
+    pytest.param(thor.DataType.bf16, thor.DataType.fp16, id="bf16_to_fp16"),
+    pytest.param(thor.DataType.fp8_e4m3, thor.DataType.fp16, id="fp8_e4m3_to_fp16"),
     pytest.param(thor.DataType.fp8_e5m2, thor.DataType.fp32, id="fp8_e5m2_to_fp32"),
 ]
 
@@ -345,13 +345,13 @@ MIXED_DTYPE_PERF_CASES = [
         input_reads_per_output=2,
         expects_fused_transpose=True,
     ),
-    # PerfCase(
-    #     "broadcast_outer_fused_arithmetic_transpose",
-    #     _build_broadcast_outer_transpose,
-    #     _broadcast_transposed_output_shape,
-    #     input_reads_per_output=2,
-    #     expects_fused_transpose=True,
-    # ),
+    PerfCase(
+        "broadcast_outer_fused_arithmetic_transpose",
+        _build_broadcast_outer_transpose,
+        _broadcast_transposed_output_shape,
+        input_reads_per_output=2,
+        expects_fused_transpose=True,
+    ),
 ]
 
 

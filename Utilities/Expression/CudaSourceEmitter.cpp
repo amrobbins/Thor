@@ -350,6 +350,21 @@ static std::string fp8RawLaneHelperName(DataType dtype) {
     }
 }
 
+static std::string uint8Vector4LaneMember(uint32_t lane) {
+    switch (lane) {
+        case 0:
+            return "x";
+        case 1:
+            return "y";
+        case 2:
+            return "z";
+        case 3:
+            return "w";
+        default:
+            throw runtime_error("Unsupported uint8 vector4 lane: " + std::to_string(lane));
+    }
+}
+
 static std::string emitFp8PackLaneMemberExpr(const std::string& pack_expr, uint32_t lane, const DataType input_dtype) {
     std::string dtypeString;
     switch (input_dtype) {
@@ -363,21 +378,17 @@ static std::string emitFp8PackLaneMemberExpr(const std::string& pack_expr, uint3
             throw runtime_error("Unsupported fp8 pack lane dtype: " + TensorDescriptor::getElementTypeName(input_dtype));
     }
 
-    const uint32_t shift = lane * 8U;
-
     switch (lane) {
         case 0:
         case 1:
         case 2:
         case 3:
-            return "([](unsigned int raw) { " + dtypeString +
+            return "([](unsigned char raw) { " + dtypeString +
                    " v; "
-                   "v.__x = static_cast<__nv_fp8_storage_t>((raw >> " +
-                   std::to_string(shift) +
-                   "U) & 0xFFU); "
+                   "v.__x = static_cast<__nv_fp8_storage_t>(raw); "
                    "return v; "
-                   "})(static_cast<unsigned int>((" +
-                   pack_expr + ").__x))";
+                   "})((" +
+                   pack_expr + ")." + uint8Vector4LaneMember(lane) + ")";
         default:
             throw runtime_error("Unsupported fp8 pack lane: " + std::to_string(lane));
     }
@@ -2815,7 +2826,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "  constexpr unsigned int WRITE_PACK_SCALARS = " << write_pack_scalars << "U;\n";
         ss << "  constexpr unsigned int TILE_COL_SCALARS = TILE_DIM;\n";
         if (read_pack_scalars > 1) {
-            ss << "  using InputPack = " << transposePackType(input_dtype) << ";\n";
+            ss << "  using InputPack = " << (isFp8DType(input_dtype) ? std::string("uchar4") : transposePackType(input_dtype)) << ";\n";
         }
         if (write_pack_scalars > 1) {
             ss << "  using OutputPack = " << transposePackType(output_dtype) << ";\n";
@@ -3364,7 +3375,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "  constexpr unsigned int WRITE_PACK_SCALARS = " << write_pack_scalars << "U;\n";
         ss << "  constexpr unsigned int TILE_COL_SCALARS = TILE_DIM;\n";
         if (read_pack_scalars > 1) {
-            ss << "  using InputPack = " << transposePackType(input_dtype) << ";\n";
+            ss << "  using InputPack = " << (isFp8DType(input_dtype) ? std::string("uchar4") : transposePackType(input_dtype)) << ";\n";
         }
         if (write_pack_scalars > 1) {
             ss << "  using OutputPack = " << transposePackType(output_dtype) << ";\n";
