@@ -1833,7 +1833,8 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                                                 const std::string& suffix,
                                                 const std::string& indent,
                                                 const std::function<std::string(uint32_t)>& input_slot_value,
-                                                const std::function<std::string(uint32_t)>& scalar_const_value = {}) {
+                                                const std::function<std::string(uint32_t)>& scalar_const_value = {},
+                                                bool input_slot_value_is_compute = false) {
     std::string compute_dtype_vector;
     if (dtype == DataType::BF16) {
         compute_dtype_vector = "__nv_bfloat162";
@@ -1848,8 +1849,13 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
         switch (n.op) {
             case ExprOp::INPUT: {
                 const std::string variable = input_slot_value(n.input_slot);
-                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
-                   << vector_compute_conversion(storage_dtype_vector, variable) << ";\n";
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = ";
+                if (input_slot_value_is_compute) {
+                    ss << variable;
+                } else {
+                    ss << vector_compute_conversion(storage_dtype_vector, variable);
+                }
+                ss << ";\n";
                 break;
             }
             case ExprOp::RUNTIME_SCALAR:
@@ -3034,11 +3040,25 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
     const std::string output_type = scalarStorageType(output_dtype);
     const bool emit_packed_low_precision_path = transposePackScalars(output_dtype) > 1;
-    const bool use_uint32_index_math = false;
+    const Optional<DataType> maybe_vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
+    const bool emit_fp8_vectorized_pair_path = emit_packed_low_precision_path && isFp8DType(output_dtype) &&
+                                               maybe_vectorized_dtype.isPresent() && maybe_vectorized_dtype.get() == output_dtype;
+    const bool use_uint32_index_math = groupSupportsUInt32IndexMath(group);
     const std::string index_type = emittedIndexType(use_uint32_index_math);
 
     std::vector<size_t> all_used_indices(group.used_input_slots.size());
     std::iota(all_used_indices.begin(), all_used_indices.end(), 0);
+
+    std::vector<size_t> scalar_pack_indices;
+    std::unordered_map<uint32_t, SpecializedInputLoadKind> input_load_kind_by_slot;
+    scalar_pack_indices.reserve(group.used_input_slots.size());
+    for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+        const SpecializedInputLoadKind kind = group.used_input_load_kinds.at(used_i);
+        input_load_kind_by_slot.emplace(group.used_input_slots[used_i], kind);
+        if (kind == SpecializedInputLoadKind::ScalarPack) {
+            scalar_pack_indices.push_back(used_i);
+        }
+    }
 
     std::ostringstream ss;
     emitRequiredHeaders(stage.expr, ss);
@@ -3072,19 +3092,105 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "  constexpr unsigned int PACK_SCALARS = " << pack_scalars << "U;\n";
         ss << "  constexpr unsigned int TILE_COL_SCALARS = TILE_DIM * PACK_SCALARS;\n";
         ss << "  using Pack = " << pack_type << ";\n";
+        if (emit_fp8_vectorized_pair_path) {
+            ss << "  using Vec2 = " << transposeVector2StorageType(output_dtype) << ";\n";
+        }
         ss << "  union PackRaw { unsigned int raw; Pack pack; };\n";
         ss << "  __shared__ unsigned int tile[TILE_DIM][TILE_DIM + 1];\n";
         ss << "  const unsigned int rowStart = static_cast<unsigned int>(blockIdx.y) * TILE_DIM;\n";
         ss << "  const unsigned int colStart = static_cast<unsigned int>(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int packedCol = threadIdx.x;\n";
-        ss << "  const unsigned int logicalColBase = colStart + packedCol * PACK_SCALARS;\n\n";
+        ss << "  const unsigned int logicalColBase = colStart + packedCol * PACK_SCALARS;\n";
+        if (emit_fp8_vectorized_pair_path) {
+            for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+                const ExprNode& node = stage.expr.nodes[node_idx];
+                if (node.op != ExprOp::SCALAR_FP && node.op != ExprOp::FILL) {
+                    continue;
+                }
+                ss << "  const half2 c" << node_idx << " = " << emitVector2ScalarLiteral(node.scalar_fp, output_dtype) << ";\n";
+            }
+        }
+        ss << "\n";
 
         ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
         ss << "    const unsigned int logicalRow = rowStart + threadIdx.y + j;\n";
         ss << "    Pack output_pack{};\n";
         ss << "    if (logicalRow < numRows) {\n";
+        if (emit_fp8_vectorized_pair_path) {
+            const uint32_t pairs_per_pack = pack_scalars / 2U;
+            ss << "      Vec2* output_vec2 = reinterpret_cast<Vec2*>(&output_pack);\n";
+            ss << "      bool pair_done[PACK_SCALARS / 2U] = {};\n";
+            for (uint32_t pair = 0; pair < pairs_per_pack; ++pair) {
+                const std::string suffix = "_btp" + std::to_string(pair);
+                const std::string suffix0 = suffix + "_0";
+                const std::string suffix1 = suffix + "_1";
+                ss << "      {\n";
+                ss << "        constexpr unsigned int PAIR = " << pair << "U;\n";
+                ss << "        constexpr unsigned int PAIR_BASE_LANE = PAIR * 2U;\n";
+                ss << "        const unsigned int logicalColPairBase = logicalColBase + PAIR_BASE_LANE;\n";
+                ss << "        if (logicalColPairBase + 1U < numCols) {\n";
+                ss << "          const " << index_type << " logical_idx" << suffix0 << " = static_cast<" << index_type
+                   << ">(logicalRow) * static_cast<" << index_type << ">(numCols) + static_cast<" << index_type
+                   << ">(logicalColPairBase);\n";
+                for (uint32_t input_slot : group.used_input_slots) {
+                    ss << "          " << index_type << " in" << input_slot << "_offset" << suffix0 << " = "
+                       << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
+                }
+                for (size_t used_i : scalar_pack_indices) {
+                    const uint32_t input_slot = group.used_input_slots[used_i];
+                    ss << "          " << index_type << " in" << input_slot << "_offset" << suffix1 << " = "
+                       << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
+                }
+                if (!group.active_axes.empty()) {
+                    ss << "\n";
+                    emitSpecializedBroadcastOffsetMath(
+                        ss, group, all_used_indices, "logical_idx" + suffix0, suffix0, "          ", use_uint32_index_math);
+                    if (!scalar_pack_indices.empty()) {
+                        ss << "          const " << index_type << " logical_idx" << suffix1 << " = logical_idx" << suffix0 << " + "
+                           << emitUnsignedLiteral(1, use_uint32_index_math) << ";\n";
+                        emitSpecializedBroadcastOffsetMath(
+                            ss, group, scalar_pack_indices, "logical_idx" + suffix1, suffix1, "          ", use_uint32_index_math);
+                    }
+                    ss << "\n";
+                }
+                emitVector2NodeDefinitionsForSuffix(
+                    ss,
+                    stage.expr,
+                    output_dtype,
+                    transposeVector2StorageType(output_dtype),
+                    suffix,
+                    "          ",
+                    [&](uint32_t input_slot) {
+                        const auto kind_it = input_load_kind_by_slot.find(input_slot);
+                        if (kind_it == input_load_kind_by_slot.end()) {
+                            throw std::runtime_error("Missing input load kind for transposed vector broadcast input.");
+                        }
+                        if (kind_it->second == SpecializedInputLoadKind::NativeVector) {
+                            return emitVector2BroadcastNativeLoad(transposeVector2StorageType(output_dtype),
+                                                                  "in" + std::to_string(input_slot),
+                                                                  "in" + std::to_string(input_slot) + "_offset" + suffix0);
+                        }
+                        const std::string var0 =
+                            "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset" + suffix0 + "]";
+                        const std::string var1 =
+                            "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset" + suffix1 + "]";
+                        return emitVector2BroadcastPackLoad(output_type, var0, var1);
+                    },
+                    [&](uint32_t scalar_node_idx) { return "c" + std::to_string(scalar_node_idx); },
+                    true);
+                ss << "          output_vec2[PAIR] = "
+                   << vector_storage_conversion(transposeVector2StorageType(output_dtype), refWithSuffix(output.local_node_idx, suffix))
+                   << ";\n";
+                ss << "          pair_done[PAIR] = true;\n";
+                ss << "        }\n";
+                ss << "      }\n";
+            }
+        }
         ss << "      " << output_type << "* output_scalar = reinterpret_cast<" << output_type << "*>(&output_pack);\n";
         ss << "      for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
+        if (emit_fp8_vectorized_pair_path) {
+            ss << "        if (pair_done[lane / 2U]) continue;\n";
+        }
         ss << "        const unsigned int logicalCol = logicalColBase + lane;\n";
         ss << "        if (logicalCol < numCols) {\n";
         ss << "          const " << index_type << " logical_idx = static_cast<" << index_type << ">(logicalRow) * static_cast<"
@@ -3134,9 +3240,9 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "      const " << output_type << "* input_scalar = reinterpret_cast<const " << output_type << "*>(&input_raw.pack);\n";
         ss << "      output_scalar[lane] = input_scalar[inputColLane];\n";
         ss << "    }\n";
-        ss << "    const unsigned long long out_base_idx = static_cast<unsigned long long>(outputRow) * static_cast<unsigned long "
-              "long>(numRows) +\n";
-        ss << "                                           static_cast<unsigned long long>(outputColBase);\n";
+        ss << "    const " << index_type << " out_base_idx = static_cast<" << index_type << ">(outputRow) * static_cast<" << index_type
+           << ">(numRows) +\n";
+        ss << "                                     static_cast<" << index_type << ">(outputColBase);\n";
         ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + PACK_SCALARS <= numRows) &&\n";
         ss << "                                     ((out_base_idx % PACK_SCALARS) == 0ULL);\n";
         ss << "    if (outputPackedStoreOk) {\n";
@@ -3188,8 +3294,9 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     ss << "  const unsigned int ty = blockIdx.x * TILE_DIM + threadIdx.y;\n";
     ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
     ss << "    if (tx < numRows && (ty + j) < numCols) {\n";
-    ss << "      const unsigned long long out_idx = static_cast<unsigned long long>(ty + j) * static_cast<unsigned long long>(numRows) +\n";
-    ss << "                                       static_cast<unsigned long long>(tx);\n";
+    ss << "      const " << index_type << " out_idx = static_cast<" << index_type << ">(ty + j) * static_cast<" << index_type
+       << ">(numRows) +\n";
+    ss << "                                   static_cast<" << index_type << ">(tx);\n";
     ss << "      out0[out_idx] = tile[threadIdx.x][threadIdx.y + j];\n";
     ss << "    }\n";
     ss << "  }\n";
