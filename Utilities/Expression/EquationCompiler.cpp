@@ -939,7 +939,7 @@ vector<char> EquationCompiler::linkToCubin(const vector<char>& ltoir, const Equa
     return cubin;
 }
 
-constexpr bool PRINT_KERNELS = true;
+constexpr bool PRINT_KERNELS = false;
 
 vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& kernel_name, const EquationSignature& sig) {
     if (PRINT_KERNELS) {
@@ -1006,6 +1006,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
         compiled->elements_per_thread = 1;
         compiled->tiled_transpose_pack_scalars = CudaSourceEmitter::tiledTransposePackScalars(stage);
         compiled->uses_uint32_numel_arg = false;
+        compiled->uses_uint32_tiled_transpose_index_math = use_uint32_index_math;
     } else {
         compiled->elements_per_thread = CudaSourceEmitter::flatElementsPerThread(stage);
         compiled->uses_uint32_numel_arg = use_uint32_index_math;
@@ -2843,6 +2844,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
         compiled->launch_kind = CompiledEquation::LaunchKind::FusedTiledTranspose;
         compiled->elements_per_thread = 1u;
         compiled->tiled_transpose_pack_scalars = CudaSourceEmitter::tiledTransposePackScalars(stage);
+        compiled->uses_uint32_tiled_transpose_index_math = CudaSourceEmitter::specializedBroadcastUsesUInt32IndexMath(groups);
     } else {
         const Optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
         compiled->elements_per_thread = vectorized_dtype.isPresent() ? 2u : 1u;
