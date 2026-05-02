@@ -49,6 +49,7 @@ struct CompiledEquation {
         BroadcastSingle,
         BroadcastGrouped,
         Transpose,
+        FusedTiledTranspose,
     };
 
     EquationCacheKey key;
@@ -59,6 +60,7 @@ struct CompiledEquation {
     LaunchKind launch_kind = LaunchKind::Flat;
     uint32_t num_broadcast_groups = 0;
     uint32_t elements_per_thread = 1;
+    uint32_t tiled_transpose_pack_scalars = 1;
     bool uses_uint32_numel_arg = false;
 
     int deviceNum = 0;

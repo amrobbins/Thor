@@ -1,4 +1,5 @@
 #include "Utilities/Expression/EquationRunner.h"
+#include <algorithm>
 #include <limits>
 
 #include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
@@ -48,6 +49,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
 
     const bool is_transpose_launch = compiledEquation->launch_kind == CompiledEquation::LaunchKind::Transpose;
+    const bool is_fused_tiled_transpose_launch = compiledEquation->launch_kind == CompiledEquation::LaunchKind::FusedTiledTranspose;
 
     uint64_t max_numel = 0;
     for (size_t i = 0; i < outputs.size(); ++i) {
@@ -123,7 +125,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         }
     }
 
-    if (!is_transpose_launch) {
+    if (!is_transpose_launch && !is_fused_tiled_transpose_launch) {
         assert(max_numel != 0);
     }
     std::vector<const void*> input_ptrs;
@@ -193,6 +195,41 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
                                     compiledEquation->input_dtypes[0],
                                     compiledEquation->output_dtypes[0],
                                     stream);
+        return;
+    }
+
+    if (is_fused_tiled_transpose_launch) {
+        if (outputs.size() != 1) {
+            throw std::runtime_error("Fused tiled-transpose launch expects exactly one output.");
+        }
+        const Tensor& output_tensor = outputs[0];
+        const std::vector<uint64_t> output_dims = output_tensor.getDimensions();
+        if (output_dims.size() != 2) {
+            throw std::runtime_error("Fused tiled-transpose launch currently only supports rank-2 outputs.");
+        }
+        if (output_tensor.getTotalNumElements() == 0) {
+            return;
+        }
+        if (output_dims[0] > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) ||
+            output_dims[1] > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+            throw std::runtime_error("Fused tiled-transpose launch dimensions exceed uint32_t.");
+        }
+
+        // Transposed materialization stores a logical [numRows, numCols] output into a physical
+        // row-major [numCols, numRows] tensor, so infer the logical dimensions by swapping the
+        // allocated output tensor dimensions back.
+        uint32_t numRows = static_cast<uint32_t>(output_dims[1]);
+        uint32_t numCols = static_cast<uint32_t>(output_dims[0]);
+        args.push_back((void*)&numRows);
+        args.push_back((void*)&numCols);
+
+        constexpr uint32_t TILE_DIM = 32;
+        constexpr uint32_t BLOCK_ROWS = 8;
+        const uint32_t pack_scalars = std::max<uint32_t>(1U, compiledEquation->tiled_transpose_pack_scalars);
+        const uint32_t tile_col_scalars = TILE_DIM * pack_scalars;
+        const uint32_t grid_x = static_cast<uint32_t>((static_cast<uint64_t>(numCols) + tile_col_scalars - 1ULL) / tile_col_scalars);
+        const uint32_t grid_y = static_cast<uint32_t>((static_cast<uint64_t>(numRows) + TILE_DIM - 1ULL) / TILE_DIM);
+        CU_CHECK(cuLaunchKernel(compiledEquation->kernel, grid_x, grid_y, 1, TILE_DIM, BLOCK_ROWS, 1, 0, stream, args.data(), nullptr));
         return;
     }
 

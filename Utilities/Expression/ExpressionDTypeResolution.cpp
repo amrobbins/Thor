@@ -241,8 +241,81 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
     return node.output_dtype.isPresent() ? node.output_dtype.get() : default_output;
 }
 
-void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<DataType>& root_input_dtypes) {
+static void seedRequiredComputeDType(Optional<DataType>& slot, DataType dtype) {
+    if (!isSupportedFusionFloatingType(dtype)) {
+        return;
+    }
+
+    if (!slot.isPresent()) {
+        slot = dtype;
+    } else {
+        slot = promoteTensorValueDTypes(slot.get(), dtype);
+    }
+}
+
+static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
+                                                     const std::vector<uint32_t>& materialized_output_nodes,
+                                                     const std::vector<uint8_t>& explicit_compute_dtype) {
+    std::vector<Optional<DataType>> required_compute_dtype(expr.nodes.size(), Optional<DataType>::empty());
+
+    for (uint32_t output_node_idx : materialized_output_nodes) {
+        if (output_node_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Output node index out of range in propagateMaterializedOutputComputeDTypes.");
+        }
+
+        const ExprNode& output_node = expr.nodes[output_node_idx];
+        if (output_node.compute_dtype.isPresent()) {
+            seedRequiredComputeDType(required_compute_dtype[output_node_idx], output_node.compute_dtype.get());
+        } else if (output_node.output_dtype.isPresent()) {
+            seedRequiredComputeDType(required_compute_dtype[output_node_idx], output_node.output_dtype.get());
+        }
+    }
+
+    for (int64_t node_idx_signed = static_cast<int64_t>(expr.nodes.size()) - 1; node_idx_signed >= 0; --node_idx_signed) {
+        const uint32_t node_idx = static_cast<uint32_t>(node_idx_signed);
+        if (!required_compute_dtype[node_idx].isPresent()) {
+            continue;
+        }
+
+        ExprNode& node = expr.nodes[node_idx];
+        DataType propagated_dtype = required_compute_dtype[node_idx].get();
+
+        if (!Expression::isLeafOp(node.op) && node.compute_dtype.isPresent()) {
+            if (!explicit_compute_dtype[node_idx]) {
+                const DataType promoted_requested_dtype = promoteTensorValueDTypes(node.compute_dtype.get(), propagated_dtype);
+                node.compute_dtype = toSupportedComputeDType(node.op, promoted_requested_dtype);
+            }
+            propagated_dtype = node.compute_dtype.get();
+        }
+
+        auto propagate_to_parent = [&](uint32_t parent_idx) {
+            if (parent_idx >= expr.nodes.size()) {
+                throw std::runtime_error("Parent node index out of range in propagateMaterializedOutputComputeDTypes.");
+            }
+            seedRequiredComputeDType(required_compute_dtype[parent_idx], propagated_dtype);
+        };
+
+        if (!Expression::isLeafOp(node.op)) {
+            propagate_to_parent(node.lhs);
+        }
+        if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
+            propagate_to_parent(node.rhs);
+        }
+        if (Expression::isTernaryOp(node.op)) {
+            propagate_to_parent(node.aux);
+        }
+    }
+}
+
+static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
+                                           const std::vector<DataType>& root_input_dtypes,
+                                           const std::vector<uint32_t>& materialized_output_nodes) {
     std::vector<DataType> resolved_output_dtypes(expr.nodes.size());
+    std::vector<uint8_t> explicit_compute_dtype(expr.nodes.size(), 0);
+
+    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+        explicit_compute_dtype[node_idx] = expr.nodes[node_idx].compute_dtype.isPresent() ? 1 : 0;
+    }
 
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
         ExprNode& node = expr.nodes[node_idx];
@@ -291,6 +364,15 @@ void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<
 
         resolved_output_dtypes[node_idx] = output_dtype;
     }
+
+    propagateMaterializedOutputComputeDTypes(expr, materialized_output_nodes, explicit_compute_dtype);
+}
+
+void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<DataType>& root_input_dtypes) {
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("resolveExpressionDTypesInPlace requires a valid output_node.");
+    }
+    resolveExpressionDTypesInPlace(expr, root_input_dtypes, std::vector<uint32_t>{expr.output_node});
 }
 
 void resolveOutputsDTypesInPlace(PhysicalOutputs& outputs, const std::vector<DataType>& root_input_dtypes) {
@@ -298,7 +380,12 @@ void resolveOutputsDTypesInPlace(PhysicalOutputs& outputs, const std::vector<Dat
         throw std::runtime_error("resolveOutputsDTypesInPlace requires non-null outputs.expr.");
     }
 
-    resolveExpressionDTypesInPlace(*outputs.expr, root_input_dtypes);
+    std::vector<uint32_t> output_nodes;
+    output_nodes.reserve(outputs.outputs.size());
+    for (const NamedOutput& output : outputs.outputs) {
+        output_nodes.push_back(output.node_idx);
+    }
+    resolveExpressionDTypesInPlace(*outputs.expr, root_input_dtypes, output_nodes);
 }
 
 }  // namespace ThorImplementation

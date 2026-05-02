@@ -66,8 +66,10 @@ def _host_to_gpu(arr: np.ndarray, dtype: thor.DataType, stream: Stream, gpu_num:
 
 
 def _copy_to_host(tensor: PhysicalTensor, dtype: thor.DataType, stream: Stream) -> np.ndarray:
+    _host_same_dtype = _cpu_tensor(list(tensor.dimensions), tensor.dtype)
     host = _cpu_tensor(list(tensor.dimensions), dtype)
-    host.copy_from_async(tensor, stream)
+    _host_same_dtype.copy_from_async(tensor, stream)
+    host.copy_from_async(_host_same_dtype, stream)
     stream.synchronize()
     return host.numpy().copy()
 
@@ -127,6 +129,7 @@ def test_transpose_forward_numerical(dtype: thor.DataType, shape: tuple[int, int
 @pytest.mark.parametrize(
     "input_dtype,output_dtype",
     [
+        (thor.DataType.fp32, thor.DataType.fp32),
         (thor.DataType.fp32, thor.DataType.fp16),
         (thor.DataType.fp16, thor.DataType.fp32),
         (thor.DataType.bf16, thor.DataType.fp16),

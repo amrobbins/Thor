@@ -2346,7 +2346,16 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
     if (local_node_idx >= node_dims.size()) {
         throw std::runtime_error("resolveOutputDimsForStageOutput local_node_idx out of range.");
     }
-    return node_dims[local_node_idx];
+
+    std::vector<uint64_t> output_dims = node_dims[local_node_idx];
+    if (stage.kind == CompiledExecutionStage::Kind::FusedKernel &&
+        stage.outputs[output_idx].materialized_layout == MaterializedTensorLayout::Transposed) {
+        if (output_dims.size() != 2) {
+            throw std::runtime_error("Transposed fused materialization currently requires a rank-2 logical output.");
+        }
+        std::swap(output_dims[0], output_dims[1]);
+    }
+    return output_dims;
 }
 
 static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecutionStage& stage,
@@ -2358,6 +2367,27 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
         stage_input_dims.push_back(runtimeInputDims(input));
     }
     return resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
+}
+
+static bool stageHasTransposedMaterializedOutput(const CompiledExecutionStage& stage) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        return false;
+    }
+    return std::any_of(stage.outputs.begin(), stage.outputs.end(), [](const CompiledStageOutput& output) {
+        return output.materialized_layout == MaterializedTensorLayout::Transposed;
+    });
+}
+
+static std::vector<uint64_t> logicalDimsForBroadcastComparison(const CompiledExecutionStage& stage,
+                                                               size_t output_idx,
+                                                               std::vector<uint64_t> physical_output_dims) {
+    if (stage.outputs[output_idx].materialized_layout == MaterializedTensorLayout::Transposed) {
+        if (physical_output_dims.size() != 2) {
+            throw std::runtime_error("Transposed fused materialization currently requires a rank-2 output.");
+        }
+        std::swap(physical_output_dims[0], physical_output_dims[1]);
+    }
+    return physical_output_dims;
 }
 
 struct ResolvedBroadcastGroup {
@@ -2550,6 +2580,8 @@ static bool fusedStageRequiresBroadcastLaunch(const CompiledExecutionStage& stag
             }
             output_dims = requested_it->second;
         }
+
+        output_dims = logicalDimsForBroadcastComparison(stage, output_idx, std::move(output_dims));
 
         if (!have_common_output_dims) {
             common_output_dims = output_dims;
@@ -4380,6 +4412,12 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 std::vector<uint64_t> resolved_output_dims;
                 const bool requires_broadcast = fusedStageRequiresBroadcastLaunch(
                     stage, stageInputs, effectiveRequestedOutputShapes, backward_config.has_value(), resolved_output_dims);
+
+                if (requires_broadcast && stageHasTransposedMaterializedOutput(stage)) {
+                    throw std::runtime_error(
+                        "Transposed fused materialization currently supports flat rank-2 fused stages only; "
+                        "broadcast/mixed-shape layout-aware emission will be added as a follow-up.");
+                }
 
                 if (!requires_broadcast) {
                     for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {

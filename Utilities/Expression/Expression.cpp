@@ -698,6 +698,18 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
             ss << canonicalizeNode(stage.expr, out.local_node_idx, memo, memoReady);
         }
 
+        ss << ";layout=";
+        switch (out.materialized_layout) {
+            case MaterializedTensorLayout::RowMajor:
+                ss << "row_major";
+                break;
+            case MaterializedTensorLayout::Transposed:
+                ss << "transposed";
+                break;
+            default:
+                throw std::runtime_error("canonicalize(PhysicalExecutionStage): unknown output materialization layout.");
+        }
+
         ss << "}";
     }
     ss << "]";
