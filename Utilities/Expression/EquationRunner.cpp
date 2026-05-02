@@ -175,25 +175,45 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         if (output_tensor.getTotalNumElements() == 0) {
             return;
         }
-        if (output_dims[0] > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) ||
-            output_dims[1] > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
-            throw std::runtime_error("Fused tiled-transpose launch dimensions exceed uint32_t.");
-        }
 
         // Transposed materialization stores a logical [numRows, numCols] output into a physical
         // row-major [numCols, numRows] tensor, so infer the logical dimensions by swapping the
         // allocated output tensor dimensions back.
-        uint32_t numRows = static_cast<uint32_t>(output_dims[1]);
-        uint32_t numCols = static_cast<uint32_t>(output_dims[0]);
-        args.push_back((void*)&numRows);
-        args.push_back((void*)&numCols);
+        const uint64_t numRows64 = output_dims[1];
+        const uint64_t numCols64 = output_dims[0];
+        if (numRows64 != 0 && numCols64 > std::numeric_limits<uint64_t>::max() / numRows64) {
+            throw std::runtime_error("Fused tiled-transpose launch dimensions exceed uint64_t index range.");
+        }
+
+        uint32_t numRows32 = 0;
+        uint32_t numCols32 = 0;
+        if (compiledEquation->uses_uint32_tiled_transpose_index_math) {
+            const uint64_t max_u32 = static_cast<uint64_t>(std::numeric_limits<uint32_t>::max());
+            if (numRows64 > max_u32 || numCols64 > max_u32 || (numRows64 != 0 && numCols64 > max_u32 / numRows64)) {
+                throw std::runtime_error(
+                    "Fused tiled-transpose kernel compiled for uint32_t indexing was launched with dimensions whose indexes exceed uint32_t.");
+            }
+            numRows32 = static_cast<uint32_t>(numRows64);
+            numCols32 = static_cast<uint32_t>(numCols64);
+            args.push_back((void*)&numRows32);
+            args.push_back((void*)&numCols32);
+        } else {
+            args.push_back((void*)&numRows64);
+            args.push_back((void*)&numCols64);
+        }
 
         constexpr uint32_t TILE_DIM = 32;
         constexpr uint32_t BLOCK_ROWS = 8;
         const uint32_t pack_scalars = std::max<uint32_t>(1U, compiledEquation->tiled_transpose_pack_scalars);
         const uint32_t tile_col_scalars = TILE_DIM * pack_scalars;
-        const uint32_t grid_x = static_cast<uint32_t>((static_cast<uint64_t>(numCols) + tile_col_scalars - 1ULL) / tile_col_scalars);
-        const uint32_t grid_y = static_cast<uint32_t>((static_cast<uint64_t>(numRows) + TILE_DIM - 1ULL) / TILE_DIM);
+        const uint64_t grid_x_64 = (numCols64 + static_cast<uint64_t>(tile_col_scalars) - 1ULL) / static_cast<uint64_t>(tile_col_scalars);
+        const uint64_t grid_y_64 = (numRows64 + static_cast<uint64_t>(TILE_DIM) - 1ULL) / static_cast<uint64_t>(TILE_DIM);
+        if (grid_x_64 > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) ||
+            grid_y_64 > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+            throw std::runtime_error("Fused tiled-transpose launch grid dimensions exceed uint32_t.");
+        }
+        const uint32_t grid_x = static_cast<uint32_t>(grid_x_64);
+        const uint32_t grid_y = static_cast<uint32_t>(grid_y_64);
         CU_CHECK(cuLaunchKernel(compiledEquation->kernel, grid_x, grid_y, 1, TILE_DIM, BLOCK_ROWS, 1, 0, stream, args.data(), nullptr));
         return;
     }

@@ -61,6 +61,7 @@ struct CompiledEquation {
     uint32_t elements_per_thread = 1;
     uint32_t tiled_transpose_pack_scalars = 1;
     bool uses_uint32_numel_arg = false;
+    bool uses_uint32_tiled_transpose_index_math = true;
 
     int deviceNum = 0;
     std::vector<std::string> input_names;
