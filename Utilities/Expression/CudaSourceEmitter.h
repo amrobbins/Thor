@@ -23,11 +23,11 @@ class CudaSourceEmitter {
                                                 const std::vector<SpecializedBroadcastGroup>& groups,
                                                 const std::string& kernel_name);
 
-
     static Optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const PhysicalExecutionStage& stage);
     static Optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const CompiledExecutionStage& stage);
     static uint32_t flatElementsPerThread(const PhysicalExecutionStage& stage);
     static uint32_t tiledTransposePackScalars(const PhysicalExecutionStage& stage);
+    static uint32_t tiledTransposePackScalars(const CompiledExecutionStage& stage);
 
     static std::string ref(uint32_t idx);
 };
