@@ -1980,16 +1980,16 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     for (int run = 0; run < initialRun; ++run) {
         for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
             startEvents[kernelIndex].push_back(stream.putEvent(true));
-            CHECK_CUBLAS(kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
-                                                               B[tensorInstance],
-                                                               C[tensorInstance],
-                                                               D[tensorInstance],
-                                                               workspace[workspaceInstance],
-                                                               &ONE,
-                                                               &ZERO,
-                                                               stream,
-                                                               CublasScalarPointerMode::Host,
-                                                               fp8Scales));
+            cublasStatus = kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
+                                                                 B[tensorInstance],
+                                                                 C[tensorInstance],
+                                                                 D[tensorInstance],
+                                                                 workspace[workspaceInstance],
+                                                                 &ONE,
+                                                                 &ZERO,
+                                                                 stream,
+                                                                 CublasScalarPointerMode::Host,
+                                                                 fp8Scales);
 
             tensorInstance += 1;
             if (tensorInstance >= numInstances)

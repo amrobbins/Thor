@@ -2755,7 +2755,6 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
             specialized.output_dims = output_dims;
             specialized.numel = product(output_dims);
             specialized.used_input_slots = used_input_slots;
-            specialized.used_input_load_kinds.assign(used_input_slots.size(), SpecializedInputLoadKind::ScalarPack);
 
             const std::vector<uint64_t> output_strides = computePackedOutputStrides(output_dims);
 
@@ -2788,6 +2787,19 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
                 }
 
                 input_strides_by_used.push_back(computeInputPackedStridesForBroadcast(effective_dims, output_dims));
+            }
+
+            specialized.used_input_load_kinds.assign(used_input_slots.size(), SpecializedInputLoadKind::ScalarPack);
+            if (!output_dims.empty() && (output_dims.back() % 2ULL) == 0ULL) {
+                const size_t innermost_axis = output_dims.size() - 1ULL;
+                for (size_t used_i = 0; used_i < used_input_slots.size(); ++used_i) {
+                    // Pair-vector loads are safe when two adjacent output lanes map to two
+                    // adjacent input scalars along the innermost logical axis. Requiring an
+                    // even innermost output extent avoids pairs crossing a row boundary.
+                    if (input_strides_by_used[used_i][innermost_axis] == 1ULL) {
+                        specialized.used_input_load_kinds[used_i] = SpecializedInputLoadKind::NativeVector;
+                    }
+                }
             }
 
             for (size_t axis = 0; axis < output_dims.size(); ++axis) {
