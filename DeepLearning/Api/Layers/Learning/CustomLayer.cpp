@@ -37,8 +37,6 @@ Optional<DataType> stageOutputDType(const CompiledExecutionStage& stage, size_t 
             return stage.convolution_backward->output_dtype;
         case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
             return stage.reduce_minmax_backward->output_dtype;
-        case CompiledExecutionStage::Kind::Transpose:
-            return stage.transpose->output_dtypes.at(outputIdx);
     }
     return Optional<DataType>::empty();
 }

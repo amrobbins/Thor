@@ -701,6 +701,36 @@ static bool supportsHalf2TransposedVectorization(const PhysicalExpression& expr,
     return true;
 }
 
+static bool supportsFp8ToBf16Float2TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
+    if (!isFp8DType(input_dtype) || output_dtype != DataType::BF16) {
+        return false;
+    }
+
+    for (const ExprNode& node : expr.nodes) {
+        switch (node.op) {
+            case ExprOp::INPUT:
+                if (requireNodeInputTensorDType(node) != input_dtype) {
+                    return false;
+                }
+                break;
+            case ExprOp::SCALAR_FP:
+            case ExprOp::FILL:
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+                break;
+            default: {
+                const DataType compute_dtype = requireNodeComputeDType(node);
+                if (compute_dtype != DataType::FP32 && compute_dtype != DataType::BF16) {
+                    return false;
+                }
+                break;
+            }
+        }
+    }
+
+    return true;
+}
+
 static uint32_t dataTypeStorageBytes(DataType dtype) {
     switch (dtype) {
         case DataType::FP8_E4M3:
@@ -1454,6 +1484,8 @@ static std::string float2_compute_conversion(const std::string& storage_dtype_ve
         return "__half22float2(" + variable + ")";
     } else if (storage_dtype_vector == "__nv_bfloat162") {
         return "__bfloat1622float2(" + variable + ")";
+    } else if (storage_dtype_vector == "__nv_fp8x2_e4m3" || storage_dtype_vector == "__nv_fp8x2_e5m2") {
+        return "__half22float2(static_cast<__half2>(" + variable + "))";
     }
     throw runtime_error("Unsupported vector storage dtype in float2_compute_conversion: " + storage_dtype_vector);
 }
@@ -1527,6 +1559,130 @@ static std::string emitFloat2MinMaxGradMask(ExprOp op, const std::string& a, con
             throw runtime_error("Unsupported min/max grad mask op in float2 vector emitter.");
     }
     return "make_float2(" + x_expr + ", " + y_expr + ")";
+}
+
+static std::string emitFloatScalarRuntimeScalarValue(const PhysicalExpression& expr, const ExprNode& node) {
+    const DataType input_dtype = requireNodeInputTensorDType(node);
+    const DataType output_dtype = requireNodeOutputDType(node);
+
+    std::string scalar_source;
+    if (expr.inputs.at(node.input_slot).kind == NamedInput::Kind::TensorRuntimeScalar) {
+        const std::string input_storage_type = scalarStorageType(input_dtype);
+        scalar_source = "reinterpret_cast<const " + input_storage_type + "*>(in" + std::to_string(node.input_slot) + ")[0]";
+    } else {
+        scalar_source = "in" + std::to_string(node.input_slot);
+    }
+
+    std::string scalar_expr = castScalarExpr(scalar_source, input_dtype, output_dtype);
+    return castScalarExpr(scalar_expr, output_dtype, DataType::FP32);
+}
+
+static void emitFloatScalarNodeDefinitions(std::ostringstream& ss,
+                                           const PhysicalExpression& expr,
+                                           const std::string& indent,
+                                           const std::function<std::string(uint32_t)>& input_slot_value) {
+    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+        const ExprNode& n = expr.nodes[node_idx];
+        switch (n.op) {
+            case ExprOp::INPUT: {
+                const std::string variable = input_slot_value(n.input_slot);
+                const DataType input_dtype = requireNodeInputTensorDType(n);
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = "
+                   << castScalarExpr(variable, input_dtype, DataType::FP32) << ";\n";
+                break;
+            }
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << emitFloatScalarRuntimeScalarValue(expr, n)
+                   << ";\n";
+                break;
+            case ExprOp::SCALAR_FP:
+            case ExprOp::FILL:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << emitScalarFpLiteral(n.scalar_fp) << ";\n";
+                break;
+            case ExprOp::ADD:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << CudaSourceEmitter::ref(n.lhs) << " + "
+                   << CudaSourceEmitter::ref(n.rhs) << ";\n";
+                break;
+            case ExprOp::SUB:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << CudaSourceEmitter::ref(n.lhs) << " - "
+                   << CudaSourceEmitter::ref(n.rhs) << ";\n";
+                break;
+            case ExprOp::MUL:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << CudaSourceEmitter::ref(n.lhs) << " * "
+                   << CudaSourceEmitter::ref(n.rhs) << ";\n";
+                break;
+            case ExprOp::DIV:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << CudaSourceEmitter::ref(n.lhs) << " / "
+                   << CudaSourceEmitter::ref(n.rhs) << ";\n";
+                break;
+            case ExprOp::NEG:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = -" << CudaSourceEmitter::ref(n.lhs) << ";\n";
+                break;
+            case ExprOp::ABS:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = fabsf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::EXP:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = expf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::EXP2:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = exp2f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::EXP10:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = exp10f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::LN:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = logf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::LOG2:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = log2f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::LOG10:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = log10f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::SQRT:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = sqrtf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::UNSQUEEZE:
+            case ExprOp::SQUEEZE:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
+                break;
+            case ExprOp::POW:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = powf(" << CudaSourceEmitter::ref(n.lhs) << ", "
+                   << CudaSourceEmitter::ref(n.rhs) << ");\n";
+                break;
+            case ExprOp::MIN:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = fminf(" << CudaSourceEmitter::ref(n.lhs) << ", "
+                   << CudaSourceEmitter::ref(n.rhs) << ");\n";
+                break;
+            case ExprOp::MAX:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = fmaxf(" << CudaSourceEmitter::ref(n.lhs) << ", "
+                   << CudaSourceEmitter::ref(n.rhs) << ");\n";
+                break;
+            case ExprOp::MIN_GRAD_LEFT:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = ((" << CudaSourceEmitter::ref(n.lhs) << " < "
+                   << CudaSourceEmitter::ref(n.rhs) << ") ? 1.0f : ((" << CudaSourceEmitter::ref(n.lhs) << " > "
+                   << CudaSourceEmitter::ref(n.rhs) << ") ? 0.0f : 0.5f));\n";
+                break;
+            case ExprOp::MIN_GRAD_RIGHT:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = ((" << CudaSourceEmitter::ref(n.lhs) << " > "
+                   << CudaSourceEmitter::ref(n.rhs) << ") ? 1.0f : ((" << CudaSourceEmitter::ref(n.lhs) << " < "
+                   << CudaSourceEmitter::ref(n.rhs) << ") ? 0.0f : 0.5f));\n";
+                break;
+            case ExprOp::MAX_GRAD_LEFT:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = ((" << CudaSourceEmitter::ref(n.lhs) << " > "
+                   << CudaSourceEmitter::ref(n.rhs) << ") ? 1.0f : ((" << CudaSourceEmitter::ref(n.lhs) << " < "
+                   << CudaSourceEmitter::ref(n.rhs) << ") ? 0.0f : 0.5f));\n";
+                break;
+            case ExprOp::MAX_GRAD_RIGHT:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = ((" << CudaSourceEmitter::ref(n.lhs) << " < "
+                   << CudaSourceEmitter::ref(n.rhs) << ") ? 1.0f : ((" << CudaSourceEmitter::ref(n.lhs) << " > "
+                   << CudaSourceEmitter::ref(n.rhs) << ") ? 0.0f : 0.5f));\n";
+                break;
+            default:
+                throw runtime_error("Unsupported op in fp32 scalar transpose fallback emitter: " + to_string((int32_t)n.op));
+        }
+    }
 }
 
 static DataType vectorizedComputeScalarDType(DataType dtype) {
@@ -1652,7 +1808,8 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                                                 const std::string& storage_dtype_vector,
                                                 const std::string& suffix,
                                                 const std::string& indent,
-                                                const std::function<std::string(uint32_t)>& input_slot_value) {
+                                                const std::function<std::string(uint32_t)>& input_slot_value,
+                                                const std::function<std::string(uint32_t)>& scalar_const_value = {}) {
     std::string compute_dtype_vector;
     if (dtype == DataType::BF16) {
         compute_dtype_vector = "__nv_bfloat162";
@@ -1678,11 +1835,11 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 break;
             case ExprOp::SCALAR_FP:
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
-                   << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
+                   << (scalar_const_value ? scalar_const_value(node_idx) : emitVector2ScalarLiteral(n.scalar_fp, dtype)) << ";\n";
                 break;
             case ExprOp::FILL:
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
-                   << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
+                   << (scalar_const_value ? scalar_const_value(node_idx) : emitVector2ScalarLiteral(n.scalar_fp, dtype)) << ";\n";
                 break;
             case ExprOp::ADD:
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
@@ -1771,7 +1928,8 @@ static void emitFloat2NodeDefinitionsForSuffix(std::ostringstream& ss,
                                                const std::string& input_storage_dtype_vector,
                                                const std::string& suffix,
                                                const std::string& indent,
-                                               const std::function<std::string(uint32_t)>& input_slot_value) {
+                                               const std::function<std::string(uint32_t)>& input_slot_value,
+                                               const std::function<std::string(uint32_t)>& scalar_const_value = {}) {
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
         const auto& n = expr.nodes[node_idx];
         switch (n.op) {
@@ -1786,10 +1944,12 @@ static void emitFloat2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = " << emitFloat2RuntimeScalarValue(expr, n) << ";\n";
                 break;
             case ExprOp::SCALAR_FP:
-                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = " << emitFloat2ScalarLiteral(n.scalar_fp) << ";\n";
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << (scalar_const_value ? scalar_const_value(node_idx) : emitFloat2ScalarLiteral(n.scalar_fp)) << ";\n";
                 break;
             case ExprOp::FILL:
-                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = " << emitFloat2ScalarLiteral(n.scalar_fp) << ";\n";
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << (scalar_const_value ? scalar_const_value(node_idx) : emitFloat2ScalarLiteral(n.scalar_fp)) << ";\n";
                 break;
             case ExprOp::ADD:
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
@@ -2493,8 +2653,12 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         supportsFloat2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
     const bool emit_cross_width_half2_path = maybe_tensor_input_dtype.isPresent() &&
                                              supportsHalf2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
+    const bool emit_fp8_to_bf16_float2_path =
+        maybe_tensor_input_dtype.isPresent() &&
+        supportsFp8ToBf16Float2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
     const bool emit_packed_vectorized_path = emit_homogeneous_packed_vectorized_path || emit_mixed_two_byte_float2_path ||
-                                             emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path || emit_cross_width_half2_path;
+                                             emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path ||
+                                             emit_cross_width_half2_path || emit_fp8_to_bf16_float2_path;
     std::ostringstream ss;
     emitRequiredHeaders(stage.expr, ss);
     ss << "#define TILE_DIM 32\n";
@@ -2523,7 +2687,8 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     if (emit_packed_low_precision_path) {
         const DataType dtype = output_dtype;
         const bool needs_input_vector_type = emit_homogeneous_packed_vectorized_path || emit_mixed_two_byte_float2_path ||
-                                             emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path || emit_cross_width_half2_path;
+                                             emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path ||
+                                             emit_cross_width_half2_path || emit_fp8_to_bf16_float2_path;
         const DataType vector_input_dtype =
             needs_input_vector_type ? (maybe_tensor_input_dtype.isPresent() ? maybe_tensor_input_dtype.get() : output_dtype) : output_dtype;
         const uint32_t pack_scalars = transposePackScalars(dtype);
@@ -2534,17 +2699,33 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
             needs_input_vector_type ? transposeVector2StorageType(vector_input_dtype) : output_storage_dtype_vector;
 
         ss << "  constexpr unsigned int PACK_SCALARS = " << pack_scalars << "U;\n";
-        ss << "  constexpr unsigned int PAIRS_PER_PACK = " << pairs_per_pack << "U;\n";
         ss << "  constexpr unsigned int TILE_COL_SCALARS = TILE_DIM * PACK_SCALARS;\n";
         ss << "  using Pack = " << pack_type << ";\n";
-        ss << "  using OutputVec2 = " << output_storage_dtype_vector << ";\n";
-        ss << "  using InputVec2 = " << input_storage_dtype_vector << ";\n";
+        if (emit_packed_vectorized_path) {
+            ss << "  using OutputVec2 = " << output_storage_dtype_vector << ";\n";
+            ss << "  using InputVec2 = " << input_storage_dtype_vector << ";\n";
+        }
         ss << "  union PackRaw { unsigned int raw; Pack pack; };\n";
         ss << "  __shared__ unsigned int tile[TILE_DIM][TILE_DIM + 1];\n";
         ss << "  const unsigned int rowStart = static_cast<unsigned int>(blockIdx.y) * TILE_DIM;\n";
         ss << "  const unsigned int colStart = static_cast<unsigned int>(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int packedCol = threadIdx.x;\n";
-        ss << "  const unsigned int logicalColBase = colStart + packedCol * PACK_SCALARS;\n\n";
+        ss << "  const unsigned int logicalColBase = colStart + packedCol * PACK_SCALARS;\n";
+        if (emit_packed_vectorized_path) {
+            for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+                const ExprNode& node = stage.expr.nodes[node_idx];
+                if (node.op != ExprOp::SCALAR_FP && node.op != ExprOp::FILL) {
+                    continue;
+                }
+                if (emit_mixed_two_byte_float2_path || emit_cross_width_float2_path || emit_fp8_to_bf16_float2_path) {
+                    ss << "  const float2 c" << node_idx << " = " << emitFloat2ScalarLiteral(node.scalar_fp) << ";\n";
+                } else {
+                    ss << "  const " << (vector_input_dtype == DataType::BF16 ? "__nv_bfloat162" : "half2") << " c" << node_idx << " = "
+                       << emitVector2ScalarLiteral(node.scalar_fp, vector_input_dtype) << ";\n";
+                }
+            }
+        }
+        ss << "\n";
 
         ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
         ss << "    const unsigned int logicalRow = rowStart + threadIdx.y + j;\n";
@@ -2561,18 +2742,31 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                 const std::string suffix = "_tp" + std::to_string(pair);
                 ss << "      {\n";
                 ss << "        constexpr unsigned int PAIR = " << pair << "U;\n";
-                if (emit_mixed_two_byte_float2_path || emit_cross_width_float2_path) {
+                if (emit_mixed_two_byte_float2_path || emit_cross_width_float2_path || emit_fp8_to_bf16_float2_path) {
                     emitFloat2NodeDefinitionsForSuffix(
-                        ss, stage.expr, input_storage_dtype_vector, suffix, "        ", [&](uint32_t input_slot) {
+                        ss,
+                        stage.expr,
+                        input_storage_dtype_vector,
+                        suffix,
+                        "        ",
+                        [&](uint32_t input_slot) {
                             return "reinterpret_cast<const InputVec2*>(in" + std::to_string(input_slot) + " + idx_base)[PAIR]";
-                        });
+                        },
+                        [&](uint32_t scalar_node_idx) { return "c" + std::to_string(scalar_node_idx); });
                     ss << "        output_vec2[PAIR] = "
                        << float2_storage_conversion(output_storage_dtype_vector, refWithSuffix(output.local_node_idx, suffix)) << ";\n";
                 } else {
                     emitVector2NodeDefinitionsForSuffix(
-                        ss, stage.expr, vector_input_dtype, input_storage_dtype_vector, suffix, "        ", [&](uint32_t input_slot) {
+                        ss,
+                        stage.expr,
+                        vector_input_dtype,
+                        input_storage_dtype_vector,
+                        suffix,
+                        "        ",
+                        [&](uint32_t input_slot) {
                             return "reinterpret_cast<const InputVec2*>(in" + std::to_string(input_slot) + " + idx_base)[PAIR]";
-                        });
+                        },
+                        [&](uint32_t scalar_node_idx) { return "c" + std::to_string(scalar_node_idx); });
                     ss << "        output_vec2[PAIR] = "
                        << vector_storage_conversion(output_storage_dtype_vector, refWithSuffix(output.local_node_idx, suffix)) << ";\n";
                 }
@@ -2590,13 +2784,20 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
               "long>(numCols) +\n";
         ss << "                                         static_cast<unsigned long long>(logicalCol);\n";
         ss << "          {\n";
-        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-            if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
-                continue;
+        if (emit_fp8_to_bf16_float2_path) {
+            emitFloatScalarNodeDefinitions(
+                ss, stage.expr, "            ", [&](uint32_t input_slot) { return "in" + std::to_string(input_slot) + "[idx]"; });
+            ss << "            output_scalar[lane] = __nv_bfloat16(" << CudaSourceEmitter::ref(output.local_node_idx) << ");\n";
+        } else {
+            for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+                if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                    continue;
+                }
+                emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, "            ");
             }
-            emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, "            ");
+            ss << "            output_scalar[lane] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype)
+               << ";\n";
         }
-        ss << "            output_scalar[lane] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ";\n";
         ss << "          }\n";
         ss << "        }\n";
         ss << "      }\n";
@@ -2781,121 +2982,6 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
     }
 
     ss << "}";
-    return ss.str();
-}
-
-std::string CudaSourceEmitter::emitTranspose(const PhysicalExecutionStage& stage, const std::string& kernel_name) {
-    if (stage.kind != PhysicalExecutionStage::Kind::Transpose) {
-        throw runtime_error("CudaSourceEmitter::emitTranspose called on non-transpose stage.");
-    }
-    if (stage.expr.inputs.size() != 1 || stage.outputs.size() != 1) {
-        throw runtime_error("Transpose stage expects exactly one input and one output.");
-    }
-    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
-    const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
-    if (input_dtypes.size() != 1 || output_dtypes.size() != 1) {
-        throw runtime_error("Transpose stage expects exactly one compiled input dtype and one compiled output dtype.");
-    }
-    const DataType input_dtype = input_dtypes[0];
-    const DataType output_dtype = output_dtypes[0];
-    if (input_dtype != output_dtype) {
-        throw runtime_error("Transpose stage currently requires matching input/output dtypes.");
-    }
-
-    const std::string scalar_type = scalarStorageType(input_dtype);
-    const uint32_t pack_scalars = transposePackScalars(input_dtype);
-    const bool emit_packed_fast_path = pack_scalars > 1;
-    const std::string pack_type = emit_packed_fast_path ? transposePackType(input_dtype) : std::string();
-
-    std::ostringstream ss;
-    emitRequiredHeaders(stage.expr, ss);
-    ss << "#define TILE_DIM 32\n";
-    ss << "#define BLOCK_ROWS 8\n\n";
-    ss << "extern \"C\" __global__\n";
-    ss << "void " << kernel_name << "(const " << scalar_type << "* in0, " << scalar_type
-       << "* out0, unsigned int numRows, unsigned int numCols) {\n";
-
-    if (emit_packed_fast_path) {
-        ss << "  constexpr unsigned int PACK_SCALARS = " << pack_scalars << "U;\n";
-        ss << "  if ((numRows % PACK_SCALARS) == 0U && (numCols % PACK_SCALARS) == 0U) {\n";
-        ss << "    if ((blockIdx.x % PACK_SCALARS) != 0U || (blockIdx.y % PACK_SCALARS) != 0U) return;\n";
-        ss << "    using Pack = " << pack_type << ";\n";
-        ss << "    __shared__ Pack tile[PACK_SCALARS * TILE_DIM][TILE_DIM + 1];\n";
-        ss << "    const unsigned int packedBlockX = static_cast<unsigned int>(blockIdx.x) / PACK_SCALARS;\n";
-        ss << "    const unsigned int packedBlockY = static_cast<unsigned int>(blockIdx.y) / PACK_SCALARS;\n";
-        ss << "    unsigned int tileRow = threadIdx.y;\n";
-        ss << "    unsigned int tileCol = threadIdx.x;\n";
-        ss << "    const unsigned int matrixPackCol = threadIdx.x + packedBlockX * TILE_DIM;\n";
-        ss << "    const unsigned int matrixPackCols = numCols / PACK_SCALARS;\n";
-        ss << "    const unsigned int matrixRowStart = packedBlockY * PACK_SCALARS * TILE_DIM;\n";
-        ss << "    const unsigned int matrixRowStartNextBlock = matrixRowStart + PACK_SCALARS * TILE_DIM;\n";
-        ss << "    if (matrixPackCol < matrixPackCols) {\n";
-        ss << "      for (unsigned int matrixRow = threadIdx.y + matrixRowStart;\n";
-        ss << "           matrixRow < matrixRowStartNextBlock && matrixRow < numRows && tileRow < PACK_SCALARS * TILE_DIM;\n";
-        ss << "           matrixRow += BLOCK_ROWS, tileRow += BLOCK_ROWS) {\n";
-        ss << "        const Pack* row_ptr = reinterpret_cast<const Pack*>(in0 + matrixRow * numCols);\n";
-        ss << "        tile[tileRow][tileCol] = row_ptr[matrixPackCol];\n";
-        ss << "      }\n";
-        ss << "    }\n";
-        ss << "\n";
-        ss << "    __syncthreads();\n";
-        ss << "\n";
-        ss << "    const unsigned int transposedRows = numCols;\n";
-        ss << "    const unsigned int transposedPackCols = numRows / PACK_SCALARS;\n";
-        ss << "    const unsigned int transposedRowStart = packedBlockX * PACK_SCALARS * TILE_DIM;\n";
-        ss << "    const unsigned int transposedRowStartNextBlock = transposedRowStart + PACK_SCALARS * TILE_DIM;\n";
-        ss << "    const unsigned int transposedPackCol = threadIdx.x + packedBlockY * TILE_DIM;\n";
-        ss << "    if (transposedPackCol < transposedPackCols) {\n";
-        ss << "      unsigned int writeTileCol = threadIdx.y;\n";
-        ss << "      const unsigned int tileBaseRow = PACK_SCALARS * threadIdx.x;\n";
-        ss << "      for (unsigned int transposedBaseRow = transposedRowStart + PACK_SCALARS * threadIdx.y;\n";
-        ss << "           transposedBaseRow < transposedRowStartNextBlock && transposedBaseRow < transposedRows && writeTileCol < "
-              "TILE_DIM;\n";
-        ss << "           transposedBaseRow += PACK_SCALARS * BLOCK_ROWS, writeTileCol += BLOCK_ROWS) {\n";
-        ss << "        Pack input_buffers[PACK_SCALARS];\n";
-        ss << "        for (unsigned int pack_lane = 0; pack_lane < PACK_SCALARS; ++pack_lane) {\n";
-        ss << "          input_buffers[pack_lane] = tile[tileBaseRow + pack_lane][writeTileCol];\n";
-        ss << "        }\n";
-        ss << "        for (unsigned int out_lane = 0; out_lane < PACK_SCALARS; ++out_lane) {\n";
-        ss << "          const unsigned int out_row = transposedBaseRow + out_lane;\n";
-        ss << "          if (out_row >= transposedRows) break;\n";
-        ss << "          Pack output_buffer;\n";
-        ss << "          " << scalar_type << "* out_data = reinterpret_cast<" << scalar_type << "*>(&output_buffer);\n";
-        ss << "          for (unsigned int pack_lane = 0; pack_lane < PACK_SCALARS; ++pack_lane) {\n";
-        ss << "            const " << scalar_type << "* in_data = reinterpret_cast<const " << scalar_type
-           << "*>(&input_buffers[pack_lane]);\n";
-        ss << "            out_data[pack_lane] = in_data[out_lane];\n";
-        ss << "          }\n";
-        ss << "          Pack* out_row_ptr = reinterpret_cast<Pack*>(out0 + out_row * numRows);\n";
-        ss << "          out_row_ptr[transposedPackCol] = output_buffer;\n";
-        ss << "        }\n";
-        ss << "      }\n";
-        ss << "    }\n";
-        ss << "    return;\n";
-        ss << "  }\n\n";
-    }
-
-    ss << "  __shared__ " << scalar_type << " tile[TILE_DIM][TILE_DIM + 1];\n";
-    ss << "  const unsigned int x = blockIdx.x * TILE_DIM + threadIdx.x;\n";
-    ss << "  const unsigned int y = blockIdx.y * TILE_DIM + threadIdx.y;\n";
-    ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
-    ss << "    if (x < numCols && (y + j) < numRows) {\n";
-    ss << "      tile[threadIdx.y + j][threadIdx.x] = in0[(y + j) * numCols + x];\n";
-    ss << "    }\n";
-    ss << "  }\n";
-    ss << "\n";
-    ss << "  __syncthreads();\n";
-    ss << "\n";
-    ss << "  const unsigned int tx = blockIdx.y * TILE_DIM + threadIdx.x;\n";
-    ss << "  const unsigned int ty = blockIdx.x * TILE_DIM + threadIdx.y;\n";
-    ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
-    ss << "    if (tx < numRows && (ty + j) < numCols) {\n";
-    ss << "      const unsigned long long out_idx = static_cast<unsigned long long>(ty + j) * "
-          "static_cast<unsigned long long>(numRows) + static_cast<unsigned long long>(tx);\n";
-    ss << "      out0[out_idx] = tile[threadIdx.x][threadIdx.y + j];\n";
-    ss << "    }\n";
-    ss << "  }\n";
-    ss << "}\n";
     return ss.str();
 }
 

@@ -2,8 +2,6 @@
 #include <algorithm>
 #include <limits>
 
-#include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
-
 namespace ThorImplementation {
 
 static size_t runtimeInputScalarSizeBytes(TensorDescriptor::DataType dtype) {
@@ -48,7 +46,6 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         throw std::runtime_error("Wrong number of outputs passed to EquationRunner::run.");
     }
 
-    const bool is_transpose_launch = compiledEquation->launch_kind == CompiledEquation::LaunchKind::Transpose;
     const bool is_fused_tiled_transpose_launch = compiledEquation->launch_kind == CompiledEquation::LaunchKind::FusedTiledTranspose;
 
     uint64_t max_numel = 0;
@@ -125,7 +122,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         }
     }
 
-    if (!is_transpose_launch && !is_fused_tiled_transpose_launch) {
+    if (!is_fused_tiled_transpose_launch) {
         assert(max_numel != 0);
     }
     std::vector<const void*> input_ptrs;
@@ -164,38 +161,6 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
     for (size_t i = 0; i < output_ptrs.size(); ++i) {
         args.push_back((void*)&output_ptrs[i]);
-    }
-
-    if (is_transpose_launch) {
-        if (inputs.size() != 1 || outputs.size() != 1) {
-            throw std::runtime_error("Transpose launch expects exactly one input and one output.");
-        }
-        if (!std::holds_alternative<Tensor>(inputs[0])) {
-            throw std::runtime_error("Transpose launch expects a tensor input.");
-        }
-        const Tensor& input_tensor = std::get<Tensor>(inputs[0]);
-        const Tensor& output_tensor = outputs[0];
-        const std::vector<uint64_t> input_dims = input_tensor.getDimensions();
-        const std::vector<uint64_t> output_dims = output_tensor.getDimensions();
-        if (input_dims.size() != 2 || output_dims.size() != 2) {
-            throw std::runtime_error("Transpose launch currently only supports rank-2 tensors.");
-        }
-        if (output_dims[0] != input_dims[1] || output_dims[1] != input_dims[0]) {
-            throw std::runtime_error("Transpose launch output dimensions must be the input dimensions swapped.");
-        }
-        if (input_tensor.getTotalNumElements() == 0 || output_tensor.getTotalNumElements() == 0) {
-            return;
-        }
-        uint32_t numRows = static_cast<uint32_t>(input_dims[0]);
-        uint32_t numCols = static_cast<uint32_t>(input_dims[1]);
-        launchMatrixTransposeByType(const_cast<void*>(output_ptrs[0]),
-                                    input_ptrs[0],
-                                    numRows,
-                                    numCols,
-                                    compiledEquation->input_dtypes[0],
-                                    compiledEquation->output_dtypes[0],
-                                    stream);
-        return;
     }
 
     if (is_fused_tiled_transpose_launch) {
