@@ -339,6 +339,63 @@ static bool isTwoByteFloatDType(DataType dtype) { return dtype == DataType::FP16
 
 static bool isFp8DType(DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2; }
 
+static std::string fp8RawLaneHelperName(DataType dtype) {
+    switch (dtype) {
+        case DataType::FP8_E4M3:
+            return "thor_fp8_e4m3_from_raw_lane";
+        case DataType::FP8_E5M2:
+            return "thor_fp8_e5m2_from_raw_lane";
+        default:
+            throw runtime_error("Unsupported fp8 raw-lane helper dtype: " + TensorDescriptor::getElementTypeName(dtype));
+    }
+}
+
+static std::string emitFp8PackLaneMemberExpr(const std::string& pack_expr, uint32_t lane, const DataType input_dtype) {
+    std::string dtypeString;
+    switch (input_dtype) {
+        case DataType::FP8_E5M2:
+            dtypeString = "__nv_fp8_e5m2";
+            break;
+        case DataType::FP8_E4M3:
+            dtypeString = "__nv_fp8_e4m3";
+            break;
+        default:
+            throw runtime_error("Unsupported fp8 pack lane dtype: " + TensorDescriptor::getElementTypeName(input_dtype));
+    }
+
+    const uint32_t shift = lane * 8U;
+
+    switch (lane) {
+        case 0:
+        case 1:
+        case 2:
+        case 3:
+            return "([](unsigned int raw) { " + dtypeString +
+                   " v; "
+                   "v.__x = static_cast<__nv_fp8_storage_t>((raw >> " +
+                   std::to_string(shift) +
+                   "U) & 0xFFU); "
+                   "return v; "
+                   "})(static_cast<unsigned int>((" +
+                   pack_expr + ").__x))";
+        default:
+            throw runtime_error("Unsupported fp8 pack lane: " + std::to_string(lane));
+    }
+}
+
+static void emitFp8RawLaneHelperDefinition(std::ostringstream& ss, DataType dtype) {
+    if (!isFp8DType(dtype)) {
+        return;
+    }
+
+    const std::string fp8_type = scalarStorageType(dtype);
+    ss << "__device__ __forceinline__ " << fp8_type << " " << fp8RawLaneHelperName(dtype) << "(unsigned int raw, unsigned int lane) {\n";
+    ss << "  " << fp8_type << " v;\n";
+    ss << "  v.__x = static_cast<__nv_fp8_storage_t>((raw >> (lane * 8U)) & 0xffU);\n";
+    ss << "  return v;\n";
+    ss << "}\n\n";
+}
+
 static bool isHalf2ComputeStorageDType(DataType dtype) { return dtype == DataType::FP16 || isFp8DType(dtype); }
 
 static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstream& ss) {
@@ -2779,14 +2836,38 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "    const " << index_type << " idx_base = logicalRow * numCols + logicalColBase;\n";
 
         auto emit_flat_scalar_lanes = [&](const std::string& base_indent, const std::string& idx_expr_base, bool use_loaded_chunks) {
-            for (uint32_t lane = 0; lane < read_pack_scalars; ++lane) {
-                const std::string suffix = "_dl" + std::to_string(lane);
-                ss << base_indent << "{\n";
-                ss << base_indent << "  const unsigned int LANE = " << lane << "U;\n";
-                ss << base_indent << "  const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
-                if (!use_loaded_chunks) {
-                    ss << base_indent << "  const " << index_type << " logicalCol = logicalColBase + "
-                       << emitUnsignedLiteral(lane, use_uint32_index_math) << ";\n";
+            if (use_loaded_chunks && isFp8DType(input_dtype)) {
+                for (uint32_t lane = 0; lane < read_pack_scalars; ++lane) {
+                    const std::string suffix = "_dl" + std::to_string(lane);
+                    const std::string lane_literal = emitUnsignedLiteral(lane, use_uint32_index_math);
+                    ss << base_indent << "{\n";
+                    ss << base_indent << "  const unsigned int LANE = " << lane << "U;\n";
+                    ss << base_indent << "  const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
+                    const std::string lane_idx_expr = idx_expr_base + " + " + lane_literal;
+                    auto input_value = [&](uint32_t input_slot) -> std::string {
+                        return emitFp8PackLaneMemberExpr("in" + std::to_string(input_slot) + "_chunk", lane, input_dtype);
+                    };
+                    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+                        if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                            continue;
+                        }
+                        emitScalarNodeSuffixed(ss, stage.expr, node_idx, lane_idx_expr, suffix, base_indent + "  ", "", 0, input_value);
+                    }
+                    ss << base_indent << "  tile[localRow][LOCAL_COL] = "
+                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                    ss << base_indent << "}\n";
+                }
+                return;
+            }
+
+            if (!use_loaded_chunks && isFp8DType(input_dtype)) {
+                for (uint32_t lane = 0; lane < read_pack_scalars; ++lane) {
+                    const std::string suffix = "_dls" + std::to_string(lane);
+                    const std::string lane_literal = emitUnsignedLiteral(lane, use_uint32_index_math);
+                    ss << base_indent << "{\n";
+                    ss << base_indent << "  const unsigned int LANE = " << lane << "U;\n";
+                    ss << base_indent << "  const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
+                    ss << base_indent << "  const " << index_type << " logicalCol = logicalColBase + " << lane_literal << ";\n";
                     ss << base_indent << "  if (logicalCol < numCols) {\n";
                     ss << base_indent << "    const " << index_type << " idx = logicalRow * numCols + logicalCol;\n";
                     for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
@@ -2798,20 +2879,43 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                     ss << base_indent << "    tile[localRow][LOCAL_COL] = "
                        << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
                     ss << base_indent << "  }\n";
-                } else {
-                    const std::string lane_idx_expr = idx_expr_base + " + " + emitUnsignedLiteral(lane, use_uint32_index_math);
-                    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-                        if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
-                            continue;
-                        }
-                        emitScalarNodeSuffixed(
-                            ss, stage.expr, node_idx, lane_idx_expr, suffix, base_indent + "  ", std::to_string(lane), read_pack_scalars);
-                    }
-                    ss << base_indent << "  tile[localRow][LOCAL_COL] = "
-                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                    ss << base_indent << "}\n";
                 }
-                ss << base_indent << "}\n";
+                return;
             }
+
+            const std::string suffix = use_loaded_chunks ? "_dl" : "_dls";
+            ss << base_indent << "#pragma unroll\n";
+            ss << base_indent << "for (unsigned int laneIter = 0; laneIter < READ_PACK_SCALARS; ++laneIter) {\n";
+            ss << base_indent << "  const unsigned int LANE = ((localReadPackCol + laneIter) & (READ_PACK_SCALARS - 1U));\n";
+            ss << base_indent << "  const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
+            if (!use_loaded_chunks) {
+                ss << base_indent << "  const " << index_type << " logicalCol = logicalColBase + static_cast<" << index_type
+                   << ">(LANE);\n";
+                ss << base_indent << "  if (logicalCol < numCols) {\n";
+                ss << base_indent << "    const " << index_type << " idx = logicalRow * numCols + logicalCol;\n";
+                for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+                    if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                        continue;
+                    }
+                    emitScalarNodeSuffixed(ss, stage.expr, node_idx, "idx", suffix, base_indent + "    ");
+                }
+                ss << base_indent << "    tile[localRow][LOCAL_COL] = "
+                   << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                ss << base_indent << "  }\n";
+            } else {
+                const std::string lane_idx_expr = idx_expr_base + " + static_cast<" + index_type + ">(LANE)";
+                for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+                    if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                        continue;
+                    }
+                    emitScalarNodeSuffixed(ss, stage.expr, node_idx, lane_idx_expr, suffix, base_indent + "  ", "LANE", read_pack_scalars);
+                }
+
+                ss << base_indent << "  tile[localRow][LOCAL_COL] = "
+                   << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+            }
+            ss << base_indent << "}\n";
         };
 
         if (read_pack_scalars > 1) {
@@ -2824,8 +2928,10 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                     continue;
                 }
                 ss << "      const InputPack in" << i << "_chunk = reinterpret_cast<const InputPack*>(in" << i << " + idx_base)[0];\n";
-                ss << "      const " << input_type << "* in" << i << "_chunk_data = reinterpret_cast<const " << input_type << "*>(&in" << i
-                   << "_chunk);\n";
+                if (!isFp8DType(input_dtype)) {
+                    ss << "      const " << input_type << "* in" << i << "_chunk_data = reinterpret_cast<const " << input_type << "*>(&in"
+                       << i << "_chunk);\n";
+                }
             }
             emit_flat_scalar_lanes("      ", "idx_base", true);
             ss << "    } else if (logicalRow < numRows) {\n";
@@ -3316,16 +3422,46 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
                 const uint32_t input_slot = group.used_input_slots[used_i];
                 ss << "      const InputPack in" << input_slot << "_chunk = reinterpret_cast<const InputPack*>(in" << input_slot << " + in"
                    << input_slot << "_offset_base)[0];\n";
-                ss << "      const " << input_type << "* in" << input_slot << "_chunk_data = reinterpret_cast<const " << input_type
-                   << "*>(&in" << input_slot << "_chunk);\n";
+                if (!isFp8DType(input_dtype)) {
+                    ss << "      const " << input_type << "* in" << input_slot << "_chunk_data = reinterpret_cast<const " << input_type
+                       << "*>(&in" << input_slot << "_chunk);\n";
+                }
             }
-            for (uint32_t lane = 0; lane < read_pack_scalars; ++lane) {
-                const std::string suffix = "_dbl" + std::to_string(lane);
-                const std::string lane_literal = emitUnsignedLiteral(lane, use_uint32_index_math);
-                ss << "      {\n";
-                ss << "        const unsigned int LANE = " << lane << "U;\n";
+            if (isFp8DType(input_dtype)) {
+                for (uint32_t lane = 0; lane < read_pack_scalars; ++lane) {
+                    const std::string suffix = "_dbl" + std::to_string(lane);
+                    const std::string lane_literal = emitUnsignedLiteral(lane, use_uint32_index_math);
+                    ss << "      {\n";
+                    ss << "        const unsigned int LANE = " << lane << "U;\n";
+                    ss << "        const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
+                    ss << "        const " << index_type << " logical_idx = logical_idx_base + " << lane_literal << ";\n";
+                    emit_broadcast_offsets(scalar_pack_indices, "logical_idx", "", "        ");
+                    auto input_value = [&](uint32_t input_slot) -> std::string {
+                        const auto kind_it = input_load_kind_by_slot.find(input_slot);
+                        if (kind_it == input_load_kind_by_slot.end()) {
+                            throw std::runtime_error("Missing input load kind for decoupled transposed broadcast input.");
+                        }
+                        if (kind_it->second == SpecializedInputLoadKind::NativeVector) {
+                            return emitFp8PackLaneMemberExpr("in" + std::to_string(input_slot) + "_chunk", lane, input_dtype);
+                        }
+                        return "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset]";
+                    };
+                    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+                        if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                            continue;
+                        }
+                        emitScalarNodeSuffixed(ss, stage.expr, node_idx, "logical_idx", suffix, "        ", "", 0, input_value);
+                    }
+                    ss << "        tile[localRow][LOCAL_COL] = "
+                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                    ss << "      }\n";
+                }
+            } else {
+                ss << "      #pragma unroll\n";
+                ss << "      for (unsigned int laneIter = 0; laneIter < READ_PACK_SCALARS; ++laneIter) {\n";
+                ss << "        const unsigned int LANE = ((localReadPackCol + laneIter) & (READ_PACK_SCALARS - 1U));\n";
                 ss << "        const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
-                ss << "        const " << index_type << " logical_idx = logical_idx_base + " << lane_literal << ";\n";
+                ss << "        const " << index_type << " logical_idx = logical_idx_base + static_cast<" << index_type << ">(LANE);\n";
                 emit_broadcast_offsets(scalar_pack_indices, "logical_idx", "", "        ");
                 auto input_value = [&](uint32_t input_slot) -> std::string {
                     const auto kind_it = input_load_kind_by_slot.find(input_slot);
@@ -3333,7 +3469,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
                         throw std::runtime_error("Missing input load kind for decoupled transposed broadcast input.");
                     }
                     if (kind_it->second == SpecializedInputLoadKind::NativeVector) {
-                        return "in" + std::to_string(input_slot) + "_chunk_data[" + std::to_string(lane) + "]";
+                        return "in" + std::to_string(input_slot) + "_chunk_data[LANE]";
                     }
                     return "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset]";
                 };
@@ -3341,10 +3477,10 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
                     if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
                         continue;
                     }
-                    emitScalarNodeSuffixed(ss, stage.expr, node_idx, "logical_idx", suffix, "        ", "", 0, input_value);
+                    emitScalarNodeSuffixed(ss, stage.expr, node_idx, "logical_idx", "_dbl", "        ", "", 0, input_value);
                 }
                 ss << "        tile[localRow][LOCAL_COL] = "
-                   << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                   << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, "_dbl") << ";\n";
                 ss << "      }\n";
             }
             ss << "    } else if (logicalRow < numRows) {\n";
@@ -3352,31 +3488,28 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             ss << "    if (logicalRow < numRows) {\n";
         }
 
-        for (uint32_t lane = 0; lane < read_pack_scalars; ++lane) {
-            const std::string suffix = "_dbs" + std::to_string(lane);
-            const std::string lane_literal = emitUnsignedLiteral(lane, use_uint32_index_math);
-            ss << "      {\n";
-            ss << "        const unsigned int LANE = " << lane << "U;\n";
-            ss << "        const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
-            ss << "        const " << index_type << " logicalCol = logicalColBase + " << lane_literal << ";\n";
-            ss << "        if (logicalCol < numCols) {\n";
-            ss << "          const " << index_type << " logical_idx = static_cast<" << index_type << ">(logicalRow) * static_cast<"
-               << index_type << ">(numCols) + static_cast<" << index_type << ">(logicalCol);\n";
-            emit_broadcast_offsets(all_used_indices, "logical_idx", "", "          ");
-            auto input_value = [&](uint32_t input_slot) -> std::string {
-                return "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset]";
-            };
-            for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-                if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
-                    continue;
-                }
-                emitScalarNodeSuffixed(ss, stage.expr, node_idx, "logical_idx", suffix, "          ", "", 0, input_value);
+        ss << "      #pragma unroll\n";
+        ss << "      for (unsigned int laneIter = 0; laneIter < READ_PACK_SCALARS; ++laneIter) {\n";
+        ss << "        const unsigned int LANE = ((localReadPackCol + laneIter) & (READ_PACK_SCALARS - 1U));\n";
+        ss << "        const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
+        ss << "        const " << index_type << " logicalCol = logicalColBase + static_cast<" << index_type << ">(LANE);\n";
+        ss << "        if (logicalCol < numCols) {\n";
+        ss << "          const " << index_type << " logical_idx = static_cast<" << index_type << ">(logicalRow) * static_cast<"
+           << index_type << ">(numCols) + static_cast<" << index_type << ">(logicalCol);\n";
+        emit_broadcast_offsets(all_used_indices, "logical_idx", "", "          ");
+        auto input_value = [&](uint32_t input_slot) -> std::string {
+            return "in" + std::to_string(input_slot) + "[in" + std::to_string(input_slot) + "_offset]";
+        };
+        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+            if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                continue;
             }
-            ss << "          tile[localRow][LOCAL_COL] = "
-               << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
-            ss << "        }\n";
-            ss << "      }\n";
+            emitScalarNodeSuffixed(ss, stage.expr, node_idx, "logical_idx", "_dbs", "          ", "", 0, input_value);
         }
+        ss << "          tile[localRow][LOCAL_COL] = "
+           << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, "_dbs") << ";\n";
+        ss << "        }\n";
+        ss << "      }\n";
         ss << "    }\n";
         ss << "  }\n\n";
         ss << "  __syncthreads();\n\n";
@@ -3562,7 +3695,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "  constexpr unsigned int PACKED_OUTPUT_COLS_PER_TILE = TILE_DIM / PACK_SCALARS;\n";
         ss << "  constexpr unsigned int PACKED_STORES_PER_TILE = TILE_COL_SCALARS * PACKED_OUTPUT_COLS_PER_TILE;\n";
         ss << "  const unsigned int threadLinear = threadIdx.y * TILE_DIM + threadIdx.x;\n";
-        ss << "  for (unsigned int packedStore = threadLinear; packedStore < PACKED_STORES_PER_TILE; packedStore += TILE_DIM * BLOCK_ROWS) "
+        ss << "  for (unsigned int packedStore = threadLinear; packedStore < PACKED_STORES_PER_TILE; packedStore += TILE_DIM * "
+              "BLOCK_ROWS) "
               "{\n";
         ss << "    const unsigned int localOutRow = packedStore / PACKED_OUTPUT_COLS_PER_TILE;\n";
         ss << "    const unsigned int localOutPackCol = packedStore - localOutRow * PACKED_OUTPUT_COLS_PER_TILE;\n";
