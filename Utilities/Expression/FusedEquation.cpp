@@ -1415,11 +1415,6 @@ static DataType compiledStageOutputDType(const CompiledExecutionStage& stage, si
                 throw std::runtime_error("compiledStageOutputDType missing convolution-backward stage.");
             }
             return stage.convolution_backward->output_dtype;
-        case CompiledExecutionStage::Kind::Transpose:
-            if (!stage.transpose) {
-                throw std::runtime_error("compiledStageOutputDType missing transpose stage.");
-            }
-            return stage.transpose->output_dtypes.at(output_idx);
         case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("compiledStageOutputDType missing reduce-min/max-backward stage.");
@@ -2241,8 +2236,6 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
             }
             return computeReduceMinMaxBackwardStageFlops(*stage.reduce_minmax_backward, stage_input_dims);
 
-        case CompiledExecutionStage::Kind::Transpose:
-            return 0;
     }
 
     throw std::runtime_error("Unknown stage kind while computing FLOPs.");
@@ -2309,16 +2302,6 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 throw std::runtime_error("resolveOutputDimsForStageOutput convolution-backward stage missing payload.");
             }
             return resolveConvolutionBackwardOutputDimsFromInputs(*stage.convolution_backward, stage_input_dims);
-        }
-
-        case CompiledExecutionStage::Kind::Transpose: {
-            if (!stage.transpose) {
-                throw std::runtime_error("resolveOutputDimsForStageOutput transpose stage missing payload.");
-            }
-            if (stage_input_dims.size() != 1) {
-                throw std::runtime_error("resolveOutputDimsForStageOutput transpose stage expected exactly one input shape.");
-            }
-            return inferTransposeOutputDims(stage_input_dims[0]);
         }
 
         case CompiledExecutionStage::Kind::FusedKernel:
@@ -3098,14 +3081,6 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
             }
             value_dims[stage.outputs[0].value_id] =
                 resolveConvolutionBackwardOutputDimsFromInputs(*stage.convolution_backward, stage_input_dims);
-        } else if (stage.kind == CompiledExecutionStage::Kind::Transpose) {
-            if (!stage.transpose) {
-                throw std::runtime_error("Missing compiled transpose stage.");
-            }
-            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
-                throw std::runtime_error("Transpose stage expected exactly one input and one output.");
-            }
-            value_dims[stage.outputs[0].value_id] = inferTransposeOutputDims(stage_input_dims[0]);
         } else {
             throw std::runtime_error("Unknown execution stage kind in getOutputShapes.");
         }
@@ -4735,44 +4710,6 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedConvolutionBackward, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
-            case CompiledExecutionStage::Kind::Transpose: {
-                if (!stage.transpose) {
-                    throw std::runtime_error("Transpose stage missing compiled payload.");
-                }
-                if (stageInputs.size() != 1) {
-                    throw std::runtime_error("Transpose stage expects exactly one input.");
-                }
-                if (stage.outputs.size() != 1) {
-                    throw std::runtime_error("Transpose stage expects exactly one output.");
-                }
-                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
-                const CompiledStageOutput& stageOutput = stage.outputs[0];
-                const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
-                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
-                Tensor outputTensor;
-                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
-                    outputTensor = preallocated_it->second;
-                    if (outputTensor.getDimensions() != output_dims) {
-                        throw std::runtime_error(
-                            "Preallocated transpose output tensor dimensions are incompatible with the staged output shape.");
-                    }
-                    if (outputTensor.getDataType() != stage.transpose->output_dtypes.at(0)) {
-                        throw std::runtime_error(
-                            "Preallocated transpose output tensor dtype is incompatible with the compiled transpose stage.");
-                    }
-                } else {
-                    TensorDescriptor outputDescriptor(stage.transpose->output_dtypes.at(0), output_dims);
-                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
-                }
-                std::vector<RuntimeInputValue> transposeInputs{stageInputs[0]};
-                std::vector<Tensor> transposeOutputs{outputTensor};
-                std::shared_ptr<StampedEquation> stampedTranspose =
-                    stampEquation(stage.transpose, transposeInputs, transposeOutputs, stream);
-                values[stageOutput.value_id] = outputTensor;
-                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
-                stampedStages.emplace_back(stampedTranspose, std::move(dependency_stage_indices), stage_flops);
-                break;
-            }
             case CompiledExecutionStage::Kind::ReduceMinMaxBackward: {
                 if (!stage.reduce_minmax_backward) {
                     throw std::runtime_error("Reduce-min/max-backward stage missing compiled payload.");
@@ -5124,14 +5061,6 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             }
             value_dims[stage.outputs[0].value_id] =
                 resolveConvolutionBackwardOutputDimsFromInputs(*stage.convolution_backward, stage_input_dims);
-        } else if (stage.kind == CompiledExecutionStage::Kind::Transpose) {
-            if (!stage.transpose) {
-                throw std::runtime_error("Missing compiled transpose stage.");
-            }
-            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
-                throw std::runtime_error("Transpose stage expected exactly one input and one output.");
-            }
-            value_dims[stage.outputs[0].value_id] = inferTransposeOutputDims(stage_input_dims[0]);
         } else {
             throw std::runtime_error("Unknown execution stage kind in getParameterFanOverrides.");
         }

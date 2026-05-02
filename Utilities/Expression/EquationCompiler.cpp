@@ -1015,51 +1015,6 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     return compiled;
 }
 
-shared_ptr<CompiledEquation> EquationCompiler::compileTransposeStage(const PhysicalExecutionStage& stage, const EquationSignature& sig) {
-    if (stage.kind != PhysicalExecutionStage::Kind::Transpose) {
-        throw runtime_error("compileTransposeStage called on non-transpose stage.");
-    }
-    if (stage.expr.inputs.size() != 1 || stage.outputs.size() != 1) {
-        throw runtime_error("Transpose stage expects exactly one input and one output.");
-    }
-
-    EquationCacheKey key(canonicalize(stage), sig, false);
-    shared_ptr<CompiledEquation> hit = cacheLookup(key);
-    if (hit) {
-        return hit;
-    }
-
-    const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
-    const std::vector<DataType> output_dtypes = collectCompiledOutputDTypes(stage);
-    if (input_dtypes.size() != 1 || output_dtypes.size() != 1) {
-        throw runtime_error("Transpose stage expects exactly one compiled input dtype and one compiled output dtype.");
-    }
-
-    vector<string> input_names;
-    std::vector<NamedInput::Kind> input_kinds;
-    input_names.reserve(stage.expr.inputs.size());
-    input_kinds.reserve(stage.expr.inputs.size());
-    for (const NamedInput& input : stage.expr.inputs) {
-        input_names.push_back(input.name);
-        input_kinds.push_back(input.kind);
-    }
-
-    auto compiled = std::make_shared<CompiledEquation>();
-    compiled->key = key;
-    compiled->kernel_name = "precompiled_transpose";
-    compiled->launch_kind = CompiledEquation::LaunchKind::Transpose;
-    compiled->deviceNum = sig.device_num;
-    compiled->input_names = std::move(input_names);
-    compiled->input_kinds = std::move(input_kinds);
-    compiled->input_dtypes = input_dtypes;
-    compiled->output_dtypes = output_dtypes;
-    compiled->elements_per_thread = 1;
-    compiled->uses_uint32_numel_arg = false;
-
-    cacheInsert(key, compiled);
-    return compiled;
-}
-
 shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalExpression& expr) {
     if (expr.numInputs() != 1) {
         throw std::runtime_error("Reduction stage must have exactly one input.");
@@ -1774,77 +1729,71 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     };
 }
 
-static PhysicalExecutionStage buildTransposeStage(const PhysicalExpression& expr,
-                                                  uint32_t node_idx,
-                                                  uint32_t output_value_id,
-                                                  const std::string& output_name,
-                                                  const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
-    const ExprNode& node = expr.nodes[node_idx];
-    if (!isTransposeOp(node.op)) {
-        throw std::runtime_error("buildTransposeStage called on non-transpose node.");
+static PhysicalExecutionStage buildInputTransposedMaterializationStage(const PhysicalExpression& expr,
+                                                                       uint32_t parent_idx,
+                                                                       uint32_t output_value_id,
+                                                                       const std::string& output_name,
+                                                                       const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    if (parent_idx >= expr.nodes.size()) {
+        throw std::runtime_error("buildInputTransposedMaterializationStage parent index out of range.");
     }
-    if (node.lhs == UINT32_MAX) {
-        throw std::runtime_error("Transpose node missing lhs input.");
+
+    const ExprNode& parent = expr.nodes[parent_idx];
+
+    uint32_t input_value_id = UINT32_MAX;
+    Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+    Optional<DataType> output_dtype = Optional<DataType>::empty();
+    Optional<DataType> compute_dtype = Optional<DataType>::empty();
+    Optional<DataType> backward_output_dtype = Optional<DataType>::empty();
+    Optional<DataType> backward_compute_dtype = Optional<DataType>::empty();
+
+    auto out_it = node_output_value_id.find(parent_idx);
+    if (out_it != node_output_value_id.end()) {
+        input_value_id = out_it->second;
+        actual_input_dtype = parent.output_dtype;
+        output_dtype = parent.output_dtype;
+        compute_dtype = parent.compute_dtype;
+        backward_output_dtype = parent.backward_output_dtype;
+        backward_compute_dtype = parent.backward_compute_dtype;
+    } else if (parent.op == ExprOp::INPUT) {
+        input_value_id = parent.input_slot;
+        actual_input_dtype = parent.input_tensor_dtype;
+        output_dtype = parent.output_dtype;
+        compute_dtype = parent.compute_dtype;
+        backward_output_dtype = parent.backward_output_dtype;
+        backward_compute_dtype = parent.backward_compute_dtype;
+    } else {
+        throw std::runtime_error("Missing materialized value id for transposed input materialization parent.");
+    }
+
+    if (!actual_input_dtype.isPresent() || !output_dtype.isPresent()) {
+        throw std::runtime_error("Transposed input materialization parent is missing resolved dtype metadata.");
     }
 
     PhysicalExpression stage_expr;
     stage_expr.inputs.push_back(NamedInput{"__arg0", 0, NamedInput::Kind::Tensor});
 
-    std::vector<uint32_t> input_value_ids;
-    input_value_ids.reserve(1);
-
-    uint32_t parent_idx = node.lhs;
-    if (parent_idx >= expr.nodes.size()) {
-        throw std::runtime_error("Transpose input node index out of range.");
-    }
-
-    const ExprNode& parent = expr.nodes[parent_idx];
-    Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
-
-    auto out_it = node_output_value_id.find(parent_idx);
-    if (out_it != node_output_value_id.end()) {
-        input_value_ids.push_back(out_it->second);
-        actual_input_dtype = parent.output_dtype;
-    } else if (parent.op == ExprOp::INPUT) {
-        input_value_ids.push_back(parent.input_slot);
-        actual_input_dtype = parent.input_tensor_dtype;
-    } else {
-        throw std::runtime_error("Missing value id for transpose input.");
-    }
-
-    if (!actual_input_dtype.isPresent()) {
-        throw std::runtime_error("Transpose parent node is missing resolved actual input dtype.");
-    }
-    if (!parent.output_dtype.isPresent()) {
-        throw std::runtime_error("Transpose parent node is missing resolved output_dtype.");
-    }
-
     ExprNode input_node;
     input_node.op = ExprOp::INPUT;
     input_node.input_slot = 0;
     input_node.input_tensor_dtype = actual_input_dtype.get();
-    input_node.output_dtype = parent.output_dtype;
-    input_node.compute_dtype = parent.compute_dtype;
-    input_node.backward_output_dtype = parent.backward_output_dtype;
-    input_node.backward_compute_dtype = parent.backward_compute_dtype;
+    input_node.output_dtype = output_dtype;
+    input_node.compute_dtype = compute_dtype;
+    input_node.backward_output_dtype = backward_output_dtype;
+    input_node.backward_compute_dtype = backward_compute_dtype;
     stage_expr.nodes.push_back(std::move(input_node));
+    stage_expr.output_node = 0;
 
-    ExprNode transpose = node;
-    transpose.lhs = 0;
-    transpose.rhs = UINT32_MAX;
-    transpose.aux = UINT32_MAX;
-    stage_expr.nodes.push_back(std::move(transpose));
-    stage_expr.output_node = 1;
-
-    std::vector<CompiledStageOutput> stage_outputs;
-    stage_outputs.push_back(CompiledStageOutput{
+    std::vector<uint32_t> input_value_ids{input_value_id};
+    std::vector<CompiledStageOutput> stage_outputs{CompiledStageOutput{
         .name = output_name,
-        .local_node_idx = 1,
+        .local_node_idx = 0,
         .value_id = output_value_id,
-    });
+        .materialized_layout = MaterializedTensorLayout::Transposed,
+    }};
 
     return PhysicalExecutionStage{
-        .kind = PhysicalExecutionStage::Kind::Transpose,
+        .kind = PhysicalExecutionStage::Kind::FusedKernel,
         .expr = std::move(stage_expr),
         .input_value_ids = std::move(input_value_ids),
         .outputs = std::move(stage_outputs),
@@ -2384,7 +2333,14 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         const uint32_t materialized_parent_idx = transpose_node.lhs;
         const ExprNode& materialized_parent = expr.nodes[materialized_parent_idx];
         if (isStageBoundaryOp(materialized_parent.op)) {
-            return false;
+            emitForDependency(materialized_parent_idx);
+            if (node_output_value_id.find(materialized_parent_idx) == node_output_value_id.end()) {
+                throw std::runtime_error("Failed to materialize transpose parent boundary stage.");
+            }
+            node_output_value_id[transpose_idx] = output_value_id;
+            planned.stages.push_back(buildInputTransposedMaterializationStage(
+                expr, materialized_parent_idx, output_value_id, output_name, node_output_value_id));
+            return true;
         }
 
         std::unordered_set<uint32_t> region;
@@ -2486,7 +2442,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isConvolutionForwardOp(root.op)) {
                 planned.stages.push_back(buildConvolutionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isTransposeOp(root.op)) {
-                planned.stages.push_back(buildTransposeStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+                throw std::runtime_error("Internal error: explicit transpose was not lowered to fused tiled-transpose materialization.");
             } else {
                 planned.stages.push_back(buildReductionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             }
@@ -2671,8 +2627,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 planned.stages.push_back(
                     buildConvolutionStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isTransposeOp(root.op)) {
-                planned.stages.push_back(
-                    buildTransposeStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+                throw std::runtime_error(
+                    "Internal error: explicit transpose output was not lowered to fused tiled-transpose materialization.");
             } else {
                 planned.stages.push_back(
                     buildReductionStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -2816,11 +2772,6 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::ReduceMinMaxBackward: {
                 std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = compileReduceMinMaxBackward(stage.expr);
                 compiled->stages.emplace_back(reduce_minmax_backward, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
-                break;
-            }
-            case PhysicalExecutionStage::Kind::Transpose: {
-                std::shared_ptr<CompiledEquation> transpose = compileTransposeStage(stage, sig);
-                compiled->stages.emplace_back(transpose, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides, nullptr);
                 break;
             }
             default:

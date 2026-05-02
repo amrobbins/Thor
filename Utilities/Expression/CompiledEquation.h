@@ -48,7 +48,6 @@ struct CompiledEquation {
         Flat,
         BroadcastSingle,
         BroadcastGrouped,
-        Transpose,
         FusedTiledTranspose,
     };
 

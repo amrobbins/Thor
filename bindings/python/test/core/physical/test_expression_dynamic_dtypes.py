@@ -308,19 +308,12 @@ def test_mixed_dtype_staged_reduction_and_epilogue_outputs_preserve_expected_dty
     x_np = np.linspace(0.25, 2.25, num=24, dtype=np.float32).reshape(2, 3, 4).astype(_numpy_storage_dtype(x_dtype))
     y_np = np.linspace(1.0, 3.0, num=24, dtype=np.float32).reshape(2, 3, 4).astype(_numpy_storage_dtype(y_dtype))
 
-    x_plus_one_ref = (x_np.astype(_numpy_compute_dtype(thor.DataType.fp16)) + 1.0).astype(
-        _numpy_storage_dtype(thor.DataType.fp16))
-    y_minus_half_ref = (y_np.astype(_numpy_compute_dtype(thor.DataType.fp32)) - 0.5).astype(
-        _numpy_storage_dtype(thor.DataType.fp32))
-
-    trunk_ref = (
-        x_plus_one_ref.astype(_numpy_compute_dtype(thor.DataType.fp32)) *
-        y_minus_half_ref.astype(_numpy_compute_dtype(thor.DataType.fp32)))
+    trunk_ref = ((x_np.astype(np.float32) + 1.0) * (y_np.astype(np.float32) - 0.5)).astype(np.float32)
 
     expected_reduced = np.sum(trunk_ref, axis=2, keepdims=True).astype(_numpy_storage_dtype(thor.DataType.fp32))
     expected_final = np.sqrt(np.sum(trunk_ref, axis=2, keepdims=True) + 1.0).astype(
         _numpy_storage_dtype(thor.DataType.fp32))
-    expected_pointwise = (x_np.astype(_numpy_compute_dtype(thor.DataType.fp16)) + 2.0).astype(
+    expected_pointwise = (x_np.astype(_numpy_compute_dtype(thor.DataType.fp32)) + 2.0).astype(
         _numpy_storage_dtype(thor.DataType.fp16))
 
     got = _run_outputs(

@@ -666,9 +666,6 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
         case PhysicalExecutionStage::Kind::ReduceMinMaxBackward:
             ss << "reduce_minmax_backward";
             break;
-        case PhysicalExecutionStage::Kind::Transpose:
-            ss << "transpose";
-            break;
         default:
             throw std::runtime_error("canonicalize(PhysicalExecutionStage): unknown stage kind.");
     }
