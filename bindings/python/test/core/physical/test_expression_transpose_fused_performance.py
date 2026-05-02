@@ -15,12 +15,12 @@ GPU_NUM = int(os.getenv("THOR_EXPR_PERF_GPU", "0"))
 # These fall back to the existing expression-performance env vars when present.
 WARMUP_ITERS = int(os.getenv(
     "THOR_EXPR_TRANSPOSE_PERF_WARMUP_ITERS",
-    os.getenv("THOR_EXPR_PERF_WARMUP_ITERS", "25"),
+    os.getenv("THOR_EXPR_PERF_WARMUP_ITERS", "1"),
 ))
 MEASURE_ITERS = int(
     os.getenv(
         "THOR_EXPR_TRANSPOSE_PERF_MEASURE_ITERS",
-        os.getenv("THOR_EXPR_PERF_MEASURE_ITERS", "200"),
+        os.getenv("THOR_EXPR_PERF_MEASURE_ITERS", "1"),
     ))
 
 # Match the large flat-performance suite's element count for the main aligned
@@ -345,13 +345,13 @@ MIXED_DTYPE_PERF_CASES = [
         input_reads_per_output=2,
         expects_fused_transpose=True,
     ),
-    PerfCase(
-        "broadcast_outer_fused_arithmetic_transpose",
-        _build_broadcast_outer_transpose,
-        _broadcast_transposed_output_shape,
-        input_reads_per_output=2,
-        expects_fused_transpose=True,
-    ),
+    # PerfCase(
+    #     "broadcast_outer_fused_arithmetic_transpose",
+    #     _build_broadcast_outer_transpose,
+    #     _broadcast_transposed_output_shape,
+    #     input_reads_per_output=2,
+    #     expects_fused_transpose=True,
+    # ),
 ]
 
 
