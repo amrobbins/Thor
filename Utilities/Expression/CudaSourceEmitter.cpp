@@ -3,6 +3,7 @@
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 
 #include <algorithm>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <numeric>
@@ -313,6 +314,21 @@ static std::string transposePackType(DataType dtype) {
     }
 }
 
+static std::string transposeVector2StorageType(DataType dtype) {
+    switch (dtype) {
+        case DataType::FP16:
+            return "half2";
+        case DataType::BF16:
+            return "__nv_bfloat162";
+        case DataType::FP8_E4M3:
+            return "__nv_fp8x2_e4m3";
+        case DataType::FP8_E5M2:
+            return "__nv_fp8x2_e5m2";
+        default:
+            throw runtime_error("Unsupported transpose vector2 dtype: " + TensorDescriptor::getElementTypeName(dtype));
+    }
+}
+
 static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstream& ss) {
     bool need_fp16 = false;
     bool need_bf16 = false;
@@ -439,6 +455,26 @@ static std::vector<DataType> collectOutputDTypes(const CompiledExecutionStage& s
     return output_dtypes;
 }
 
+static bool stageHasTransposedMaterializedOutput(const std::vector<CompiledStageOutput>& outputs) {
+    return std::any_of(outputs.begin(), outputs.end(), [](const CompiledStageOutput& output) {
+        return output.materialized_layout == MaterializedTensorLayout::Transposed;
+    });
+}
+
+static const CompiledStageOutput& requireSingleTransposedMaterializedOutput(const PhysicalExecutionStage& stage) {
+    if (stage.outputs.size() != 1) {
+        throw runtime_error("Transposed fused materialization currently supports exactly one output.");
+    }
+    const CompiledStageOutput& output = stage.outputs[0];
+    if (output.materialized_layout != MaterializedTensorLayout::Transposed) {
+        throw runtime_error("Expected a transposed materialized fused output.");
+    }
+    if (output.local_node_idx >= stage.expr.nodes.size()) {
+        throw runtime_error("Transposed fused output local_node_idx out of range.");
+    }
+    return output;
+}
+
 static Optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpression& expr,
                                                              const std::vector<DataType>& input_dtypes,
                                                              const std::vector<DataType>& output_dtypes) {
@@ -549,6 +585,9 @@ uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& 
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
         return 1;
     }
+    if (stageHasTransposedMaterializedOutput(stage.outputs)) {
+        return 1;
+    }
 
     const Optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
     if (vectorized_dtype.isPresent()) {
@@ -565,6 +604,16 @@ uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& 
     }
 
     return flatScalarElementsPerThreadImpl(collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
+}
+
+uint32_t CudaSourceEmitter::tiledTransposePackScalars(const PhysicalExecutionStage& stage) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel || !stageHasTransposedMaterializedOutput(stage.outputs)) {
+        return 1;
+    }
+
+    const CompiledStageOutput& output = requireSingleTransposedMaterializedOutput(stage);
+    const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+    return transposePackScalars(output_dtype);
 }
 
 static std::string castScalarExpr(const std::string& expr, DataType src_dtype, DataType dst_dtype) {
@@ -1367,6 +1416,126 @@ static std::string emitVector2BroadcastPackLoad(const std::string& storage_dtype
     throw runtime_error("Unsupported scalar storage dtype in emitVector2BroadcastPackLoad: " + storage_dtype);
 }
 
+static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
+                                                const PhysicalExpression& expr,
+                                                DataType dtype,
+                                                const std::string& storage_dtype_vector,
+                                                const std::string& suffix,
+                                                const std::string& indent,
+                                                const std::function<std::string(uint32_t)>& input_slot_value) {
+    std::string compute_dtype_vector;
+    if (dtype == DataType::BF16) {
+        compute_dtype_vector = "__nv_bfloat162";
+    } else if (dtype == DataType::FP16 || dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2) {
+        compute_dtype_vector = "half2";
+    } else {
+        throw runtime_error("emitVector2NodeDefinitionsForSuffix called with non-vectorizable dtype.");
+    }
+
+    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+        const auto& n = expr.nodes[node_idx];
+        switch (n.op) {
+            case ExprOp::INPUT: {
+                const std::string variable = input_slot_value(n.input_slot);
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << vector_compute_conversion(storage_dtype_vector, variable) << ";\n";
+                break;
+            }
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2RuntimeScalarValue(expr, n, dtype) << ";\n";
+                break;
+            case ExprOp::SCALAR_FP:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
+                break;
+            case ExprOp::FILL:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
+                break;
+            case ExprOp::ADD:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Add(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                break;
+            case ExprOp::SUB:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Sub(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                break;
+            case ExprOp::MUL:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Mul(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                break;
+            case ExprOp::DIV:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Div(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                break;
+            case ExprOp::NEG:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Neg(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ABS:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Abs(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::EXP:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Exp(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::EXP2:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Exp2(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::EXP10:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Exp10(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::LN:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Ln(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::LOG2:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Log2(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::LOG10:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Log10(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::SQRT:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Sqrt(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::UNSQUEEZE:
+            case ExprOp::SQUEEZE:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = " << refWithSuffix(n.lhs, suffix)
+                   << ";\n";
+                break;
+            case ExprOp::POW:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Pow(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::MIN:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Min(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                break;
+            case ExprOp::MAX:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Max(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                break;
+            case ExprOp::MIN_GRAD_LEFT:
+            case ExprOp::MIN_GRAD_RIGHT:
+            case ExprOp::MAX_GRAD_LEFT:
+            case ExprOp::MAX_GRAD_RIGHT:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2MinMaxGradMask(n.op, refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix), dtype) << ";\n";
+                break;
+            default:
+                throw runtime_error("Unsupported op in vectorized fused transpose emitter: " + to_string((int32_t)n.op));
+        }
+    }
+}
+
 static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                                    DataType dtype,
                                    const std::string& kernel_name,
@@ -1960,6 +2129,189 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
     return ss.str();
 }
 
+static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionStage& stage, const std::string& kernel_name) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
+        throw runtime_error("emitTiledTransposeMaterializedFused called on non-fused stage.");
+    }
+    const CompiledStageOutput& output = requireSingleTransposedMaterializedOutput(stage);
+
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+    const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+    const std::string output_type = scalarStorageType(output_dtype);
+    const Optional<DataType> maybe_vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
+    const bool emit_packed_low_precision_path = transposePackScalars(output_dtype) > 1;
+    const bool emit_packed_vectorized_path = maybe_vectorized_dtype.isPresent() && maybe_vectorized_dtype.get() == output_dtype &&
+                                             transposePackScalars(output_dtype) > 1;
+
+    std::ostringstream ss;
+    emitRequiredHeaders(stage.expr, ss);
+    ss << "#define TILE_DIM 32\n";
+    ss << "#define BLOCK_ROWS 8\n\n";
+    ss << "extern \"C\" __global__\n";
+    ss << "void " << kernel_name << "(";
+
+    bool first_arg = true;
+    for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
+        if (!first_arg) {
+            ss << ", ";
+        }
+        first_arg = false;
+        if (stage.expr.inputs[i].kind == NamedInput::Kind::RuntimeScalarFp32) {
+            ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        } else {
+            ss << "const " << scalarStorageType(input_dtypes[i]) << "* __restrict__ in" << i;
+        }
+    }
+
+    if (!first_arg) {
+        ss << ", ";
+    }
+    ss << output_type << "* __restrict__ out0, unsigned int numRows, unsigned int numCols) {\n";
+
+    if (emit_packed_low_precision_path) {
+        const DataType dtype = output_dtype;
+        const uint32_t pack_scalars = transposePackScalars(dtype);
+        const uint32_t pairs_per_pack = pack_scalars / 2;
+        const std::string pack_type = transposePackType(dtype);
+        const std::string storage_dtype_vector = transposeVector2StorageType(dtype);
+
+        ss << "  constexpr unsigned int PACK_SCALARS = " << pack_scalars << "U;\n";
+        ss << "  constexpr unsigned int PAIRS_PER_PACK = " << pairs_per_pack << "U;\n";
+        ss << "  constexpr unsigned int TILE_COL_SCALARS = TILE_DIM * PACK_SCALARS;\n";
+        ss << "  using Pack = " << pack_type << ";\n";
+        ss << "  using Vec2 = " << storage_dtype_vector << ";\n";
+        ss << "  union PackRaw { unsigned int raw; Pack pack; };\n";
+        ss << "  __shared__ unsigned int tile[TILE_DIM][TILE_DIM + 1];\n";
+        ss << "  const unsigned int rowStart = static_cast<unsigned int>(blockIdx.y) * TILE_DIM;\n";
+        ss << "  const unsigned int colStart = static_cast<unsigned int>(blockIdx.x) * TILE_COL_SCALARS;\n";
+        ss << "  const unsigned int packedCol = threadIdx.x;\n";
+        ss << "  const unsigned int logicalColBase = colStart + packedCol * PACK_SCALARS;\n\n";
+
+        ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
+        ss << "    const unsigned int logicalRow = rowStart + threadIdx.y + j;\n";
+        ss << "    const bool inputPackedLoadOk = ((numCols % PACK_SCALARS) == 0U) && (logicalRow < numRows) &&\n";
+        ss << "                                   (logicalColBase + PACK_SCALARS <= numCols);\n";
+        ss << "    Pack output_pack{};\n";
+        if (emit_packed_vectorized_path) {
+            ss << "    if (inputPackedLoadOk) {\n";
+            ss << "      const unsigned long long idx_base = static_cast<unsigned long long>(logicalRow) * static_cast<unsigned long "
+                  "long>(numCols) +\n";
+            ss << "                                      static_cast<unsigned long long>(logicalColBase);\n";
+            ss << "      Vec2* output_vec2 = reinterpret_cast<Vec2*>(&output_pack);\n";
+            for (uint32_t pair = 0; pair < pairs_per_pack; ++pair) {
+                const std::string suffix = "_tp" + std::to_string(pair);
+                ss << "      {\n";
+                ss << "        constexpr unsigned int PAIR = " << pair << "U;\n";
+                emitVector2NodeDefinitionsForSuffix(ss, stage.expr, dtype, storage_dtype_vector, suffix, "        ", [&](uint32_t input_slot) {
+                    return "reinterpret_cast<const Vec2*>(in" + std::to_string(input_slot) + " + idx_base)[PAIR]";
+                });
+                ss << "        output_vec2[PAIR] = "
+                   << vector_storage_conversion(storage_dtype_vector, refWithSuffix(output.local_node_idx, suffix)) << ";\n";
+                ss << "      }\n";
+            }
+            ss << "    } else if (logicalRow < numRows) {\n";
+        } else {
+            ss << "    if (logicalRow < numRows) {\n";
+        }
+        ss << "      " << output_type << "* output_scalar = reinterpret_cast<" << output_type << "*>(&output_pack);\n";
+        ss << "      for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
+        ss << "        const unsigned int logicalCol = logicalColBase + lane;\n";
+        ss << "        if (logicalCol < numCols) {\n";
+        ss << "          const unsigned long long idx = static_cast<unsigned long long>(logicalRow) * static_cast<unsigned long "
+              "long>(numCols) +\n";
+        ss << "                                         static_cast<unsigned long long>(logicalCol);\n";
+        ss << "          {\n";
+        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+            if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                continue;
+            }
+            emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, "            ");
+        }
+        ss << "            output_scalar[lane] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ";\n";
+        ss << "          }\n";
+        ss << "        }\n";
+        ss << "      }\n";
+        ss << "    }\n";
+        ss << "    PackRaw raw{};\n";
+        ss << "    raw.pack = output_pack;\n";
+        ss << "    tile[threadIdx.y + j][packedCol] = raw.raw;\n";
+        ss << "  }\n\n";
+        ss << "  __syncthreads();\n\n";
+        ss << "  constexpr unsigned int PACKED_OUTPUT_COLS_PER_TILE = TILE_DIM / PACK_SCALARS;\n";
+        ss << "  constexpr unsigned int PACKED_STORES_PER_TILE = TILE_COL_SCALARS * PACKED_OUTPUT_COLS_PER_TILE;\n";
+        ss << "  const unsigned int threadLinear = threadIdx.y * TILE_DIM + threadIdx.x;\n";
+        ss << "  for (unsigned int packedStore = threadLinear; packedStore < PACKED_STORES_PER_TILE; packedStore += TILE_DIM * BLOCK_ROWS) "
+              "{\n";
+        ss << "    const unsigned int localOutRow = packedStore / PACKED_OUTPUT_COLS_PER_TILE;\n";
+        ss << "    const unsigned int localOutPackCol = packedStore - localOutRow * PACKED_OUTPUT_COLS_PER_TILE;\n";
+        ss << "    const unsigned int inputPackCol = localOutRow / PACK_SCALARS;\n";
+        ss << "    const unsigned int inputColLane = localOutRow - inputPackCol * PACK_SCALARS;\n";
+        ss << "    const unsigned int outputRow = colStart + localOutRow;\n";
+        ss << "    const unsigned int outputColBase = rowStart + localOutPackCol * PACK_SCALARS;\n";
+        ss << "    Pack output_pack{};\n";
+        ss << "    " << output_type << "* output_scalar = reinterpret_cast<" << output_type << "*>(&output_pack);\n";
+        ss << "    for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
+        ss << "      PackRaw input_raw{};\n";
+        ss << "      input_raw.raw = tile[localOutPackCol * PACK_SCALARS + lane][inputPackCol];\n";
+        ss << "      const " << output_type << "* input_scalar = reinterpret_cast<const " << output_type << "*>(&input_raw.pack);\n";
+        ss << "      output_scalar[lane] = input_scalar[inputColLane];\n";
+        ss << "    }\n";
+        ss << "    const bool outputPackedStoreOk = ((numRows % PACK_SCALARS) == 0U) && (outputRow < numCols) &&\n";
+        ss << "                                     (outputColBase + PACK_SCALARS <= numRows);\n";
+        ss << "    if (outputPackedStoreOk) {\n";
+        ss << "      Pack* out_ptr = reinterpret_cast<Pack*>(out0 + static_cast<unsigned long long>(outputRow) * static_cast<unsigned long "
+              "long>(numRows) +\n";
+        ss << "                                           static_cast<unsigned long long>(outputColBase));\n";
+        ss << "      *out_ptr = output_pack;\n";
+        ss << "    } else if (outputRow < numCols) {\n";
+        ss << "      for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
+        ss << "        const unsigned int outputCol = outputColBase + lane;\n";
+        ss << "        if (outputCol < numRows) {\n";
+        ss << "          out0[static_cast<unsigned long long>(outputRow) * static_cast<unsigned long long>(numRows) +\n";
+        ss << "               static_cast<unsigned long long>(outputCol)] = output_scalar[lane];\n";
+        ss << "        }\n";
+        ss << "      }\n";
+        ss << "    }\n";
+        ss << "  }\n";
+        ss << "}\n";
+        return ss.str();
+    }
+
+    ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_DIM + 1];\n";
+    ss << "  const unsigned int x = blockIdx.x * TILE_DIM + threadIdx.x;\n";
+    ss << "  const unsigned int y = blockIdx.y * TILE_DIM + threadIdx.y;\n";
+    ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
+    ss << "    const unsigned int logical_row = y + j;\n";
+    ss << "    const unsigned int logical_col = x;\n";
+    ss << "    if (logical_col < numCols && logical_row < numRows) {\n";
+    ss << "      const unsigned long long idx = static_cast<unsigned long long>(logical_row) * static_cast<unsigned long long>(numCols) + "
+          "static_cast<unsigned long long>(logical_col);\n";
+
+    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+        if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+            continue;
+        }
+        emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, "      ");
+    }
+
+    ss << "      tile[threadIdx.y + j][threadIdx.x] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype)
+       << ";\n";
+    ss << "    }\n";
+    ss << "  }\n\n";
+    ss << "  __syncthreads();\n\n";
+    ss << "  const unsigned int tx = blockIdx.y * TILE_DIM + threadIdx.x;\n";
+    ss << "  const unsigned int ty = blockIdx.x * TILE_DIM + threadIdx.y;\n";
+    ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
+    ss << "    if (tx < numRows && (ty + j) < numCols) {\n";
+    ss << "      const unsigned long long out_idx = static_cast<unsigned long long>(ty + j) * "
+          "static_cast<unsigned long long>(numRows) + static_cast<unsigned long long>(tx);\n";
+    ss << "      out0[out_idx] = tile[threadIdx.x][threadIdx.y + j];\n";
+    ss << "    }\n";
+    ss << "  }\n";
+    ss << "}\n";
+    return ss.str();
+}
+
 std::string CudaSourceEmitter::emitFlat(const PhysicalExpression& expr, const std::string& kernel_name, bool use_uint32_index_math) {
     if (expr.output_node >= expr.nodes.size()) {
         throw runtime_error("CudaSourceEmitter::emitFlat(expr, ...) output_node out of range.");
@@ -1989,6 +2341,10 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
 
     if (stage.outputs.empty()) {
         throw runtime_error("Fused stage has no outputs.");
+    }
+
+    if (stageHasTransposedMaterializedOutput(stage.outputs)) {
+        return emitTiledTransposeMaterializedFused(stage, kernel_name);
     }
 
     Optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
@@ -2164,7 +2520,9 @@ std::string CudaSourceEmitter::emitTranspose(const PhysicalExecutionStage& stage
     ss << "  const unsigned int ty = blockIdx.x * TILE_DIM + threadIdx.y;\n";
     ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
     ss << "    if (tx < numRows && (ty + j) < numCols) {\n";
-    ss << "      out0[(ty + j) * numRows + tx] = tile[threadIdx.x][threadIdx.y + j];\n";
+    ss << "      const unsigned long long out_idx = static_cast<unsigned long long>(ty + j) * "
+          "static_cast<unsigned long long>(numRows) + static_cast<unsigned long long>(tx);\n";
+    ss << "      out0[out_idx] = tile[threadIdx.x][threadIdx.y + j];\n";
     ss << "    }\n";
     ss << "  }\n";
     ss << "}\n";

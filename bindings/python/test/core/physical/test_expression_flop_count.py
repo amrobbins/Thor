@@ -123,7 +123,7 @@ def test_flop_count_transpose_is_zero():
     }
 
     stage_kinds, _ = _assert_flops(eq, inputs, expected_total=0, expected_stage_flops=[0])
-    assert stage_kinds == ["Transpose"]
+    assert stage_kinds == ["FusedKernel"]
 
 
 @pytest.mark.cuda

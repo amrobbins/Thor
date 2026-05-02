@@ -875,6 +875,12 @@ static std::vector<DataType> collectCompiledOutputDTypes(const PhysicalExecution
     return output_dtypes;
 }
 
+static bool stageHasTransposedMaterializedOutput(const std::vector<CompiledStageOutput>& outputs) {
+    return std::any_of(outputs.begin(), outputs.end(), [](const CompiledStageOutput& output) {
+        return output.materialized_layout == MaterializedTensorLayout::Transposed;
+    });
+}
+
 static DataType resolveHomogeneousFusedStageDType(const PhysicalExpression& expr) {
     Optional<DataType> stage_output_dtype = Optional<DataType>::empty();
 
@@ -933,7 +939,7 @@ vector<char> EquationCompiler::linkToCubin(const vector<char>& ltoir, const Equa
     return cubin;
 }
 
-constexpr bool PRINT_KERNELS = false;
+constexpr bool PRINT_KERNELS = true;
 
 vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& kernel_name, const EquationSignature& sig) {
     if (PRINT_KERNELS) {
@@ -995,8 +1001,15 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);
     auto compiled = loadCubin(key, cubin, kernel_name, input_names, input_kinds, input_dtypes, output_dtypes, sig.device_num);
-    compiled->elements_per_thread = CudaSourceEmitter::flatElementsPerThread(stage);
-    compiled->uses_uint32_numel_arg = use_uint32_index_math;
+    if (stageHasTransposedMaterializedOutput(stage.outputs)) {
+        compiled->launch_kind = CompiledEquation::LaunchKind::FusedTiledTranspose;
+        compiled->elements_per_thread = 1;
+        compiled->tiled_transpose_pack_scalars = CudaSourceEmitter::tiledTransposePackScalars(stage);
+        compiled->uses_uint32_numel_arg = false;
+    } else {
+        compiled->elements_per_thread = CudaSourceEmitter::flatElementsPerThread(stage);
+        compiled->uses_uint32_numel_arg = use_uint32_index_math;
+    }
 
     cacheInsert(key, compiled);
     return compiled;
@@ -1524,6 +1537,7 @@ struct RequestedStageOutput {
     std::string name;
     uint32_t old_root_idx;
     uint32_t value_id;
+    MaterializedTensorLayout materialized_layout = MaterializedTensorLayout::RowMajor;
 };
 
 static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
@@ -1652,6 +1666,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
             .name = requested.name,
             .local_node_idx = it->second,
             .value_id = requested.value_id,
+            .materialized_layout = requested.materialized_layout,
         });
     }
 
@@ -2238,6 +2253,41 @@ struct PlannedExecution {
     std::vector<CompiledStageOutput> final_outputs;
 };
 
+static bool regionContainsShapeOnlyOp(const PhysicalExpression& expr, const std::unordered_set<uint32_t>& region_nodes) {
+    for (uint32_t node_idx : region_nodes) {
+        if (node_idx >= expr.nodes.size()) {
+            throw std::runtime_error("regionContainsShapeOnlyOp node index out of range.");
+        }
+        const ExprNode& node = expr.nodes[node_idx];
+        if (node.op == ExprOp::UNSQUEEZE || node.op == ExprOp::SQUEEZE) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool regionSupportsTiledTransposeMaterialization(const PhysicalExpression& expr, const std::unordered_set<uint32_t>& region_nodes) {
+    if (region_nodes.empty()) {
+        return false;
+    }
+    if (regionContainsShapeOnlyOp(expr, region_nodes)) {
+        return false;
+    }
+
+    // The tiled transpose materializer evaluates the fused expression in the
+    // producer's logical row-major index space and only changes the final store
+    // pattern.  That is valid for ordinary flat elementwise regions with any
+    // number of same-shaped tensor inputs: all tensor operands are still read at
+    // the same logical flat index, and the computed scalar is staged through the
+    // padded shared-memory tile before being written transposed.
+    //
+    // Broadcast / shape-changing fused regions are intentionally not accepted
+    // here yet.  They are rejected at stamp time by fusedStageRequiresBroadcastLaunch
+    // when a transposed materialized output is present, because their descriptor
+    // indexing needs a separate layout-aware implementation.
+    return true;
+}
+
 static void forceReductionProducerOutputDTypeIfNeeded(PhysicalExpression& expr, uint32_t producer_idx) {
     if (producer_idx >= expr.nodes.size()) {
         throw std::runtime_error("forceReductionProducerOutputDTypeIfNeeded producer_idx out of range.");
@@ -2294,6 +2344,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
     std::function<void(size_t)> materializeTerminalGroup;
     std::function<void(uint32_t)> emitForDependency;
+    std::function<bool(uint32_t, uint32_t, const std::string&)> tryEmitTiledTransposeMaterializedFusedStage;
 
     materializeTerminalGroup = [&](size_t group_idx) {
         if (group_idx >= terminal_groups.size() || !terminal_groups[group_idx].has_value()) {
@@ -2318,12 +2369,65 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         group.emitted = true;
     };
 
+    tryEmitTiledTransposeMaterializedFusedStage = [&](uint32_t transpose_idx, uint32_t output_value_id, const std::string& output_name) {
+        if (transpose_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Transpose node index out of range while planning fused transposed materialization.");
+        }
+        const ExprNode& transpose_node = expr.nodes[transpose_idx];
+        if (!isTransposeOp(transpose_node.op)) {
+            return false;
+        }
+        if (transpose_node.lhs == UINT32_MAX || transpose_node.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("Transpose node missing lhs while planning fused transposed materialization.");
+        }
+
+        const uint32_t materialized_parent_idx = transpose_node.lhs;
+        const ExprNode& materialized_parent = expr.nodes[materialized_parent_idx];
+        if (isStageBoundaryOp(materialized_parent.op)) {
+            return false;
+        }
+
+        std::unordered_set<uint32_t> region;
+        collectFusableRegion(expr, materialized_parent_idx, region);
+        if (regionContainsShapeOnlyOp(expr, region)) {
+            return false;
+        }
+
+        std::unordered_set<uint32_t> boundary_nodes;
+        collectBoundaryDependencies(expr, region, boundary_nodes);
+        for (uint32_t boundary_root : boundary_nodes) {
+            emitForDependency(boundary_root);
+        }
+
+        if (!regionSupportsTiledTransposeMaterialization(expr, region)) {
+            return false;
+        }
+
+        node_output_value_id[transpose_idx] = output_value_id;
+        std::vector<RequestedStageOutput> requested_outputs{RequestedStageOutput{
+            .name = output_name,
+            .old_root_idx = materialized_parent_idx,
+            .value_id = output_value_id,
+            .materialized_layout = MaterializedTensorLayout::Transposed,
+        }};
+        planned.stages.push_back(buildFusedStage(expr, region, requested_outputs, node_output_value_id));
+        return true;
+    };
+
     emitForDependency = [&](uint32_t root_idx) {
         if (node_output_value_id.find(root_idx) != node_output_value_id.end()) {
             return;
         }
 
         const ExprNode& root = expr.nodes[root_idx];
+        if (isTransposeOp(root.op)) {
+            const uint32_t stage_out_id = next_value_id++;
+            if (tryEmitTiledTransposeMaterializedFusedStage(root_idx, stage_out_id, "")) {
+                return;
+            }
+            --next_value_id;
+        }
+
         if (isStageBoundaryOp(root.op)) {
             auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label, bool force_supported_reduction_input_dtype) {
                 if (parent_idx >= expr.nodes.size()) {
@@ -2491,6 +2595,19 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
     for (const NamedOutput& named_output : outputs.outputs) {
         const ExprNode& root = expr.nodes[named_output.node_idx];
+
+        if (isTransposeOp(root.op)) {
+            const uint32_t stage_out_id = next_value_id++;
+            if (tryEmitTiledTransposeMaterializedFusedStage(named_output.node_idx, stage_out_id, named_output.name)) {
+                planned.final_outputs.push_back(CompiledStageOutput{
+                    .name = named_output.name,
+                    .local_node_idx = UINT32_MAX,
+                    .value_id = stage_out_id,
+                });
+                continue;
+            }
+            --next_value_id;
+        }
 
         if (isStageBoundaryOp(root.op)) {
             auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label, bool force_supported_reduction_input_dtype) {

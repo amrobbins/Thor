@@ -14,10 +14,13 @@
 
 namespace ThorImplementation {
 
+enum class MaterializedTensorLayout { RowMajor, Transposed };
+
 struct CompiledStageOutput {
     std::string name;
     uint32_t local_node_idx = UINT32_MAX;
     uint32_t value_id = UINT32_MAX;
+    MaterializedTensorLayout materialized_layout = MaterializedTensorLayout::RowMajor;
 };
 
 struct ParameterFanOverride {
