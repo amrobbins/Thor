@@ -316,6 +316,8 @@ static std::string transposePackType(DataType dtype) {
 
 static std::string transposeVector2StorageType(DataType dtype) {
     switch (dtype) {
+        case DataType::FP32:
+            return "float2";
         case DataType::FP16:
             return "half2";
         case DataType::BF16:
@@ -328,6 +330,12 @@ static std::string transposeVector2StorageType(DataType dtype) {
             throw runtime_error("Unsupported transpose vector2 dtype: " + TensorDescriptor::getElementTypeName(dtype));
     }
 }
+
+static bool isTwoByteFloatDType(DataType dtype) { return dtype == DataType::FP16 || dtype == DataType::BF16; }
+
+static bool isFp8DType(DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2; }
+
+static bool isHalf2ComputeStorageDType(DataType dtype) { return dtype == DataType::FP16 || isFp8DType(dtype); }
 
 static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstream& ss) {
     bool need_fp16 = false;
@@ -551,6 +559,146 @@ Optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const Compi
         return Optional<DataType>::empty();
     }
     return getVectorizedStageStorageDTypeImpl(stage.expr, collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
+}
+
+static Optional<DataType> getSingleTensorInputStorageDType(const PhysicalExpression& expr, const std::vector<DataType>& input_dtypes) {
+    Optional<DataType> maybe_tensor_dtype = Optional<DataType>::empty();
+
+    for (uint32_t slot = 0; slot < expr.inputs.size(); ++slot) {
+        if (expr.inputs[slot].kind != NamedInput::Kind::Tensor) {
+            continue;
+        }
+
+        const DataType dtype = input_dtypes.at(slot);
+        if (!maybe_tensor_dtype.isPresent()) {
+            maybe_tensor_dtype = dtype;
+        } else if (maybe_tensor_dtype.get() != dtype) {
+            return Optional<DataType>::empty();
+        }
+    }
+
+    return maybe_tensor_dtype;
+}
+
+static bool supportsMixedTwoByteFloat2TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
+    if (input_dtype == output_dtype || !isTwoByteFloatDType(input_dtype) || !isTwoByteFloatDType(output_dtype)) {
+        return false;
+    }
+
+    for (const ExprNode& node : expr.nodes) {
+        switch (node.op) {
+            case ExprOp::INPUT:
+                if (requireNodeInputTensorDType(node) != input_dtype) {
+                    return false;
+                }
+                break;
+            case ExprOp::SCALAR_FP:
+            case ExprOp::FILL:
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+                break;
+            default:
+                if (requireNodeComputeDType(node) != DataType::FP32) {
+                    return false;
+                }
+                break;
+        }
+    }
+
+    return true;
+}
+
+static bool supportsMixedFp8TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
+    if (input_dtype == output_dtype || !isFp8DType(input_dtype) || !isFp8DType(output_dtype)) {
+        return false;
+    }
+
+    for (const ExprNode& node : expr.nodes) {
+        switch (node.op) {
+            case ExprOp::INPUT:
+                if (requireNodeInputTensorDType(node) != input_dtype) {
+                    return false;
+                }
+                break;
+            case ExprOp::SCALAR_FP:
+            case ExprOp::FILL:
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+                break;
+            default:
+                if (requireNodeComputeDType(node) != DataType::FP16) {
+                    return false;
+                }
+                break;
+        }
+    }
+
+    return true;
+}
+
+static bool supportsFloat2TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
+    if (transposePackScalars(output_dtype) <= 1 || input_dtype == output_dtype) {
+        return false;
+    }
+
+    // This path is for cross-width/cross-family cases that should compute the fused
+    // producer in fp32 pairs before packing the low-precision transposed output.
+    if (output_dtype == DataType::FP32) {
+        return false;
+    }
+
+    for (const ExprNode& node : expr.nodes) {
+        switch (node.op) {
+            case ExprOp::INPUT:
+                if (requireNodeInputTensorDType(node) != input_dtype) {
+                    return false;
+                }
+                break;
+            case ExprOp::SCALAR_FP:
+            case ExprOp::FILL:
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+                break;
+            default:
+                if (requireNodeComputeDType(node) != DataType::FP32) {
+                    return false;
+                }
+                break;
+        }
+    }
+
+    return true;
+}
+
+static bool supportsHalf2TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
+    if (input_dtype == output_dtype || !isHalf2ComputeStorageDType(input_dtype) || !isHalf2ComputeStorageDType(output_dtype)) {
+        return false;
+    }
+    if (transposePackScalars(output_dtype) <= 1) {
+        return false;
+    }
+
+    for (const ExprNode& node : expr.nodes) {
+        switch (node.op) {
+            case ExprOp::INPUT:
+                if (requireNodeInputTensorDType(node) != input_dtype) {
+                    return false;
+                }
+                break;
+            case ExprOp::SCALAR_FP:
+            case ExprOp::FILL:
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+                break;
+            default:
+                if (requireNodeComputeDType(node) != DataType::FP16) {
+                    return false;
+                }
+                break;
+        }
+    }
+
+    return true;
 }
 
 static uint32_t dataTypeStorageBytes(DataType dtype) {
@@ -1299,6 +1447,88 @@ static std::string emitVector2ScalarLiteral(double x, DataType dtype) {
     throw runtime_error("Unsupported dtype in emitVector2ScalarLiteral.");
 }
 
+static std::string float2_compute_conversion(const std::string& storage_dtype_vector, const std::string& variable) {
+    if (storage_dtype_vector == "float2") {
+        return variable;
+    } else if (storage_dtype_vector == "half2") {
+        return "__half22float2(" + variable + ")";
+    } else if (storage_dtype_vector == "__nv_bfloat162") {
+        return "__bfloat1622float2(" + variable + ")";
+    }
+    throw runtime_error("Unsupported vector storage dtype in float2_compute_conversion: " + storage_dtype_vector);
+}
+
+static std::string float2_storage_conversion(const std::string& storage_dtype_vector, const std::string& variable) {
+    if (storage_dtype_vector == "float2") {
+        return variable;
+    } else if (storage_dtype_vector == "half2") {
+        return "__float22half2_rn(" + variable + ")";
+    } else if (storage_dtype_vector == "__nv_bfloat162") {
+        return "__float22bfloat162_rn(" + variable + ")";
+    } else if (storage_dtype_vector == "__nv_fp8x2_e4m3") {
+        return "__nv_fp8x2_e4m3(__float22half2_rn(" + variable + "))";
+    } else if (storage_dtype_vector == "__nv_fp8x2_e5m2") {
+        return "__nv_fp8x2_e5m2(__float22half2_rn(" + variable + "))";
+    }
+    throw runtime_error("Unsupported vector storage dtype in float2_storage_conversion: " + storage_dtype_vector);
+}
+
+static std::string emitFloat2ScalarLiteral(double x) {
+    const std::string lit = emitScalarFpLiteral(x);
+    return "make_float2(" + lit + ", " + lit + ")";
+}
+
+static std::string emitFloat2RuntimeScalarValue(const PhysicalExpression& expr, const ExprNode& node) {
+    const DataType input_dtype = requireNodeInputTensorDType(node);
+    const DataType output_dtype = requireNodeOutputDType(node);
+
+    std::string scalar_source;
+    if (expr.inputs.at(node.input_slot).kind == NamedInput::Kind::TensorRuntimeScalar) {
+        const std::string input_storage_type = scalarStorageType(input_dtype);
+        scalar_source = "reinterpret_cast<const " + input_storage_type + "*>(in" + std::to_string(node.input_slot) + ")[0]";
+    } else {
+        scalar_source = "in" + std::to_string(node.input_slot);
+    }
+
+    std::string scalar_expr = castScalarExpr(scalar_source, input_dtype, output_dtype);
+    scalar_expr = castScalarExpr(scalar_expr, output_dtype, DataType::FP32);
+    return "make_float2(" + scalar_expr + ", " + scalar_expr + ")";
+}
+
+static std::string emitFloat2Binary(const std::string& op, const std::string& a, const std::string& b) {
+    return "make_float2(" + a + ".x " + op + " " + b + ".x, " + a + ".y " + op + " " + b + ".y)";
+}
+
+static std::string emitFloat2UnaryCall(const std::string& fn, const std::string& x) {
+    return "make_float2(" + fn + "(" + x + ".x), " + fn + "(" + x + ".y))";
+}
+
+static std::string emitFloat2MinMaxGradMask(ExprOp op, const std::string& a, const std::string& b) {
+    std::string x_expr;
+    std::string y_expr;
+    switch (op) {
+        case ExprOp::MIN_GRAD_LEFT:
+            x_expr = "((" + a + ".x < " + b + ".x) ? 1.0f : ((" + a + ".x > " + b + ".x) ? 0.0f : 0.5f))";
+            y_expr = "((" + a + ".y < " + b + ".y) ? 1.0f : ((" + a + ".y > " + b + ".y) ? 0.0f : 0.5f))";
+            break;
+        case ExprOp::MIN_GRAD_RIGHT:
+            x_expr = "((" + a + ".x > " + b + ".x) ? 1.0f : ((" + a + ".x < " + b + ".x) ? 0.0f : 0.5f))";
+            y_expr = "((" + a + ".y > " + b + ".y) ? 1.0f : ((" + a + ".y < " + b + ".y) ? 0.0f : 0.5f))";
+            break;
+        case ExprOp::MAX_GRAD_LEFT:
+            x_expr = "((" + a + ".x > " + b + ".x) ? 1.0f : ((" + a + ".x < " + b + ".x) ? 0.0f : 0.5f))";
+            y_expr = "((" + a + ".y > " + b + ".y) ? 1.0f : ((" + a + ".y < " + b + ".y) ? 0.0f : 0.5f))";
+            break;
+        case ExprOp::MAX_GRAD_RIGHT:
+            x_expr = "((" + a + ".x < " + b + ".x) ? 1.0f : ((" + a + ".x > " + b + ".x) ? 0.0f : 0.5f))";
+            y_expr = "((" + a + ".y < " + b + ".y) ? 1.0f : ((" + a + ".y > " + b + ".y) ? 0.0f : 0.5f))";
+            break;
+        default:
+            throw runtime_error("Unsupported min/max grad mask op in float2 vector emitter.");
+    }
+    return "make_float2(" + x_expr + ", " + y_expr + ")";
+}
+
 static DataType vectorizedComputeScalarDType(DataType dtype) {
     switch (dtype) {
         case DataType::BF16:
@@ -1532,6 +1762,115 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 break;
             default:
                 throw runtime_error("Unsupported op in vectorized fused transpose emitter: " + to_string((int32_t)n.op));
+        }
+    }
+}
+
+static void emitFloat2NodeDefinitionsForSuffix(std::ostringstream& ss,
+                                               const PhysicalExpression& expr,
+                                               const std::string& input_storage_dtype_vector,
+                                               const std::string& suffix,
+                                               const std::string& indent,
+                                               const std::function<std::string(uint32_t)>& input_slot_value) {
+    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+        const auto& n = expr.nodes[node_idx];
+        switch (n.op) {
+            case ExprOp::INPUT: {
+                const std::string variable = input_slot_value(n.input_slot);
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << float2_compute_conversion(input_storage_dtype_vector, variable) << ";\n";
+                break;
+            }
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = " << emitFloat2RuntimeScalarValue(expr, n) << ";\n";
+                break;
+            case ExprOp::SCALAR_FP:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = " << emitFloat2ScalarLiteral(n.scalar_fp) << ";\n";
+                break;
+            case ExprOp::FILL:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = " << emitFloat2ScalarLiteral(n.scalar_fp) << ";\n";
+                break;
+            case ExprOp::ADD:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2Binary("+", refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                break;
+            case ExprOp::SUB:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2Binary("-", refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                break;
+            case ExprOp::MUL:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2Binary("*", refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                break;
+            case ExprOp::DIV:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2Binary("/", refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                break;
+            case ExprOp::NEG:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = make_float2(-" << refWithSuffix(n.lhs, suffix)
+                   << ".x, -" << refWithSuffix(n.lhs, suffix) << ".y);\n";
+                break;
+            case ExprOp::ABS:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("fabsf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::EXP:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("expf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::EXP2:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("exp2f", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::EXP10:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = make_float2(exp10f(" << refWithSuffix(n.lhs, suffix)
+                   << ".x), exp10f(" << refWithSuffix(n.lhs, suffix) << ".y));\n";
+                break;
+            case ExprOp::LN:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("logf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::LOG2:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("log2f", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::LOG10:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("log10f", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::SQRT:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("sqrtf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::UNSQUEEZE:
+            case ExprOp::SQUEEZE:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = " << refWithSuffix(n.lhs, suffix) << ";\n";
+                break;
+            case ExprOp::POW:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = make_float2(powf(" << refWithSuffix(n.lhs, suffix)
+                   << ".x, " << refWithSuffix(n.rhs, suffix) << ".x), powf(" << refWithSuffix(n.lhs, suffix) << ".y, "
+                   << refWithSuffix(n.rhs, suffix) << ".y));\n";
+                break;
+            case ExprOp::MIN:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = make_float2(fminf(" << refWithSuffix(n.lhs, suffix)
+                   << ".x, " << refWithSuffix(n.rhs, suffix) << ".x), fminf(" << refWithSuffix(n.lhs, suffix) << ".y, "
+                   << refWithSuffix(n.rhs, suffix) << ".y));\n";
+                break;
+            case ExprOp::MAX:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = make_float2(fmaxf(" << refWithSuffix(n.lhs, suffix)
+                   << ".x, " << refWithSuffix(n.rhs, suffix) << ".x), fmaxf(" << refWithSuffix(n.lhs, suffix) << ".y, "
+                   << refWithSuffix(n.rhs, suffix) << ".y));\n";
+                break;
+            case ExprOp::MIN_GRAD_LEFT:
+            case ExprOp::MIN_GRAD_RIGHT:
+            case ExprOp::MAX_GRAD_LEFT:
+            case ExprOp::MAX_GRAD_RIGHT:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2MinMaxGradMask(n.op, refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                break;
+            default:
+                throw runtime_error("Unsupported op in float2 fused transpose emitter: " + to_string((int32_t)n.op));
         }
     }
 }
@@ -2139,10 +2478,23 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
     const std::string output_type = scalarStorageType(output_dtype);
     const Optional<DataType> maybe_vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
+    const Optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
     const bool emit_packed_low_precision_path = transposePackScalars(output_dtype) > 1;
-    const bool emit_packed_vectorized_path = maybe_vectorized_dtype.isPresent() && maybe_vectorized_dtype.get() == output_dtype &&
-                                             transposePackScalars(output_dtype) > 1;
-
+    const bool emit_homogeneous_packed_vectorized_path =
+        maybe_vectorized_dtype.isPresent() && maybe_vectorized_dtype.get() == output_dtype && transposePackScalars(output_dtype) > 1;
+    const bool emit_mixed_two_byte_float2_path =
+        maybe_tensor_input_dtype.isPresent() &&
+        supportsMixedTwoByteFloat2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
+    const bool emit_mixed_fp8_vectorized_path =
+        maybe_tensor_input_dtype.isPresent() &&
+        supportsMixedFp8TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
+    const bool emit_cross_width_float2_path =
+        maybe_tensor_input_dtype.isPresent() &&
+        supportsFloat2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
+    const bool emit_cross_width_half2_path = maybe_tensor_input_dtype.isPresent() &&
+                                             supportsHalf2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
+    const bool emit_packed_vectorized_path = emit_homogeneous_packed_vectorized_path || emit_mixed_two_byte_float2_path ||
+                                             emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path || emit_cross_width_half2_path;
     std::ostringstream ss;
     emitRequiredHeaders(stage.expr, ss);
     ss << "#define TILE_DIM 32\n";
@@ -2170,16 +2522,23 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
 
     if (emit_packed_low_precision_path) {
         const DataType dtype = output_dtype;
+        const bool needs_input_vector_type = emit_homogeneous_packed_vectorized_path || emit_mixed_two_byte_float2_path ||
+                                             emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path || emit_cross_width_half2_path;
+        const DataType vector_input_dtype =
+            needs_input_vector_type ? (maybe_tensor_input_dtype.isPresent() ? maybe_tensor_input_dtype.get() : output_dtype) : output_dtype;
         const uint32_t pack_scalars = transposePackScalars(dtype);
         const uint32_t pairs_per_pack = pack_scalars / 2;
         const std::string pack_type = transposePackType(dtype);
-        const std::string storage_dtype_vector = transposeVector2StorageType(dtype);
+        const std::string output_storage_dtype_vector = transposeVector2StorageType(output_dtype);
+        const std::string input_storage_dtype_vector =
+            needs_input_vector_type ? transposeVector2StorageType(vector_input_dtype) : output_storage_dtype_vector;
 
         ss << "  constexpr unsigned int PACK_SCALARS = " << pack_scalars << "U;\n";
         ss << "  constexpr unsigned int PAIRS_PER_PACK = " << pairs_per_pack << "U;\n";
         ss << "  constexpr unsigned int TILE_COL_SCALARS = TILE_DIM * PACK_SCALARS;\n";
         ss << "  using Pack = " << pack_type << ";\n";
-        ss << "  using Vec2 = " << storage_dtype_vector << ";\n";
+        ss << "  using OutputVec2 = " << output_storage_dtype_vector << ";\n";
+        ss << "  using InputVec2 = " << input_storage_dtype_vector << ";\n";
         ss << "  union PackRaw { unsigned int raw; Pack pack; };\n";
         ss << "  __shared__ unsigned int tile[TILE_DIM][TILE_DIM + 1];\n";
         ss << "  const unsigned int rowStart = static_cast<unsigned int>(blockIdx.y) * TILE_DIM;\n";
@@ -2189,24 +2548,34 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
 
         ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
         ss << "    const unsigned int logicalRow = rowStart + threadIdx.y + j;\n";
-        ss << "    const bool inputPackedLoadOk = ((numCols % PACK_SCALARS) == 0U) && (logicalRow < numRows) &&\n";
-        ss << "                                   (logicalColBase + PACK_SCALARS <= numCols);\n";
+        ss << "    const unsigned long long idx_base = static_cast<unsigned long long>(logicalRow) * static_cast<unsigned long "
+              "long>(numCols) +\n";
+        ss << "                                      static_cast<unsigned long long>(logicalColBase);\n";
+        ss << "    const bool inputPackedLoadOk = (logicalRow < numRows) && (logicalColBase + PACK_SCALARS <= numCols) &&\n";
+        ss << "                                   ((idx_base % PACK_SCALARS) == 0ULL);\n";
         ss << "    Pack output_pack{};\n";
         if (emit_packed_vectorized_path) {
             ss << "    if (inputPackedLoadOk) {\n";
-            ss << "      const unsigned long long idx_base = static_cast<unsigned long long>(logicalRow) * static_cast<unsigned long "
-                  "long>(numCols) +\n";
-            ss << "                                      static_cast<unsigned long long>(logicalColBase);\n";
-            ss << "      Vec2* output_vec2 = reinterpret_cast<Vec2*>(&output_pack);\n";
+            ss << "      OutputVec2* output_vec2 = reinterpret_cast<OutputVec2*>(&output_pack);\n";
             for (uint32_t pair = 0; pair < pairs_per_pack; ++pair) {
                 const std::string suffix = "_tp" + std::to_string(pair);
                 ss << "      {\n";
                 ss << "        constexpr unsigned int PAIR = " << pair << "U;\n";
-                emitVector2NodeDefinitionsForSuffix(ss, stage.expr, dtype, storage_dtype_vector, suffix, "        ", [&](uint32_t input_slot) {
-                    return "reinterpret_cast<const Vec2*>(in" + std::to_string(input_slot) + " + idx_base)[PAIR]";
-                });
-                ss << "        output_vec2[PAIR] = "
-                   << vector_storage_conversion(storage_dtype_vector, refWithSuffix(output.local_node_idx, suffix)) << ";\n";
+                if (emit_mixed_two_byte_float2_path || emit_cross_width_float2_path) {
+                    emitFloat2NodeDefinitionsForSuffix(
+                        ss, stage.expr, input_storage_dtype_vector, suffix, "        ", [&](uint32_t input_slot) {
+                            return "reinterpret_cast<const InputVec2*>(in" + std::to_string(input_slot) + " + idx_base)[PAIR]";
+                        });
+                    ss << "        output_vec2[PAIR] = "
+                       << float2_storage_conversion(output_storage_dtype_vector, refWithSuffix(output.local_node_idx, suffix)) << ";\n";
+                } else {
+                    emitVector2NodeDefinitionsForSuffix(
+                        ss, stage.expr, vector_input_dtype, input_storage_dtype_vector, suffix, "        ", [&](uint32_t input_slot) {
+                            return "reinterpret_cast<const InputVec2*>(in" + std::to_string(input_slot) + " + idx_base)[PAIR]";
+                        });
+                    ss << "        output_vec2[PAIR] = "
+                       << vector_storage_conversion(output_storage_dtype_vector, refWithSuffix(output.local_node_idx, suffix)) << ";\n";
+                }
                 ss << "      }\n";
             }
             ss << "    } else if (logicalRow < numRows) {\n";
@@ -2256,12 +2625,13 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "      const " << output_type << "* input_scalar = reinterpret_cast<const " << output_type << "*>(&input_raw.pack);\n";
         ss << "      output_scalar[lane] = input_scalar[inputColLane];\n";
         ss << "    }\n";
-        ss << "    const bool outputPackedStoreOk = ((numRows % PACK_SCALARS) == 0U) && (outputRow < numCols) &&\n";
-        ss << "                                     (outputColBase + PACK_SCALARS <= numRows);\n";
-        ss << "    if (outputPackedStoreOk) {\n";
-        ss << "      Pack* out_ptr = reinterpret_cast<Pack*>(out0 + static_cast<unsigned long long>(outputRow) * static_cast<unsigned long "
+        ss << "    const unsigned long long out_base_idx = static_cast<unsigned long long>(outputRow) * static_cast<unsigned long "
               "long>(numRows) +\n";
-        ss << "                                           static_cast<unsigned long long>(outputColBase));\n";
+        ss << "                                           static_cast<unsigned long long>(outputColBase);\n";
+        ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + PACK_SCALARS <= numRows) &&\n";
+        ss << "                                     ((out_base_idx % PACK_SCALARS) == 0ULL);\n";
+        ss << "    if (outputPackedStoreOk) {\n";
+        ss << "      Pack* out_ptr = reinterpret_cast<Pack*>(out0 + out_base_idx);\n";
         ss << "      *out_ptr = output_pack;\n";
         ss << "    } else if (outputRow < numCols) {\n";
         ss << "      for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
