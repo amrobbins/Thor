@@ -483,6 +483,20 @@ static const CompiledStageOutput& requireSingleTransposedMaterializedOutput(cons
     return output;
 }
 
+static const CompiledStageOutput& requireSingleTransposedMaterializedOutput(const CompiledExecutionStage& stage) {
+    if (stage.outputs.size() != 1) {
+        throw runtime_error("Transposed fused materialization currently supports exactly one output.");
+    }
+    const CompiledStageOutput& output = stage.outputs[0];
+    if (output.materialized_layout != MaterializedTensorLayout::Transposed) {
+        throw runtime_error("Expected a transposed materialized fused output.");
+    }
+    if (output.local_node_idx >= stage.expr.nodes.size()) {
+        throw runtime_error("Transposed fused output local_node_idx out of range.");
+    }
+    return output;
+}
+
 static Optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpression& expr,
                                                              const std::vector<DataType>& input_dtypes,
                                                              const std::vector<DataType>& output_dtypes) {
@@ -786,6 +800,16 @@ uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& 
 
 uint32_t CudaSourceEmitter::tiledTransposePackScalars(const PhysicalExecutionStage& stage) {
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel || !stageHasTransposedMaterializedOutput(stage.outputs)) {
+        return 1;
+    }
+
+    const CompiledStageOutput& output = requireSingleTransposedMaterializedOutput(stage);
+    const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+    return transposePackScalars(output_dtype);
+}
+
+uint32_t CudaSourceEmitter::tiledTransposePackScalars(const CompiledExecutionStage& stage) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel || !stageHasTransposedMaterializedOutput(stage.outputs)) {
         return 1;
     }
 
@@ -2987,6 +3011,192 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
 
 std::string CudaSourceEmitter::ref(uint32_t idx) { return "t" + to_string(idx); }
 
+static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const CompiledExecutionStage& stage,
+                                                                      const std::vector<SpecializedBroadcastGroup>& groups,
+                                                                      const std::string& kernel_name) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        throw runtime_error("emitTiledTransposeMaterializedSpecializedBroadcast called on non-fused stage.");
+    }
+    const CompiledStageOutput& output = requireSingleTransposedMaterializedOutput(stage);
+    if (groups.size() != 1) {
+        throw runtime_error("Transposed broadcast fused materialization expects exactly one broadcast group.");
+    }
+
+    const SpecializedBroadcastGroup& group = groups[0];
+    if (group.output_indices.size() != 1 || group.output_indices[0] != 0) {
+        throw runtime_error("Transposed broadcast fused materialization expects the single stage output in its broadcast group.");
+    }
+    if (group.output_dims.size() != 2) {
+        throw runtime_error("Transposed broadcast fused materialization currently requires a rank-2 logical output.");
+    }
+
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+    const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+    const std::string output_type = scalarStorageType(output_dtype);
+    const bool emit_packed_low_precision_path = transposePackScalars(output_dtype) > 1;
+    const bool use_uint32_index_math = false;
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
+
+    std::vector<size_t> all_used_indices(group.used_input_slots.size());
+    std::iota(all_used_indices.begin(), all_used_indices.end(), 0);
+
+    std::ostringstream ss;
+    emitRequiredHeaders(stage.expr, ss);
+    ss << "#define TILE_DIM 32\n";
+    ss << "#define BLOCK_ROWS 8\n\n";
+    ss << "extern \"C\" __global__\n";
+    ss << "void " << kernel_name << "(";
+
+    bool first_arg = true;
+    for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
+        if (!first_arg) {
+            ss << ", ";
+        }
+        first_arg = false;
+        if (stage.expr.inputs[i].kind == NamedInput::Kind::RuntimeScalarFp32) {
+            ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        } else {
+            ss << "const " << scalarStorageType(input_dtypes[i]) << "* __restrict__ in" << i;
+        }
+    }
+
+    if (!first_arg) {
+        ss << ", ";
+    }
+    ss << output_type << "* __restrict__ out0, unsigned int numRows, unsigned int numCols) {\n";
+
+    if (emit_packed_low_precision_path) {
+        const uint32_t pack_scalars = transposePackScalars(output_dtype);
+        const std::string pack_type = transposePackType(output_dtype);
+
+        ss << "  constexpr unsigned int PACK_SCALARS = " << pack_scalars << "U;\n";
+        ss << "  constexpr unsigned int TILE_COL_SCALARS = TILE_DIM * PACK_SCALARS;\n";
+        ss << "  using Pack = " << pack_type << ";\n";
+        ss << "  union PackRaw { unsigned int raw; Pack pack; };\n";
+        ss << "  __shared__ unsigned int tile[TILE_DIM][TILE_DIM + 1];\n";
+        ss << "  const unsigned int rowStart = static_cast<unsigned int>(blockIdx.y) * TILE_DIM;\n";
+        ss << "  const unsigned int colStart = static_cast<unsigned int>(blockIdx.x) * TILE_COL_SCALARS;\n";
+        ss << "  const unsigned int packedCol = threadIdx.x;\n";
+        ss << "  const unsigned int logicalColBase = colStart + packedCol * PACK_SCALARS;\n\n";
+
+        ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
+        ss << "    const unsigned int logicalRow = rowStart + threadIdx.y + j;\n";
+        ss << "    Pack output_pack{};\n";
+        ss << "    if (logicalRow < numRows) {\n";
+        ss << "      " << output_type << "* output_scalar = reinterpret_cast<" << output_type << "*>(&output_pack);\n";
+        ss << "      for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
+        ss << "        const unsigned int logicalCol = logicalColBase + lane;\n";
+        ss << "        if (logicalCol < numCols) {\n";
+        ss << "          const " << index_type << " logical_idx = static_cast<" << index_type << ">(logicalRow) * static_cast<"
+           << index_type << ">(numCols) + static_cast<" << index_type << ">(logicalCol);\n";
+        for (uint32_t input_slot : group.used_input_slots) {
+            ss << "          " << index_type << " in" << input_slot << "_offset = " << emitUnsignedLiteral(0, use_uint32_index_math)
+               << ";\n";
+        }
+        if (!group.active_axes.empty()) {
+            ss << "\n";
+            emitSpecializedBroadcastOffsetMath(ss, group, all_used_indices, "logical_idx", "", "          ", use_uint32_index_math);
+            ss << "\n";
+        }
+        ss << "          {\n";
+        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+            if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                continue;
+            }
+            emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/true, "            ");
+        }
+        ss << "            output_scalar[lane] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ";\n";
+        ss << "          }\n";
+        ss << "        }\n";
+        ss << "      }\n";
+        ss << "    }\n";
+        ss << "    PackRaw raw{};\n";
+        ss << "    raw.pack = output_pack;\n";
+        ss << "    tile[threadIdx.y + j][packedCol] = raw.raw;\n";
+        ss << "  }\n\n";
+        ss << "  __syncthreads();\n\n";
+        ss << "  constexpr unsigned int PACKED_OUTPUT_COLS_PER_TILE = TILE_DIM / PACK_SCALARS;\n";
+        ss << "  constexpr unsigned int PACKED_STORES_PER_TILE = TILE_COL_SCALARS * PACKED_OUTPUT_COLS_PER_TILE;\n";
+        ss << "  const unsigned int threadLinear = threadIdx.y * TILE_DIM + threadIdx.x;\n";
+        ss << "  for (unsigned int packedStore = threadLinear; packedStore < PACKED_STORES_PER_TILE; packedStore += TILE_DIM * BLOCK_ROWS) "
+              "{\n";
+        ss << "    const unsigned int localOutRow = packedStore / PACKED_OUTPUT_COLS_PER_TILE;\n";
+        ss << "    const unsigned int localOutPackCol = packedStore - localOutRow * PACKED_OUTPUT_COLS_PER_TILE;\n";
+        ss << "    const unsigned int inputPackCol = localOutRow / PACK_SCALARS;\n";
+        ss << "    const unsigned int inputColLane = localOutRow - inputPackCol * PACK_SCALARS;\n";
+        ss << "    const unsigned int outputRow = colStart + localOutRow;\n";
+        ss << "    const unsigned int outputColBase = rowStart + localOutPackCol * PACK_SCALARS;\n";
+        ss << "    Pack output_pack{};\n";
+        ss << "    " << output_type << "* output_scalar = reinterpret_cast<" << output_type << "*>(&output_pack);\n";
+        ss << "    for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
+        ss << "      PackRaw input_raw{};\n";
+        ss << "      input_raw.raw = tile[localOutPackCol * PACK_SCALARS + lane][inputPackCol];\n";
+        ss << "      const " << output_type << "* input_scalar = reinterpret_cast<const " << output_type << "*>(&input_raw.pack);\n";
+        ss << "      output_scalar[lane] = input_scalar[inputColLane];\n";
+        ss << "    }\n";
+        ss << "    const unsigned long long out_base_idx = static_cast<unsigned long long>(outputRow) * static_cast<unsigned long "
+              "long>(numRows) +\n";
+        ss << "                                           static_cast<unsigned long long>(outputColBase);\n";
+        ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + PACK_SCALARS <= numRows) &&\n";
+        ss << "                                     ((out_base_idx % PACK_SCALARS) == 0ULL);\n";
+        ss << "    if (outputPackedStoreOk) {\n";
+        ss << "      Pack* out_ptr = reinterpret_cast<Pack*>(out0 + out_base_idx);\n";
+        ss << "      *out_ptr = output_pack;\n";
+        ss << "    } else if (outputRow < numCols) {\n";
+        ss << "      for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
+        ss << "        const unsigned int outputCol = outputColBase + lane;\n";
+        ss << "        if (outputCol < numRows) {\n";
+        ss << "          out0[static_cast<unsigned long long>(outputRow) * static_cast<unsigned long long>(numRows) +\n";
+        ss << "               static_cast<unsigned long long>(outputCol)] = output_scalar[lane];\n";
+        ss << "        }\n";
+        ss << "      }\n";
+        ss << "    }\n";
+        ss << "  }\n";
+        ss << "}\n";
+        return ss.str();
+    }
+
+    ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_DIM + 1];\n";
+    ss << "  const unsigned int x = blockIdx.x * TILE_DIM + threadIdx.x;\n";
+    ss << "  const unsigned int y = blockIdx.y * TILE_DIM + threadIdx.y;\n";
+    ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
+    ss << "    const unsigned int logical_row = y + j;\n";
+    ss << "    const unsigned int logical_col = x;\n";
+    ss << "    if (logical_col < numCols && logical_row < numRows) {\n";
+    ss << "      const " << index_type << " logical_idx = static_cast<" << index_type << ">(logical_row) * static_cast<" << index_type
+       << ">(numCols) + static_cast<" << index_type << ">(logical_col);\n";
+    for (uint32_t input_slot : group.used_input_slots) {
+        ss << "      " << index_type << " in" << input_slot << "_offset = " << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
+    }
+    if (!group.active_axes.empty()) {
+        ss << "\n";
+        emitSpecializedBroadcastOffsetMath(ss, group, all_used_indices, "logical_idx", "", "      ", use_uint32_index_math);
+        ss << "\n";
+    }
+    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+        if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+            continue;
+        }
+        emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/true, "      ");
+    }
+    ss << "      tile[threadIdx.y + j][threadIdx.x] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype)
+       << ";\n";
+    ss << "    }\n";
+    ss << "  }\n\n";
+    ss << "  __syncthreads();\n\n";
+    ss << "  const unsigned int tx = blockIdx.y * TILE_DIM + threadIdx.x;\n";
+    ss << "  const unsigned int ty = blockIdx.x * TILE_DIM + threadIdx.y;\n";
+    ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
+    ss << "    if (tx < numRows && (ty + j) < numCols) {\n";
+    ss << "      const unsigned long long out_idx = static_cast<unsigned long long>(ty + j) * static_cast<unsigned long long>(numRows) +\n";
+    ss << "                                       static_cast<unsigned long long>(tx);\n";
+    ss << "      out0[out_idx] = tile[threadIdx.x][threadIdx.y + j];\n";
+    ss << "    }\n";
+    ss << "  }\n";
+    ss << "}\n";
+    return ss.str();
+}
+
 std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionStage& stage,
                                                         const std::vector<SpecializedBroadcastGroup>& groups,
                                                         const std::string& kernel_name) {
@@ -2995,6 +3205,9 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
     }
     if (groups.empty()) {
         throw std::runtime_error("emitSpecializedBroadcast requires at least one group.");
+    }
+    if (stageHasTransposedMaterializedOutput(stage.outputs)) {
+        return emitTiledTransposeMaterializedSpecializedBroadcast(stage, groups, kernel_name);
     }
 
     Optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);

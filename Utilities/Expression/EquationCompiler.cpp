@@ -2230,10 +2230,10 @@ static bool regionSupportsTiledTransposeMaterialization(const PhysicalExpression
     // the same logical flat index, and the computed scalar is staged through the
     // padded shared-memory tile before being written transposed.
     //
-    // Broadcast / shape-changing fused regions are intentionally not accepted
-    // here yet.  They are rejected at stamp time by fusedStageRequiresBroadcastLaunch
-    // when a transposed materialized output is present, because their descriptor
-    // indexing needs a separate layout-aware implementation.
+    // Broadcast / mixed-shape fused regions are accepted here too.  At stamp
+    // time they are compiled through the specialized broadcast emitter, which
+    // uses the pre-transpose logical output index space for input-offset math
+    // and still stores through the tiled transposed materializer.
     return true;
 }
 
@@ -2837,14 +2837,20 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
                                                       input_dtypes,
                                                       output_dtypes,
                                                       sig.device_num);
-    const Optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
-    compiled->elements_per_thread = vectorized_dtype.isPresent() ? 2u : 1u;
-
     compiled->uses_uint32_numel_arg = false;
 
-    if (groups.size() > 1) {
-        compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;
-        compiled->num_broadcast_groups = static_cast<uint32_t>(groups.size());
+    if (stageHasTransposedMaterializedOutput(stage.outputs)) {
+        compiled->launch_kind = CompiledEquation::LaunchKind::FusedTiledTranspose;
+        compiled->elements_per_thread = 1u;
+        compiled->tiled_transpose_pack_scalars = CudaSourceEmitter::tiledTransposePackScalars(stage);
+    } else {
+        const Optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
+        compiled->elements_per_thread = vectorized_dtype.isPresent() ? 2u : 1u;
+
+        if (groups.size() > 1) {
+            compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;
+            compiled->num_broadcast_groups = static_cast<uint32_t>(groups.size());
+        }
     }
 
     specializedBroadcastCache.put(cache_key, compiled);

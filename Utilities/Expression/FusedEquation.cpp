@@ -2235,7 +2235,6 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
                 throw std::runtime_error("ReduceMinMaxBackward stage missing payload while computing FLOPs.");
             }
             return computeReduceMinMaxBackwardStageFlops(*stage.reduce_minmax_backward, stage_input_dims);
-
     }
 
     throw std::runtime_error("Unknown stage kind while computing FLOPs.");
@@ -2672,7 +2671,9 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
 
     std::map<std::vector<uint64_t>, std::vector<uint32_t>> outputs_by_dims;
     for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-        outputs_by_dims[resolveOutputDimsForStageOutput(stage, out_idx, stage_input_dims)].push_back(out_idx);
+        std::vector<uint64_t> physical_output_dims = resolveOutputDimsForStageOutput(stage, out_idx, stage_input_dims);
+        std::vector<uint64_t> logical_output_dims = logicalDimsForBroadcastComparison(stage, out_idx, std::move(physical_output_dims));
+        outputs_by_dims[logical_output_dims].push_back(out_idx);
     }
 
     auto effective_dims_maps_equal = [](const std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>& a,
@@ -3340,7 +3341,10 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
                     if (output_idx >= prepared_stage.expected_output_dims.size()) {
                         throw std::runtime_error("Broadcast group output index out of range.");
                     }
-                    std::vector<uint64_t> output_dims = group.specialized.output_dims;
+                    std::vector<uint64_t> output_dims =
+                        stage.outputs[output_idx].materialized_layout == MaterializedTensorLayout::Transposed
+                            ? resolveOutputDimsForStageOutput(stage, output_idx, ordered_inputs)
+                            : group.specialized.output_dims;
                     auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[output_idx].name);
                     if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
                         if (!(ordered_inputs.empty() && output_dims.empty())) {
@@ -4388,12 +4392,6 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 const bool requires_broadcast = fusedStageRequiresBroadcastLaunch(
                     stage, stageInputs, effectiveRequestedOutputShapes, backward_config.has_value(), resolved_output_dims);
 
-                if (requires_broadcast && stageHasTransposedMaterializedOutput(stage)) {
-                    throw std::runtime_error(
-                        "Transposed fused materialization currently supports flat rank-2 fused stages only; "
-                        "broadcast/mixed-shape layout-aware emission will be added as a follow-up.");
-                }
-
                 if (!requires_broadcast) {
                     for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
                         std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
@@ -4421,7 +4419,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                             if (output_idx >= expected_output_dims.size()) {
                                 throw std::runtime_error("Broadcast group output index out of range.");
                             }
-                            std::vector<uint64_t> output_dims = group.specialized.output_dims;
+                            std::vector<uint64_t> output_dims =
+                                stage.outputs[output_idx].materialized_layout == MaterializedTensorLayout::Transposed
+                                    ? resolveOutputDimsForStageOutput(stage, output_idx, stageInputs)
+                                    : group.specialized.output_dims;
                             auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[output_idx].name);
                             if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
                                 if (!(stageInputs.empty() && output_dims.empty())) {

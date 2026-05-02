@@ -341,3 +341,73 @@ def test_transposed_and_untransposed_outputs_from_same_region_are_materialized_a
         assert got.dtype == _numpy_storage_dtype(output_dtype)
         assert got.shape == expected[name].shape
         _assert_close(got, expected[name], output_dtype)
+
+
+BROADCAST_TRANSPOSE_DTYPE_CASES = [
+    pytest.param(thor.DataType.fp32, thor.DataType.fp32, id="fp32_scalar_output"),
+    pytest.param(thor.DataType.fp16, thor.DataType.fp16, id="fp16_packed_output"),
+    pytest.param(thor.DataType.fp8_e4m3, thor.DataType.fp8_e4m3, id="fp8_packed_output"),
+]
+
+
+def _run_fused_broadcast_transpose_expr(
+        input_dtype: thor.DataType, output_dtype: thor.DataType, *, lhs_shape: tuple[int, int],
+        rhs_shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    x = ex.input("x")
+    y = ex.input("y")
+
+    fused = ((x * 1.25) + (y * -0.5) + ((x - y) * 0.125) - 0.25).with_output_dtype(output_dtype)
+    expr = fused.transpose()
+
+    x_np = _make_matrix(lhs_shape, input_dtype, offset=-0.125)
+    y_np = _make_matrix(rhs_shape, input_dtype, offset=0.375)
+    reference_compute_dtype = _default_compute_dtype(input_dtype, output_dtype)
+    expected_untransposed = _cast_reference_to_storage_dtype(
+        _arithmetic_reference(x_np, y_np, reference_compute_dtype),
+        output_dtype,
+    )
+    expected = expected_untransposed.T
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _copy_numpy_to_gpu(x_np, input_dtype, stream),
+        "y": _copy_numpy_to_gpu(y_np, input_dtype, stream),
+    }
+
+    eq = ex.compile(expr, device_num=0)
+    _assert_fused_transpose_stage(eq, inputs_gpu)
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_gpu_to_numpy(stamped.output(), stream)
+    return got, expected
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("input_dtype,output_dtype", BROADCAST_TRANSPOSE_DTYPE_CASES)
+def test_fused_broadcast_outer_arithmetic_transpose_numerical(input_dtype: thor.DataType, output_dtype: thor.DataType):
+    got, expected = _run_fused_broadcast_transpose_expr(
+        input_dtype,
+        output_dtype,
+        lhs_shape=(35, 1),
+        rhs_shape=(1, 67),
+    )
+
+    assert got.dtype == _numpy_storage_dtype(output_dtype)
+    assert got.shape == expected.shape == (67, 35)
+    _assert_close(got, expected, output_dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("input_dtype,output_dtype", BROADCAST_TRANSPOSE_DTYPE_CASES)
+def test_fused_broadcast_row_arithmetic_transpose_numerical(input_dtype: thor.DataType, output_dtype: thor.DataType):
+    got, expected = _run_fused_broadcast_transpose_expr(
+        input_dtype,
+        output_dtype,
+        lhs_shape=(35, 67),
+        rhs_shape=(1, 67),
+    )
+
+    assert got.dtype == _numpy_storage_dtype(output_dtype)
+    assert got.shape == expected.shape == (67, 35)
+    _assert_close(got, expected, output_dtype)
