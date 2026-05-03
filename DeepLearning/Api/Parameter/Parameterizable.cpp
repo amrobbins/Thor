@@ -10,30 +10,54 @@ using namespace std;
 
 namespace Thor {
 
-shared_ptr<ParameterSpecification> Parameterizable::getParameter(const std::string& name) const {
-    for (const auto& parameter : getParameters()) {
-        if (parameter != nullptr && parameter->getName() == name)
-            return parameter;
+void Parameterizable::addParameter(const std::shared_ptr<ParameterSpecification>& parameter) {
+    const string paramName = parameter->getName();
+    if (hasParameter(paramName)) {
+        throw runtime_error("Trying to add parameter named " + paramName +
+                            " but that parameter is already present. Existing parameters: " + listParametersString());
+    }
+    parameters[paramName] = parameter;
+}
+
+bool Parameterizable::hasParameter(const std::string& name) const { return parameters.contains(name); }
+
+std::vector<std::string> Parameterizable::listParameters() const {
+    std::vector<std::string> names;
+    names.reserve(parameters.size());
+
+    for (const auto& [key, value] : parameters) {
+        names.push_back(key);
     }
 
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+shared_ptr<ParameterSpecification> Parameterizable::getParameterSpecification(const std::string& name) const {
+    auto it = parameters.find(name);
+    if (it != parameters.end()) {
+        return it->second;
+    }
     throw runtime_error("Parameter '" + name + "' is not present on this parameterizable API layer.");
 }
 
 BoundParameter Parameterizable::getBoundParameter(PlacedNetwork& placedNetwork, const std::string& name) const {
-    return BoundParameter(getParameter(name), &placedNetwork, getParameterizableId());
+    return BoundParameter(getParameterSpecification(name), &placedNetwork, getOwningLayerId());
 }
 
-vector<BoundParameter> Parameterizable::getBoundParameters(PlacedNetwork& placedNetwork) const {
-    vector<BoundParameter> boundParameters;
-    boundParameters.reserve(getParameters().size());
+string Parameterizable::listParametersString() const {
+    const std::vector<std::string> names = listParameters();
 
-    for (const auto& parameter : getParameters()) {
-        if (parameter == nullptr)
-            throw runtime_error("Parameterizable API layer contained a null Parameter.");
-        boundParameters.emplace_back(parameter, &placedNetwork, getParameterizableId());
+    std::string result;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        if (i > 0) {
+            result += ", ";
+        }
+
+        result += names[i];
     }
 
-    return boundParameters;
+    return result;
 }
 
 }  // namespace Thor
