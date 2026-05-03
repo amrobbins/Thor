@@ -24,7 +24,7 @@ class Convolution2d : public TrainableLayer {
     Convolution2d() {}
     virtual ~Convolution2d() = default;
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Convolution2d>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<Convolution2d>(*this); }
 
     virtual uint32_t getFilterHeight() { return filterHeight; }
     virtual uint32_t getFilterWidth() { return filterWidth; }
@@ -33,14 +33,14 @@ class Convolution2d : public TrainableLayer {
     virtual uint32_t getVerticalPadding() { return verticalPadding; }
     virtual uint32_t getHoriztonalPadding() { return horizontalPadding; }
 
-    virtual std::string getLayerType() const { return "Convolution2d"; }
+    std::string getLayerType() const override { return "Convolution2d"; }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
-                                     Stream stream,
-                                     bool saveOptimizerState,
-                                     ThorImplementation::StampedNetwork &stampedNetwork) const;
+    nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+                             Stream stream,
+                             bool saveOptimizerState,
+                             ThorImplementation::StampedNetwork &stampedNetwork) const override;
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
 
    protected:
     virtual bool isMultiLayer() const {
@@ -49,7 +49,7 @@ class Convolution2d : public TrainableLayer {
     }
     virtual void buildSupportLayersAndAddToNetwork(Network *network);
 
-    virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {
+    void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) override {
         std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
         assert(inputDimensions.size() == 3);
 
@@ -97,7 +97,6 @@ class Convolution2d : public TrainableLayer {
                                                                 placement,
                                                                 inferenceOnly,
                                                                 getId());
-        stampOptimizer(physicalConvolution2d);
 
         return physicalConvolution2d;
     }
@@ -106,26 +105,6 @@ class Convolution2d : public TrainableLayer {
                                   bool isFirstStamp,
                                   std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
                                   Optional<Event> sisterLayerLoadedEvent);
-
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
-        // FIXME: workspace size?
-        uint64_t numInputChannels = featureInputs[0].getDimensions()[0];
-        uint64_t numWeights = filterHeight * filterWidth * numInputChannels * numOutputChannels;
-        uint64_t numBiases = numOutputChannels;
-        // have weights and gradient accumulators, as FP16 elements
-        uint64_t fixedMem = 2 * (numWeights + numBiases) * 2;
-        uint64_t batchSizeDependentMem =
-            2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
-
-        return fixedMem + batchSizeDependentMem;
-    }
-
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
-                                                              ThorImplementation::TensorPlacement tensorPlacement) const {
-        uint64_t batchSizeDependentMem =
-            2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
-        return batchSizeDependentMem;
-    }
 
     std::vector<Tensor> standaloneLayerFeatureInputs;
     std::vector<Tensor> standaloneLayerFeatureOutputs;
@@ -142,6 +121,8 @@ class Convolution2d : public TrainableLayer {
     std::shared_ptr<Initializer> weightsInitializer;
     std::shared_ptr<Initializer> biasInitializer;
     std::shared_ptr<Activation> activation;
+    std::shared_ptr<Optimizer> weightsOptimizer;
+    std::shared_ptr<Optimizer> biasesOptimizer;
 
     float dropProportion;
 
@@ -180,8 +161,8 @@ class Convolution2d::Builder {
             _hasBias = false;
         if (_weightsInitializer == nullptr)
             _weightsInitializer = Glorot::Builder().build();
-        if (_biasInitializer == nullptr)
-            _biasInitializer = Glorot::Builder().build();
+        if (_biasesInitializer == nullptr)
+            _biasesInitializer = Glorot::Builder().build();
         if (!_activation && !_activationExplicitlyRemoved)
             _activation = Relu::Builder().build();
         if (_dropProportion.isEmpty())
@@ -227,7 +208,7 @@ class Convolution2d::Builder {
 
         convolution2d.hasBias = _hasBias;
         convolution2d.weightsInitializer = _weightsInitializer->clone();
-        convolution2d.biasInitializer = _biasInitializer->clone();
+        convolution2d.biasInitializer = _biasesInitializer->clone();
         if (_activation != nullptr)
             convolution2d.activation = _activation;
         convolution2d.dropProportion = _dropProportion;
@@ -236,8 +217,8 @@ class Convolution2d::Builder {
         convolution2d.batchNormEpsilon = _batchNormEpsilon;
 
         // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
-        if (_layerOptimizer != nullptr)
-            convolution2d.optimizer = _layerOptimizer;
+        convolution2d.weightsOptimizer = _weightsOptimizer;
+        convolution2d.biasesOptimizer = _biasesOptimizer;
 
         convolution2d.initialized = true;
 
@@ -378,14 +359,14 @@ class Convolution2d::Builder {
     }
 
     virtual Convolution2d::Builder &biasInitializer(std::shared_ptr<Initializer> &_biasInitializer) {
-        assert(this->_biasInitializer == nullptr);
-        this->_biasInitializer = _biasInitializer->clone();
+        assert(this->_biasesInitializer == nullptr);
+        this->_biasesInitializer = _biasInitializer->clone();
         return *this;
     }
 
     virtual Convolution2d::Builder &biasInitializer(std::shared_ptr<Initializer> &&_biasInitializer) {
-        assert(this->_biasInitializer == nullptr);
-        this->_biasInitializer = _biasInitializer->clone();
+        assert(this->_biasesInitializer == nullptr);
+        this->_biasesInitializer = _biasInitializer->clone();
         return *this;
     }
 
@@ -411,9 +392,15 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    virtual Convolution2d::Builder &optimizer(std::shared_ptr<Optimizer> _layerOptimizer) {
-        assert(this->_layerOptimizer == nullptr);
-        this->_layerOptimizer = _layerOptimizer;
+    virtual Convolution2d::Builder &weightsOptimizer(std::shared_ptr<Optimizer> _weightsOptimizer) {
+        assert(this->_weightsOptimizer == nullptr);
+        this->_weightsOptimizer = _weightsOptimizer;
+        return *this;
+    }
+
+    virtual Convolution2d::Builder &biasesOptimizer(std::shared_ptr<Optimizer> _biasesOptimizer) {
+        assert(this->_biasesOptimizer == nullptr);
+        this->_biasesOptimizer = _biasesOptimizer;
         return *this;
     }
 
@@ -468,10 +455,11 @@ class Convolution2d::Builder {
     Optional<uint32_t> _horizontalPadding;
     Optional<bool> _hasBias;
     std::shared_ptr<Initializer> _weightsInitializer;
-    std::shared_ptr<Initializer> _biasInitializer;
+    std::shared_ptr<Initializer> _biasesInitializer;
     std::shared_ptr<Activation> _activation;
     bool _activationExplicitlyRemoved;
-    std::shared_ptr<Optimizer> _layerOptimizer;
+    std::shared_ptr<Optimizer> _weightsOptimizer;
+    std::shared_ptr<Optimizer> _biasesOptimizer;
 
     Optional<float> _dropProportion;
 

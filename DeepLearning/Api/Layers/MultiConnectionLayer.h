@@ -55,6 +55,19 @@ class MultiConnectionLayer : public Layer {
     virtual std::vector<Tensor> getFeatureOutputs() const { return featureOutputs; }
     virtual std::vector<Tensor> getFeatureInputs() const { return featureInputs; }
 
+    uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
+        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes() * batchSize;
+    }
+
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
+        return getOutputTensorBytes(batchSize);
+    }
+
+    uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                      ThorImplementation::TensorPlacement tensorPlacement) const override {
+        return getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+    }
+
    protected:
     std::vector<Tensor> featureInputs;
     std::vector<Tensor> featureOutputs;
