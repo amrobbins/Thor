@@ -15,6 +15,11 @@ using json = nlohmann::json;
 
 namespace Thor {
 
+TrainableLayer::TrainableLayer(std::vector<std::shared_ptr<ParameterSpecification>> parameters) : Parameterizable(getId()) {
+    for (const auto &parameter : parameters)
+        addParameter(parameter);
+}
+
 unordered_map<string, TrainableLayer::Deserializer> &TrainableLayer::get_registry() {
     static unordered_map<string, Deserializer> registry;
     return registry;
@@ -44,8 +49,7 @@ void TrainableLayer::attachDefaultOptimizer(std::shared_ptr<Optimizer> optimizer
 }
 
 bool TrainableLayer::hasOptimizer() const {
-    for (const auto &[name, parameter] : parameters) {
-        (void)name;
+    for (const auto &parameter : parameters) {
         if (parameter != nullptr && parameter->isTrainable() && parameter->hasOptimizer()) {
             return true;
         }
@@ -113,7 +117,7 @@ void TrainableLayer::deserializeParameters(const json &j, shared_ptr<thor_file::
 
 uint64_t TrainableLayer::getParameterBytes() const {
     uint64_t parameterBytes = 0;
-    for (const auto &[paramName, param] : parameters) {
+    for (const auto &param : parameters) {
         parameterBytes += param->getTotalSizeInBytes();
     }
     return parameterBytes;

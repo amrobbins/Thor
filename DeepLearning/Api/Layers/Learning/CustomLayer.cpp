@@ -79,7 +79,7 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          const std::vector<TensorMap>& outputInterfaces,
                          std::vector<std::shared_ptr<ParameterSpecification>> parameters,
                          bool useFastMath)
-    : expr(std::move(expr)), useFastMath(useFastMath), parameters(std::move(parameters)) {
+    : TrainableLayer(std::move(parameters)), expr(std::move(expr)), useFastMath(useFastMath) {
     if (inputNames.empty())
         inputNames = this->expr.getExpectedInputNames();
     if (outputNames.empty())

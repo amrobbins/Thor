@@ -22,21 +22,21 @@ void Parameterizable::addParameter(const std::shared_ptr<ParameterSpecification>
         throw runtime_error("Trying to add parameter named " + paramName +
                             " but that parameter is already present. Existing parameters: " + listParametersString());
     }
-    parameters[paramName] = parameter;
+    parameterIndexByName[parameter->getName()] = parameters.size();
+    parameters.push_back(parameter);
 }
 
-bool Parameterizable::hasParameter(const std::string& name) const { return parameters.contains(name); }
+bool Parameterizable::hasParameter(const std::string& name) const { return parameterIndexByName.contains(name); }
 
 std::vector<std::string> Parameterizable::listParameters() const {
     std::vector<std::string> names;
     names.reserve(parameters.size());
 
-    for (const auto& [key, value] : parameters) {
-        (void)value;
-        names.push_back(key);
+    for (const auto &param : parameters) {
+        names.push_back(param->getName());
     }
 
-    std::sort(names.begin(), names.end());
+    // std::sort(names.begin(), names.end());
     return names;
 }
 
@@ -53,15 +53,28 @@ std::vector<std::shared_ptr<ParameterSpecification>> Parameterizable::getParamet
 }
 
 shared_ptr<ParameterSpecification> Parameterizable::getParameterSpecification(const std::string& name) const {
-    auto it = parameters.find(name);
-    if (it != parameters.end()) {
-        return it->second;
+    auto it = parameterIndexByName.find(name);
+    if (it != parameterIndexByName.end()) {
+        return parameters[it->second];
     }
     throw runtime_error("Parameter '" + name + "' is not present on this parameterizable API layer.");
 }
 
 BoundParameter Parameterizable::getBoundParameter(PlacedNetwork* placedNetwork, const std::string& name) const {
     return BoundParameter(getParameterSpecification(name), placedNetwork, getParameterizableId());
+}
+
+std::vector<BoundParameter> Parameterizable::getBoundParameters(PlacedNetwork* placedNetwork) const {
+    std::vector<BoundParameter> result;
+    std::vector<std::shared_ptr<ParameterSpecification>> parameterSpecs = getParameters();
+
+    result.reserve(parameterSpecs.size());
+    for (const auto& parameter : parameterSpecs) {
+        assert(parameter != nullptr);
+        result.emplace_back(parameter, placedNetwork, getParameterizableId());
+    }
+
+    return result;
 }
 
 string Parameterizable::listParametersString() const {
@@ -112,7 +125,8 @@ void Parameterizable::serializeParameters(nlohmann::json& parametersJson,
         std::dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
     assert(physicalTrainableLayer != nullptr);
 
-    for (const auto& [paramName, parameterSpecification] : parameters) {
+    for (const auto& parameterSpecification : parameters) {
+        const string& paramName = parameterSpecification->getName();
         json parameterJson = parametersJson.at(paramName);
         assert(parameterJson.is_object());
         parametersJson = BoundParameter::serialize(
