@@ -15,21 +15,21 @@ class BatchNormalization : public TrainableLayer {
 
     virtual ~BatchNormalization() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<BatchNormalization>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<BatchNormalization>(*this); }
 
     virtual Optional<double> getExponentialRunningAverageFactor() { return exponentialRunningAverageFactor; }
     virtual Optional<double> getEpsilon() { return epsilon; }
 
-    virtual std::string getLayerType() const { return "BatchNormalization"; }
+    std::string getLayerType() const override { return "BatchNormalization"; }
 
     virtual bool isMultiLayer() const { return false; }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
-                                     Stream stream,
-                                     bool saveOptimizerState,
-                                     ThorImplementation::StampedNetwork &stampedNetwork) const;
+    nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+                             Stream stream,
+                             bool saveOptimizerState,
+                             ThorImplementation::StampedNetwork &stampedNetwork) const override;
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
 
    protected:
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -42,7 +42,6 @@ class BatchNormalization : public TrainableLayer {
         std::shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormalization =
             std::make_shared<ThorImplementation::BatchNormalization>(
                 placement, inferenceOnly, numItemsObserved, exponentialRunningAverageFactor, epsilon, Tensor::DataType::FP32, getId());
-        stampOptimizer(physicalBatchNormalization);
 
         return physicalBatchNormalization;
     }
@@ -52,29 +51,6 @@ class BatchNormalization : public TrainableLayer {
                                   std::shared_ptr<ThorImplementation::TrainableLayer> sisterPhysicalLayer,
                                   Optional<Event> sisterPhysicalLayerLoadedEvent);
 
-    // mem requirements are the weights
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
-        uint64_t numChannels = featureInputs[0].getDimensions()[0];
-        uint64_t perInstanceWeights = (4 + featureInputs.size()) * numChannels * 2;  // FP16 FIXME not anymore
-        uint64_t perInputState = (2 + featureInputs.size()) * numChannels * 2;       // FP16
-
-        uint64_t featureOutputSize = featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
-        uint64_t errorOutputSize = featureInputs.size() * featureInputs[0].getTotalSizeInBytes();
-
-        return perInstanceWeights + perInputState + batchSize * (featureOutputSize + errorOutputSize);
-    }
-
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
-                                                              ThorImplementation::TensorPlacement tensorPlacement) const {
-        uint64_t numChannels = featureInputs[0].getDimensions()[0];
-        uint64_t perInputState = (2 + featureInputs.size()) * numChannels * 2;  // FP16
-
-        uint64_t featureOutputSize = featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
-        uint64_t errorOutputSize = featureInputs.size() * featureInputs[0].getTotalSizeInBytes();
-
-        return perInputState + batchSize * (featureOutputSize + errorOutputSize);
-    }
-
    private:
     double exponentialRunningAverageFactor;
     double epsilon;
@@ -82,6 +58,7 @@ class BatchNormalization : public TrainableLayer {
     Optional<std::string> runningMeansFile;
     Optional<std::string> runningVariancesFile;
     uint64_t numItemsObserved = 0;
+    std::shared_ptr<Optimizer> optimizer;
 };
 
 class BatchNormalization::Builder {
@@ -102,8 +79,7 @@ class BatchNormalization::Builder {
             batchNormalization.epsilon = _epsilon.get();
 
         // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
-        if (_layerOptimizer != nullptr)
-            batchNormalization.optimizer = _layerOptimizer;
+        batchNormalization.optimizer = _layerOptimizer;
 
         batchNormalization.initialized = true;
 

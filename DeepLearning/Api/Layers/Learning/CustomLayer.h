@@ -3,7 +3,6 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
-#include "DeepLearning/Api/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
 
@@ -17,7 +16,7 @@
 #include <vector>
 
 namespace Thor {
-class CustomLayer : public TrainableLayer, public Parameterizable {
+class CustomLayer : public TrainableLayer {
    public:
     using TensorMap = std::unordered_map<std::string, Tensor>;
 
@@ -45,7 +44,6 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     TensorMap getOutputInterfaceByIndex(uint32_t interfaceIndex = 0) const;
     Tensor getOutput(const std::string& outputName, uint32_t interfaceIndex = 0) const;
     const ThorImplementation::DynamicExpression& getExpression() const { return expr; }
-    const std::vector<std::shared_ptr<ParameterSpecification>>& getParameters() const override { return parameters; }
     uint64_t getParameterizableId() const override { return getId(); }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
@@ -75,8 +73,11 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                   bool isFirstStamp,
                                   std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
-                                  Optional<Event> sisterLayerLoadedEvent) override {
-        return Layer::initialize(layer);
+                                  Optional<Event> sisterLayerLoadedEvent) {
+        (void)isFirstStamp;
+        (void)sisterLayer;
+        (void)sisterLayerLoadedEvent;
+        return TrainableLayer::initialize(layer);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override;
@@ -114,7 +115,7 @@ class CustomLayer : public TrainableLayer, public Parameterizable {
     std::vector<TensorMap> inputInterfaces;
     std::vector<TensorMap> outputInterfaces;
 
-    std::vector<std::shared_ptr<ParameterSpecification>> parameters;
+    // std::vector<std::shared_ptr<ParameterSpecification>> parameters;
 
     // Per-interface readiness is tracked by logical input port, not by tensor, because the same tensor may satisfy
     // several named inputs and/or participate in several input interfaces.
@@ -147,7 +148,7 @@ class CustomLayer::Builder {
         CustomLayer customLayer(*_expr, _inputNames, _outputNames, _inputInterfaces, _outputInterfaces, _parameters, _useFastMath);
 
         if (_layerOptimizer != nullptr)
-            customLayer.optimizer = _layerOptimizer;
+            customLayer.attachDefaultOptimizer(_layerOptimizer);
 
         customLayer.addToNetwork(_network.get());
         return customLayer;
