@@ -96,242 +96,251 @@ void FullyConnected::buildSupportLayersAndAddToNetwork(Network *network) {
     }
 }
 
-// json FullyConnected::architectureJson() const {
-//     // Multi-layers will only serialize the single layer, itself.
-//     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
-//
-//     json j;
-//     j["factory"] = Layer::Factory::Learning.value();
-//     j["version"] = getLayerVersion();
-//     j["layer_type"] = "fully_connected";
-//     string layerName = string("layer") + to_string(getId());
-//     j["layer_name"] = layerName;
-//     j["num_output_features"] = numOutputFeatures;
-//     j["has_bias"] = hasBias;
-//
-//     // Input connections
-//     json inputs = json::array();
-//     for (uint32_t i = 0; i < standaloneFCFeatureInputs.size(); ++i) {
-//         inputs.push_back(standaloneFCFeatureInputs[i].architectureJson());
-//     }
-//     j["inputs"] = inputs;
-//
-//     // Output connections
-//     json outputs = json::array();
-//     for (uint32_t i = 0; i < standaloneFCFeatureOutputs.size(); ++i) {
-//         outputs.push_back(standaloneFCFeatureOutputs[i].architectureJson());
-//     }
-//     j["outputs"] = outputs;
-//
-//     if (weightsInitializer != nullptr) {
-//         j["weights_initializer"] = weightsInitializer->architectureJson();
-//     }
-//     if (biasesInitializer != nullptr) {
-//         j["biases_initializer"] = biasesInitializer->architectureJson();
-//     }
-//
-//     if (hasOptimizer()) {
-//         j["optimizer"] = optimizer->architectureJson();
-//     }
-//
-//     return j;
-// }
-//
-// json FullyConnected::serialize(thor_file::TarWriter &archiveWriter,
-//                                Stream stream,
-//                                bool saveOptimizerState,
-//                                ThorImplementation::StampedNetwork &stampedNetwork) const {
-//     // Multi-layers will only serialize the single layer, itself.
-//     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
-//     json j = architectureJson();
-//
-//     string layerName = string("layer") + to_string(getId());
-//
-//     // Dump the weights to a file and record its name
-//     shared_ptr<ThorImplementation::TrainableLayer> twbLayer = nullptr;
-//     shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-//     twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
-//     assert(twbLayer != nullptr);
-//
-//     ThorImplementation::Tensor weights;
-//     ThorImplementation::Tensor biases;
-//     string weightsFile;
-//     string biasesFile;
-//     if (twbLayer != nullptr) {
-//         if (hasBias) {
-//             biasesFile = (layerName + "_biases.gds");
-//             j["biases_tensor"] = biasesFile;
-//             biases = twbLayer->getParameter("biases")->getStorage().get();
-//             archiveWriter.addArchiveFile(biasesFile, biases);
-//         }
-//
-//         weightsFile = (layerName + "_weights.gds");
-//         j["weights_tensor"] = weightsFile;
-//         weights = twbLayer->getParameter("weights")->getStorage();
-//         archiveWriter.addArchiveFile(weightsFile, weights);
-//     }
-//
-//     if (hasOptimizer()) {
-//         j["weights_optimizer"] = optimizer->serialize(archiveWriter,
-//                                                       stream,
-//                                                       twbLayer->getParameter("weights")->getOptimizer(),
-//                                                       string("layer") + to_string(getId()),
-//                                                       saveOptimizerState);
-//         if (hasBias) {
-//             j["biases_optimizer"] = optimizer->serialize(archiveWriter,
-//                                                          stream,
-//                                                          twbLayer->getParameter("biases")->getOptimizer(),
-//                                                          string("layer") + to_string(getId()),
-//                                                          saveOptimizerState);
-//         }
-//     }
-//
-//     return j;
-// }
-//
-// void FullyConnected::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
-//     if (j.at("version").get<std::string>() != "1.0.0")
-//         throw runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
-//     if (j.at("layer_type").get<std::string>() != "fully_connected")
-//         throw runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
-//
-//     uint32_t numOutputFeatures = j.at("num_output_features").get<uint32_t>();
-//     bool hasBias = j.at("has_bias").get<bool>();
-//
-//     vector<Tensor> featureInputs;
-//     for (const json &input : j["inputs"]) {
-//         uint64_t originalTensorId = input.at("id").get<uint64_t>();
-//         Tensor tensor = network->getApiTensorByOriginalId(originalTensorId);
-//         featureInputs.push_back(tensor);
-//     }
-//
-//     vector<Tensor> featureOutputs;
-//     for (const json &output : j["outputs"]) {
-//         featureOutputs.push_back(Tensor::deserialize(output));
-//     }
-//
-//     FullyConnected fullyConnected = FullyConnected();
-//     fullyConnected.numOutputFeatures = numOutputFeatures;
-//     fullyConnected.hasBias = hasBias;
-//     fullyConnected.featureInputs = featureInputs;
-//     fullyConnected.standaloneFCFeatureInputs = featureInputs;
-//     for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
-//         fullyConnected.featureOutputs.push_back(featureOutputs[i]);
-//         fullyConnected.standaloneFCFeatureOutputs.push_back(featureOutputs[i]);
-//         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
-//         fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
-//     }
-//     fullyConnected.archiveReader = archiveReader;
-//     if (j.contains("weights_tensor")) {
-//         fullyConnected.weightsFile = j.at("weights_tensor").get<string>();
-//         if (hasBias)
-//             fullyConnected.biasesFile = j.at("biases_tensor").get<string>();
-//     }
-//
-//     if (j.contains("weights_initializer")) {
-//         fullyConnected.weightsInitializer = Initializer::deserialize(j.at("weights_initializer"));
-//     }
-//     if (j.contains("biases_initializer")) {
-//         fullyConnected.biasesInitializer = Initializer::deserialize(j.at("biases_initializer"));
-//     }
-//
-//     if (j.contains("optimizer")) {
-//         fullyConnected.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"), network);
-//     }
-//
-//     fullyConnected.initialized = true;
-//     fullyConnected.addToNetwork(network);
-// }
-//
-// vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::TrainableLayer> physicalLayer,
-//                                          bool isFirstStamp,
-//                                          shared_ptr<ThorImplementation::TrainableLayer> sisterPhysicalLayer,
-//                                          Optional<Event> sisterPhysicalLayerLoadedEvent) {
-//     vector<Event> initDoneEvents =
-//         TrainableLayer::initialize(physicalLayer, isFirstStamp, sisterPhysicalLayer, sisterPhysicalLayerLoadedEvent);
-//
-//     // Weights are set right now, based on 1 of 3 methods:
-//     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
-//     //      * So this is once per GPU since multiple stamps on the same GPU share the weights
-//     // 2. Copy from a file - when loading a saved network
-//     // 3. Run an initializer to set the weights - on an untrained network
-//     if (!isFirstStamp) {
-//         // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
-//         assert(sisterPhysicalLayer != nullptr);
-//         ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
-//         Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
-//         if (sisterPhysicalLayerLoadedEvent.isPresent())
-//             stream.waitEvent(sisterPhysicalLayerLoadedEvent);
-//         weights.copyFromAsync(sisterPhysicalLayer->getParameter("weights")->getStorage(), stream);
-//         if (hasBias) {
-//             ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage();
-//             Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getParameter("biases")->getStorage();
-//             assert(sisterLayerBiases.isPresent());
-//             biases.copyFromAsync(sisterLayerBiases.get(), stream);
-//         }
-//
-//         initDoneEvents.push_back(stream.putEvent(false, true));
-//     } else if (weightsFile.isPresent()) {
-//         // 2. Copy from a file - when loading a saved network
-//         assert(archiveReader != nullptr);
-//         assert(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getMemDevice() ==
-//                ThorImplementation::TensorPlacement::MemDevices::GPU);
-//         Stream stream =
-//             Stream::getNextUploadStream(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getDeviceNum());
-//
-//         ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
-//         archiveReader->registerReadRequest(weightsFile.get(), weights);
-//         if (hasBias) {
-//             assert(biasesFile.isPresent());
-//             ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().get();
-//             archiveReader->registerReadRequest(biasesFile.get(), biases);
-//         }
-//
-//         // Can't use the file later, it may not still be there
-//         archiveReader = nullptr;
-//         weightsFile = Optional<string>::empty();
-//         biasesFile = Optional<string>::empty();
-//     } else {
-//         // FIXME: This needs to be updated to use Parameter's. It should be moved to API Thor::TrainableLayer
-//         // // 3. Run an initializer to set the weights - on an untrained network
-//         // assert(weightsInitializer != nullptr);
-//         // if (hasBias)
-//         //     assert(biasInitializer != nullptr);
-//         //
-//         // Optional<Event> initDoneEvent;
-//         //
-//         // initDoneEvent = weightsInitializer->initialize(physicalLayer->getParameter("weights")->getStorage(), physicalLayer.get());
-//         // if (initDoneEvent.isPresent())
-//         //     initDoneEvents.push_back(initDoneEvent);
-//         //
-//         // if (physicalLayer->getParameter("biases")->getStorage().isPresent()) {
-//         //     initDoneEvent = biasInitializer->initialize(physicalLayer->getParameter("biases")->getStorage().get(),
-//         physicalLayer.get());
-//         //     if (initDoneEvent.isPresent())
-//         //         initDoneEvents.push_back(initDoneEvent);
-//         // }
-//     }
-//
-//     // if (hasOptimizer()) {
-//     //     // Initialize the optimizer - it will follow the same process as above.
-//     //     shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
-//     //     shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
-//     //         sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
-//     //
-//     //     vector<Event> optimizerInitDoneEvents =
-//     //         optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);
-//     //     for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
-//     //         initDoneEvents.push_back(optimizerInitDoneEvents[i]);
-//     // }
-//
-//     return initDoneEvents;
-// }
-//
-// }  // namespace Thor
-//
-// namespace {
-// static const bool registered = [] {
-//     Thor::TrainableLayer::register_layer("fully_connected", &Thor::FullyConnected::deserialize);
-//     return true;
-// }();
+json FullyConnected::architectureJson() const {
+    // Multi-layers will only serialize the single layer, itself.
+    // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
+
+    json j;
+    j["factory"] = Layer::Factory::Learning.value();
+    j["version"] = getLayerVersion();
+    j["layer_type"] = "fully_connected";
+    string layerName = string("layer") + to_string(getId());
+    j["layer_name"] = layerName;
+    j["num_output_features"] = numOutputFeatures;
+    j["has_bias"] = hasBias;
+
+    // Input connections
+    json inputs = json::array();
+    for (uint32_t i = 0; i < standaloneFCFeatureInputs.size(); ++i) {
+        inputs.push_back(standaloneFCFeatureInputs[i].architectureJson());
+    }
+    j["inputs"] = inputs;
+
+    // Output connections
+    json outputs = json::array();
+    for (uint32_t i = 0; i < standaloneFCFeatureOutputs.size(); ++i) {
+        outputs.push_back(standaloneFCFeatureOutputs[i].architectureJson());
+    }
+    j["outputs"] = outputs;
+
+    if (weightsInitializer != nullptr) {
+        j["weights_initializer"] = weightsInitializer->architectureJson();
+    }
+    if (biasesInitializer != nullptr) {
+        j["biases_initializer"] = biasesInitializer->architectureJson();
+    }
+
+    if (hasOptimizer()) {
+        j["weights_optimizer"] = weightsOptimizer->architectureJson();
+        if (hasBias) {
+            j["biases_optimizer"] = biasesOptimizer->architectureJson();
+        }
+    }
+
+    return j;
+}
+
+json FullyConnected::serialize(thor_file::TarWriter &archiveWriter,
+                               Stream stream,
+                               bool saveOptimizerState,
+                               ThorImplementation::StampedNetwork &stampedNetwork) const {
+    // Multi-layers will only serialize the single layer, itself.
+    // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
+    json j = architectureJson();
+
+    string layerName = string("layer") + to_string(getId());
+
+    // Dump the weights to a file and record its name
+    shared_ptr<ThorImplementation::TrainableLayer> twbLayer = nullptr;
+    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
+    twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
+    assert(twbLayer != nullptr);
+
+    ThorImplementation::Tensor weights;
+    ThorImplementation::Tensor biases;
+    string weightsFile;
+    string biasesFile;
+    if (twbLayer != nullptr) {
+        if (hasBias) {
+            biasesFile = (layerName + "_biases.gds");
+            j["biases_tensor"] = biasesFile;
+            biases = twbLayer->getParameter("biases")->getStorage().get();
+            archiveWriter.addArchiveFile(biasesFile, biases);
+        }
+
+        weightsFile = (layerName + "_weights.gds");
+        j["weights_tensor"] = weightsFile;
+        weights = twbLayer->getParameter("weights")->getStorage();
+        archiveWriter.addArchiveFile(weightsFile, weights);
+    }
+
+    if (hasOptimizer()) {
+        j["weights_optimizer"] = weightsOptimizer->serialize(archiveWriter,
+                                                             stream,
+                                                             twbLayer->getParameter("weights")->getOptimizer(),
+                                                             string("layer") + to_string(getId()),
+                                                             saveOptimizerState);
+        if (hasBias) {
+            j["biases_optimizer"] = biasesOptimizer->serialize(archiveWriter,
+                                                               stream,
+                                                               twbLayer->getParameter("biases")->getOptimizer(),
+                                                               string("layer") + to_string(getId()),
+                                                               saveOptimizerState);
+        }
+    }
+
+    return j;
+}
+
+void FullyConnected::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
+    // FIXME
+    // if (j.at("version").get<std::string>() != "1.0.0")
+    //     throw runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
+    // if (j.at("layer_type").get<std::string>() != "fully_connected")
+    //     throw runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
+    //
+    // uint32_t numOutputFeatures = j.at("num_output_features").get<uint32_t>();
+    // bool hasBias = j.at("has_bias").get<bool>();
+    //
+    // vector<Tensor> featureInputs;
+    // for (const json &input : j["inputs"]) {
+    //     uint64_t originalTensorId = input.at("id").get<uint64_t>();
+    //     Tensor tensor = network->getApiTensorByOriginalId(originalTensorId);
+    //     featureInputs.push_back(tensor);
+    // }
+    //
+    // vector<Tensor> featureOutputs;
+    // for (const json &output : j["outputs"]) {
+    //     featureOutputs.push_back(Tensor::deserialize(output));
+    // }
+    //
+    // FullyConnected fullyConnected = FullyConnected();
+    // fullyConnected.numOutputFeatures = numOutputFeatures;
+    // fullyConnected.hasBias = hasBias;
+    // fullyConnected.featureInputs = featureInputs;
+    // fullyConnected.standaloneFCFeatureInputs = featureInputs;
+    // for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
+    //     fullyConnected.featureOutputs.push_back(featureOutputs[i]);
+    //     fullyConnected.standaloneFCFeatureOutputs.push_back(featureOutputs[i]);
+    //     fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
+    //     fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
+    // }
+    // fullyConnected.archiveReader = archiveReader;
+    // if (j.contains("weights_tensor")) {
+    //     fullyConnected.weightsFile = j.at("weights_tensor").get<string>();
+    //     if (hasBias)
+    //         fullyConnected.biasesFile = j.at("biases_tensor").get<string>();
+    // }
+    //
+    // if (j.contains("weights_initializer")) {
+    //     fullyConnected.weightsInitializer = Initializer::deserialize(j.at("weights_initializer"));
+    // }
+    // if (j.contains("biases_initializer")) {
+    //     fullyConnected.biasesInitializer = Initializer::deserialize(j.at("biases_initializer"));
+    // }
+    //
+    // if (j.contains("weights_optimizer")) {
+    //     fullyConnected.weightsOptimizer = Optimizer::deserialize(archiveReader, j.at("weights_optimizer"), network);
+    // }
+    // if (j.contains("biases_optimizer")) {
+    //     fullyConnected.weightsOptimizer = Optimizer::deserialize(archiveReader, j.at("biases_optimizer"), network);
+    // }
+    //
+    // fullyConnected.initialized = true;
+    // fullyConnected.addToNetwork(network);
+}
+
+vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::TrainableLayer> physicalLayer,
+                                         bool isFirstStamp,
+                                         shared_ptr<ThorImplementation::TrainableLayer> sisterPhysicalLayer,
+                                         Optional<Event> sisterPhysicalLayerLoadedEvent) {
+    vector<Event> initDoneEvents =
+        TrainableLayer::initialize(physicalLayer, isFirstStamp, sisterPhysicalLayer, sisterPhysicalLayerLoadedEvent);
+
+    // FIXME
+    //
+    // // Weights are set right now, based on 1 of 3 methods:
+    // // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
+    // //      * So this is once per GPU since multiple stamps on the same GPU share the weights
+    // // 2. Copy from a file - when loading a saved network
+    // // 3. Run an initializer to set the weights - on an untrained network
+    // if (!isFirstStamp) {
+    //     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
+    //     assert(sisterPhysicalLayer != nullptr);
+    //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
+    //     Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
+    //     if (sisterPhysicalLayerLoadedEvent.isPresent())
+    //         stream.waitEvent(sisterPhysicalLayerLoadedEvent);
+    //     weights.copyFromAsync(sisterPhysicalLayer->getParameter("weights")->getStorage(), stream);
+    //     if (hasBias) {
+    //         ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage();
+    //         Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getParameter("biases")->getStorage();
+    //         assert(sisterLayerBiases.isPresent());
+    //         biases.copyFromAsync(sisterLayerBiases.get(), stream);
+    //     }
+    //
+    //     initDoneEvents.push_back(stream.putEvent(false, true));
+    // } else if (weightsFile.isPresent()) {
+    //     // 2. Copy from a file - when loading a saved network
+    //     assert(archiveReader != nullptr);
+    //     assert(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getMemDevice() ==
+    //            ThorImplementation::TensorPlacement::MemDevices::GPU);
+    //     Stream stream =
+    //         Stream::getNextUploadStream(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getDeviceNum());
+    //
+    //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
+    //     archiveReader->registerReadRequest(weightsFile.get(), weights);
+    //     if (hasBias) {
+    //         assert(biasesFile.isPresent());
+    //         ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().get();
+    //         archiveReader->registerReadRequest(biasesFile.get(), biases);
+    //     }
+    //
+    //     // Can't use the file later, it may not still be there
+    //     archiveReader = nullptr;
+    //     weightsFile = Optional<string>::empty();
+    //     biasesFile = Optional<string>::empty();
+    // } else {
+    //     // FIXME: This needs to be updated to use Parameter's. It should be moved to API Thor::TrainableLayer
+    //     // // 3. Run an initializer to set the weights - on an untrained network
+    //     // assert(weightsInitializer != nullptr);
+    //     // if (hasBias)
+    //     //     assert(biasInitializer != nullptr);
+    //     //
+    //     // Optional<Event> initDoneEvent;
+    //     //
+    //     // initDoneEvent = weightsInitializer->initialize(physicalLayer->getParameter("weights")->getStorage(), physicalLayer.get());
+    //     // if (initDoneEvent.isPresent())
+    //     //     initDoneEvents.push_back(initDoneEvent);
+    //     //
+    //     // if (physicalLayer->getParameter("biases")->getStorage().isPresent()) {
+    //     //     initDoneEvent = biasInitializer->initialize(physicalLayer->getParameter("biases")->getStorage().get(),
+    //     physicalLayer.get());
+    //     //     if (initDoneEvent.isPresent())
+    //     //         initDoneEvents.push_back(initDoneEvent);
+    //     // }
+    // }
+    //
+    // // if (hasOptimizer()) {
+    // //     // Initialize the optimizer - it will follow the same process as above.
+    // //     shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
+    // //     shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
+    // //         sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
+    // //
+    // //     vector<Event> optimizerInitDoneEvents =
+    // //         optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);
+    // //     for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
+    // //         initDoneEvents.push_back(optimizerInitDoneEvents[i]);
+    // // }
+
+    return initDoneEvents;
+}
+
 }  // namespace Thor
+
+namespace {
+static const bool registered = [] {
+    Thor::TrainableLayer::register_layer("fully_connected", &Thor::FullyConnected::deserialize);
+    return true;
+}();
+}  // namespace

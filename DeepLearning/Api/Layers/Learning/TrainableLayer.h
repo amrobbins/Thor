@@ -23,7 +23,6 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     virtual ~TrainableLayer() = default;
 
     void attachDefaultOptimizer(std::shared_ptr<Optimizer> optimizer);
-    bool hasOptimizer() const;
     std::shared_ptr<Optimizer> getOptimizer() const;
     void removeOptimizer();
 
@@ -57,9 +56,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         uint64_t batchSizeDependentMem = featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes() * batchSize;
         return batchSizeDependentMem;
     }
-
-    // FIXME: Delete
-    bool hasOptimizer() { return false; }
+    bool hasOptimizer() const;
 
    protected:
     void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) override;
@@ -74,6 +71,8 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
                              ThorImplementation::StampedNetwork &stampedNetwork) const;
 
     void deserializeParameters(const nlohmann::json &j, std::shared_ptr<thor_file::TarReader> &archiveReader);
+
+    std::shared_ptr<thor_file::TarReader> archiveReader;
 };
 
 }  // namespace Thor
