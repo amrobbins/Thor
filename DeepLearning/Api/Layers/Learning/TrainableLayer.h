@@ -44,7 +44,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                   bool isFirstStamp,
                                   std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
-                                  Optional<Event> sisterLayerLoadedEvent) override;
+                                  Optional<Event> sisterLayerLoadedEvent);
 
    protected:
     void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) override;
