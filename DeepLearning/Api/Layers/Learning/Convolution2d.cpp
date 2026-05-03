@@ -129,7 +129,10 @@ json Convolution2d::architectureJson() const {
     }
 
     if (hasOptimizer()) {
-        j["optimizer"] = optimizer->architectureJson();
+        j["weights_optimizer"] = weightsOptimizer->architectureJson();
+        if (hasBias) {
+            j["biases_optimizer"] = biasesOptimizer->architectureJson();
+        }
     }
 
     return j;
@@ -167,17 +170,17 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter,
     }
 
     if (hasOptimizer()) {
-        j["weights_optimizer"] = optimizer->serialize(archiveWriter,
-                                                      stream,
-                                                      twbLayer->getParameter("weights")->getOptimizer(),
-                                                      string("layer") + to_string(getId()),
-                                                      saveOptimizerState);
+        j["weights_optimizer"] = weightsOptimizer->serialize(archiveWriter,
+                                                             stream,
+                                                             twbLayer->getParameter("weights")->getOptimizer(),
+                                                             string("layer") + to_string(getId()),
+                                                             saveOptimizerState);
         if (hasBias) {
-            j["biases_optimizer"] = optimizer->serialize(archiveWriter,
-                                                         stream,
-                                                         twbLayer->getParameter("biases")->getOptimizer(),
-                                                         string("layer") + to_string(getId()),
-                                                         saveOptimizerState);
+            j["biases_optimizer"] = biasesOptimizer->serialize(archiveWriter,
+                                                               stream,
+                                                               twbLayer->getParameter("biases")->getOptimizer(),
+                                                               string("layer") + to_string(getId()),
+                                                               saveOptimizerState);
         }
     }
 
@@ -245,8 +248,11 @@ void Convolution2d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
         convolution2d.biasInitializer = Initializer::deserialize(j.at("biases_initializer"));
     }
 
-    if (j.contains("optimizer")) {
-        convolution2d.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"), network);
+    if (j.contains("weights_optimizer")) {
+        convolution2d.weightsOptimizer = Optimizer::deserialize(archiveReader, j.at("weights_optimizer"), network);
+    }
+    if (j.contains("biases_optimizer")) {
+        convolution2d.biasesOptimizer = Optimizer::deserialize(archiveReader, j.at("biases_optimizer"), network);
     }
 
     convolution2d.initialized = true;

@@ -42,6 +42,7 @@ class ParameterSpecification {
 
     virtual ~ParameterSpecification() = default;
 
+    bool setOptimizer(const std::shared_ptr<Optimizer>& optimizer, bool override = true);
     static std::string getVersion();
     virtual nlohmann::json architectureJson() const;
     virtual nlohmann::json serialize(thor_file::TarWriter& archiveWriter,

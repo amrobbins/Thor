@@ -4,23 +4,23 @@
 
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "DeepLearning/Api/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 
 #include <nlohmann/json.hpp>
 
+#include "DeepLearning/Api/Parameter/ParameterSpecification.h"
+
 namespace Thor {
 
-class TrainableLayer : public MultiConnectionLayer {
+class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
    public:
     using Layer::initialize;  // So that compiler doesn't complain about override below.
 
     virtual ~TrainableLayer() {}
 
-    Tensor getWeights() const { return weights; }
-    Optional<Tensor> getBiases() const { return biases; }
-    Optional<Tensor> getWeightsGradient() const { return weightsGradient; }
-    Optional<Tensor> getBiasesGradient() const { return biasesGradient; }
-
+    virtual nlohmann::json architectureJson() const = 0;
+    // Trainable layers cannot use serialize(thor_file::TarWriter &archiveWriter, Stream stream), they use the custom signature below.
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const final { assert(false); }
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                                      Stream stream,
@@ -31,54 +31,29 @@ class TrainableLayer : public MultiConnectionLayer {
     static std::unordered_map<std::string, Deserializer> &get_registry();
     static void register_layer(std::string name, Deserializer fn);
 
-    nlohmann::json architectureJson() const { /*FIXME*/ assert(false); }
-
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
                                           Optional<Event> sisterLayerLoadedEvent) {
         return MultiConnectionLayer::initialize(layer);
+        // FIXME: What do I need to do here?
     }
-
-    void attachOptimizer(std::shared_ptr<Optimizer> optimizer) { this->optimizer = optimizer; }
-    bool hasOptimizer() const { return optimizer != nullptr; }
-    std::shared_ptr<Optimizer> getOptimizer() { return optimizer; }
-
-    void removeOptimizer();
 
    protected:
-    // Helper function to call stamp() on the optimizer and then associate it with the physical layer
-    virtual void stampOptimizer(std::shared_ptr<ThorImplementation::TrainableLayer> physicalTrainableLayer) const {
-        // FIXME: when mutiple stamps are supported, optimizer and layer will need to know if there is already one stamped
-        //        for that layer on that GPU, to share things like weights, gradientUpdateStream's.
-        if (!physicalTrainableLayer->isInferenceOnly())
-            assert(hasOptimizer());
-        if (hasOptimizer()) {
-            for (const std::string &paramName : physicalTrainableLayer->listParameters()) {
-                if (!physicalTrainableLayer->getParameter(paramName)->isTrainable())
-                    continue;
-                std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = optimizer->stamp(physicalTrainableLayer);
-                physicalTrainableLayer->setOptimizer(paramName, physicalOptimizer);
-            }
-        }
-    }
-
     virtual void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) {
-        if (!physicalLayer->isInferenceOnly())
-            assert(hasOptimizer());
-
         MultiConnectionLayer::compile(physicalLayer);
+        // FIXME: What do I need to do here on the API side?
     }
 
-    Tensor weights;
-    Optional<Tensor> biases;
-    Optional<Tensor> weightsGradient;
-    Optional<Tensor> biasesGradient;
-    std::shared_ptr<Optimizer> optimizer;
+    virtual void serializeParameters(thor_file::TarWriter &archiveWriter,
+                                     Stream stream,
+                                     bool saveOptimizerState,
+                                     ThorImplementation::StampedNetwork &stampedNetwork);
 
-    std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
-    Optional<std::string> weightsFile;
-    Optional<std::string> biasesFile;
+    virtual void deserializeParameters(thor_file::TarReader &archiveReader,
+                                 Stream stream,
+                                 bool loadOptimizerState,
+                                 ThorImplementation::StampedNetwork &stampedNetwork);
 };
 
 }  // namespace Thor

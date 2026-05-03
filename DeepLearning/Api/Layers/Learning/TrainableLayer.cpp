@@ -25,6 +25,21 @@ void TrainableLayer::deserialize(shared_ptr<thor_file::TarReader> &archiveReader
     deserializer(archiveReader, j, network);
 }
 
-void TrainableLayer::removeOptimizer() { this->optimizer.reset(); }
+void TrainableLayer::serializeParameters(thor_file::TarWriter &archiveWriter,
+                                 Stream stream,
+                                 bool saveOptimizerState,
+                                 ThorImplementation::StampedNetwork &stampedNetwork) {
+    // FIXME: Layers that inherit from Thor::TrainableLayer will call Thor::TrainableLayer::serializeParameters(...)
+    //        to use common code to serialize all of the parameters, that takes care of the parameters themselves and their optimizers.
+}
+
+
+void TrainableLayer::deserializeParameters(thor_file::TarReader &archiveReader,
+                                 Stream stream,
+                                 bool loadOptimizerState,
+                                 ThorImplementation::StampedNetwork &stampedNetwork) {
+    // FIXME: Layers that inherit from Thor::TrainableLayer will call Thor::TrainableLayer::deserializeParameters(...)
+    //        to use common code to deserialize all of the parameters, that takes care of the parameters themselves and their optimizers.
+}
 
 }  // namespace Thor

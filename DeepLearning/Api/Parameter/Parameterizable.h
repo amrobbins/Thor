@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 
 #include <cstdint>
+#include <debug/unordered_map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -16,14 +17,25 @@ class Parameterizable {
    public:
     virtual ~Parameterizable() = default;
 
-    Parameterizable() = default;
+    Parameterizable(const uint64_t owningLayerId) : owningLayerId(owningLayerId) {};
 
-    virtual uint64_t getParameterizableId() const = 0;
-    virtual const std::vector<std::shared_ptr<ParameterSpecification>>& getParameters() const = 0;
+    void addParameter(const std::shared_ptr<ParameterSpecification>& parameter);
+    std::vector<std::string> listParameters() const;
+    virtual bool hasParameter(const std::string& name) const;
+    uint64_t getOwningLayerId() const { return owningLayerId; }
 
-    std::shared_ptr<ParameterSpecification> getParameter(const std::string& name) const;
+    std::shared_ptr<ParameterSpecification> getParameterSpecification(const std::string& name) const;
+
     BoundParameter getBoundParameter(PlacedNetwork& placedNetwork, const std::string& name) const;
-    std::vector<BoundParameter> getBoundParameters(PlacedNetwork& placedNetwork) const;
+    std::vector<BoundParameter> getBoundParameter(PlacedNetwork& placedNetwork, const std::string name) const;
+
+    std::string listParametersString() const;
+
+   protected:
+    std::unordered_map<std::string, std::shared_ptr<ParameterSpecification>> parameters{};
+
+   private:
+    const uint64_t owningLayerId;
 };
 
 }  // namespace Thor

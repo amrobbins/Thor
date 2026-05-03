@@ -235,6 +235,14 @@ std::shared_ptr<ThorImplementation::PhysicalParameter> ParameterSpecification::s
     return physicalParameter;
 }
 
+bool ParameterSpecification::setOptimizer(const std::shared_ptr<Optimizer> &optimizer, bool override) {
+    if (override || this->optimizer == nullptr) {
+        this->optimizer = optimizer->clone();
+        return true;
+    }
+    return false;
+}
+
 ParameterSpecification ParameterSpecification::Builder::build() {
     assert(!_name.empty());
     assert(_trainable.isPresent());
