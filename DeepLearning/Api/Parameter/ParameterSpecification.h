@@ -7,11 +7,8 @@
 #include <vector>
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
-#include "DeepLearning/Api/Network/StampedNetwork.h"
-#include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
-#include "Utilities/Common/Optional.h"
 
 namespace Thor {
 class Optimizer;
@@ -45,10 +42,6 @@ class ParameterSpecification {
     bool setOptimizer(const std::shared_ptr<Optimizer>& optimizer, bool override = true);
     static std::string getVersion();
     virtual nlohmann::json architectureJson() const;
-    virtual nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
-                                     Stream stream,
-                                     bool saveOptimizerState,
-                                     ThorImplementation::StampedNetwork& stampedNetwork) const;
     static ParameterSpecification deserialize(const nlohmann::json& j, std::shared_ptr<thor_file::TarReader>& archiveReader);
 
     [[nodiscard]] const std::string& getName() const;
@@ -68,6 +61,14 @@ class ParameterSpecification {
 
     // Build an implementation parameter that delegates storage creation to the factory bound on this API parameter.
     virtual std::shared_ptr<ThorImplementation::PhysicalParameter> stamp();
+    uint64_t getTotalSizeInBytes() const {
+        assert(dtype.isPresent());
+        assert(shape.isPresent());
+        uint64_t totalSize = 1;
+        for (uint64_t dim : shape.get())
+            totalSize *= dim;
+        return totalSize * Tensor::getBytesPerElement(dtype.get());
+    }
 
    private:
     static void validateShape(const std::vector<uint64_t>& shape);

@@ -51,12 +51,18 @@ class Layer {
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {}
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
-                                                           ThorImplementation::TensorPlacement tensorPlacement) const = 0;
-    // Layers with weights that share the weights mem with other instances of the same layer on the same gpu will have less non first
-    // instance fixed mem requirements.
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
-                                                              ThorImplementation::TensorPlacement tensorPlacement) const {
+    [[nodiscard]] virtual uint64_t getOutputTensorBytes(uint32_t batchSize) const {
+        if (featureOutput.isEmpty())
+            return 0UL;
+        return featureOutput.get().getTotalSizeInBytes() * batchSize;
+    }
+ [[nodiscard]] virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                                         ThorImplementation::TensorPlacement tensorPlacement) const {
+        return getOutputTensorBytes(batchSize);
+    }
+
+    [[nodiscard]] virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                                            ThorImplementation::TensorPlacement tensorPlacement) const {
         return getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
 

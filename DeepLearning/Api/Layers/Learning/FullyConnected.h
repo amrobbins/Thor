@@ -111,7 +111,6 @@ class FullyConnected : public TrainableLayer {
         Tensor::DataType weightsDataType = Tensor::DataType::FP16;
         std::shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected = std::make_shared<ThorImplementation::FullyConnected>(
             numOutputFeatures, hasBias, weightsDataType, placement, inferenceOnly, getId());
-        stampOptimizer(physicalFullyConnected);
 
         return physicalFullyConnected;
     }
@@ -121,33 +120,7 @@ class FullyConnected : public TrainableLayer {
                                   std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
                                   Optional<Event> sisterLayerLoadedEvent);
 
-    // mem requirements are the weights
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
-        // FIXME: workspace? Or do I assume no workspace at first and can add one later if have extra mem?
-        // FIXME: A layer owns its outputs, not its inputs, that is being double counted here
-        assert(featureInputs.size() > 0);
-        assert(featureInputs[0].getDimensions().size() > 0);
-        uint64_t numInputFeatures = 1;
-        for (uint32_t i = 0; i < featureInputs[0].getDimensions().size(); ++i)
-            numInputFeatures *= featureInputs[0].getDimensions()[i];
-        uint64_t numWeights = numInputFeatures * numOutputFeatures;
-        uint64_t numBiases = numOutputFeatures;
-        // have weights and gradient accumulators, as FP16 elements
-        uint64_t fixedMem = 2 * (numWeights + numBiases) * 2;
-        uint64_t batchSizeDependentMem =
-            2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
-
-        return fixedMem + batchSizeDependentMem;
-    }
-
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
-                                                              ThorImplementation::TensorPlacement tensorPlacement) const {
-        uint64_t batchSizeDependentMem =
-            2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
-        return batchSizeDependentMem;
-    }
-
-    virtual std::string getLayerType() const { return "FullyConnected"; }
+    std::string getLayerType() const override { return "FullyConnected"; }
 
     std::vector<Tensor> standaloneFCFeatureInputs;
     std::vector<Tensor> standaloneFCFeatureOutputs;
@@ -156,8 +129,11 @@ class FullyConnected : public TrainableLayer {
     uint32_t numOutputFeatures;
     bool hasBias;
     std::shared_ptr<Initializer> weightsInitializer;
-    std::shared_ptr<Initializer> biasInitializer;
+    std::shared_ptr<Initializer> biasesInitializer;
     std::shared_ptr<Activation> activation;
+
+    std::shared_ptr<Optimizer> weightsOptimizer;
+    std::shared_ptr<Optimizer> biasesOptimizer;
 
     DropOut dropOut;
     BatchNormalization batchNormalization;
@@ -207,7 +183,7 @@ class FullyConnected::Builder {
 
         fullyConnected.hasBias = _hasBias;
         fullyConnected.weightsInitializer = _weightsInitializer->clone();
-        fullyConnected.biasInitializer = _biasInitializer->clone();
+        fullyConnected.biasesInitializer = _biasInitializer->clone();
         if (_activation != nullptr)
             fullyConnected.activation = _activation;
         fullyConnected.dropProportion = _dropProportion;
@@ -216,8 +192,8 @@ class FullyConnected::Builder {
         fullyConnected.batchNormEpsilon = _batchNormEpsilon;
 
         // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
-        if (_layerOptimizer != nullptr)
-            fullyConnected.optimizer = _layerOptimizer;
+        fullyConnected.weightsOptimizer = _weightsOptimizer;
+        fullyConnected.biasesOptimizer = _biasesOptimizer;
 
         fullyConnected.initialized = true;
 
@@ -316,12 +292,17 @@ class FullyConnected::Builder {
         return *this;
     }
 
-    virtual FullyConnected::Builder &optimizer(std::shared_ptr<Optimizer> _layerOptimizer) {
-        assert(this->_layerOptimizer == nullptr);
-        this->_layerOptimizer = _layerOptimizer;
+    virtual FullyConnected::Builder &weightsOptimizer(std::shared_ptr<Optimizer> _weightsOptimizer) {
+        assert(this->_weightsOptimizer == nullptr);
+        this->_weightsOptimizer = _weightsOptimizer;
         return *this;
     }
 
+    virtual FullyConnected::Builder &biasesOptimizer(std::shared_ptr<Optimizer> _biasesOptimizer) {
+        assert(this->_biasesOptimizer == nullptr);
+        this->_biasesOptimizer = _biasesOptimizer;
+        return *this;
+    }
     // FIXME: batchNormalization and dropOut should be passed as builders. To support this Layer::Builder will need to be created with
     // virtual std::shared_ptr<Layer::Builder> clone.
 
@@ -351,7 +332,8 @@ class FullyConnected::Builder {
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasInitializer;
     std::shared_ptr<Activation> _activation;
-    std::shared_ptr<Optimizer> _layerOptimizer;
+    std::shared_ptr<Optimizer> _weightsOptimizer;
+    std::shared_ptr<Optimizer> _biasesOptimizer;
     bool _activationExplicitlyRemoved;
 
     Optional<float> _dropProportion;

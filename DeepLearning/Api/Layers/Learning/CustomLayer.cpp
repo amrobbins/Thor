@@ -547,19 +547,15 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
 
     std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>> physicalParameters;
     physicalParameters.reserve(parameters.size());
-    bool hasTrainableParameter = false;
     for (const auto& parameter : parameters) {
         if (parameter == nullptr)
             throw runtime_error("CustomLayer contains a null Parameter.");
-        hasTrainableParameter |= parameter->isTrainable();
         physicalParameters.push_back(parameter->stamp());
     }
 
     auto physicalLayer = std::make_shared<ThorImplementation::CustomLayer>(
         expr, inputNames, outputNames, placement, physicalParameters, inferenceOnly, Layer::getId(), useFastMath);
     physicalLayer->setLayerName(getLayerType());
-    if (hasTrainableParameter)
-        stampOptimizer(physicalLayer);
     return physicalLayer;
 }
 

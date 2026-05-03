@@ -794,7 +794,7 @@ void Network::attachOptimizerToLayers(bool replaceIfExisting) {
 
     for (shared_ptr<TrainableLayer> &trainableLayer : allTrainableLayersInNetwork) {
         if (replaceIfExisting or !trainableLayer->hasOptimizer())
-            trainableLayer->attachOptimizer(defaultOptimizer);
+            trainableLayer->attachDefaultOptimizer(defaultOptimizer);
     }
 }
 

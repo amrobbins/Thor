@@ -1,7 +1,5 @@
 #pragma once
 
-#include "DeepLearning/Api/Parameter/BoundParameter.h"
-
 #include <algorithm>
 #include <cstdint>
 #include <memory>
@@ -9,10 +7,17 @@
 #include <unordered_map>
 #include <vector>
 
+#include "Utilities/TarFile/TarWriter.h"
+
+namespace ThorImplementation {
+class StampedNetwork;
+}
+
 namespace Thor {
 
 class ParameterSpecification;
 class PlacedNetwork;
+class BoundParameter;
 
 class Parameterizable {
    public:
@@ -30,10 +35,17 @@ class Parameterizable {
     std::shared_ptr<ParameterSpecification> getParameterSpecification(const std::string& name) const;
     virtual std::vector<std::shared_ptr<ParameterSpecification>> getParameters() const;
 
-    BoundParameter getBoundParameter(PlacedNetwork& placedNetwork, const std::string& name) const;
-    std::vector<BoundParameter> getBoundParameters(PlacedNetwork& placedNetwork) const;
+    BoundParameter getBoundParameter(PlacedNetwork* placedNetwork, const std::string& name) const;
 
     std::string listParametersString() const;
+
+    nlohmann::json getParametersArchitectureJson() const;
+    void serializeParameters(nlohmann::json& parameterJson,
+                             thor_file::TarWriter& archiveWriter,
+                             Stream stream,
+                             bool saveOptimizerState,
+                             ThorImplementation::StampedNetwork& stampedNetwork,
+                             const std::string& filenamePrefix) const;
 
    protected:
     std::unordered_map<std::string, std::shared_ptr<ParameterSpecification>> parameters{};

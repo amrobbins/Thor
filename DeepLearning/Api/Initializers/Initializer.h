@@ -12,6 +12,9 @@
 
 #include <nlohmann/json.hpp>
 
+namespace thor_file {
+class TarWriter;
+}
 namespace Thor {
 
 class Initializer {
@@ -29,6 +32,17 @@ class Initializer {
     virtual std::shared_ptr<ThorImplementation::Initializer> stamp() = 0;
 
     virtual nlohmann::json architectureJson() const = 0;
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+                                     Stream stream,
+                                     std::shared_ptr<ThorImplementation::Initializer> physicalInitializer,
+                                     std::string filenamePrefix) const {
+        (void)archiveWriter;
+        (void)stream;
+        (void)physicalInitializer;
+        (void)filenamePrefix;
+        return architectureJson();
+    }
+
     static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);
     using Deserializer = std::function<std::shared_ptr<Initializer>(const nlohmann::json &)>;
     static std::unordered_map<std::string, Deserializer> &getRegistry();
