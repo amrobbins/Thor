@@ -49,6 +49,7 @@ float Adam::getEpsilon() { return epsilon; }
 shared_ptr<Optimizer> Adam::clone() const { return make_shared<Adam>(*this); }
 
 void Adam::updateParameters(PlacedNetwork *placedNetwork) {
+    // FIXME: re-implement
     // assert(placedNetwork != nullptr);
     // uint32_t numStamps = placedNetwork->getNumStamps();
     // for (uint32_t i = 0; i < numStamps; ++i) {

@@ -1,511 +1,352 @@
-// #include "DeepLearning/Api/Initializers/UniformRandom.h"
-// #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
-// #include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
-// #include "DeepLearning/Api/Network/PlacedNetwork.h"
-// #include "DeepLearning/Api/Optimizers/Adam.h"
-// #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
-//
-// #include <stdio.h>
-// #include <unistd.h>
-// #include "cuda.h"
-// #include "cuda_fp16.h"
-// #include "cuda_runtime.h"
-// #include "gtest/gtest.h"
-//
-// #include <set>
-// #include <vector>
-//
-// #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
-//
-// using json = nlohmann::json;
-//
-// using namespace std;
-//
-// using namespace Thor;
-//
-// static Network buildNetwork(uint32_t numFCLayers) {
-//     Network network("testNetwork");
-//     Tensor latestOutputTensor;
-//     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();
-//
-//     NetworkInput networkInput =
-//         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
-//     NetworkInput labels =
-//         NetworkInput::Builder().network(network).name("labels").dimensions({500}).dataType(Tensor::DataType::FP16).build();
-//     latestOutputTensor = networkInput.getFeatureOutput();
-//
-//     for (uint32_t i = 0; i < numFCLayers; ++i) {
-//         FullyConnected fullyConnected = FullyConnected::Builder()
-//                                             .network(network)
-//                                             .featureInput(latestOutputTensor)
-//                                             .numOutputFeatures(500)
-//                                             .hasBias(true)
-//                                             .weightsInitializer(uniformRandomInitializer)
-//                                             .biasInitializer(uniformRandomInitializer)
-//                                             .noActivation()
-//                                             .build();
-//         latestOutputTensor = fullyConnected.getFeatureOutput();
-//     }
-//
-//     CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
-//                                             .network(network)
-//                                             .predictions(latestOutputTensor)
-//                                             .labels(labels.getFeatureOutput())
-//                                             .reportsBatchLoss()
-//                                             .receivesOneHotLabels()
-//                                             .build();
-//
-//     NetworkOutput networkOutput =
-//         NetworkOutput::Builder().network(network).name("output").inputTensor(lossLayer.getLoss()).dataType(Tensor::DataType::FP16).build();
-//
-//     return network;
-// }
-//
-// TEST(Adam, Builds) {
-//     Optional<Network *> optionalTest;
-//     ASSERT_FALSE(optionalTest.isPresent());
-//
-//     Network network = buildNetwork(2);
-//     shared_ptr<Adam> adam = Adam::Builder().network(network).alpha(0.01).beta1(0.9).beta2(0).epsilon(0.0003).build();
-//     ASSERT_NE(adam, nullptr);
-// }
-//
-// TEST(Adam, InitializesParametersWithOneStamp) {
-//     Network network = buildNetwork(2);
-//     float alpha = 0.72;
-//     float beta1 = 0.9;
-//     float beta2 = 0.0;
-//     float epsilon = 1e-5f;
-//     shared_ptr<Adam> adam = Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).network(network).build();
-//
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents, false, {0}, 1);
-//     ASSERT_TRUE(placedNetwork != nullptr);
-//
-//     uint32_t epoch = 0;
-//     uint32_t batch = 0;
-//     uint32_t batchesPerEpoch = 10;
-//     Optimizer::updateHyperParameters(placedNetwork.get(), epoch, batch, batchesPerEpoch);
-//     unordered_map<string, float> params = adam->getAllHyperParameters(placedNetwork.get());
-//
-//     // Check that the proper values are reported
-//     ASSERT_EQ(params.size(), 5U);
-//     ASSERT_EQ(params.count("t"), 1U);
-//     ASSERT_EQ(params["t"], 0.0f);
-//     ASSERT_EQ(params.count("alpha"), 1U);
-//     ASSERT_EQ(params["alpha"], alpha);
-//     ASSERT_EQ(params.count("t"), 1U);
-//     ASSERT_EQ(params["beta1"], beta1);
-//     ASSERT_EQ(params.count("beta2"), 1U);
-//     ASSERT_EQ(params["beta2"], beta2);
-//     ASSERT_EQ(params.count("epsilon"), 1U);
-//     ASSERT_EQ(params["epsilon"], fmaxf(epsilon, ThorImplementation::Adam::MIN_FP16_EPSILON));
-// }
-//
-// /* FIXME: put this back in once multile stamps is supported
-// TEST(Adam, InitializesParametersWithTwoStamps) {
-//     Network network = buildNetwork(2);
-//     float alpha = 0.25;
-//     float beta1 = 0.8;
-//     float beta2 = 0.0;
-//     shared_ptr<Adam> adam =
-//         Adam::Builder().network(network).alpha(alpha).beta1(beta1).beta2(beta2).epsilon(true).build();
-//
-//     vector<Event> initDoneEvents;
-//     Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 2);
-//     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-//
-//     uint32_t epoch = 0;
-//     uint32_t batch = 4;
-//     uint32_t batchesPerEpoch = 25;
-//     unordered_map<string, float> params = adam->updateHyperParameters(epoch, batch, batchesPerEpoch);
-//
-//     // Check that the proper values are reported
-//     ASSERT_EQ(params.count("t"), 1U);
-//     ASSERT_EQ(params.size(), 1U);
-//     ASSERT_EQ(params["t"], 1.0f);
-// }
-//  */
-//
-// TEST(Adam, ReportsParameters) {
-//     Network network = buildNetwork(2);
-//     float alpha = 0.5;
-//     float beta1 = 0.32;
-//     float beta2 = 0.6;
-//     float epsilon = 1e-8f;
-//     shared_ptr<Adam> adam = Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).network(network).build();
-//
-//     ThorImplementation::StampedNetwork stampedNetwork0;
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents, false, {0}, 1);
-//     ASSERT_TRUE(placedNetwork != nullptr);
-//
-//     unordered_map<string, float> params = adam->getAllHyperParameters(placedNetwork.get());
-//
-//     ASSERT_EQ(params.size(), 5U);
-//     ASSERT_EQ(params.count("t"), 1U);
-//     ASSERT_EQ(params["t"], 0);
-//     ASSERT_EQ(params.count("t"), 1U);
-//     ASSERT_EQ(params["alpha"], alpha);
-//     ASSERT_EQ(params.count("beta1"), 1U);
-//     ASSERT_EQ(params["beta1"], beta1);
-//     ASSERT_EQ(params.count("beta2"), 1U);
-//     ASSERT_EQ(params["beta2"], beta2);
-//     ASSERT_EQ(params.count("epsilon"), 1U);
-//
-//     // Ensure that optimizer is connected to each trainable layer and its paratmeters are initialized properly
-//     for (uint32_t i = 0; i < stampedNetwork0.getNumTrainableLayers(); ++i) {
-//         shared_ptr<ThorImplementation::FullyConnected> fc =
-//             dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork0.getTrainableLayer(i));
-//         ASSERT_NE(fc, nullptr);
-//         Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = fc->getOptimizer();
-//         assert(maybeOptimizer.isPresent());
-//         shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
-//         shared_ptr<ThorImplementation::Adam> adam = dynamic_pointer_cast<ThorImplementation::Adam>(optimizer);
-//         ASSERT_NE(adam, nullptr);
-//         ASSERT_EQ(adam->getT(), 0);
-//         ASSERT_EQ(adam->getAlpha(), alpha);
-//         ASSERT_EQ(adam->getBeta1(), beta1);
-//         ASSERT_EQ(adam->getBeta2(), beta2);
-//         ASSERT_EQ(adam->getEpsilon(), epsilon);
-//     }
-// }
-//
-// TEST(Adam, SettersAndGetters) {
-//     Network network = buildNetwork(2);
-//     float alpha = 0.5;
-//     float beta1 = 0.32;
-//     float beta2 = 0.6;
-//     float epsilon = 1e-6f;
-//     shared_ptr<Adam> adam = Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).network(network).build();
-//
-//     ThorImplementation::StampedNetwork stampedNetwork0;
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents, false, {0}, 1);
-//     ASSERT_TRUE(placedNetwork != nullptr);
-//
-//     unordered_map<string, float> params = adam->getAllHyperParameters(placedNetwork.get());
-//
-//     ASSERT_EQ(params.size(), 5U);
-//     ASSERT_EQ(params.count("t"), 1U);
-//     ASSERT_EQ(params["t"], 0);
-//     ASSERT_EQ(params.count("t"), 1U);
-//     ASSERT_EQ(params["alpha"], alpha);
-//     ASSERT_EQ(params.count("beta1"), 1U);
-//     ASSERT_EQ(params["beta1"], beta1);
-//     ASSERT_EQ(params.count("beta2"), 1U);
-//     ASSERT_EQ(params["beta2"], beta2);
-//     ASSERT_EQ(params.count("epsilon"), 1U);
-//     ASSERT_EQ(params["epsilon"], fmaxf(epsilon, ThorImplementation::Adam::MIN_FP16_EPSILON));
-//
-//     // Test the setters
-//     alpha = 0.75f;
-//     beta1 = 0.65f;
-//     beta2 = 0.77f;
-//     epsilon = 1e-4f;
-//     adam->setAlpha(alpha, placedNetwork.get());
-//     EXPECT_EQ(adam->getAlpha(), alpha);
-//     adam->setBeta1(beta1, placedNetwork.get());
-//     EXPECT_EQ(adam->getBeta1(), beta1);
-//     adam->setBeta2(beta2, placedNetwork.get());
-//     EXPECT_EQ(adam->getBeta2(), beta2);
-//     adam->setEpsilon(epsilon, placedNetwork.get());
-//     EXPECT_EQ(adam->getEpsilon(), epsilon);
-//
-//     // Ensure that optimizer is connected to each trainable layer and its paratmeters are initialized properly
-//     for (uint32_t i = 0; i < stampedNetwork0.getNumTrainableLayers(); ++i) {
-//         shared_ptr<ThorImplementation::FullyConnected> fc =
-//             dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork0.getTrainableLayer(i));
-//         ASSERT_NE(fc, nullptr);
-//         Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = fc->getOptimizer();
-//         assert(maybeOptimizer.isPresent());
-//         shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
-//         shared_ptr<ThorImplementation::Adam> adam = dynamic_pointer_cast<ThorImplementation::Adam>(optimizer);
-//         ASSERT_NE(adam, nullptr);
-//         ASSERT_EQ(adam->getT(), 0);
-//         ASSERT_EQ(adam->getAlpha(), alpha);
-//         ASSERT_EQ(adam->getBeta1(), beta1);
-//         ASSERT_EQ(adam->getBeta2(), beta2);
-//         ASSERT_EQ(adam->getEpsilon(), epsilon);
-//     }
-// }
-//
-// inline float randFloat(float lo = 0.0f, float hi = 1.0f) {
-//     static uint32_t state = static_cast<uint32_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count()) ^ 0x9E3779B9u;
-//
-//     state = state * 1664525u + 1013904223u;
-//     const float t = (state >> 8) * (1.0f / 16777216.0f);
-//     return lo + (hi - lo) * t;
-// }
-//
-// TEST(Adam, SerializeDeserialize) {
-//     srand(time(nullptr));
-//
-//     for (uint32_t t = 0; t < 4; ++t) {
-//         Network initialNetwork("initialNetwork");
-//
-//         Tensor::DataType dataType = Tensor::DataType::FP16;
-//         vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
-//         uint32_t numOutputFeatures = 1 + (rand() % 1000);
-//
-//         NetworkInput networkInput =
-//             NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
-//
-//         bool hasBias = rand() % 2;
-//         FullyConnected::Builder fullyConnectedBuilder = FullyConnected::Builder()
-//                                                             .network(initialNetwork)
-//                                                             .featureInput(networkInput.getFeatureOutput())
-//                                                             .hasBias(hasBias)
-//                                                             .noActivation()
-//                                                             .numOutputFeatures(numOutputFeatures);
-//
-//         FullyConnected fullyConnected = fullyConnectedBuilder.build();
-//
-//         Tensor logits = fullyConnected.getFeatureOutputs()[0];
-//         uint32_t numClasses = logits.getDimensions()[0];
-//         NetworkInput labelsInput =
-//             NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions({numClasses}).dataType(dataType).build();
-//
-//         MeanAbsoluteError meanAbsoluteError = MeanAbsoluteError::Builder()
-//                                                   .network(initialNetwork)
-//                                                   .predictions(logits)
-//                                                   .reportsRawLoss()
-//                                                   .lossDataType(dataType)
-//                                                   .labels(labelsInput.getFeatureOutput())
-//                                                   .build();
-//
-//         float alpha = randFloat(0.1, 0.9);
-//         float beta1 = randFloat(0.1, 0.9);
-//         float beta2 = randFloat(0.1, 0.9);
-//         float epsilon = randFloat(0.1, 0.9);
-//         shared_ptr<Adam> adam = Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).network(initialNetwork).build();
-//
-//         NetworkOutput networkOutput = NetworkOutput::Builder()
-//                                           .network(initialNetwork)
-//                                           .name("testOutput")
-//                                           .inputTensor(meanAbsoluteError.getLoss())
-//                                           .dataType(dataType)
-//                                           .build();
-//
-//         // Now stamp the network and test serialization
-//         Stream stream(0);
-//         uint32_t batchSize = 1 + (rand() % 16);
-//         vector<Event> initDoneEvents;
-//         shared_ptr<PlacedNetwork> initialPlacedNetwork = initialNetwork.place(batchSize, initDoneEvents);
-//         ASSERT_TRUE(initialPlacedNetwork != nullptr);
-//         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//             stream.waitEvent(initDoneEvents[i]);
-//         }
-//         initDoneEvents.clear();
-//
-//         // Fetch the fully connected layer from the network
-//         ASSERT_EQ(initialPlacedNetwork->getNumStamps(), 1UL);
-//         ThorImplementation::StampedNetwork &stampedNetwork = initialPlacedNetwork->getStampedNetwork(0);
-//         ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
-//         shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer =
-//             dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
-//         ASSERT_TRUE(physicalFCLayer != nullptr);
-//         shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalFCLayer->getOptimizer();
-//         shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
-//
-//         ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-//         thor_file::TarWriter archiveWriter("testModel");
-//
-//         // Check initialization and if saving state, write some state to check that it got saved and restored
-//         bool saveOptimizerState = rand() % 2;
-//         ThorImplementation::Tensor m = physicalAdam->getM().clone(cpuPlacement);
-//         ThorImplementation::Tensor v = physicalAdam->getV().clone(cpuPlacement);
-//         m.copyFromAsync(physicalAdam->getM(), stream);
-//         v.copyFromAsync(physicalAdam->getV(), stream);
-//
-//         ASSERT_EQ(physicalAdam->getM().getDataType(), ThorImplementation::TensorDescriptor::DataType::FP32);
-//         ASSERT_EQ(physicalAdam->getV().getDataType(), ThorImplementation::TensorDescriptor::DataType::FP32);
-//
-//         ThorImplementation::Tensor mBias;
-//         ThorImplementation::Tensor vBias;
-//         if (hasBias) {
-//             mBias = physicalAdam->getMBias().get().clone(cpuPlacement);
-//             vBias = physicalAdam->getVBias().get().clone(cpuPlacement);
-//             mBias.copyFromAsync(physicalAdam->getMBias(), stream);
-//             vBias.copyFromAsync(physicalAdam->getVBias(), stream);
-//         }
-//         stream.synchronize();
-//
-//         float *mPtr = m.getMemPtr<float>();
-//         float *vPtr = v.getMemPtr<float>();
-//         float *mBiasPtr;
-//         float *vBiasPtr;
-//         if (hasBias) {
-//             mBiasPtr = mBias.getMemPtr<float>();
-//             vBiasPtr = vBias.getMemPtr<float>();
-//         }
-//
-//         for (uint32_t in = 0; in < inputDimensions[0]; ++in) {
-//             for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-//                 uint32_t index = in * numOutputFeatures + out;
-//                 ASSERT_EQ(mPtr[index], 0.0f);
-//                 ASSERT_EQ(vPtr[index], 0.0f);
-//             }
-//         }
-//         if (hasBias) {
-//             for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-//                 ASSERT_EQ(mBiasPtr[out], 0.0f);
-//                 ASSERT_EQ(vBiasPtr[out], 0.0f);
-//             }
-//         }
-//
-//         // Let's write some numbers into optimizer state when it is being saved to ensure it is preserved
-//         if (saveOptimizerState) {
-//             for (uint32_t in = 0; in < inputDimensions[0]; ++in) {
-//                 for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-//                     uint32_t index = in * numOutputFeatures + out;
-//                     mPtr[index] = randFloat(-2.0f, 2.0f);
-//                     vPtr[index] = randFloat(-2.0f, 2.0f);
-//                 }
-//             }
-//             physicalAdam->getM().copyFromAsync(m, stream);
-//             physicalAdam->getV().copyFromAsync(v, stream);
-//             if (hasBias) {
-//                 for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-//                     mBiasPtr[out] = randFloat(-2.0f, 2.0f);
-//                     vBiasPtr[out] = randFloat(-2.0f, 2.0f);
-//                 }
-//                 physicalAdam->getMBias().get().copyFromAsync(mBias, stream);
-//                 physicalAdam->getVBias().get().copyFromAsync(vBias, stream);
-//             }
-//             stream.synchronize();
-//         }
-//
-//         // The network attached the optimizer to its copy of the FC layer
-//         json fullyConnectedJ;
-//         bool fcFound = false;
-//         shared_ptr<FullyConnected> initalNetworkFC;
-//         for (int32_t i = 0; i < initialNetwork.getNumTrainableLayers(); ++i) {
-//             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
-//             initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
-//             if (initalNetworkFC) {
-//                 fullyConnectedJ =
-//                     initalNetworkFC->serialize(archiveWriter, stream, saveOptimizerState, initialPlacedNetwork->getStampedNetwork(0));
-//                 fcFound = true;
-//                 break;
-//             }
-//         }
-//         ASSERT_TRUE(fcFound);
-//
-//         json networkInputJ = networkInput.serialize(archiveWriter, stream);
-//         json labelsInputJ = labelsInput.serialize(archiveWriter, stream);
-//         json meanAbsoluteErrorJ = meanAbsoluteError.serialize(archiveWriter, stream);
-//         json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
-//
-//         archiveWriter.createArchive("/tmp/", true);
-//
-//         ASSERT_TRUE(fullyConnectedJ.contains("optimizer"));
-//         json adamJ = fullyConnectedJ["optimizer"];
-//
-//         // printf("%s\n", networkInputJ.dump(4).c_str());
-//         // printf("%s\n", labelsInputJ.dump(4).c_str());
-//         // printf("%s\n", fullyConnectedJ.dump(4).c_str());
-//         // printf("%s\n", meanAbsoluteErrorJ.dump(4).c_str());
-//         // printf("%s\n", networkOutputJ.dump(4).c_str());
-//         // printf("--------------------\n");
-//         // printf("%s\n", adamJ.dump(4).c_str());
-//
-//         ASSERT_EQ(adamJ.at("optimizer_type").get<string>(), "adam");
-//         ASSERT_EQ(adamJ.at("version").get<string>(), adam->getVersion());
-//         ASSERT_EQ(adamJ.at("t").get<float>(), 0.0f);
-//         ASSERT_EQ(adamJ.at("alpha").get<float>(), alpha);
-//         ASSERT_EQ(adamJ.at("beta1").get<float>(), beta1);
-//         ASSERT_EQ(adamJ.at("beta2").get<float>(), beta2);
-//         ASSERT_EQ(adamJ.at("epsilon").get<float>(), epsilon);
-//
-//         ASSERT_EQ(saveOptimizerState, adamJ.contains("m_tensor"));
-//         ASSERT_EQ(saveOptimizerState, adamJ.contains("v_tensor"));
-//         ASSERT_EQ(saveOptimizerState && hasBias, adamJ.contains("m_bias_tensor"));
-//         ASSERT_EQ(saveOptimizerState && hasBias, adamJ.contains("v_bias_tensor"));
-//
-//         archiveWriter.createArchive("/tmp/", true);
-//         shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
-//         Network newNetwork("newNetwork");
-//
-//         // Deserialize everything
-//         // place
-//         // Ensure adam weights are correctly initial values
-//
-//         Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
-//         Layer::deserialize(archiveReader, labelsInputJ, &newNetwork);
-//         Layer::deserialize(archiveReader, fullyConnectedJ, &newNetwork);
-//         Layer::deserialize(archiveReader, meanAbsoluteErrorJ, &newNetwork);
-//         Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
-//
-//         batchSize = 1 + (rand() % 16);
-//         shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
-//         ASSERT_TRUE(newPlacedNetwork != nullptr);
-//         archiveReader->executeReadRequests();
-//         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//             stream.waitEvent(initDoneEvents[i]);
-//         }
-//         initDoneEvents.clear();
-//
-//         // Find the API FC to verify original ID
-//         uint32_t numTrainableLayers = newNetwork.getNumTrainableLayers();
-//         for (uint32_t i = 0; i < numTrainableLayers; ++i) {
-//             shared_ptr<Thor::FullyConnected> apiFCLayerDes = dynamic_pointer_cast<Thor::FullyConnected>(newNetwork.getTrainableLayer(i));
-//             if (apiFCLayerDes != nullptr)
-//                 ASSERT_TRUE(apiFCLayerDes->getOptimizer() != nullptr);
-//             ASSERT_EQ(apiFCLayerDes->getOptimizer()->getOriginalId(), adam->getId());
-//         }
-//
-//         // Find the FC to find the Adam
-//         ThorImplementation::StampedNetwork &newStampedNetwork = newPlacedNetwork->getStampedNetwork(0);
-//         shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes;
-//         for (uint32_t i = 0; i < newStampedNetwork.getNumTrainableLayers(); ++i) {
-//             physicalFCLayerDes = dynamic_pointer_cast<ThorImplementation::FullyConnected>(newStampedNetwork.getTrainableLayer(i));
-//             if (physicalFCLayerDes != nullptr)
-//                 break;
-//         }
-//         ASSERT_TRUE(physicalFCLayerDes != nullptr);
-//
-//         shared_ptr<ThorImplementation::Adam> physicalAdamDes =
-//             dynamic_pointer_cast<ThorImplementation::Adam>(physicalFCLayerDes->getOptimizer());
-//
-//         ThorImplementation::Tensor mDeser = physicalAdamDes->getM().clone(cpuPlacement);
-//         ThorImplementation::Tensor vDeser = physicalAdamDes->getV().clone(cpuPlacement);
-//         mDeser.copyFromAsync(physicalAdamDes->getM(), stream);
-//         vDeser.copyFromAsync(physicalAdamDes->getV(), stream);
-//
-//         ThorImplementation::Tensor mBiasDeser;
-//         ThorImplementation::Tensor vBiasDeser;
-//         if (hasBias) {
-//             mBiasDeser = physicalAdamDes->getMBias().get().clone(cpuPlacement);
-//             vBiasDeser = physicalAdamDes->getVBias().get().clone(cpuPlacement);
-//             mBiasDeser.copyFromAsync(physicalAdamDes->getMBias(), stream);
-//             vBiasDeser.copyFromAsync(physicalAdamDes->getVBias(), stream);
-//         }
-//         stream.synchronize();
-//
-//         float *mDeserPtr = mDeser.getMemPtr<float>();
-//         float *vDeserPtr = vDeser.getMemPtr<float>();
-//         float *mBiasDeserPtr;
-//         float *vBiasDeserPtr;
-//         if (hasBias) {
-//             mBiasDeserPtr = mBiasDeser.getMemPtr<float>();
-//             vBiasDeserPtr = vBiasDeser.getMemPtr<float>();
-//         }
-//
-//         for (uint32_t in = 0; in < inputDimensions[0]; ++in) {
-//             for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-//                 uint32_t index = in * numOutputFeatures + out;
-//                 ASSERT_EQ(mPtr[index], mDeserPtr[index]);
-//                 ASSERT_EQ(vPtr[index], vDeserPtr[index]);
-//             }
-//         }
-//         if (hasBias) {
-//             for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-//                 ASSERT_EQ(mBiasPtr[out], mBiasDeserPtr[out]);
-//                 ASSERT_EQ(vBiasPtr[out], vBiasDeserPtr[out]);
-//             }
-//         }
-//     }
-//
-//     filesystem::remove("/tmp/testModel.thor.tar");
-// }
+#include "DeepLearning/Api/Optimizers/Adam.h"
+#include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+
+#include "gtest/gtest.h"
+
+#include <nlohmann/json.hpp>
+
+#include <cmath>
+#include <cstdint>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+using json = nlohmann::json;
+
+namespace Api = Thor;
+namespace Impl = ThorImplementation;
+
+namespace {
+
+Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
+Impl::TensorPlacement gpuPlacement(Impl::TensorPlacement::MemDevices::GPU, 0);
+
+using DataType = Impl::TensorDescriptor::DataType;
+
+void synchronizeEvents(std::vector<Event> events) {
+    for (Event& event : events)
+        event.synchronize();
+}
+
+void expectHyperParameter(const std::unordered_map<std::string, float>& parameters, const std::string& name, float expected) {
+    ASSERT_TRUE(parameters.contains(name)) << "Missing hyperparameter: " << name;
+    EXPECT_FLOAT_EQ(parameters.at(name), expected) << "Mismatch for hyperparameter: " << name;
+}
+
+void expectAllClose(const std::vector<float>& actual, const std::vector<float>& expected, float atol = 1e-5f, float rtol = 1e-5f) {
+    ASSERT_EQ(actual.size(), expected.size());
+
+    for (uint64_t i = 0; i < actual.size(); ++i) {
+        const float diff = std::fabs(actual[i] - expected[i]);
+        const float tol = atol + rtol * std::fabs(expected[i]);
+        EXPECT_LE(diff, tol) << "Mismatch at index " << i << ": actual=" << actual[i] << ", expected=" << expected[i];
+    }
+}
+
+void writeCpuFp32Tensor(Impl::Tensor& tensor, const std::vector<float>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensor.getDataType(), DataType::FP32);
+    ASSERT_EQ(tensor.getTotalNumElements(), values.size());
+
+    float* ptr = tensor.getMemPtr<float>();
+    for (uint64_t i = 0; i < values.size(); ++i)
+        ptr[i] = values[i];
+}
+
+std::vector<float> readCpuFp32Tensor(const Impl::Tensor& tensor) {
+    EXPECT_EQ(tensor.getPlacement(), cpuPlacement);
+    EXPECT_EQ(tensor.getDataType(), DataType::FP32);
+
+    std::vector<float> values(tensor.getTotalNumElements());
+    const float* ptr = tensor.getMemPtr<float>();
+    for (uint64_t i = 0; i < values.size(); ++i)
+        values[i] = ptr[i];
+
+    return values;
+}
+
+void copyValuesToGpuFp32Tensor(Impl::Tensor& gpuTensor, const std::vector<float>& values, Stream& stream) {
+    ASSERT_EQ(gpuTensor.getPlacement(), gpuPlacement);
+    ASSERT_EQ(gpuTensor.getDataType(), DataType::FP32);
+    ASSERT_EQ(gpuTensor.getTotalNumElements(), values.size());
+
+    Impl::Tensor host(cpuPlacement, gpuTensor.getDescriptor());
+    writeCpuFp32Tensor(host, values);
+
+    gpuTensor.copyFromAsync(host, stream);
+    stream.synchronize();
+}
+
+std::vector<float> copyGpuFp32TensorToValues(const Impl::Tensor& gpuTensor, Stream& stream) {
+    EXPECT_EQ(gpuTensor.getPlacement(), gpuPlacement);
+    EXPECT_EQ(gpuTensor.getDataType(), DataType::FP32);
+
+    Impl::Tensor host = gpuTensor.clone(cpuPlacement);
+    host.copyFromAsync(gpuTensor, stream);
+    stream.synchronize();
+
+    return readCpuFp32Tensor(host);
+}
+
+Impl::Tensor requireOptimizerStorage(const std::shared_ptr<Impl::Adam>& adam, const std::string& name) {
+    if (adam == nullptr)
+        throw std::runtime_error("Adam optimizer is null.");
+
+    if (!adam->hasParameter(name))
+        throw std::runtime_error("Adam optimizer is missing parameter: " + name);
+
+    Optional<Impl::Tensor> storage = adam->getParameter(name)->getStorage();
+    if (storage.isEmpty())
+        throw std::runtime_error("Adam optimizer parameter has no storage: " + name);
+
+    return storage.get();
+}
+
+std::shared_ptr<Impl::Adam> stampCompileAdam(Api::Adam& adam, Impl::Tensor& weights, Stream& stream) {
+    std::shared_ptr<Impl::Optimizer> physicalOptimizer = adam.stamp(nullptr);
+    std::shared_ptr<Impl::Adam> physicalAdam = std::dynamic_pointer_cast<Impl::Adam>(physicalOptimizer);
+    if (physicalAdam == nullptr)
+        throw std::runtime_error("Api::Adam did not stamp an Impl::Adam.");
+
+    adam.compile(physicalOptimizer, weights, stream);
+    stream.synchronize();
+
+    return physicalAdam;
+}
+
+}  // namespace
+
+TEST(AdamApi, BuilderDefaultsSettersAndArchitectureJson) {
+    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().build();
+    ASSERT_NE(adam, nullptr);
+
+    EXPECT_EQ(adam->getType(), "Adam");
+    EXPECT_FLOAT_EQ(adam->getAlpha(), 0.001f);
+    EXPECT_FLOAT_EQ(adam->getBeta1(), 0.9f);
+    EXPECT_FLOAT_EQ(adam->getBeta2(), 0.999f);
+    EXPECT_FLOAT_EQ(adam->getEpsilon(), 1e-7f);
+    EXPECT_EQ(adam->getOriginalId(), adam->getId());
+
+    adam->setAlpha(0.02f, nullptr);
+    adam->setBeta1(0.75f, nullptr);
+    adam->setBeta2(0.92f, nullptr);
+    adam->setEpsilon(1e-5f, nullptr);
+
+    EXPECT_FLOAT_EQ(adam->getAlpha(), 0.02f);
+    EXPECT_FLOAT_EQ(adam->getBeta1(), 0.75f);
+    EXPECT_FLOAT_EQ(adam->getBeta2(), 0.92f);
+    EXPECT_FLOAT_EQ(adam->getEpsilon(), 1e-5f);
+
+    json j = adam->architectureJson();
+    ASSERT_EQ(j.at("optimizer_type").get<std::string>(), "adam");
+    ASSERT_EQ(j.at("version").get<std::string>(), adam->getVersion());
+    ASSERT_EQ(j.at("id").get<uint64_t>(), adam->getId());
+    EXPECT_FLOAT_EQ(j.at("t").get<float>(), 0.0f);
+    EXPECT_FLOAT_EQ(j.at("alpha").get<float>(), 0.02f);
+    EXPECT_FLOAT_EQ(j.at("beta1").get<float>(), 0.75f);
+    EXPECT_FLOAT_EQ(j.at("beta2").get<float>(), 0.92f);
+    EXPECT_FLOAT_EQ(j.at("epsilon").get<float>(), 1e-5f);
+}
+
+TEST(AdamApi, BuilderCustomValuesStampAndCompilePhysicalAdam) {
+    Stream stream(gpuPlacement);
+
+    constexpr float alpha = 0.01f;
+    constexpr float beta1 = 0.8f;
+    constexpr float beta2 = 0.95f;
+    constexpr float epsilon = 1e-4f;
+
+    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).build();
+    ASSERT_NE(adam, nullptr);
+
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 3}));
+    copyValuesToGpuFp32Tensor(weights, {1.0f, -2.0f, 3.0f, -4.0f, 5.0f, -6.0f}, stream);
+
+    std::shared_ptr<Impl::Adam> physicalAdam = stampCompileAdam(*adam, weights, stream);
+    ASSERT_NE(physicalAdam, nullptr);
+
+    EXPECT_TRUE(physicalAdam->isCompiled());
+    EXPECT_EQ(physicalAdam->getId(), adam->getId());
+    EXPECT_FLOAT_EQ(physicalAdam->getT(), 0.0f);
+    EXPECT_FLOAT_EQ(physicalAdam->getAlpha(), alpha);
+    EXPECT_FLOAT_EQ(physicalAdam->getBeta1(), beta1);
+    EXPECT_FLOAT_EQ(physicalAdam->getBeta2(), beta2);
+    EXPECT_FLOAT_EQ(physicalAdam->getEpsilon(), epsilon);
+
+    Optional<Impl::Tensor> gradient = physicalAdam->getWeightsGradient();
+    ASSERT_TRUE(gradient.isPresent());
+    EXPECT_EQ(gradient.get().getPlacement(), gpuPlacement);
+    EXPECT_EQ(gradient.get().getDataType(), DataType::FP32);
+    EXPECT_EQ(gradient.get().getDimensions(), weights.getDimensions());
+
+    Impl::Tensor m = requireOptimizerStorage(physicalAdam, "m");
+    Impl::Tensor v = requireOptimizerStorage(physicalAdam, "v");
+
+    EXPECT_EQ(m.getPlacement(), gpuPlacement);
+    EXPECT_EQ(v.getPlacement(), gpuPlacement);
+    EXPECT_EQ(m.getDataType(), DataType::FP32);
+    EXPECT_EQ(v.getDataType(), DataType::FP32);
+    EXPECT_EQ(m.getDimensions(), weights.getDimensions());
+    EXPECT_EQ(v.getDimensions(), weights.getDimensions());
+
+    std::unordered_map<std::string, float> params = physicalAdam->getAllHyperParameters();
+    ASSERT_EQ(params.size(), 5u);
+    expectHyperParameter(params, "t", 0.0f);
+    expectHyperParameter(params, "alpha", alpha);
+    expectHyperParameter(params, "beta1", beta1);
+    expectHyperParameter(params, "beta2", beta2);
+    expectHyperParameter(params, "epsilon", epsilon);
+}
+
+TEST(AdamApi, InitializeFirstStampZerosMomentParameters) {
+    Stream stream(gpuPlacement);
+
+    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(0.01f).beta1(0.8f).beta2(0.95f).epsilon(1e-4f).build();
+    ASSERT_NE(adam, nullptr);
+
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
+    copyValuesToGpuFp32Tensor(weights, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+
+    std::shared_ptr<Impl::Adam> physicalAdam = stampCompileAdam(*adam, weights, stream);
+
+    Impl::Tensor m = requireOptimizerStorage(physicalAdam, "m");
+    Impl::Tensor v = requireOptimizerStorage(physicalAdam, "v");
+
+    copyValuesToGpuFp32Tensor(m, {1.0f, -2.0f, 3.0f, -4.0f}, stream);
+    copyValuesToGpuFp32Tensor(v, {5.0f, 6.0f, 7.0f, 8.0f}, stream);
+
+    std::vector<Event> initEvents = adam->initialize(physicalAdam, /*isFirstStamp=*/true, nullptr, Optional<Event>::empty());
+    synchronizeEvents(initEvents);
+    stream.synchronize();
+
+    expectAllClose(copyGpuFp32TensorToValues(m, stream), {0.0f, 0.0f, 0.0f, 0.0f});
+    expectAllClose(copyGpuFp32TensorToValues(v, stream), {0.0f, 0.0f, 0.0f, 0.0f});
+}
+
+TEST(AdamApi, InitializeNonFirstStampCopiesMomentParametersFromSisterOptimizer) {
+    Stream stream(gpuPlacement);
+
+    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(0.01f).beta1(0.8f).beta2(0.95f).epsilon(1e-4f).build();
+    ASSERT_NE(adam, nullptr);
+
+    Impl::Tensor sisterWeights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 3}));
+    Impl::Tensor targetWeights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 3}));
+    copyValuesToGpuFp32Tensor(sisterWeights, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, stream);
+    copyValuesToGpuFp32Tensor(targetWeights, {-1.0f, -2.0f, -3.0f, -4.0f, -5.0f, -6.0f}, stream);
+
+    std::shared_ptr<Impl::Adam> sisterAdam = stampCompileAdam(*adam, sisterWeights, stream);
+    std::shared_ptr<Impl::Adam> targetAdam = stampCompileAdam(*adam, targetWeights, stream);
+
+    Impl::Tensor sisterM = requireOptimizerStorage(sisterAdam, "m");
+    Impl::Tensor sisterV = requireOptimizerStorage(sisterAdam, "v");
+    Impl::Tensor targetM = requireOptimizerStorage(targetAdam, "m");
+    Impl::Tensor targetV = requireOptimizerStorage(targetAdam, "v");
+
+    const std::vector<float> expectedM{1.5f, -2.5f, 3.5f, -4.5f, 5.5f, -6.5f};
+    const std::vector<float> expectedV{0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f};
+
+    copyValuesToGpuFp32Tensor(sisterM, expectedM, stream);
+    copyValuesToGpuFp32Tensor(sisterV, expectedV, stream);
+
+    copyValuesToGpuFp32Tensor(targetM, {100.0f, 101.0f, 102.0f, 103.0f, 104.0f, 105.0f}, stream);
+    copyValuesToGpuFp32Tensor(targetV, {200.0f, 201.0f, 202.0f, 203.0f, 204.0f, 205.0f}, stream);
+
+    Optional<Event> sisterReadyEvent = stream.putEvent(false, true);
+
+    std::vector<Event> initEvents = adam->initialize(targetAdam, /*isFirstStamp=*/false, sisterAdam, sisterReadyEvent);
+    synchronizeEvents(initEvents);
+    stream.synchronize();
+
+    expectAllClose(copyGpuFp32TensorToValues(targetM, stream), expectedM);
+    expectAllClose(copyGpuFp32TensorToValues(targetV, stream), expectedV);
+}
+
+TEST(AdamApi, SerializeArchitectureOnlyAndDeserialize) {
+    constexpr float alpha = 0.123f;
+    constexpr float beta1 = 0.456f;
+    constexpr float beta2 = 0.789f;
+    constexpr float epsilon = 1e-4f;
+
+    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).build();
+    ASSERT_NE(adam, nullptr);
+
+    json j = adam->architectureJson();
+
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    std::shared_ptr<Api::Optimizer> optimizer = Api::Optimizer::deserialize(archiveReader, j, nullptr);
+    std::shared_ptr<Api::Adam> deserializedAdam = std::dynamic_pointer_cast<Api::Adam>(optimizer);
+    ASSERT_NE(deserializedAdam, nullptr);
+
+    EXPECT_EQ(deserializedAdam->getOriginalId(), adam->getId());
+    EXPECT_FLOAT_EQ(deserializedAdam->getAlpha(), alpha);
+    EXPECT_FLOAT_EQ(deserializedAdam->getBeta1(), beta1);
+    EXPECT_FLOAT_EQ(deserializedAdam->getBeta2(), beta2);
+    EXPECT_FLOAT_EQ(deserializedAdam->getEpsilon(), epsilon);
+
+    Stream stream(gpuPlacement);
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
+    copyValuesToGpuFp32Tensor(weights, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+
+    std::shared_ptr<Impl::Adam> physicalAdam = stampCompileAdam(*deserializedAdam, weights, stream);
+    ASSERT_NE(physicalAdam, nullptr);
+
+    EXPECT_EQ(physicalAdam->getId(), deserializedAdam->getId());
+    EXPECT_FLOAT_EQ(physicalAdam->getAlpha(), alpha);
+    EXPECT_FLOAT_EQ(physicalAdam->getBeta1(), beta1);
+    EXPECT_FLOAT_EQ(physicalAdam->getBeta2(), beta2);
+    EXPECT_FLOAT_EQ(physicalAdam->getEpsilon(), epsilon);
+}
+
+TEST(AdamApi, SerializeWithStateRecordsMomentFilesAndPhysicalTime) {
+    Stream stream(gpuPlacement);
+
+    constexpr float alpha = 0.01f;
+    constexpr float beta1 = 0.8f;
+    constexpr float beta2 = 0.95f;
+    constexpr float epsilon = 1e-4f;
+
+    std::shared_ptr<Api::Adam> adam = Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).build();
+    ASSERT_NE(adam, nullptr);
+
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
+    copyValuesToGpuFp32Tensor(weights, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+
+    std::shared_ptr<Impl::Adam> physicalAdam = stampCompileAdam(*adam, weights, stream);
+
+    Impl::Tensor m = requireOptimizerStorage(physicalAdam, "m");
+    Impl::Tensor v = requireOptimizerStorage(physicalAdam, "v");
+    copyValuesToGpuFp32Tensor(m, {0.1f, 0.2f, 0.3f, 0.4f}, stream);
+    copyValuesToGpuFp32Tensor(v, {1.1f, 1.2f, 1.3f, 1.4f}, stream);
+    physicalAdam->setT(12.0f);
+
+    thor_file::TarWriter archiveWriter("adam_api_test");
+    json stateJson = adam->serialize(archiveWriter, stream, physicalAdam, "layer123_weights", /*saveOptimizerState=*/true);
+
+    ASSERT_EQ(stateJson.at("optimizer_type").get<std::string>(), "adam");
+    ASSERT_EQ(stateJson.at("version").get<std::string>(), adam->getVersion());
+    EXPECT_EQ(stateJson.at("id").get<uint64_t>(), adam->getId());
+    EXPECT_FLOAT_EQ(stateJson.at("t").get<float>(), 12.0f);
+    EXPECT_FLOAT_EQ(stateJson.at("alpha").get<float>(), alpha);
+    EXPECT_FLOAT_EQ(stateJson.at("beta1").get<float>(), beta1);
+    EXPECT_FLOAT_EQ(stateJson.at("beta2").get<float>(), beta2);
+    EXPECT_FLOAT_EQ(stateJson.at("epsilon").get<float>(), epsilon);
+
+    ASSERT_TRUE(stateJson.contains("m_tensor"));
+    ASSERT_TRUE(stateJson.contains("v_tensor"));
+    EXPECT_EQ(stateJson.at("m_tensor").get<std::string>(), "layer123_weights_adam_m.gds");
+    EXPECT_EQ(stateJson.at("v_tensor").get<std::string>(), "layer123_weights_adam_v.gds");
+
+    EXPECT_FALSE(stateJson.contains("m_bias_tensor"));
+    EXPECT_FALSE(stateJson.contains("v_bias_tensor"));
+
+    thor_file::TarWriter architectureOnlyWriter("adam_api_architecture_only_test");
+    json architectureOnlyJson = adam->serialize(architectureOnlyWriter, stream, nullptr, "", /*saveOptimizerState=*/false);
+
+    EXPECT_FALSE(architectureOnlyJson.contains("m_tensor"));
+    EXPECT_FALSE(architectureOnlyJson.contains("v_tensor"));
+    EXPECT_FLOAT_EQ(architectureOnlyJson.at("t").get<float>(), 0.0f);
+}

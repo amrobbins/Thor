@@ -13,5 +13,5 @@ void bind_optimizers(nb::module_ &optimizers) {
     optimizer.attr("__module__") = "thor.optimizers";
 
     // bind_sgd(optimizers);
-    // bind_adam(optimizers);
+    bind_adam(optimizers);
 }
