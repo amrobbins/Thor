@@ -43,6 +43,16 @@ void TrainableLayer::attachDefaultOptimizer(std::shared_ptr<Optimizer> optimizer
     }
 }
 
+bool TrainableLayer::hasOptimizer() const {
+    for (const auto &[name, parameter] : parameters) {
+        (void)name;
+        if (parameter != nullptr && parameter->isTrainable() && parameter->hasOptimizer()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // void TrainableLayer::stampOptimizer(const std::shared_ptr<ThorImplementation::TrainableLayer> &physicalTrainableLayer) const {
 //     if (physicalTrainableLayer->isInferenceOnly()) {
 //         return;
