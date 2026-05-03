@@ -58,7 +58,12 @@ class ParameterSpecification {
     bool isTrainingInitiallyEnabled() const;
 
     bool hasOptimizer() const;
-    std::shared_ptr<Optimizer> getOptimizer();
+    std::shared_ptr<Optimizer> getOptimizer() const;
+
+    bool hasSerializedStorageFile() const;
+    std::string getSerializedStorageFile() const;
+    void setSerializedStorageFile(const std::string& fileName);
+    void clearSerializedStorageFile();
 
     // Convenience helper to allocate storage with the same properties (placement, etc.) as inputTensor,
     // but having shape and dtype.
