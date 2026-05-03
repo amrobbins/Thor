@@ -1,698 +1,490 @@
-// #include "DeepLearning/Api/Initializers/UniformRandom.h"
-// #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
-// #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
-// #include "DeepLearning/Api/Network/PlacedNetwork.h"
-// #include "DeepLearning/Api/Optimizers/Sgd.h"
-//
-// #include <stdio.h>
-// #include <unistd.h>
-// #include <nlohmann/json.hpp>
-// #include "cuda.h"
-// #include "cuda_fp16.h"
-// #include "cuda_runtime.h"
-// #include "gtest/gtest.h"
-//
-// #include <set>
-// #include <vector>
-//
-// using namespace std;
-// using json = nlohmann::json;
-// using namespace Thor;
-//
-// static Network buildNetwork(uint32_t numFCLayers) {
-//     Network network("testNetwork");
-//     Tensor latestOutputTensor;
-//     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();
-//
-//     NetworkInput networkInput =
-//         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
-//     NetworkInput labels =
-//         NetworkInput::Builder().network(network).name("labels").dimensions({500}).dataType(Tensor::DataType::FP16).build();
-//     latestOutputTensor = networkInput.getFeatureOutput();
-//
-//     for (uint32_t i = 0; i < numFCLayers; ++i) {
-//         FullyConnected fullyConnected = FullyConnected::Builder()
-//                                             .network(network)
-//                                             .featureInput(latestOutputTensor)
-//                                             .numOutputFeatures(500)
-//                                             .hasBias(true)
-//                                             .weightsInitializer(uniformRandomInitializer)
-//                                             .biasInitializer(uniformRandomInitializer)
-//                                             .noActivation()
-//                                             .build();
-//         latestOutputTensor = fullyConnected.getFeatureOutput();
-//     }
-//
-//     MeanAbsoluteError lossLayer = MeanAbsoluteError::Builder()
-//                                       .network(network)
-//                                       .predictions(latestOutputTensor)
-//                                       .labels(labels.getFeatureOutput())
-//                                       .reportsBatchLoss()
-//                                       .build();
-//
-//     NetworkOutput networkOutput =
-//         NetworkOutput::Builder().network(network).name("output").inputTensor(lossLayer.getLoss()).dataType(Tensor::DataType::FP16).build();
-//
-//     return network;
-// }
-//
-// TEST(Sgd, SetAndGetInitialLearningRate) {
-//     Network network = buildNetwork(3);
-//     // Attach default optimizer
-//     shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.2f).network(network).build();
-//
-//     Stream stream(0);
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
-//     ASSERT_TRUE(placedNetwork != nullptr);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//
-//     sgd->setInitialLearningRate(0.1f, placedNetwork.get());
-//     ASSERT_FLOAT_EQ(0.1f, sgd->getInitialLearningRate());
-//
-//     for (uint32_t i = 0; i < placedNetwork->getNumStamps(); ++i) {
-//         ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
-//         for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
-//             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
-//             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
-//             assert(maybeOptimizer.isPresent());
-//             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
-//             shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
-//             assert(sgd != NULL);
-//             ASSERT_EQ(sgd->getInitialLearningRate(), 0.1f);
-//         }
-//     }
-// }
-//
-// TEST(Sgd, SetAndGetDecay) {
-//     Network network = buildNetwork(4);
-//     shared_ptr<Sgd> sgd = Sgd::Builder().decay(0.5f).network(network).build();
-//
-//     Stream stream(0);
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
-//     ASSERT_TRUE(placedNetwork != nullptr);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//
-//     sgd->setDecay(0.2f, placedNetwork.get());
-//     ASSERT_FLOAT_EQ(0.2f, sgd->getDecay());
-//
-//     for (uint32_t i = 0; i < placedNetwork->getNumStamps(); ++i) {
-//         ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
-//         for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
-//             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
-//             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
-//             assert(maybeOptimizer.isPresent());
-//             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
-//             shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
-//             assert(sgd != NULL);
-//             ASSERT_EQ(sgd->getDecay(), 0.2f);
-//         }
-//     }
-// }
-//
-// TEST(Sgd, SetAndGetMomentum) {
-//     Network network = buildNetwork(5);
-//     shared_ptr<Sgd> sgd = Sgd::Builder().decay(0.5f).network(network).build();
-//
-//     sgd->setMomentum(0.3f, nullptr);
-//     ASSERT_FLOAT_EQ(0.3f, sgd->getMomentum());
-//
-//     Stream stream(0);
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
-//     ASSERT_TRUE(placedNetwork != nullptr);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//     for (uint32_t i = 0; i < placedNetwork->getNumStamps(); ++i) {
-//         ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
-//         for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
-//             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
-//             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
-//             assert(maybeOptimizer.isPresent());
-//             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
-//             shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
-//             assert(sgd != NULL);
-//             ASSERT_EQ(sgd->getMomentum(), 0.3f);
-//         }
-//     }
-// }
-//
-// TEST(Sgd, SetAndGetUseNesterovMomentum) {
-//     Network network = buildNetwork(6);
-//     shared_ptr<Sgd> sgd = Sgd::Builder().useNesterovMomentum(false).network(network).build();
-//
-//     Stream stream(0);
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
-//     ASSERT_TRUE(placedNetwork != nullptr);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//
-//     sgd->setUseNesterovMomentum(true, placedNetwork.get());
-//     ASSERT_TRUE(sgd->getUseNesterovMomentum());
-//
-//     for (uint32_t i = 0; i < placedNetwork->getNumStamps(); ++i) {
-//         ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
-//         for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
-//             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
-//             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
-//             assert(maybeOptimizer.isPresent());
-//             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
-//             shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
-//             assert(sgd != NULL);
-//             ASSERT_EQ(sgd->getUseNesterovMomentum(), true);
-//         }
-//     }
-//
-//     sgd->setUseNesterovMomentum(false, placedNetwork.get());
-//     ASSERT_FALSE(sgd->getUseNesterovMomentum());
-//
-//     for (uint32_t i = 0; i < placedNetwork->getNumStamps(); ++i) {
-//         ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
-//         for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
-//             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
-//             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
-//             assert(maybeOptimizer.isPresent());
-//             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
-//             shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
-//             assert(sgd != NULL);
-//             ASSERT_EQ(sgd->getUseNesterovMomentum(), false);
-//         }
-//     }
-// }
-//
-// TEST(Sgd, SgdBuilds) {
-//     Optional<Network *> optionalTest;
-//     ASSERT_FALSE(optionalTest.isPresent());
-//
-//     Network network = buildNetwork(2);
-//     shared_ptr<Sgd> sgd =
-//         Sgd::Builder().network(network).initialLearningRate(0.01).decay(0.9).momentum(0).useNesterovMomentum(true).build();
-//     ASSERT_NE(sgd, nullptr);
-// }
-//
-// TEST(Sgd, SgdInitializesParametersWithOneStamp) {
-//     Network network = buildNetwork(2);
-//     float initialLearningRate = 0.72;
-//     float decay = 0.9;
-//     float momentum = 0.0;
-//     shared_ptr<Sgd> sgd = Sgd::Builder()
-//                               .initialLearningRate(initialLearningRate)
-//                               .decay(decay)
-//                               .momentum(momentum)
-//                               .useNesterovMomentum(true)
-//                               .network(network)
-//                               .build();
-//
-//     ThorImplementation::StampedNetwork stampedNetwork0;
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents, false, {0}, 1);
-//     ASSERT_TRUE(placedNetwork != nullptr);
-//
-//     uint32_t epoch = 0;
-//     uint32_t batch = 0;
-//     uint32_t batchesPerEpoch = 10;
-//     Optimizer::updateHyperParameters(placedNetwork.get(), epoch, batch, batchesPerEpoch);
-//     unordered_map<string, float> params = sgd->getAllHyperParameters(placedNetwork.get());
-//
-//     // Check that the proper values are reported
-//     ASSERT_EQ(params.count("currentLearningRate"), 1U);
-//     ASSERT_EQ(params.size(), 5U);
-//     ASSERT_LT(abs(params["currentLearningRate"] - initialLearningRate), 0.0001);
-//     ASSERT_EQ(params["useNesterovMomentum"], float(true));
-//     ASSERT_EQ(params["momentum"], momentum);
-//     ASSERT_EQ(params["initialLearningRate"], initialLearningRate);
-//     ASSERT_EQ(params["decay"], decay);
-// }
-//
-// /* FIXME: put this back in once multiple stamps is supported
-// TEST(Sgd, SgdInitializesParametersWithTwoStamps) {
-// Network network = buildNetwork(2);
-// float initialLearningRate = 0.25;
-// float decay = 0.8;
-// float momentum = 0.0;
-// shared_ptr<Sgd> sgd =
-// Sgd::Builder().network(network).initialLearningRate(initialLearningRate).decay(decay).momentum(momentum).useNesterovMomentum(true).build();
-//
-// ThorImplementation::StampedNetwork stampedNetwork0;
-// ThorImplementation::StampedNetwork stampedNetwork1;
-// vector<Event> initDoneEvents;
-// Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 2);
-// ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-//
-// uint32_t epoch = 0;
-// uint32_t batch = 4;
-// uint32_t batchesPerEpoch = 25;
-// unordered_map<string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
-//
-// // Check that the proper values are reported
-// ASSERT_EQ(params.count("currentLearningRate"), 1U);
-// ASSERT_EQ(params.size(), 1U);
-// ASSERT_LT(abs(params["currentLearningRate"] - initialLearningRate), 0.0001);
-// }
-// */
-//
-// TEST(Sgd, SgdUpdatesParameters) {
-//     Network network = buildNetwork(1);
-//     float initialLearningRate = 0.43;
-//     float decay = 0.8;
-//     float momentum = 0.0;
-//     shared_ptr<Sgd> sgd = Sgd::Builder()
-//                               .network(network)
-//                               .initialLearningRate(initialLearningRate)
-//                               .decay(decay)
-//                               .momentum(momentum)
-//                               .useNesterovMomentum(true)
-//                               .build();
-//
-//     ThorImplementation::StampedNetwork stampedNetwork0;
-//
-//     Stream stream(0);
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
-//     ASSERT_TRUE(placedNetwork != nullptr);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//
-//     Optimizer::updateHyperParameters(placedNetwork.get(), 0, 0, 10);
-//     uint32_t epoch = 5;
-//     uint32_t batch = 0;
-//     uint32_t batchesPerEpoch = 50;
-//     Optimizer::updateHyperParameters(placedNetwork.get(), epoch, batch, batchesPerEpoch);
-//     unordered_map<string, float> params = sgd->getAllHyperParameters(placedNetwork.get());
-//     float expected = initialLearningRate * pow(1.0f - decay, epoch);
-//
-//     // Check that the proper values are reported
-//     ASSERT_EQ(params.count("currentLearningRate"), 1U);
-//     ASSERT_EQ(params.size(), 5U);
-//     ASSERT_LT(abs(params["currentLearningRate"] - expected), 0.0001);
-//     ASSERT_EQ(params["useNesterovMomentum"], float(true));
-//     ASSERT_EQ(params["momentum"], momentum);
-//     ASSERT_EQ(params["initialLearningRate"], initialLearningRate);
-//     ASSERT_EQ(params["decay"], decay);
-// }
-//
-// TEST(Sgd, SgdInitializesStampedNetworkParameters) {
-//     Network network = buildNetwork(2);
-//     float initialLearningRate = 0.5;
-//     float decay = 0.32;
-//     float momentum = 0.0;
-//     shared_ptr<Sgd> sgd = Sgd::Builder()
-//                               .initialLearningRate(initialLearningRate)
-//                               .decay(decay)
-//                               .momentum(momentum)
-//                               .useNesterovMomentum(true)
-//                               .network(network)
-//                               .build();
-//
-//     ThorImplementation::StampedNetwork stampedNetwork0;
-//
-//     Stream stream(0);
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
-//     ASSERT_TRUE(placedNetwork != nullptr);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//
-//     Optimizer::updateHyperParameters(placedNetwork.get(), 0, 0, 10);
-//     uint32_t epoch = 1;
-//     uint32_t batch = 0;
-//     uint32_t batchesPerEpoch = 50;
-//     Optimizer::updateHyperParameters(placedNetwork.get(), epoch, batch, batchesPerEpoch);
-//     unordered_map<string, float> params = sgd->getAllHyperParameters(placedNetwork.get());
-//     float expected = initialLearningRate * pow(1.0f - decay, epoch);
-//
-//     // Check that the proper values are reported
-//     ASSERT_EQ(params.count("currentLearningRate"), 1U);
-//     ASSERT_EQ(params.size(), 5U);
-//     ASSERT_LT(abs(params["currentLearningRate"] - expected), 0.0001);
-//     ASSERT_EQ(params["useNesterovMomentum"], float(true));
-//     ASSERT_EQ(params["momentum"], momentum);
-//     ASSERT_EQ(params["initialLearningRate"], initialLearningRate);
-//     ASSERT_EQ(params["decay"], decay);
-// }
-//
-// TEST(Sgd, SgdReportsParameters) {
-//     Network network = buildNetwork(2);
-//     float initialLearningRate = 0.5;
-//     float decay = 0.32;
-//     float momentum = 0.0;
-//     bool useNesteroveMomentum = true;
-//     shared_ptr<Sgd> sgd = Sgd::Builder()
-//                               .initialLearningRate(initialLearningRate)
-//                               .decay(decay)
-//                               .momentum(momentum)
-//                               .useNesterovMomentum(useNesteroveMomentum)
-//                               .network(network)
-//                               .build();
-//
-//     ThorImplementation::StampedNetwork stampedNetwork0;
-//
-//     Stream stream(0);
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
-//     ASSERT_TRUE(placedNetwork != nullptr);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//
-//     Optimizer::updateHyperParameters(placedNetwork.get(), 0, 1, 10);
-//     unordered_map<string, float> params = sgd->getAllHyperParameters(placedNetwork.get());
-//
-//     // Check that the proper values are reported
-//     ASSERT_EQ(params.size(), 5U);
-//     ASSERT_EQ(params.count("currentLearningRate"), 1U);
-//     ASSERT_LT(abs(params["currentLearningRate"] - initialLearningRate), 0.0001);
-//     ASSERT_EQ(params.count("initialLearningRate"), 1U);
-//     ASSERT_LT(abs(params["initialLearningRate"] - initialLearningRate), 0.0001);
-//     ASSERT_EQ(params.count("decay"), 1U);
-//     ASSERT_LT(abs(params["decay"] - decay), 0.0001);
-//     ASSERT_EQ(params.count("momentum"), 1U);
-//     ASSERT_LT(abs(params["momentum"] - momentum), 0.0001);
-//     ASSERT_EQ(params.count("useNesterovMomentum"), 1U);
-//     ASSERT_TRUE(params["useNesterovMomentum"]);
-//
-//     // Ensure that optimizer is connected to each trainable layer and its paratmeters are initialized properly
-//     for (uint32_t i = 0; i < stampedNetwork0.getNumTrainableLayers(); ++i) {
-//         shared_ptr<ThorImplementation::FullyConnected> fc =
-//             dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork0.getTrainableLayer(i));
-//         ASSERT_NE(fc, nullptr);
-//         Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = fc->getOptimizer();
-//         assert(maybeOptimizer.isPresent());
-//         shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
-//         shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
-//         ASSERT_NE(sgd, nullptr);
-//         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
-//         ASSERT_EQ(sgd->getDecay(), decay);
-//         ASSERT_EQ(sgd->getMomentum(), momentum);
-//         ASSERT_EQ(sgd->getUseNesterovMomentum(), useNesteroveMomentum);
-//     }
-//
-//     Optimizer::updateHyperParameters(placedNetwork.get(), 0, 0, 10);
-//     uint32_t epoch = 2;
-//     uint32_t batch = 3;
-//     uint32_t batchesPerEpoch = 50;
-//     Optimizer::updateHyperParameters(placedNetwork.get(), epoch, batch, batchesPerEpoch);
-//     float expected = initialLearningRate * pow(1.0f - decay, epoch);
-//     params.clear();
-//     params = sgd->getAllHyperParameters(placedNetwork.get());
-//
-//     // Check that the proper values are reported
-//     ASSERT_EQ(params.size(), 5U);
-//     ASSERT_EQ(params.count("currentLearningRate"), 1U);
-//     ASSERT_LT(abs(params["currentLearningRate"] - expected), 0.0001);
-//     ASSERT_EQ(params.count("initialLearningRate"), 1U);
-//     ASSERT_LT(abs(params["initialLearningRate"] - initialLearningRate), 0.0001);
-//     ASSERT_EQ(params.count("decay"), 1U);
-//     ASSERT_LT(abs(params["decay"] - decay), 0.0001);
-//     ASSERT_EQ(params.count("momentum"), 1U);
-//     ASSERT_LT(abs(params["momentum"] - momentum), 0.0001);
-//     ASSERT_EQ(params.count("useNesterovMomentum"), 1U);
-//     ASSERT_TRUE(params["useNesterovMomentum"]);
-// }
-//
-// TEST(Sgd, SerializeDeserialize) {
-//     srand(time(nullptr));
-//
-//     Network initialNetwork("initialNetwork");
-//
-//     Tensor::DataType dataType = Tensor::DataType::FP16;
-//
-//     vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
-//
-//     uint32_t numOutputFeatures = 1 + (rand() % 1000);
-//     bool hasBias = rand() % 2;
-//
-//     NetworkInput networkInput =
-//         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
-//
-//     FullyConnected fullyConnected = FullyConnected::Builder()
-//                                         .network(initialNetwork)
-//                                         .featureInput(networkInput.getFeatureOutput())
-//                                         .numOutputFeatures(numOutputFeatures)
-//                                         .hasBias(hasBias)
-//                                         .noActivation()
-//                                         .build();
-//
-//     Tensor logits = fullyConnected.getFeatureOutputs()[0];
-//     uint32_t numClasses = logits.getDimensions()[0];
-//     NetworkInput labelsInput =
-//         NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions({numClasses}).dataType(dataType).build();
-//
-//     MeanAbsoluteError meanAbsoluteError = MeanAbsoluteError::Builder()
-//                                               .network(initialNetwork)
-//                                               .predictions(logits)
-//                                               .reportsRawLoss()
-//                                               .lossDataType(dataType)
-//                                               .labels(labelsInput.getFeatureOutput())
-//                                               .build();
-//
-//     NetworkOutput networkOutput = NetworkOutput::Builder()
-//                                       .network(initialNetwork)
-//                                       .name("lossOutput")
-//                                       .inputTensor(meanAbsoluteError.getLoss())
-//                                       .dataType(dataType)
-//                                       .build();
-//
-//     float initialLearningRate = (1 + (rand() % 1000)) / 1000.0f;
-//     float decay = (rand() % 1000) / 1000.0f;
-//     float momentum = (1 + (rand() % 1000)) / 1000.0f;
-//     bool useNesterovMomentum = rand() % 2;
-//
-//     // Looks like I am missing the step where I go over all the API TWB layers and the optimizer
-//     shared_ptr<Sgd> sgd = Sgd::Builder()
-//                               .network(initialNetwork)
-//                               .initialLearningRate(initialLearningRate)
-//                               .decay(decay)
-//                               .momentum(momentum)
-//                               .useNesterovMomentum(useNesterovMomentum)
-//                               .build();
-//
-//     ASSERT_TRUE(fullyConnected.isInitialized());
-//
-//     vector<uint64_t> outputDimensions = {numOutputFeatures};
-//     vector<Tensor> featureInputs = fullyConnected.getFeatureInputs();
-//     vector<Tensor> featureOutputs = fullyConnected.getFeatureOutputs();
-//     assert(featureInputs[0] == networkInput.getFeatureOutput());
-//
-//     ASSERT_EQ(fullyConnected.getFeatureOutput(networkInput.getFeatureOutput()), featureOutputs[0]);
-//
-//     assert(fullyConnected.getFeatureInput(featureOutputs[0]) == featureInputs[0]);
-//
-//     ASSERT_EQ(featureInputs[0].getDataType(), dataType);
-//     ASSERT_EQ(featureInputs[0].getDimensions(), inputDimensions);
-//
-//     ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
-//     ASSERT_EQ(featureOutputs[0].getDimensions(), outputDimensions);
-//
-//     // Now stamp the network and test serialization
-//     Stream stream(0);
-//     uint32_t batchSize = 1 + (rand() % 16);
-//     vector<Event> initDoneEvents;
-//     shared_ptr<PlacedNetwork> initialPlacedNetwork = initialNetwork.place(batchSize, initDoneEvents);
-//     ASSERT_TRUE(initialPlacedNetwork != nullptr);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//
-//     // Fetch the fully connected layer from the network and write to its weights
-//     ASSERT_EQ(initialPlacedNetwork->getNumStamps(), 1UL);
-//     ThorImplementation::StampedNetwork &stampedNetwork = initialPlacedNetwork->getStampedNetwork(0);
-//     ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
-//     shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer =
-//         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
-//     ASSERT_TRUE(physicalFCLayer != nullptr);
-//     ThorImplementation::Tensor weights = physicalFCLayer->getWeights();
-//     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-//     ThorImplementation::Tensor weightsCpu = weights.clone(cpuPlacement);
-//     half *weightsCpuMem = (half *)weightsCpu.getMemPtr();
-//     for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
-//         weightsCpuMem[i] = i;
-//     }
-//     weights.copyFromAsync(weightsCpu, stream);
-//
-//     ThorImplementation::Tensor biases;
-//     ThorImplementation::Tensor biasesCpu;
-//     if (hasBias) {
-//         biases = physicalFCLayer->getBiases();
-//         biasesCpu = biases.clone(cpuPlacement);
-//         half *biasesCpuMem = (half *)biasesCpu.getMemPtr();
-//         for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
-//             biasesCpuMem[i] = i * i + 6;
-//         }
-//         biases.copyFromAsync(biasesCpu, stream);
-//     }
-//
-//     thor_file::TarWriter archiveWriter("testModel");
-//
-//     // The network attached the optimizer to its copy of the FC layer
-//     json fullyConnectedJ;
-//     bool fcFound = false;
-//     shared_ptr<FullyConnected> initalNetworkFC;
-//     for (int32_t i = 0; i < initialNetwork.getNumTrainableLayers(); ++i) {
-//         shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
-//         initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
-//         if (initalNetworkFC) {
-//             fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true, initialPlacedNetwork->getStampedNetwork(0));
-//             fcFound = true;
-//             break;
-//         }
-//     }
-//     ASSERT_TRUE(fcFound);
-//
-//     json networkInputJ = networkInput.serialize(archiveWriter, stream);
-//     json labelsInputJ = labelsInput.serialize(archiveWriter, stream);
-//     json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
-//     json crossEntropyJ = meanAbsoluteError.serialize(archiveWriter, stream);
-//
-//     ThorImplementation::StampedNetwork &initial_stamped_network = initialPlacedNetwork->getStampedNetwork(0);
-//     shared_ptr<ThorImplementation::Layer> initial_phys_layer =
-//     initial_stamped_network.getPhysicalLayerFromApiLayer(fullyConnected.getId());
-//     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> initial_phys_twb =
-//         dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(initial_phys_layer);
-//     assert(initial_phys_twb != nullptr);
-//     json sgdJ = sgd->serialize(archiveWriter, stream, initial_phys_twb->getOptimizer(), "layer" + to_string(fullyConnected.getId()),
-//     true);
-//
-//     ASSERT_EQ(fullyConnectedJ["version"], "1.0.0");
-//     ASSERT_EQ(fullyConnectedJ["layer_type"], "fully_connected");
-//
-//     EXPECT_TRUE(fullyConnectedJ.contains("num_output_features"));
-//     EXPECT_TRUE(fullyConnectedJ.contains("has_bias"));
-//     EXPECT_FALSE(fullyConnectedJ.contains("activation"));
-//     EXPECT_FALSE(fullyConnectedJ.contains("drop_out"));
-//     EXPECT_FALSE(fullyConnectedJ.contains("batch_normalization"));
-//     EXPECT_FALSE(fullyConnectedJ.contains("activation"));
-//     EXPECT_EQ(fullyConnectedJ.contains("biases_tensor"), hasBias);
-//     EXPECT_TRUE(fullyConnectedJ.contains("weights_tensor"));
-//     EXPECT_TRUE(fullyConnectedJ.contains("inputs"));
-//     EXPECT_TRUE(fullyConnectedJ.contains("outputs"));
-//
-//     ASSERT_TRUE(fullyConnectedJ.at("num_output_features").is_number_integer());
-//     ASSERT_TRUE(fullyConnectedJ.at("has_bias").is_boolean());
-//     ASSERT_TRUE(fullyConnectedJ.at("weights_tensor").is_string());
-//     ASSERT_TRUE(fullyConnectedJ.at("inputs").is_array());
-//     ASSERT_TRUE(fullyConnectedJ.at("outputs").is_array());
-//
-//     EXPECT_EQ(fullyConnectedJ.at("num_output_features").get<uint32_t>(), numOutputFeatures);
-//     EXPECT_EQ(fullyConnectedJ.at("has_bias").get<bool>(), hasBias);
-//
-//     const auto &inputs = fullyConnectedJ.at("inputs");
-//     ASSERT_EQ(inputs.size(), 1U) << "Expect exactly one input";
-//     const auto &in0 = inputs.at(0);
-//     ASSERT_TRUE(in0.is_object());
-//     ASSERT_TRUE(in0.at("data_type").is_string());
-//     EXPECT_EQ(in0.at("data_type").get<string>(), "fp16");
-//
-//     ASSERT_TRUE(in0.at("dimensions").is_array());
-//     ASSERT_EQ(in0.at("dimensions").size(), 1U);
-//     EXPECT_TRUE(in0.at("dimensions").at(0).is_number_integer());
-//     EXPECT_EQ(in0.at("dimensions").at(0).get<uint32_t>(), inputDimensions[0]);
-//
-//     ASSERT_TRUE(in0.at("id").is_number_integer());
-//
-//     const auto &outputs = fullyConnectedJ.at("outputs");
-//     ASSERT_EQ(outputs.size(), 1U) << "Expect exactly one output";
-//     const auto &out0 = outputs.at(0);
-//     ASSERT_TRUE(out0.is_object());
-//     ASSERT_TRUE(out0.at("data_type").is_string());
-//     EXPECT_EQ(out0.at("data_type").get<string>(), "fp16");
-//
-//     ASSERT_TRUE(out0.at("dimensions").is_array());
-//     ASSERT_EQ(out0.at("dimensions").size(), 1U);
-//     EXPECT_TRUE(out0.at("dimensions").at(0).is_number_integer());
-//     EXPECT_EQ(out0.at("dimensions").at(0).get<uint32_t>(), numOutputFeatures);
-//
-//     ASSERT_TRUE(out0.at("id").is_number_integer());
-//
-//     string file_prefix = "layer" + to_string(fullyConnected.getId());
-//     EXPECT_FALSE(fullyConnectedJ.at("weights_tensor").get<string>().empty());
-//     EXPECT_EQ(fullyConnectedJ.at("weights_tensor").get<string>(), file_prefix + "_weights.gds");
-//     if (hasBias) {
-//         EXPECT_FALSE(fullyConnectedJ.at("biases_tensor").get<string>().empty());
-//         EXPECT_EQ(fullyConnectedJ.at("biases_tensor").get<string>(), file_prefix + "_biases.gds");
-//     }
-//
-//     const auto &optimizer = fullyConnectedJ.at("optimizer");
-//     ASSERT_TRUE(optimizer.is_object());
-//     ASSERT_EQ(optimizer.at("decay").get<float>(), decay);
-//     ASSERT_EQ(optimizer.at("epoch").get<uint32_t>(), 0);
-//     ASSERT_EQ(optimizer.at("initial_learning_rate").get<float>(), initialLearningRate);
-//     ASSERT_EQ(optimizer.at("momentum").get<float>(), momentum);
-//     ASSERT_EQ(optimizer.at("optimizer_type").get<string>(), "sgd");
-//     ASSERT_EQ(optimizer.at("use_nesterov").get<bool>(), useNesterovMomentum);
-//     ASSERT_EQ(optimizer.at("version").get<string>(), "1.0.0");
-//
-//     // printf("%s\n", networkInputJ.dump(4).c_str());
-//     // printf("%s\n", labelsInputJ.dump(4).c_str());
-//     // printf("%s\n", fullyConnectedJ.dump(4).c_str());
-//     // printf("%s\n", networkOutputJ.dump(4).c_str());
-//     // printf("%s\n", crossEntropyJ.dump(4).c_str());
-//
-//     ////////////////////////////
-//     // Deserialize
-//     ////////////////////////////
-//     // Verify that the layer gets added to the network and that its weights are set to the correct values
-//     Network newNetwork("newNetwork");
-//
-//     archiveWriter.createArchive("/tmp/", true);
-//     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
-//
-//     Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
-//     Layer::deserialize(archiveReader, labelsInputJ, &newNetwork);
-//     Layer::deserialize(archiveReader, fullyConnectedJ, &newNetwork);
-//     Layer::deserialize(archiveReader, crossEntropyJ, &newNetwork);
-//     Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
-//
-//     batchSize = 1 + (rand() % 16);
-//     shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
-//     ASSERT_TRUE(newPlacedNetwork != nullptr);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//
-//     ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
-//     ThorImplementation::StampedNetwork &newStampedNetwork = newPlacedNetwork->getStampedNetwork(0);
-//
-//     // Find the API FC to verify original ID
-//     uint32_t numTrainableLayers = newNetwork.getNumTrainableLayers();
-//     for (uint32_t i = 0; i < numTrainableLayers; ++i) {
-//         shared_ptr<Thor::FullyConnected> apiFCLayerDes = dynamic_pointer_cast<Thor::FullyConnected>(newNetwork.getTrainableLayer(i));
-//         if (apiFCLayerDes != nullptr)
-//             ASSERT_TRUE(apiFCLayerDes->getOptimizer() != nullptr);
-//         ASSERT_EQ(apiFCLayerDes->getOptimizer()->getOriginalId(), sgd->getId());
-//     }
-//
-//     // Find the FullyConnected layer and verify its optimizer's parameters
-//     shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes =
-//         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
-//     ASSERT_TRUE(physicalFCLayerDes != nullptr);
-//
-//     shared_ptr<ThorImplementation::Sgd> stampedSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalFCLayerDes->getOptimizer());
-//     ASSERT_TRUE(stampedSgd != nullptr);
-//
-//     ASSERT_EQ(stampedSgd->getInitialLearningRate(), initialLearningRate);
-//     ASSERT_EQ(stampedSgd->getDecay(), decay);
-//     ASSERT_EQ(stampedSgd->getMomentum(), momentum);
-//     ASSERT_EQ(stampedSgd->getUseNesterovMomentum(), useNesterovMomentum);
-//
-//     filesystem::remove("/tmp/testModel.thor.tar");
-// }
+#include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "DeepLearning/Api/Optimizers/Sgd.h"
+#include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Common/Stream.h"
+
+#include "gtest/gtest.h"
+
+#include <nlohmann/json.hpp>
+
+#include <cmath>
+#include <cstdint>
+#include <memory>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+using json = nlohmann::json;
+
+namespace Api = Thor;
+namespace Impl = ThorImplementation;
+
+namespace {
+
+Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
+Impl::TensorPlacement gpuPlacement(Impl::TensorPlacement::MemDevices::GPU, 0);
+
+using DataType = Impl::TensorDescriptor::DataType;
+
+void expectHyperParameter(const std::unordered_map<std::string, float>& parameters, const std::string& name, float expected) {
+    ASSERT_TRUE(parameters.contains(name)) << "Missing hyperparameter: " << name;
+    EXPECT_FLOAT_EQ(parameters.at(name), expected) << "Mismatch for hyperparameter: " << name;
+}
+
+void expectAllClose(const std::vector<float>& actual, const std::vector<float>& expected, float atol = 1e-5f, float rtol = 1e-5f) {
+    ASSERT_EQ(actual.size(), expected.size());
+
+    for (uint64_t i = 0; i < actual.size(); ++i) {
+        const float diff = std::fabs(actual[i] - expected[i]);
+        const float tol = atol + rtol * std::fabs(expected[i]);
+        EXPECT_LE(diff, tol) << "Mismatch at index " << i << ": actual=" << actual[i] << ", expected=" << expected[i];
+    }
+}
+
+float computeCurrentLearningRate(float initialLearningRate, float decay, uint64_t epoch) {
+    return static_cast<float>(static_cast<double>(initialLearningRate) * std::pow(1.0 - static_cast<double>(decay), epoch));
+}
+
+float computeStep(float currentLearningRate, uint32_t batchSize) {
+    EXPECT_GT(batchSize, 0u);
+    return currentLearningRate / (static_cast<float>(batchSize) * Impl::Loss::getLossScalingFactor());
+}
+
+void writeCpuFp32Tensor(Impl::Tensor& tensor, const std::vector<float>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensor.getDataType(), DataType::FP32);
+    ASSERT_EQ(tensor.getTotalNumElements(), values.size());
+
+    float* ptr = tensor.getMemPtr<float>();
+    for (uint64_t i = 0; i < values.size(); ++i)
+        ptr[i] = values[i];
+}
+
+std::vector<float> readCpuFp32Tensor(const Impl::Tensor& tensor) {
+    EXPECT_EQ(tensor.getPlacement(), cpuPlacement);
+    EXPECT_EQ(tensor.getDataType(), DataType::FP32);
+
+    std::vector<float> values(tensor.getTotalNumElements());
+    const float* ptr = tensor.getMemPtr<float>();
+    for (uint64_t i = 0; i < values.size(); ++i)
+        values[i] = ptr[i];
+
+    return values;
+}
+
+void copyValuesToGpuFp32Tensor(Impl::Tensor& gpuTensor, const std::vector<float>& values, Stream& stream) {
+    ASSERT_EQ(gpuTensor.getPlacement(), gpuPlacement);
+    ASSERT_EQ(gpuTensor.getDataType(), DataType::FP32);
+    ASSERT_EQ(gpuTensor.getTotalNumElements(), values.size());
+
+    Impl::Tensor host(cpuPlacement, gpuTensor.getDescriptor());
+    writeCpuFp32Tensor(host, values);
+
+    gpuTensor.copyFromAsync(host, stream);
+    stream.synchronize();
+}
+
+std::vector<float> copyGpuFp32TensorToValues(const Impl::Tensor& gpuTensor, Stream& stream) {
+    EXPECT_EQ(gpuTensor.getPlacement(), gpuPlacement);
+    EXPECT_EQ(gpuTensor.getDataType(), DataType::FP32);
+
+    Impl::Tensor host = gpuTensor.clone(cpuPlacement);
+    host.copyFromAsync(gpuTensor, stream);
+    stream.synchronize();
+
+    return readCpuFp32Tensor(host);
+}
+
+std::shared_ptr<Impl::Sgd> stampCompileSgd(Api::Sgd& sgd, Impl::Tensor& weights, Stream& stream) {
+    std::shared_ptr<Impl::Optimizer> physicalOptimizer = sgd.stamp(nullptr);
+    std::shared_ptr<Impl::Sgd> physicalSgd = std::dynamic_pointer_cast<Impl::Sgd>(physicalOptimizer);
+    if (physicalSgd == nullptr)
+        throw std::runtime_error("Api::Sgd did not stamp an Impl::Sgd.");
+
+    sgd.compile(physicalOptimizer, weights, stream);
+    stream.synchronize();
+
+    return physicalSgd;
+}
+
+struct SgdReferenceState {
+    std::vector<float> weights;
+    std::vector<float> velocity;
+};
+
+void applyPlainSgdReferenceStep(SgdReferenceState& state,
+                                const std::vector<float>& rawGradient,
+                                uint32_t batchSize,
+                                float currentLearningRate) {
+    ASSERT_EQ(state.weights.size(), rawGradient.size());
+
+    const float step = computeStep(currentLearningRate, batchSize);
+    for (uint64_t i = 0; i < rawGradient.size(); ++i)
+        state.weights[i] -= step * rawGradient[i];
+}
+
+void applyMomentumSgdReferenceStep(SgdReferenceState& state,
+                                   const std::vector<float>& rawGradient,
+                                   uint32_t batchSize,
+                                   float currentLearningRate,
+                                   float momentum,
+                                   bool useNesterovMomentum) {
+    ASSERT_EQ(state.weights.size(), rawGradient.size());
+    ASSERT_EQ(state.velocity.size(), rawGradient.size());
+
+    const float step = computeStep(currentLearningRate, batchSize);
+    for (uint64_t i = 0; i < rawGradient.size(); ++i) {
+        const float vNext = momentum * state.velocity[i] - step * rawGradient[i];
+
+        if (useNesterovMomentum) {
+            state.weights[i] += momentum * vNext - step * rawGradient[i];
+        } else {
+            state.weights[i] += vNext;
+        }
+
+        state.velocity[i] = vNext;
+    }
+}
+
+void runSgdStep(Impl::Sgd& sgd, const std::vector<float>& rawGradient, uint32_t batchSize, Stream& stream) {
+    Optional<Impl::Tensor> gradientOpt = sgd.getWeightsGradient();
+    ASSERT_TRUE(gradientOpt.isPresent());
+
+    Impl::Tensor gradient = gradientOpt.get();
+    copyValuesToGpuFp32Tensor(gradient, rawGradient, stream);
+
+    sgd.updateWeights(batchSize);
+    stream.synchronize();
+}
+
+Impl::Tensor getMomentumStorage(Impl::Sgd& sgd) {
+    EXPECT_TRUE(sgd.hasParameter("momentum"));
+
+    Optional<Impl::Tensor> storage = sgd.getParameter("momentum")->getStorage();
+    EXPECT_TRUE(storage.isPresent());
+
+    return storage.get();
+}
+
+}  // namespace
+
+TEST(SgdApi, BuilderDefaultsSettersAndArchitectureJson) {
+    std::shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder().build();
+    ASSERT_NE(sgd, nullptr);
+
+    EXPECT_EQ(sgd->getType(), "SGD");
+    EXPECT_FLOAT_EQ(sgd->getInitialLearningRate(), 0.01f);
+    EXPECT_FLOAT_EQ(sgd->getDecay(), 0.0f);
+    EXPECT_FLOAT_EQ(sgd->getMomentum(), 0.0f);
+    EXPECT_FALSE(sgd->getUseNesterovMomentum());
+    EXPECT_EQ(sgd->getEpoch(), 0u);
+    EXPECT_EQ(sgd->getOriginalId(), sgd->getId());
+
+    sgd->setInitialLearningRate(0.2f, nullptr);
+    sgd->setDecay(0.3f, nullptr);
+    sgd->setMomentum(0.4f, nullptr);
+    sgd->setUseNesterovMomentum(true, nullptr);
+
+    EXPECT_FLOAT_EQ(sgd->getInitialLearningRate(), 0.2f);
+    EXPECT_FLOAT_EQ(sgd->getDecay(), 0.3f);
+    EXPECT_FLOAT_EQ(sgd->getMomentum(), 0.4f);
+    EXPECT_TRUE(sgd->getUseNesterovMomentum());
+
+    sgd->setConstantLearningRate(0.125f, nullptr);
+    EXPECT_FLOAT_EQ(sgd->getInitialLearningRate(), 0.125f);
+    EXPECT_FLOAT_EQ(sgd->getDecay(), 0.0f);
+
+    json j = sgd->architectureJson();
+    ASSERT_EQ(j.at("optimizer_type").get<std::string>(), "sgd");
+    ASSERT_EQ(j.at("version").get<std::string>(), sgd->getVersion());
+    ASSERT_EQ(j.at("id").get<uint64_t>(), sgd->getId());
+    EXPECT_FLOAT_EQ(j.at("initial_learning_rate").get<float>(), 0.125f);
+    EXPECT_FLOAT_EQ(j.at("decay").get<float>(), 0.0f);
+    EXPECT_FLOAT_EQ(j.at("momentum").get<float>(), 0.4f);
+    EXPECT_TRUE(j.at("use_nesterov").get<bool>());
+    EXPECT_EQ(j.at("epoch").get<uint64_t>(), 0u);
+}
+
+TEST(SgdApi, BuilderCustomValuesStampAndCompilePhysicalSgdWithoutMomentum) {
+    Stream stream(gpuPlacement);
+
+    constexpr float initialLearningRate = 0.25f;
+    constexpr float decay = 0.1f;
+    constexpr float momentum = 0.0f;
+    constexpr bool useNesterovMomentum = false;
+
+    std::shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder()
+                                        .initialLearningRate(initialLearningRate)
+                                        .decay(decay)
+                                        .momentum(momentum)
+                                        .useNesterovMomentum(useNesterovMomentum)
+                                        .build();
+    ASSERT_NE(sgd, nullptr);
+
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 3}));
+    copyValuesToGpuFp32Tensor(weights, {1.0f, -2.0f, 3.0f, -4.0f, 5.0f, -6.0f}, stream);
+
+    std::shared_ptr<Impl::Sgd> physicalSgd = stampCompileSgd(*sgd, weights, stream);
+    ASSERT_NE(physicalSgd, nullptr);
+
+    EXPECT_TRUE(physicalSgd->isCompiled());
+    EXPECT_EQ(physicalSgd->getId(), sgd->getId());
+    EXPECT_FLOAT_EQ(physicalSgd->getInitialLearningRate(), initialLearningRate);
+    EXPECT_FLOAT_EQ(physicalSgd->getDecay(), decay);
+    EXPECT_FLOAT_EQ(physicalSgd->getMomentum(), momentum);
+    EXPECT_EQ(physicalSgd->getUseNesterovMomentum(), useNesterovMomentum);
+    EXPECT_FALSE(physicalSgd->hasParameter("momentum"));
+
+    Optional<Impl::Tensor> gradient = physicalSgd->getWeightsGradient();
+    ASSERT_TRUE(gradient.isPresent());
+    EXPECT_EQ(gradient.get().getPlacement(), gpuPlacement);
+    EXPECT_EQ(gradient.get().getDataType(), DataType::FP32);
+    EXPECT_EQ(gradient.get().getDimensions(), weights.getDimensions());
+
+    Impl::Tensor weightsOut = physicalSgd->getOptimizerParameterTensor("weights");
+    EXPECT_EQ(weightsOut, weights);
+
+    std::vector<std::string> outputNames = physicalSgd->getOptimizerParameterNames();
+    std::set<std::string> names(outputNames.begin(), outputNames.end());
+    EXPECT_EQ(names, (std::set<std::string>{"weights"}));
+
+    std::unordered_map<std::string, float> params = physicalSgd->getAllHyperParameters();
+    ASSERT_EQ(params.size(), 5u);
+    expectHyperParameter(params, "currentLearningRate", initialLearningRate);
+    expectHyperParameter(params, "initialLearningRate", initialLearningRate);
+    expectHyperParameter(params, "decay", decay);
+    expectHyperParameter(params, "momentum", momentum);
+    expectHyperParameter(params, "useNesterovMomentum", 0.0f);
+}
+
+TEST(SgdApi, BuilderCustomValuesStampAndCompilePhysicalSgdWithMomentum) {
+    Stream stream(gpuPlacement);
+
+    constexpr float initialLearningRate = 0.125f;
+    constexpr float decay = 0.2f;
+    constexpr float momentum = 0.75f;
+    constexpr bool useNesterovMomentum = true;
+
+    std::shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder()
+                                        .initialLearningRate(initialLearningRate)
+                                        .decay(decay)
+                                        .momentum(momentum)
+                                        .useNesterovMomentum(useNesterovMomentum)
+                                        .build();
+    ASSERT_NE(sgd, nullptr);
+
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
+    copyValuesToGpuFp32Tensor(weights, {1.0f, -2.0f, 3.0f, -4.0f}, stream);
+
+    std::shared_ptr<Impl::Sgd> physicalSgd = stampCompileSgd(*sgd, weights, stream);
+    ASSERT_NE(physicalSgd, nullptr);
+
+    EXPECT_TRUE(physicalSgd->isCompiled());
+    EXPECT_EQ(physicalSgd->getId(), sgd->getId());
+    EXPECT_FLOAT_EQ(physicalSgd->getInitialLearningRate(), initialLearningRate);
+    EXPECT_FLOAT_EQ(physicalSgd->getDecay(), decay);
+    EXPECT_FLOAT_EQ(physicalSgd->getMomentum(), momentum);
+    EXPECT_EQ(physicalSgd->getUseNesterovMomentum(), useNesterovMomentum);
+    EXPECT_TRUE(physicalSgd->hasParameter("momentum"));
+
+    Impl::Tensor velocity = physicalSgd->getOptimizerParameterTensor("velocity");
+    Impl::Tensor momentumStorage = getMomentumStorage(*physicalSgd);
+    EXPECT_EQ(velocity, momentumStorage);
+    EXPECT_EQ(momentumStorage.getPlacement(), gpuPlacement);
+    EXPECT_EQ(momentumStorage.getDataType(), DataType::FP32);
+    EXPECT_EQ(momentumStorage.getDimensions(), weights.getDimensions());
+    expectAllClose(copyGpuFp32TensorToValues(momentumStorage, stream), {0.0f, 0.0f, 0.0f, 0.0f});
+
+    std::vector<std::string> outputNames = physicalSgd->getOptimizerParameterNames();
+    std::set<std::string> names(outputNames.begin(), outputNames.end());
+    EXPECT_EQ(names, (std::set<std::string>{"weights", "velocity"}));
+
+    std::unordered_map<std::string, float> params = physicalSgd->getAllHyperParameters();
+    ASSERT_EQ(params.size(), 5u);
+    expectHyperParameter(params, "currentLearningRate", initialLearningRate);
+    expectHyperParameter(params, "initialLearningRate", initialLearningRate);
+    expectHyperParameter(params, "decay", decay);
+    expectHyperParameter(params, "momentum", momentum);
+    expectHyperParameter(params, "useNesterovMomentum", 1.0f);
+}
+
+TEST(SgdApi, StampedPhysicalPlainSgdStepMatchesCpuReference) {
+    Stream stream(gpuPlacement);
+
+    const std::vector<float> initialWeights{1.0f, -2.0f, 3.0f, -4.0f};
+    const std::vector<float> gradient{8.0f, -12.0f, 0.5f, -2.0f};
+
+    constexpr uint32_t batchSize = 2;
+    constexpr float initialLearningRate = 0.1f;
+    constexpr float decay = 0.0f;
+
+    std::shared_ptr<Api::Sgd> sgd =
+        Api::Sgd::Builder().initialLearningRate(initialLearningRate).decay(decay).momentum(0.0f).useNesterovMomentum(false).build();
+    ASSERT_NE(sgd, nullptr);
+
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
+    copyValuesToGpuFp32Tensor(weights, initialWeights, stream);
+
+    std::shared_ptr<Impl::Sgd> physicalSgd = stampCompileSgd(*sgd, weights, stream);
+
+    SgdReferenceState expected;
+    expected.weights = initialWeights;
+
+    applyPlainSgdReferenceStep(expected, gradient, batchSize, initialLearningRate);
+    runSgdStep(*physicalSgd, gradient, batchSize, stream);
+
+    expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 2e-5f, 2e-5f);
+}
+
+TEST(SgdApi, StampedPhysicalMomentumSgdStepMatchesCpuReference) {
+    Stream stream(gpuPlacement);
+
+    const std::vector<float> initialWeights{2.0f, -1.0f, 3.0f, -4.0f};
+    const std::vector<float> gradient1{4.0f, -8.0f, 1.0f, -2.0f};
+    const std::vector<float> gradient2{-5.0f, 6.0f, -7.0f, 8.0f};
+
+    constexpr float initialLearningRate = 0.08f;
+    constexpr float decay = 0.2f;
+    constexpr float momentum = 0.6f;
+    constexpr bool useNesterovMomentum = true;
+
+    std::shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder()
+                                        .initialLearningRate(initialLearningRate)
+                                        .decay(decay)
+                                        .momentum(momentum)
+                                        .useNesterovMomentum(useNesterovMomentum)
+                                        .build();
+    ASSERT_NE(sgd, nullptr);
+
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
+    copyValuesToGpuFp32Tensor(weights, initialWeights, stream);
+
+    std::shared_ptr<Impl::Sgd> physicalSgd = stampCompileSgd(*sgd, weights, stream);
+    Impl::Tensor velocity = physicalSgd->getOptimizerParameterTensor("velocity");
+
+    SgdReferenceState expected;
+    expected.weights = initialWeights;
+    expected.velocity.assign(initialWeights.size(), 0.0f);
+
+    physicalSgd->updateHyperParameters(/*epoch=*/0, /*batch=*/0, /*batchesPerEpoch=*/10);
+    float currentLearningRate = computeCurrentLearningRate(initialLearningRate, decay, 0);
+    applyMomentumSgdReferenceStep(expected,
+                                  gradient1,
+                                  /*batchSize=*/1,
+                                  currentLearningRate,
+                                  momentum,
+                                  useNesterovMomentum);
+    runSgdStep(*physicalSgd, gradient1, /*batchSize=*/1, stream);
+
+    physicalSgd->updateHyperParameters(/*epoch=*/2, /*batch=*/5, /*batchesPerEpoch=*/10);
+    currentLearningRate = computeCurrentLearningRate(initialLearningRate, decay, 2);
+    applyMomentumSgdReferenceStep(expected,
+                                  gradient2,
+                                  /*batchSize=*/2,
+                                  currentLearningRate,
+                                  momentum,
+                                  useNesterovMomentum);
+    runSgdStep(*physicalSgd, gradient2, /*batchSize=*/2, stream);
+
+    expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 3e-5f, 3e-5f);
+    expectAllClose(copyGpuFp32TensorToValues(velocity, stream), expected.velocity, 3e-5f, 3e-5f);
+}
+
+TEST(SgdApi, SerializeArchitectureOnlyAndDeserialize) {
+    constexpr float initialLearningRate = 0.123f;
+    constexpr float decay = 0.25f;
+    constexpr float momentum = 0.75f;
+    constexpr bool useNesterovMomentum = true;
+
+    std::shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder()
+                                        .initialLearningRate(initialLearningRate)
+                                        .decay(decay)
+                                        .momentum(momentum)
+                                        .useNesterovMomentum(useNesterovMomentum)
+                                        .build();
+    ASSERT_NE(sgd, nullptr);
+
+    json j = sgd->architectureJson();
+
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    std::shared_ptr<Api::Optimizer> optimizer = Api::Optimizer::deserialize(archiveReader, j, nullptr);
+    std::shared_ptr<Api::Sgd> deserializedSgd = std::dynamic_pointer_cast<Api::Sgd>(optimizer);
+    ASSERT_NE(deserializedSgd, nullptr);
+
+    EXPECT_EQ(deserializedSgd->getOriginalId(), sgd->getId());
+    EXPECT_FLOAT_EQ(deserializedSgd->getInitialLearningRate(), initialLearningRate);
+    EXPECT_FLOAT_EQ(deserializedSgd->getDecay(), decay);
+    EXPECT_FLOAT_EQ(deserializedSgd->getMomentum(), momentum);
+    EXPECT_EQ(deserializedSgd->getUseNesterovMomentum(), useNesterovMomentum);
+    EXPECT_EQ(deserializedSgd->getEpoch(), 0u);
+
+    Stream stream(gpuPlacement);
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
+    copyValuesToGpuFp32Tensor(weights, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+
+    std::shared_ptr<Impl::Sgd> physicalSgd = stampCompileSgd(*deserializedSgd, weights, stream);
+    ASSERT_NE(physicalSgd, nullptr);
+
+    EXPECT_EQ(physicalSgd->getId(), deserializedSgd->getId());
+    EXPECT_FLOAT_EQ(physicalSgd->getInitialLearningRate(), initialLearningRate);
+    EXPECT_FLOAT_EQ(physicalSgd->getDecay(), decay);
+    EXPECT_FLOAT_EQ(physicalSgd->getMomentum(), momentum);
+    EXPECT_EQ(physicalSgd->getUseNesterovMomentum(), useNesterovMomentum);
+    EXPECT_EQ(physicalSgd->getEpoch(), 0u);
+}
+
+TEST(SgdApi, SerializeWithStateRecordsPhysicalEpoch) {
+    Stream stream(gpuPlacement);
+
+    constexpr float initialLearningRate = 0.2f;
+    constexpr float decay = 0.1f;
+    constexpr float momentum = 0.5f;
+    constexpr bool useNesterovMomentum = false;
+
+    std::shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder()
+                                        .initialLearningRate(initialLearningRate)
+                                        .decay(decay)
+                                        .momentum(momentum)
+                                        .useNesterovMomentum(useNesterovMomentum)
+                                        .build();
+    ASSERT_NE(sgd, nullptr);
+
+    Impl::Tensor weights(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {2, 2}));
+    copyValuesToGpuFp32Tensor(weights, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+
+    std::shared_ptr<Impl::Sgd> physicalSgd = stampCompileSgd(*sgd, weights, stream);
+    physicalSgd->updateHyperParameters(/*epoch=*/7, /*batch=*/3, /*batchesPerEpoch=*/10);
+
+    thor_file::TarWriter archiveWriter("sgd_api_test");
+    json stateJson = sgd->serialize(archiveWriter, stream, physicalSgd, "layer123_weights", /*saveOptimizerState=*/true);
+
+    ASSERT_EQ(stateJson.at("optimizer_type").get<std::string>(), "sgd");
+    ASSERT_EQ(stateJson.at("version").get<std::string>(), sgd->getVersion());
+    EXPECT_EQ(stateJson.at("id").get<uint64_t>(), sgd->getId());
+    EXPECT_FLOAT_EQ(stateJson.at("initial_learning_rate").get<float>(), initialLearningRate);
+    EXPECT_FLOAT_EQ(stateJson.at("decay").get<float>(), decay);
+    EXPECT_FLOAT_EQ(stateJson.at("momentum").get<float>(), momentum);
+    EXPECT_EQ(stateJson.at("use_nesterov").get<bool>(), useNesterovMomentum);
+    EXPECT_EQ(stateJson.at("epoch").get<uint64_t>(), 7u);
+
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    std::shared_ptr<Api::Optimizer> optimizer = Api::Optimizer::deserialize(archiveReader, stateJson, nullptr);
+    std::shared_ptr<Api::Sgd> deserializedSgd = std::dynamic_pointer_cast<Api::Sgd>(optimizer);
+    ASSERT_NE(deserializedSgd, nullptr);
+
+    EXPECT_EQ(deserializedSgd->getOriginalId(), sgd->getId());
+    EXPECT_EQ(deserializedSgd->getEpoch(), 7u);
+    EXPECT_FLOAT_EQ(deserializedSgd->getInitialLearningRate(), initialLearningRate);
+    EXPECT_FLOAT_EQ(deserializedSgd->getDecay(), decay);
+    EXPECT_FLOAT_EQ(deserializedSgd->getMomentum(), momentum);
+    EXPECT_EQ(deserializedSgd->getUseNesterovMomentum(), useNesterovMomentum);
+
+    thor_file::TarWriter architectureOnlyWriter("sgd_api_architecture_only_test");
+    json architectureOnlyJson = sgd->serialize(architectureOnlyWriter, stream, nullptr, "", /*saveOptimizerState=*/false);
+
+    EXPECT_EQ(architectureOnlyJson.at("epoch").get<uint64_t>(), 0u);
+}

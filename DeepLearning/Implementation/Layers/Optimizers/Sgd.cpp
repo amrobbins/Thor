@@ -52,7 +52,6 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
             shared_ptr<Initializer> paramInitializer = make_shared<ZerosInitializer>();
             momentumParameter->setInitializer(paramInitializer->clone());
             addParameter(momentumParameter);
-            momentumParameter->initialize(gradientUpdateStream);
             momentumParameter->compileStorage(weights);
             momentumParameter->compileInitializer();
             momentumParameter->initialize(gradientUpdateStream);
