@@ -77,7 +77,7 @@ class CustomLayer : public TrainableLayer {
         (void)isFirstStamp;
         (void)sisterLayer;
         (void)sisterLayerLoadedEvent;
-        return Layer::initialize(layer);
+        return TrainableLayer::initialize(layer);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override;
@@ -148,7 +148,7 @@ class CustomLayer::Builder {
         CustomLayer customLayer(*_expr, _inputNames, _outputNames, _inputInterfaces, _outputInterfaces, _parameters, _useFastMath);
 
         if (_layerOptimizer != nullptr)
-            customLayer.attachOptimizer(_layerOptimizer);
+            customLayer.attachDefaultOptimizer(_layerOptimizer);
 
         customLayer.addToNetwork(_network.get());
         return customLayer;

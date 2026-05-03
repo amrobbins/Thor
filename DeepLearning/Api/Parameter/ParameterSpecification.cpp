@@ -2,8 +2,11 @@
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
-#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+
+#include "DeepLearning/Api/Network/StampedNetwork.h"
+#include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "Utilities/Common/Optional.h"
 
 #include <stdexcept>
 #include <utility>
@@ -110,6 +113,8 @@ void ParameterSpecification::validateStorageFactoryReadyForStamping() const {
 
 // Parameters don't need to be serialized, bound parameters do. That will resolve the trainingInitiallyEnabled vs current state issue.
 json ParameterSpecification::architectureJson() const {
+    // Here I call architectureJson for parameter, initializer and optimizer
+
     json j;
     j["version"] = getVersion();
     j["name"] = name;
@@ -119,6 +124,10 @@ json ParameterSpecification::architectureJson() const {
         j["shape"] = shape.get();
         j["dtype"] = json(dtype.get());
     } else {
+        // shape and dtype should always be present by the time serialize is called,
+        // because the layer has been connected to the network, and that is when this info is determined,
+        // before the network has been serialized.
+        // The following indicates an architecture bug:
         throw runtime_error(
             "Parameter '" + name +
             "' is not serializable because its storage is determined by a runtime StorageContext factory and no resolved storage "
@@ -131,36 +140,6 @@ json ParameterSpecification::architectureJson() const {
         j["initializer"] = initializer->architectureJson();
     if (optimizer != nullptr)
         j["optimizer_override"] = optimizer->architectureJson();
-    return j;
-}
-
-json ParameterSpecification::serialize(thor_file::TarWriter &archiveWriter,
-                                       Stream stream,
-                                       bool saveOptimizerState,
-                                       ThorImplementation::StampedNetwork &stampedNetwork) const {
-    json j = architectureJson();
-
-    // Below pattern wrong. Get the layer and assert that it casts to a parameterizable.
-    // Actually the whole pattern is wrong. I need to serialize each parameter when serializing a layer,
-    // like serializing a tensor. Then can just check in general if a layer supports parameters through casting
-    // as a parameterizable - if even needed, because I suppose I know ahead of time which layers are parameterizable.
-    // PARAMETERIZABLE DOES NOT OWN SERIALIZE, THE LAYER SIDE DOES.
-    // shared_ptr<ThorImplementation::PhysicalParameterizable> physicalParameterizable =
-    //     stampedNetwork.getPhysicalParameterizableFromApiParameterizable(owner->getId());
-    // shared_ptr<ThorImplementation::PhysicalParameter> physicalParameter = physicalParameterizable->getParameter(name);
-    // ThorImplementation::Tensor physicalStorage = physicalParameter->getStorage();
-    //
-    // string storageFile = "FIXME filename";
-    // archiveWriter.addArchiveFile(storageFile, physicalStorage);
-    //
-    // if (hasOptimizer()) {
-    //     j["optimizer"] = optimizer->serialize(archiveWriter,
-    //                                           stream,
-    //                                           physicalParameter->getOptimizer(),
-    //                                           "paramaterizable" + to_string(owner->getId()) + "_" + name,
-    //                                           saveOptimizerState);
-    // }
-
     return j;
 }
 

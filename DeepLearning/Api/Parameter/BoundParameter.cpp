@@ -6,24 +6,22 @@
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 
+#include "DeepLearning/Api/Initializers/Initializer.h"
+#include "DeepLearning/Api/Optimizers/Optimizer.h"
+
+#include "DeepLearning/Api/Network/StampedNetwork.h"
+
 #include <stdexcept>
 
 using namespace std;
+using json = nlohmann::json;
 
 namespace Thor {
 
 namespace {
-std::shared_ptr<ThorImplementation::PhysicalParameter> getImplementationParameter(PlacedNetwork* placedNetwork,
-                                                                          uint64_t apiLayerId,
-                                                                          const std::string& parameterName,
-                                                                          uint64_t stampIndex) {
-    if (placedNetwork == nullptr)
-        throw runtime_error("BoundParameter is not associated with a placed network.");
-
-    if (stampIndex >= placedNetwork->getNumStamps())
-        throw runtime_error("BoundParameter stamp index out of range.");
-
-    ThorImplementation::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(stampIndex);
+std::shared_ptr<ThorImplementation::PhysicalParameter> getImplementationParameter(ThorImplementation::StampedNetwork& stampedNetwork,
+                                                                                  uint64_t apiLayerId,
+                                                                                  const std::string& parameterName) {
     shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(apiLayerId);
     if (physicalLayer == nullptr) {
         throw runtime_error("BoundParameter could not find the physical layer for api layer id " + to_string(apiLayerId) + ".");
@@ -37,6 +35,20 @@ std::shared_ptr<ThorImplementation::PhysicalParameter> getImplementationParamete
 
     return physicalParameterizable->getParameter(parameterName);
 }
+
+std::shared_ptr<ThorImplementation::PhysicalParameter> getImplementationParameter(PlacedNetwork* placedNetwork,
+                                                                                  uint64_t apiLayerId,
+                                                                                  const std::string& parameterName,
+                                                                                  uint64_t stampIndex) {
+    if (placedNetwork == nullptr)
+        throw runtime_error("BoundParameter is not associated with a placed network.");
+
+    if (stampIndex >= placedNetwork->getNumStamps())
+        throw runtime_error("BoundParameter stamp index out of range.");
+    ThorImplementation::StampedNetwork stampedNetwork = placedNetwork->getStampedNetwork(stampIndex);
+    return getImplementationParameter(stampedNetwork, apiLayerId, parameterName);
+}
+
 }  // namespace
 
 BoundParameter::BoundParameter(std::shared_ptr<ParameterSpecification> parameter, PlacedNetwork* placedNetwork, uint64_t apiLayerId)
@@ -84,5 +96,45 @@ void BoundParameter::setTrainingEnabled(bool enabled) {
 }
 
 bool BoundParameter::hasOptimizer() const { return parameter->hasOptimizer(); }
+
+json BoundParameter::serialize(json parameterJson,
+                               std::shared_ptr<ParameterSpecification> parameterSpecification,
+                               thor_file::TarWriter& archiveWriter,
+                               Stream stream,
+                               bool saveOptimizerState,
+                               ThorImplementation::StampedNetwork& stampedNetwork,
+                               const string& filenamePrefix,
+                               const uint64_t apiLayerId) {
+    // parameterJson is the contents of json[...][layer][parameters][thisParameter]
+    // It is mutated here to include the files that are written to the archive.
+    shared_ptr<ThorImplementation::PhysicalParameter> physicalParameter =
+        getImplementationParameter(stampedNetwork, apiLayerId, parameterSpecification->getName());
+
+    // Serialize the initializer
+    shared_ptr<Initializer> apiInitializer = parameterSpecification->getInitializer();
+    assert(apiInitializer != nullptr);
+    shared_ptr<ThorImplementation::Initializer> physicalInitializer = physicalParameter->getInitializer();
+    assert(physicalInitializer != nullptr);
+    json initializerJson = apiInitializer->serialize(archiveWriter, stream, physicalInitializer, filenamePrefix);
+    parameterJson["initializer"] = initializerJson;
+
+    // Serialize the optimizer if present
+    if (parameterSpecification->hasOptimizer()) {
+        std::shared_ptr<Optimizer> optimizer = parameterSpecification->getOptimizer();
+        assert(optimizer != nullptr);
+        json optimizerJson =
+            optimizer->serialize(archiveWriter, stream, physicalParameter->getOptimizer(), filenamePrefix, saveOptimizerState);
+        parameterJson["optimizer"] = optimizerJson;
+    }
+
+    // Serialize the parameter values
+    Optional<ThorImplementation::Tensor> physicalStorage = physicalParameter->getStorage();
+    assert(physicalStorage.isPresent());
+    string parameterStorageFile = (filenamePrefix + "_parameter_" + parameterSpecification->getName());
+    parameterJson["parameter_storage"] = parameterStorageFile;
+    archiveWriter.addArchiveFile(parameterStorageFile, physicalStorage.get());
+
+    return parameterJson;
+}
 
 }  // namespace Thor

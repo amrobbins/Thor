@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 using namespace std;
+using nlohmann::json;
 
 namespace Thor {
 
@@ -59,20 +60,8 @@ shared_ptr<ParameterSpecification> Parameterizable::getParameterSpecification(co
     throw runtime_error("Parameter '" + name + "' is not present on this parameterizable API layer.");
 }
 
-BoundParameter Parameterizable::getBoundParameter(PlacedNetwork& placedNetwork, const std::string& name) const {
-    return BoundParameter(getParameterSpecification(name), &placedNetwork, getParameterizableId());
-}
-
-std::vector<BoundParameter> Parameterizable::getBoundParameters(PlacedNetwork& placedNetwork) const {
-    std::vector<BoundParameter> result;
-    const std::vector<std::string> names = listParameters();
-    result.reserve(names.size());
-
-    for (const std::string& name : names) {
-        result.push_back(getBoundParameter(placedNetwork, name));
-    }
-
-    return result;
+BoundParameter Parameterizable::getBoundParameter(PlacedNetwork* placedNetwork, const std::string& name) const {
+    return BoundParameter(getParameterSpecification(name), placedNetwork, getParameterizableId());
 }
 
 string Parameterizable::listParametersString() const {
@@ -92,6 +81,44 @@ string Parameterizable::listParametersString() const {
     }
 
     return result;
+}
+
+json Parameterizable::getParametersArchitectureJson() const {
+    json j;
+    if (parameters.empty()) {
+        j["parameters"] = json::array();
+        for (const auto& parameter : getParameters()) {
+            if (parameter != nullptr) {
+                // Optimizer and initializer serialization is parameter's job.
+                j["parameters"].push_back(parameter->architectureJson());
+            }
+        }
+    }
+    return j;
+}
+
+// Pass j["parameters"] as parameterJson to serialize. j["parameters"] is created by getParametersArchitectureJson().
+void Parameterizable::serializeParameters(nlohmann::json& parametersJson,
+                                          thor_file::TarWriter& archiveWriter,
+                                          Stream stream,
+                                          bool saveOptimizerState,
+                                          ThorImplementation::StampedNetwork& stampedNetwork,
+                                          const string& filenamePrefix) const {
+    assert(parametersJson.is_object());
+
+    const uint64_t apiLayerId = getParameterizableId();
+    std::shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(apiLayerId);
+    std::shared_ptr<ThorImplementation::TrainableLayer> physicalTrainableLayer =
+        std::dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
+    assert(physicalTrainableLayer != nullptr);
+
+    for (const auto& [paramName, parameterSpecification] : parameters) {
+        json parameterJson = parametersJson.at(paramName);
+        assert(parameterJson.is_object());
+        parametersJson = BoundParameter::serialize(
+            parameterJson, parameterSpecification, archiveWriter, stream, saveOptimizerState, stampedNetwork, filenamePrefix, apiLayerId);
+        parametersJson[paramName] = parametersJson;
+    }
 }
 
 }  // namespace Thor
