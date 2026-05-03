@@ -666,4 +666,5 @@ Convenience forms:
     custom_layer.def("get_output_names", &CustomLayer::getOutputNames);
     custom_layer.def("get_parameters", &CustomLayer::getParameters, nb::rv_policy::reference_internal);
     custom_layer.def("get_bound_parameter", &CustomLayer::getBoundParameter, "placed_network"_a, "name"_a);
+    custom_layer.def("get_bound_parameters", &CustomLayer::getBoundParameters, "placed_network"_a);
 }

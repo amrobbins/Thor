@@ -20,6 +20,8 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
    public:
     using Layer::initialize;  // So that compiler doesn't complain about override below.
 
+    TrainableLayer(std::vector<std::shared_ptr<ParameterSpecification>> parameters = {});
+
     virtual ~TrainableLayer() = default;
 
     void attachDefaultOptimizer(std::shared_ptr<Optimizer> optimizer);

@@ -115,7 +115,7 @@ class CustomLayer : public TrainableLayer {
     std::vector<TensorMap> inputInterfaces;
     std::vector<TensorMap> outputInterfaces;
 
-    std::vector<std::shared_ptr<ParameterSpecification>> parameters;
+    // std::vector<std::shared_ptr<ParameterSpecification>> parameters;
 
     // Per-interface readiness is tracked by logical input port, not by tensor, because the same tensor may satisfy
     // several named inputs and/or participate in several input interfaces.

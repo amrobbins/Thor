@@ -23,7 +23,6 @@ class Parameterizable {
    public:
     virtual ~Parameterizable() = default;
 
-    Parameterizable() : owningLayerId(0) {}
     explicit Parameterizable(const uint64_t owningLayerId) : owningLayerId(owningLayerId) {}
 
     void addParameter(const std::shared_ptr<ParameterSpecification>& parameter);
@@ -36,6 +35,7 @@ class Parameterizable {
     virtual std::vector<std::shared_ptr<ParameterSpecification>> getParameters() const;
 
     BoundParameter getBoundParameter(PlacedNetwork* placedNetwork, const std::string& name) const;
+    std::vector<BoundParameter> getBoundParameters(PlacedNetwork* placedNetwork) const;
 
     std::string listParametersString() const;
 
@@ -48,7 +48,9 @@ class Parameterizable {
                              const std::string& filenamePrefix) const;
 
    protected:
-    std::unordered_map<std::string, std::shared_ptr<ParameterSpecification>> parameters{};
+    std::vector<std::shared_ptr<ParameterSpecification>> parameters{};
+    std::unordered_map<std::string, size_t> parameterIndexByName{};
+    // std::unordered_map<std::string, std::shared_ptr<ParameterSpecification>> parameters{};
 
    private:
     const uint64_t owningLayerId;
