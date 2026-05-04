@@ -51,7 +51,7 @@ class FullyConnected : public TrainableLayer {
    protected:
     virtual bool isMultiLayer() const {
         assert(featureInputs.size() > 0);
-        return useBatchNormalization || dropProportion > 0.0f || activation || featureInputs.front().getDimensions().size() > 1 ||
+        return useBatchNormalization || dropProportion > 0.0f || featureInputs.front().getDimensions().size() > 1 ||
                featureInputs.front().getDataType() != Tensor::DataType::FP16;
     }
 
@@ -109,8 +109,16 @@ class FullyConnected : public TrainableLayer {
         // Note: Network notes when a layer has already been stamped and only adds a connection, does not re-stamp the layer
         // FIXME: add support for data type.
         Tensor::DataType weightsDataType = Tensor::DataType::FP16;
+        ThorImplementation::FullyConnected::ExpressionTransform activationTransform = nullptr;
+        if (activation != nullptr) {
+            std::shared_ptr<Activation> activationTemplate = activation;
+            activationTransform = [activationTemplate](const ThorImplementation::Expression &input) {
+                return activationTemplate->toExpression(input);
+            };
+        }
+
         std::shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected = std::make_shared<ThorImplementation::FullyConnected>(
-            numOutputFeatures, hasBias, weightsDataType, placement, inferenceOnly, getId());
+            numOutputFeatures, hasBias, weightsDataType, placement, inferenceOnly, getId(), activationTransform);
 
         return physicalFullyConnected;
     }

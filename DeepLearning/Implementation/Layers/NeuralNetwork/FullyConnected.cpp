@@ -56,18 +56,19 @@ FullyConnected::FullyConnected(const uint32_t numOutputFeatures,
                                Optional<DataType> weightsDataType,
                                const TensorPlacement& placement,
                                bool inferenceOnly,
-                               int64_t stampedId)
-    : CustomLayer(buildExpression(hasBias, placement),
+                               int64_t stampedId,
+                               ExpressionTransform activation)
+    : CustomLayer(buildExpression(hasBias, placement, std::move(activation)),
                   placement,
                   defineParameters(numOutputFeatures, hasBias, weightsDataType),
                   inferenceOnly,
                   stampedId,
                   false) {}
 
-DynamicExpression FullyConnected::buildExpression(bool hasBias, TensorPlacement placement) {
-    return DynamicExpression([hasBias, placement](const DynamicExpression::TensorMap& inputs,
-                                                  const DynamicExpression::TensorMap& outputs,
-                                                  Stream& stream) -> DynamicExpressionBuild {
+DynamicExpression FullyConnected::buildExpression(bool hasBias, TensorPlacement placement, ExpressionTransform activation) {
+    return DynamicExpression([hasBias, placement, activation = std::move(activation)](const DynamicExpression::TensorMap& inputs,
+                                                                                     const DynamicExpression::TensorMap& outputs,
+                                                                                     Stream& stream) -> DynamicExpressionBuild {
         (void)stream;
 
         // This is just validation. CustomLayer connects the proper tensors with the contracted names,
@@ -104,6 +105,10 @@ DynamicExpression FullyConnected::buildExpression(bool hasBias, TensorPlacement 
 
             // Broadcast [out_features] over batch
             fout = fout + b;
+        }
+
+        if (activation) {
+            fout = activation(fout);
         }
 
         auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
