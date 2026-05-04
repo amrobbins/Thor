@@ -17,32 +17,34 @@ void Activation::register_layer(string name, Deserializer fn) { get_registry().e
 ThorImplementation::Expression Activation::toExpression(const ThorImplementation::Expression& input) const {
     using ThorImplementation::Expression;
 
+    const Expression zero(0.0);
+    const Expression one(1.0);
+    const Expression two(2.0);
     const string layerType = getLayerType();
 
     if (layerType == "Relu") {
-        return input.max(0.0);
+        return input.max(zero);
     }
 
     if (layerType == "Sigmoid") {
-        Expression one(1.0);
         return one / (one + (-input).exp());
     }
 
     if (layerType == "Tanh") {
-        const Expression exp2x = (input * 2.0).exp();
-        return (exp2x - 1.0) / (exp2x + 1.0);
+        const Expression exp2x = (input * two).exp();
+        return (exp2x - one) / (exp2x + one);
     }
 
     if (layerType == "HardSigmoid") {
-        return ((input * 0.2) + 0.5).min(1.0).max(0.0);
+        return ((input * Expression(0.2)) + Expression(0.5)).min(one).max(zero);
     }
 
     if (layerType == "SoftPlus") {
-        return (input.exp() + 1.0).ln();
+        return (input.exp() + one).ln();
     }
 
     if (layerType == "SoftSign") {
-        return input / (input.abs() + 1.0);
+        return input / (input.abs() + one);
     }
 
     if (layerType == "Exponential") {
@@ -53,20 +55,19 @@ ThorImplementation::Expression Activation::toExpression(const ThorImplementation
         // Match the existing CUDA activation approximation:
         // 0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x^3))).
         const Expression x3 = input * input * input;
-        const Expression inner = (input + (x3 * 0.044715)) * 0.797884561;
-        const Expression exp2Inner = (inner * 2.0).exp();
-        const Expression tanhInner = (exp2Inner - 1.0) / (exp2Inner + 1.0);
-        return input * 0.5 * (tanhInner + 1.0);
+        const Expression inner = (input + (x3 * Expression(0.044715))) * Expression(0.797884561);
+        const Expression exp2Inner = (inner * two).exp();
+        const Expression tanhInner = (exp2Inner - one) / (exp2Inner + one);
+        return input * Expression(0.5) * (tanhInner + one);
     }
 
     if (layerType == "Selu") {
-        constexpr double scale = 1.05070098;
-        constexpr double scaleAlpha = 1.758099326;
-        return (input.max(0.0) * scale) + ((input.exp() - 1.0).min(0.0) * scaleAlpha);
+        const Expression scale(1.05070098);
+        const Expression scaleAlpha(1.758099326);
+        return (input.max(zero) * scale) + ((input.exp() - one).min(zero) * scaleAlpha);
     }
 
     if (layerType == "Swish") {
-        Expression one(1.0);
         return input * (one / (one + (-input).exp()));
     }
 
