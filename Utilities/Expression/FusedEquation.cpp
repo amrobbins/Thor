@@ -458,12 +458,16 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::NEG:
             case ExprOp::ABS:
             case ExprOp::EXP:
+            case ExprOp::EXPM1:
             case ExprOp::EXP2:
             case ExprOp::EXP10:
             case ExprOp::LN:
+            case ExprOp::LOG1P:
             case ExprOp::LOG2:
             case ExprOp::LOG10:
             case ExprOp::SQRT:
+            case ExprOp::TANH:
+            case ExprOp::NORMCDF:
                 node_dims[i] = node_dims[node.lhs];
                 break;
             case ExprOp::TRANSPOSE:
@@ -1655,12 +1659,16 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::NEG:
             case ExprOp::ABS:
             case ExprOp::EXP:
+            case ExprOp::EXPM1:
             case ExprOp::EXP2:
             case ExprOp::EXP10:
             case ExprOp::LN:
+            case ExprOp::LOG1P:
             case ExprOp::LOG2:
             case ExprOp::LOG10:
             case ExprOp::SQRT:
+            case ExprOp::TANH:
+            case ExprOp::NORMCDF:
                 node_dims[i] = node_dims[node.lhs];
                 break;
             case ExprOp::TRANSPOSE:
@@ -1817,12 +1825,16 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::NEG:
         case ExprOp::ABS:
         case ExprOp::EXP:
+        case ExprOp::EXPM1:
         case ExprOp::EXP2:
         case ExprOp::EXP10:
         case ExprOp::LN:
+        case ExprOp::LOG1P:
         case ExprOp::LOG2:
         case ExprOp::LOG10:
         case ExprOp::SQRT:
+        case ExprOp::TANH:
+        case ExprOp::NORMCDF:
         case ExprOp::MIN:
         case ExprOp::MAX:
         case ExprOp::MIN_GRAD_LEFT:
@@ -1914,12 +1926,16 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::NEG:
             case ExprOp::ABS:
             case ExprOp::EXP:
+            case ExprOp::EXPM1:
             case ExprOp::EXP2:
             case ExprOp::EXP10:
             case ExprOp::LN:
+            case ExprOp::LOG1P:
             case ExprOp::LOG2:
             case ExprOp::LOG10:
             case ExprOp::SQRT:
+            case ExprOp::TANH:
+            case ExprOp::NORMCDF:
                 node_dims[i] = node_dims[node.lhs];
                 break;
             case ExprOp::UNSQUEEZE: {
@@ -2000,12 +2016,16 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::NEG:
             case ExprOp::ABS:
             case ExprOp::EXP:
+            case ExprOp::EXPM1:
             case ExprOp::EXP2:
             case ExprOp::EXP10:
             case ExprOp::LN:
+            case ExprOp::LOG1P:
             case ExprOp::LOG2:
             case ExprOp::LOG10:
             case ExprOp::SQRT:
+            case ExprOp::TANH:
+            case ExprOp::NORMCDF:
             case ExprOp::MIN:
             case ExprOp::MAX:
             case ExprOp::MIN_GRAD_LEFT:
@@ -2485,12 +2505,16 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::NEG:
         case ExprOp::ABS:
         case ExprOp::EXP:
+        case ExprOp::EXPM1:
         case ExprOp::EXP2:
         case ExprOp::EXP10:
         case ExprOp::LN:
+        case ExprOp::LOG1P:
         case ExprOp::LOG2:
         case ExprOp::LOG10:
         case ExprOp::SQRT:
+        case ExprOp::TANH:
+        case ExprOp::NORMCDF:
         case ExprOp::REDUCE_SUM:
         case ExprOp::REDUCE_PROD:
         case ExprOp::REDUCE_MIN:

@@ -25,14 +25,14 @@ class ParameterSpecification {
     ParameterSpecification() = default;
     ParameterSpecification(std::string name,
                            const std::vector<uint64_t>& shape,
-                           DataType dtype = DataType::FP32,
-                           std::shared_ptr<Initializer> initializer = nullptr,
+                           DataType dtype,
+                           std::shared_ptr<Initializer> initializer,
                            bool trainable = true,
                            std::shared_ptr<Optimizer> optimizer = nullptr,
                            bool trainingInitiallyEnabled = true);
     ParameterSpecification(std::string name,
                            StorageContextStorageFactory createStorage,
-                           std::shared_ptr<Initializer> initializer = nullptr,
+                           std::shared_ptr<Initializer> initializer,
                            bool trainable = true,
                            std::shared_ptr<Optimizer> optimizer = nullptr,
                            bool trainingInitiallyEnabled = true);

@@ -33,12 +33,16 @@ enum class ExprOp : uint16_t {
     NEG,
     ABS,
     EXP,
+    EXPM1,
     EXP2,
     EXP10,
     LN,
+    LOG1P,
     LOG2,
     LOG10,
     SQRT,
+    TANH,
+    NORMCDF,
     FILL,
     UNSQUEEZE,
     SQUEEZE,
@@ -262,21 +266,24 @@ class Expression {
 
     [[nodiscard]] Expression abs() const;
     [[nodiscard]] Expression ln() const;
+    [[nodiscard]] Expression log1p() const;
     [[nodiscard]] Expression log2() const;
     [[nodiscard]] Expression log10() const;
     [[nodiscard]] Expression log(double base) const;
     [[nodiscard]] Expression exp() const;
+    [[nodiscard]] Expression expm1() const;
     [[nodiscard]] Expression exp2() const;
     [[nodiscard]] Expression exp10() const;
     [[nodiscard]] Expression sqrt() const;
     [[nodiscard]] static Expression sqrt(const Expression& expr);
+    [[nodiscard]] Expression normcdf() const;
     [[nodiscard]] Expression unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const;
     [[nodiscard]] Expression squeeze(const std::vector<uint64_t>& squeeze_axes) const;
     [[nodiscard]] Expression transpose() const;
     [[nodiscard]] Expression pow(const Expression& exponent) const;
 
-    // Numerically stable activation-shaped expression helpers built from existing primitive expression ops.
-    // These avoid overflow-prone expansions such as exp(2x) for tanh or log(1 + exp(x)) for softplus.
+    // Numerically stable activation-shaped expression helpers. These prefer dedicated CUDA special-function
+    // expression ops where available (tanhf, log1pf, expm1f, normcdff).
     [[nodiscard]] Expression sigmoid() const;
     [[nodiscard]] Expression tanh() const;
     [[nodiscard]] Expression softplus() const;
@@ -400,49 +407,37 @@ inline Expression Expression::sigmoid() const {
     // Stable for both signs:
     //   x >= 0: 1 / (1 + exp(-x))
     //   x <  0: exp(x) / (1 + exp(x))
-    const Expression numerator = (-(-*this).max(zero)).exp();
+    const Expression neg = -*this;
+    const Expression numerator = (-neg.max(zero)).exp();
     const Expression denominator = one + (-this->abs()).exp();
     return numerator / denominator;
 }
 
-inline Expression Expression::tanh() const {
-    return (Expression(2.0) * ((*this * Expression(2.0)).sigmoid())) - Expression(1.0);
-}
-
 inline Expression Expression::softplus() const {
     const Expression zero(0.0);
-    const Expression one(1.0);
 
-    // log(1 + exp(x)) = max(x, 0) + log(1 + exp(-abs(x)))
-    return this->max(zero) + ((-this->abs()).exp() + one).ln();
+    // log(1 + exp(x)) = max(x, 0) + log1p(exp(-abs(x)))
+    return this->max(zero) + (-this->abs()).exp().log1p();
 }
 
 inline Expression Expression::elu(double alpha) const {
     const Expression zero(0.0);
-    const Expression one(1.0);
 
-    // Use exp(min(x, 0)) - 1 so positive x does not evaluate exp(x).
-    return this->max(zero) + ((this->min(zero).exp() - one) * Expression(alpha));
+    // Use expm1(min(x, 0)) so positive x does not evaluate exp(x), and negative values near zero keep precision.
+    return this->max(zero) + (this->min(zero).expm1() * Expression(alpha));
 }
 
 inline Expression Expression::selu() const {
     const Expression zero(0.0);
-    const Expression one(1.0);
     const Expression scale(1.05070098);
     const Expression scaleAlpha(1.758099326);
 
-    return (this->max(zero) * scale) + ((this->min(zero).exp() - one) * scaleAlpha);
+    return (this->max(zero) * scale) + (this->min(zero).expm1() * scaleAlpha);
 }
 
 inline Expression Expression::gelu() const {
-    const Expression one(1.0);
-    const Expression two(2.0);
-    const Expression half(0.5);
-
-    // Match the existing CUDA activation approximation, but use stable tanh helper.
-    const Expression x3 = *this * *this * *this;
-    const Expression inner = (*this + (x3 * Expression(0.044715))) * Expression(0.797884561);
-    return *this * half * (inner.tanh() + one);
+    // Exact GELU: x * Phi(x), where Phi is the standard normal CDF.
+    return *this * this->normcdf();
 }
 
 inline Expression Expression::swish() const { return *this * this->sigmoid(); }

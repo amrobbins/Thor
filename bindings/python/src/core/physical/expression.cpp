@@ -367,6 +367,7 @@ Return the absolute value of the input expression x
 )nbdoc");
 
     expr.def_static("exp", [](const Expression& x) { return x.exp(); }, "x"_a);
+    expr.def_static("expm1", [](const Expression& x) { return x.expm1(); }, "x"_a);
     expr.def_static("exp2", [](const Expression& x) { return x.exp2(); }, "x"_a);
     expr.def_static("exp10", [](const Expression& x) { return x.exp10(); }, "x"_a);
 
@@ -378,6 +379,7 @@ Return the absolute value of the input expression x
 Return the elementwise natural logarithm of the input expression x
 )nbdoc");
     expr.def_static("log", [](const Expression& x, double base) { return x.log(base); }, "x"_a, "base"_a = std::numbers::e);
+    expr.def_static("log1p", [](const Expression& x) { return x.log1p(); }, "x"_a);
     expr.def_static("log2", [](const Expression& x) { return x.log2(); }, "x"_a);
     expr.def_static("log10", [](const Expression& x) { return x.log10(); }, "x"_a);
 
@@ -387,6 +389,26 @@ Return the elementwise natural logarithm of the input expression x
         "x"_a,
         R"nbdoc(
 Return the elementwise square root of the input expression x
+)nbdoc");
+
+    expr.def_static(
+        "tanh",
+        [](const Expression& x) { return x.tanh(); },
+        "x"_a,
+        R"nbdoc(
+Return the elementwise hyperbolic tangent of the input expression x.
+
+This lowers to Thor's TANH expression op, which is emitted with CUDA's built-in tanh implementation.
+)nbdoc");
+
+    expr.def_static(
+        "normcdf",
+        [](const Expression& x) { return x.normcdf(); },
+        "x"_a,
+        R"nbdoc(
+Return the elementwise standard normal CDF of the input expression x.
+
+This lowers to Thor's NORMCDF expression op, which is emitted with CUDA's built-in normcdf implementation.
 )nbdoc");
 
     // Reductions

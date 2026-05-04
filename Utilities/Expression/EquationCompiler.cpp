@@ -534,18 +534,26 @@ static const char* fusedOpTag(ExprOp op) {
             return "ABS";
         case ExprOp::EXP:
             return "EXP";
+        case ExprOp::EXPM1:
+            return "EXPM1";
         case ExprOp::EXP2:
             return "EXP2";
         case ExprOp::EXP10:
             return "EXP10";
         case ExprOp::LN:
             return "LOG";
+        case ExprOp::LOG1P:
+            return "LOG1P";
         case ExprOp::LOG2:
             return "LOG2";
         case ExprOp::LOG10:
             return "LOG10";
         case ExprOp::SQRT:
             return "SQRT";
+        case ExprOp::TANH:
+            return "TANH";
+        case ExprOp::NORMCDF:
+            return "NORMCDF";
         case ExprOp::FILL:
             return "FILL";
         case ExprOp::UNSQUEEZE:

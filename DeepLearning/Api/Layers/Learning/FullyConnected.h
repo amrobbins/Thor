@@ -51,8 +51,7 @@ class FullyConnected : public TrainableLayer {
    protected:
     virtual bool isMultiLayer() const {
         assert(featureInputs.size() > 0);
-        return useBatchNormalization || dropProportion > 0.0f || featureInputs.front().getDimensions().size() > 1 ||
-               featureInputs.front().getDataType() != Tensor::DataType::FP16;
+        return featureInputs.front().getDimensions().size() > 1 || featureInputs.front().getDataType() != Tensor::DataType::FP16;
     }
 
     virtual void buildSupportLayersAndAddToNetwork(Network *network);
@@ -136,21 +135,14 @@ class FullyConnected : public TrainableLayer {
    private:
     uint32_t numOutputFeatures;
     bool hasBias;
-    std::shared_ptr<Initializer> weightsInitializer;
-    std::shared_ptr<Initializer> biasesInitializer;
     std::shared_ptr<Activation> activation;
 
+    // FIXME: These should not be part of Thor::FullyConnected, the builder yes, but the builder should
+    //        associate these with the parameters
+    std::shared_ptr<Initializer> weightsInitializer;
+    std::shared_ptr<Initializer> biasesInitializer;
     std::shared_ptr<Optimizer> weightsOptimizer;
     std::shared_ptr<Optimizer> biasesOptimizer;
-
-    DropOut dropOut;
-    BatchNormalization batchNormalization;
-
-    float dropProportion;
-
-    bool useBatchNormalization;
-    Optional<double> batchNormExponentialRunningAverageFactor;
-    Optional<double> batchNormEpsilon;
 
     friend class Network;
 
@@ -194,10 +186,6 @@ class FullyConnected::Builder {
         fullyConnected.biasesInitializer = _biasInitializer->clone();
         if (_activation != nullptr)
             fullyConnected.activation = _activation;
-        fullyConnected.dropProportion = _dropProportion;
-        fullyConnected.useBatchNormalization = _useBatchNormalization;
-        fullyConnected.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
-        fullyConnected.batchNormEpsilon = _batchNormEpsilon;
 
         // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
         fullyConnected.weightsOptimizer = _weightsOptimizer;

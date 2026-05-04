@@ -34,26 +34,6 @@ void FullyConnected::buildSupportLayersAndAddToNetwork(Network *network) {
         }
     }
 
-    // if (useBatchNormalization) {
-    //     BatchNormalization::Builder batchNormBuilder;
-    //     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-    //         batchNormBuilder.featureInput(currentFeatureInputs[i]);
-    //     }
-    //     if (batchNormExponentialRunningAverageFactor.isPresent())
-    //         batchNormBuilder.exponentialRunningAverageFactor(batchNormExponentialRunningAverageFactor);
-    //     if (batchNormEpsilon.isPresent())
-    //         batchNormBuilder.epsilon(batchNormEpsilon);
-    //     batchNormalization = batchNormBuilder.network(*network).build();
-    //     currentFeatureInputs = batchNormalization.getFeatureOutputs();
-    // }
-
-    if (dropProportion > 0.0f) {
-        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            dropOut = DropOut::Builder().network(*network).dropProportion(dropProportion).featureInput(currentFeatureInputs[i]).build();
-            currentFeatureInputs[i] = dropOut.getFeatureOutput();
-        }
-    }
-
     vector<uint64_t> dimensions = currentFeatureInputs[0].getDimensions();
 
     // I do actually need a second one because the connections of this multi-layer don't match the one that

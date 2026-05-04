@@ -32,7 +32,7 @@ std::vector<std::string> Parameterizable::listParameters() const {
     std::vector<std::string> names;
     names.reserve(parameters.size());
 
-    for (const auto &param : parameters) {
+    for (const auto& param : parameters) {
         names.push_back(param->getName());
     }
 
