@@ -1,0 +1,104 @@
+diff --git a/Utilities/Expression/CudaSourceEmitter.cpp b/Utilities/Expression/CudaSourceEmitter.cpp
+index f087d95..d3a3ac9 100644
+--- a/Utilities/Expression/CudaSourceEmitter.cpp
++++ b/Utilities/Expression/CudaSourceEmitter.cpp
+@@ -420,6 +420,8 @@ static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstre
+                 need_fp16 = true;
+                 break;
+             case DataType::BF16:
++                // BF16 special-function lowering casts through FP16 for CUDA half/half2 intrinsics.
++                need_fp16 = true;
+                 need_bf16 = true;
+                 break;
+             case DataType::FP8_E4M3:
+@@ -1053,7 +1055,7 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
+                 return "tanhf(" + x + ")";
+             }
+             const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
+-            return castScalarExpr("half(tanhf(float(" + x_h + ")))", DataType::FP16, compute_dtype);
++            return castScalarExpr("htanh(" + x_h + ")", DataType::FP16, compute_dtype);
+         }
+         case ExprOp::NORMCDF: {
+             if (compute_dtype == DataType::FP32) {
+@@ -1903,9 +1905,19 @@ static std::string emitVector2SpecialUnary(const std::string& fn, const std::str
+     }
+     return "__floats2half2_rn(" + fn + "(float(half(" + x + ".x))), " + fn + "(float(half(" + x + ".y))))";
+ }
++
++static std::string emitVector2Half2Tanh(const std::string& x, DataType dtype) {
++    if (dtype == DataType::BF16) {
++        const std::string x_half2 = "__float22half2_rn(__bfloat1622float2(" + x + "))";
++        return "__float22bfloat162_rn(__half22float2(h2tanh(" + x_half2 + ")))";
++    }
++
++    return "h2tanh(" + x + ")";
++}
++
+ static std::string emitVector2Expm1(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("expm1f", x, dtype); }
+ static std::string emitVector2Log1p(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("log1pf", x, dtype); }
+-static std::string emitVector2Tanh(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("tanhf", x, dtype); }
++static std::string emitVector2Tanh(const std::string& x, DataType dtype) { return emitVector2Half2Tanh(x, dtype); }
+ static std::string emitVector2Normcdf(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("normcdff", x, dtype); }
+ static std::string emitVector2Pow(const std::string& a, const std::string& b, DataType dtype) {
+     if (dtype == DataType::BF16)
+@@ -2249,6 +2261,7 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
+         compute_dtype_vector = "__nv_bfloat162";
+         storage_dtype_vector = "__nv_bfloat162";
+         packs_per_thread = 4;
++        ss << "#include <cuda_fp16.h>\n";
+         ss << "#include <cuda_bf16.h>\n";
+     } else if (dtype == DataType::FP16) {
+         compute_dtype = "half";
+@@ -2612,6 +2625,7 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
+         compute_dtype_vector = "__nv_bfloat162";
+         storage_dtype = "__nv_bfloat16";
+         storage_dtype_vector = "__nv_bfloat162";
++        ss << "#include <cuda_fp16.h>\n";
+         ss << "#include <cuda_bf16.h>\n";
+     } else if (dtype == DataType::FP16) {
+         compute_dtype = "half";
+diff --git a/bindings/python/test/core/physical/test_expression_stable_activations.py b/bindings/python/test/core/physical/test_expression_stable_activations.py
+index 8948dd0..55a7964 100644
+--- a/bindings/python/test/core/physical/test_expression_stable_activations.py
++++ b/bindings/python/test/core/physical/test_expression_stable_activations.py
+@@ -278,3 +278,40 @@ def test_stable_elu_and_selu_do_not_evaluate_positive_exp_branch():
+     assert np.isfinite(got_selu).all()
+     np.testing.assert_allclose(got_elu, x_np, rtol=1e-5, atol=1e-6)
+     np.testing.assert_allclose(got_selu, (1.05070098 * x_np).astype(np.float32), rtol=1e-5, atol=1e-6)
++
++
++@pytest.mark.cuda
++@pytest.mark.parametrize(
++    ("dtype", "rtol", "atol"),
++    [
++        (thor.DataType.fp16, 4e-3, 4e-3),
++        (thor.DataType.bf16, 1e-2, 1e-2),
++        (thor.DataType.fp8_e4m3, 2.5e-1, 2.5e-1),
++        (thor.DataType.fp8_e5m2, 3.5e-1, 3.5e-1),
++    ],
++)
++@pytest.mark.parametrize(
++    ("name", "expr_builder", "np_builder", "values"),
++    [
++        ("expm1", lambda x: ex.expm1(x), np.expm1, [-5.0, -2.0, -1.0, -0.25, -0.03125, 0.0, 0.03125, 0.25, 1.0, 2.0]),
++        ("log1p", lambda x: ex.log1p(x), np.log1p, [-0.75, -0.5, -0.25, -0.03125, 0.0, 0.03125, 0.25, 1.0, 4.0, 8.0]),
++        ("normcdf", lambda x: ex.normcdf(x), _normcdf_np, [-6.0, -3.0, -2.0, -1.0, -0.25, 0.0, 0.25, 1.0, 2.0, 6.0]),
++        ("tanh", lambda x: ex.tanh(x), np.tanh, [-6.0, -3.0, -2.0, -1.0, -0.25, 0.0, 0.25, 1.0, 2.0, 6.0]),
++    ],
++)
++def test_special_function_expression_ops_match_numpy_for_low_precision_storage_dtypes(dtype, rtol, atol, name, expr_builder, np_builder, values):
++    del name
++
++    storage_dtype = _numpy_storage_dtype(dtype)
++    x_np = np.array(values, dtype=np.float32).astype(storage_dtype)
++
++    x = ex.input("x")
++    got = _run_expr(expr_builder(x), {
++        "x": (x_np, dtype)
++    })
++    expected = np_builder(x_np.astype(np.float32)).astype(storage_dtype)
++
++    assert got.dtype == storage_dtype
++    assert got.shape == expected.shape
++    assert np.isfinite(got.astype(np.float32)).all()
++    np.testing.assert_allclose(got, expected, rtol=rtol, atol=atol)
