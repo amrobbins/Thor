@@ -19,7 +19,6 @@ ThorImplementation::Expression Activation::toExpression(const ThorImplementation
 
     const Expression zero(0.0);
     const Expression one(1.0);
-    const Expression two(2.0);
     const string layerType = getLayerType();
 
     if (layerType == "Relu") {
@@ -27,12 +26,11 @@ ThorImplementation::Expression Activation::toExpression(const ThorImplementation
     }
 
     if (layerType == "Sigmoid") {
-        return one / (one + (-input).exp());
+        return input.sigmoid();
     }
 
     if (layerType == "Tanh") {
-        const Expression exp2x = (input * two).exp();
-        return (exp2x - one) / (exp2x + one);
+        return input.tanh();
     }
 
     if (layerType == "HardSigmoid") {
@@ -40,7 +38,7 @@ ThorImplementation::Expression Activation::toExpression(const ThorImplementation
     }
 
     if (layerType == "SoftPlus") {
-        return (input.exp() + one).ln();
+        return input.softplus();
     }
 
     if (layerType == "SoftSign") {
@@ -52,23 +50,15 @@ ThorImplementation::Expression Activation::toExpression(const ThorImplementation
     }
 
     if (layerType == "Gelu") {
-        // Match the existing CUDA activation approximation:
-        // 0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x^3))).
-        const Expression x3 = input * input * input;
-        const Expression inner = (input + (x3 * Expression(0.044715))) * Expression(0.797884561);
-        const Expression exp2Inner = (inner * two).exp();
-        const Expression tanhInner = (exp2Inner - one) / (exp2Inner + one);
-        return input * Expression(0.5) * (tanhInner + one);
+        return input.gelu();
     }
 
     if (layerType == "Selu") {
-        const Expression scale(1.05070098);
-        const Expression scaleAlpha(1.758099326);
-        return (input.max(zero) * scale) + ((input.exp() - one).min(zero) * scaleAlpha);
+        return input.selu();
     }
 
     if (layerType == "Swish") {
-        return input * (one / (one + (-input).exp()));
+        return input.swish();
     }
 
     if (layerType == "Softmax") {
