@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "Utilities/Expression/Expression.h"
 
 #include <assert.h>
 #include <atomic>
@@ -22,6 +23,10 @@ class Activation : public Layer {
     using Layer::addToNetwork;
     // Activation template version
     virtual Tensor addToNetwork(Tensor inputTensor, Network* network);
+
+    // Returns an expression equivalent to applying this activation to the input expression.
+    // This is used by expression-backed learning layers to fuse the activation into the layer equation.
+    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const = 0;
 
     virtual std::string getLayerType() const = 0;
 
