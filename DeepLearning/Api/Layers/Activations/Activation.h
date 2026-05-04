@@ -26,7 +26,7 @@ class Activation : public Layer {
 
     // Returns an expression equivalent to applying this activation to the input expression.
     // This is used by expression-backed learning layers to fuse the activation into the layer equation.
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const = 0;
+    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const;
 
     virtual std::string getLayerType() const = 0;
 
