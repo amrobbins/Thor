@@ -8,6 +8,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -239,6 +240,16 @@ class Expression {
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
         Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
     [[nodiscard]] static Expression constantScalar(double value);
+
+    [[nodiscard]] static Expression fromPhysicalNode(std::shared_ptr<PhysicalExpression> expr, uint32_t nodeIndex) {
+        if (!expr) {
+            throw std::invalid_argument("Expression::fromPhysicalNode requires a non-null PhysicalExpression.");
+        }
+        if (nodeIndex >= expr->nodes.size()) {
+            throw std::out_of_range("Expression::fromPhysicalNode node index is out of range.");
+        }
+        return Expression(std::move(expr), nodeIndex);
+    }
 
     [[nodiscard]] PhysicalExpression expression() const;
 
