@@ -19,9 +19,7 @@ class Elu : public Activation {
     }
 
     virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
-        const ThorImplementation::Expression zero(0.0);
-        const ThorImplementation::Expression one(1.0);
-        return input.max(zero) + ((input.exp() - one).min(zero) * ThorImplementation::Expression(alpha));
+        return input.elu(alpha);
     }
 
     virtual std::string getLayerType() const { return "Elu"; }
