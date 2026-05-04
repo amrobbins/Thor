@@ -18,6 +18,12 @@ class Elu : public Activation {
         return myClone;
     }
 
+    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+        const ThorImplementation::Expression zero(0.0);
+        const ThorImplementation::Expression one(1.0);
+        return input.max(zero) + ((input.exp() - one).min(zero) * ThorImplementation::Expression(alpha));
+    }
+
     virtual std::string getLayerType() const { return "Elu"; }
 
     virtual nlohmann::json architectureJson() const {
