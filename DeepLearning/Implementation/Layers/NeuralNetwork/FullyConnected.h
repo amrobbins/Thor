@@ -22,8 +22,8 @@ class FullyConnected : public CustomLayer {
                    Optional<TensorDescriptor::DataType> weightsDataType,
                    const TensorPlacement& placement,
                    bool inferenceOnly,
-                   ExpressionTransform activation = nullptr,
-                   int64_t stampedId = -1);
+                   int64_t stampedId = -1,
+                   ExpressionTransform activation = nullptr);
 
     std::string getLayerType() override { return "FullyConnected"; }
 
