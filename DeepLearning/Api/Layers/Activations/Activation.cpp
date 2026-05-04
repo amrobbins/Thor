@@ -12,6 +12,11 @@ unordered_map<string, Activation::Deserializer>& Activation::get_registry() {
 
 void Activation::register_layer(string name, Deserializer fn) { get_registry().emplace(std::move(name), std::move(fn)); }
 
+ThorImplementation::Expression Activation::toExpression(const ThorImplementation::Expression& input) const {
+    (void)input;
+    throw std::runtime_error("Activation " + getLayerType() + " does not support expression fusion.");
+}
+
 json Activation::architectureJson() const {
     assert(initialized);
     assert(featureInput.isPresent());
