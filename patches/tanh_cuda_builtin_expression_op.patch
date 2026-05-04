@@ -1,0 +1,335 @@
+diff -ruN orig/Utilities/Expression/AutoDiff.cpp work/Utilities/Expression/AutoDiff.cpp
+--- orig/Utilities/Expression/AutoDiff.cpp	2026-04-24 21:47:01.000000000 +0000
++++ work/Utilities/Expression/AutoDiff.cpp	2026-05-04 21:54:48.515822798 +0000
+@@ -204,6 +204,7 @@
+             case ExprOp::LOG2:
+             case ExprOp::LOG10:
+             case ExprOp::SQRT:
++            case ExprOp::TANH:
+             case ExprOp::TRANSPOSE:
+             case ExprOp::UNSQUEEZE:
+             case ExprOp::SQUEEZE:
+@@ -1228,6 +1229,7 @@
+             case ExprOp::LOG2:
+             case ExprOp::LOG10:
+             case ExprOp::SQRT:
++            case ExprOp::TANH:
+                 node_dims[i] = node_dims[node.lhs];
+                 break;
+             case ExprOp::TRANSPOSE:
+@@ -1763,6 +1765,16 @@
+                 }
+                 break;
+             }
++
++            case ExprOp::TANH: {
++                if (node_reaches_requested_inputs.at(node.lhs)) {
++                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
++                    const uint32_t one = builder.scalar(1.0);
++                    const uint32_t one_minus_out_squared = builder.sub(one, builder.mul(out, out));
++                    addContributionToChild(node.lhs, builder.mul(grad, one_minus_out_squared), node_dims);
++                }
++                break;
++            }
+ 
+             case ExprOp::POW: {
+                 if (node_reaches_requested_inputs.at(node.lhs)) {
+diff -ruN orig/Utilities/Expression/CudaSourceEmitter.cpp work/Utilities/Expression/CudaSourceEmitter.cpp
+--- orig/Utilities/Expression/CudaSourceEmitter.cpp	2026-05-02 22:54:20.000000000 +0000
++++ work/Utilities/Expression/CudaSourceEmitter.cpp	2026-05-04 21:55:35.203491088 +0000
+@@ -1034,6 +1034,13 @@
+             return castScalarExpr("log10f(" + x_f + ")", DataType::FP32, compute_dtype);
+         case ExprOp::SQRT:
+             return castScalarExpr("sqrtf(" + x_f + ")", DataType::FP32, compute_dtype);
++        case ExprOp::TANH: {
++            if (compute_dtype == DataType::FP32) {
++                return "tanhf(" + x + ")";
++            }
++            const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
++            return castScalarExpr("half(tanhf(float(" + x_h + ")))", DataType::FP16, compute_dtype);
++        }
+         case ExprOp::UNSQUEEZE:
+         case ExprOp::SQUEEZE:
+             return x;
+@@ -1869,6 +1876,12 @@
+ static std::string emitVector2Log2(const std::string& x, DataType dtype) { return "h2log2(" + x + ")"; }
+ static std::string emitVector2Log10(const std::string& x, DataType dtype) { return "h2log10(" + x + ")"; }
+ static std::string emitVector2Sqrt(const std::string& x, DataType dtype) { return "h2sqrt(" + x + ")"; }
++static std::string emitVector2Tanh(const std::string& x, DataType dtype) {
++    if (dtype == DataType::BF16) {
++        return "__floats2bfloat162_rn(tanhf(float(half(float(" + x + ".x)))), tanhf(float(half(float(" + x + ".y)))))";
++    }
++    return "__floats2half2_rn(tanhf(float(half(" + x + ".x))), tanhf(float(half(" + x + ".y))))";
++}
+ static std::string emitVector2Pow(const std::string& a, const std::string& b, DataType dtype) {
+     if (dtype == DataType::BF16)
+         return "__floats2bfloat162_rn( powf(" + a + ".x, " + b + ".x), powf(" + a + ".y, " + b + ".y) )";
+@@ -2021,6 +2034,10 @@
+                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                    << emitVector2Sqrt(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                 break;
++            case ExprOp::TANH:
++                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
++                   << emitVector2Tanh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
++                break;
+             case ExprOp::UNSQUEEZE:
+             case ExprOp::SQUEEZE:
+                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = " << refWithSuffix(n.lhs, suffix)
+@@ -2131,6 +2148,10 @@
+                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                    << emitFloat2UnaryCall("sqrtf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                 break;
++            case ExprOp::TANH:
++                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
++                   << emitFloat2UnaryCall("tanhf", refWithSuffix(n.lhs, suffix)) << ";\n";
++                break;
+             case ExprOp::UNSQUEEZE:
+             case ExprOp::SQUEEZE:
+                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = " << refWithSuffix(n.lhs, suffix) << ";\n";
+@@ -2332,6 +2353,10 @@
+                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                        << emitVector2Sqrt(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                     break;
++                case ExprOp::TANH:
++                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
++                       << emitVector2Tanh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
++                    break;
+                 case ExprOp::UNSQUEEZE:
+                 case ExprOp::SQUEEZE:
+                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = " << refWithSuffix(n.lhs, suffix)
+@@ -2714,6 +2739,10 @@
+                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                        << emitVector2Sqrt(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                     break;
++                case ExprOp::TANH:
++                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
++                       << emitVector2Tanh(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
++                    break;
+                 case ExprOp::UNSQUEEZE:
+                 case ExprOp::SQUEEZE:
+                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
+diff -ruN orig/Utilities/Expression/EquationCompiler.cpp work/Utilities/Expression/EquationCompiler.cpp
+--- orig/Utilities/Expression/EquationCompiler.cpp	2026-05-02 22:59:55.000000000 +0000
++++ work/Utilities/Expression/EquationCompiler.cpp	2026-05-04 21:54:08.129185736 +0000
+@@ -546,6 +546,8 @@
+             return "LOG10";
+         case ExprOp::SQRT:
+             return "SQRT";
++        case ExprOp::TANH:
++            return "TANH";
+         case ExprOp::FILL:
+             return "FILL";
+         case ExprOp::UNSQUEEZE:
+diff -ruN orig/Utilities/Expression/Expression.cpp work/Utilities/Expression/Expression.cpp
+--- orig/Utilities/Expression/Expression.cpp	2026-05-02 17:11:53.000000000 +0000
++++ work/Utilities/Expression/Expression.cpp	2026-05-04 21:54:08.127268085 +0000
+@@ -124,6 +124,8 @@
+             return "log10";
+         case ExprOp::SQRT:
+             return "sqrt";
++        case ExprOp::TANH:
++            return "tanh";
+         case ExprOp::FILL:
+             return "fill";
+         case ExprOp::UNSQUEEZE:
+@@ -201,6 +203,7 @@
+         {"log2", ExprOp::LOG2},
+         {"log10", ExprOp::LOG10},
+         {"sqrt", ExprOp::SQRT},
++        {"tanh", ExprOp::TANH},
+         {"fill", ExprOp::FILL},
+         {"unsqueeze", ExprOp::UNSQUEEZE},
+         {"squeeze", ExprOp::SQUEEZE},
+@@ -388,6 +391,8 @@
+             return "LOG";
+         case ExprOp::SQRT:
+             return "SQRT";
++        case ExprOp::TANH:
++            return "TANH";
+         case ExprOp::FILL:
+             return "FILL";
+         case ExprOp::UNSQUEEZE:
+@@ -525,6 +530,7 @@
+         case ExprOp::LOG2:
+         case ExprOp::LOG10:
+         case ExprOp::SQRT:
++        case ExprOp::TANH:
+         case ExprOp::TRANSPOSE:
+             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ")";
+             break;
+@@ -972,6 +978,7 @@
+         case ExprOp::LOG2:
+         case ExprOp::LOG10:
+         case ExprOp::SQRT:
++        case ExprOp::TANH:
+         case ExprOp::TRANSPOSE:
+         case ExprOp::UNSQUEEZE:
+         case ExprOp::SQUEEZE:
+@@ -1427,6 +1434,7 @@
+ Expression Expression::abs() const { return unaryOp(*this, ExprOp::ABS); }
+ Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
+ Expression Expression::sqrt(const Expression& expr) { return unaryOp(expr, ExprOp::SQRT); }
++Expression Expression::tanh() const { return unaryOp(*this, ExprOp::TANH); }
+ 
+ Expression Expression::unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const {
+     if (!expr)
+diff -ruN orig/Utilities/Expression/Expression.h work/Utilities/Expression/Expression.h
+--- orig/Utilities/Expression/Expression.h	2026-05-04 21:16:44.000000000 +0000
++++ work/Utilities/Expression/Expression.h	2026-05-04 21:54:08.125489333 +0000
+@@ -39,6 +39,7 @@
+     LOG2,
+     LOG10,
+     SQRT,
++    TANH,
+     FILL,
+     UNSQUEEZE,
+     SQUEEZE,
+@@ -405,10 +406,6 @@
+     return numerator / denominator;
+ }
+ 
+-inline Expression Expression::tanh() const {
+-    return (Expression(2.0) * ((*this * Expression(2.0)).sigmoid())) - Expression(1.0);
+-}
+-
+ inline Expression Expression::softplus() const {
+     const Expression zero(0.0);
+     const Expression one(1.0);
+diff -ruN orig/Utilities/Expression/FusedEquation.cpp work/Utilities/Expression/FusedEquation.cpp
+--- orig/Utilities/Expression/FusedEquation.cpp	2026-05-02 19:56:33.000000000 +0000
++++ work/Utilities/Expression/FusedEquation.cpp	2026-05-04 21:54:48.581417626 +0000
+@@ -464,6 +464,7 @@
+             case ExprOp::LOG2:
+             case ExprOp::LOG10:
+             case ExprOp::SQRT:
++            case ExprOp::TANH:
+                 node_dims[i] = node_dims[node.lhs];
+                 break;
+             case ExprOp::TRANSPOSE:
+@@ -1661,6 +1662,7 @@
+             case ExprOp::LOG2:
+             case ExprOp::LOG10:
+             case ExprOp::SQRT:
++            case ExprOp::TANH:
+                 node_dims[i] = node_dims[node.lhs];
+                 break;
+             case ExprOp::TRANSPOSE:
+@@ -1823,6 +1825,7 @@
+         case ExprOp::LOG2:
+         case ExprOp::LOG10:
+         case ExprOp::SQRT:
++        case ExprOp::TANH:
+         case ExprOp::MIN:
+         case ExprOp::MAX:
+         case ExprOp::MIN_GRAD_LEFT:
+@@ -1920,6 +1923,7 @@
+             case ExprOp::LOG2:
+             case ExprOp::LOG10:
+             case ExprOp::SQRT:
++            case ExprOp::TANH:
+                 node_dims[i] = node_dims[node.lhs];
+                 break;
+             case ExprOp::UNSQUEEZE: {
+@@ -2006,6 +2010,7 @@
+             case ExprOp::LOG2:
+             case ExprOp::LOG10:
+             case ExprOp::SQRT:
++            case ExprOp::TANH:
+             case ExprOp::MIN:
+             case ExprOp::MAX:
+             case ExprOp::MIN_GRAD_LEFT:
+@@ -2491,6 +2496,7 @@
+         case ExprOp::LOG2:
+         case ExprOp::LOG10:
+         case ExprOp::SQRT:
++        case ExprOp::TANH:
+         case ExprOp::REDUCE_SUM:
+         case ExprOp::REDUCE_PROD:
+         case ExprOp::REDUCE_MIN:
+diff -ruN orig/bindings/python/src/core/physical/expression.cpp work/bindings/python/src/core/physical/expression.cpp
+--- orig/bindings/python/src/core/physical/expression.cpp	2026-04-27 22:42:33.000000000 +0000
++++ work/bindings/python/src/core/physical/expression.cpp	2026-05-04 21:54:48.585616968 +0000
+@@ -389,6 +389,16 @@
+ Return the elementwise square root of the input expression x
+ )nbdoc");
+ 
++    expr.def_static(
++        "tanh",
++        [](const Expression& x) { return x.tanh(); },
++        "x"_a,
++        R"nbdoc(
++Return the elementwise hyperbolic tangent of the input expression x.
++
++This lowers to Thor's TANH expression op, which is emitted with CUDA's built-in tanh implementation.
++)nbdoc");
++
+     // Reductions
+     auto parse_axes = [](const nb::object& axis) -> std::vector<uint64_t> {
+         if (axis.is_none()) {
+diff -ruN orig/bindings/python/test/core/physical/test_expression_stable_activations.py work/bindings/python/test/core/physical/test_expression_stable_activations.py
+--- orig/bindings/python/test/core/physical/test_expression_stable_activations.py	2026-05-04 21:16:44.000000000 +0000
++++ work/bindings/python/test/core/physical/test_expression_stable_activations.py	2026-05-04 21:54:48.589609715 +0000
+@@ -53,7 +53,7 @@
+ 
+ 
+ def _stable_tanh_expr(x):
+-    return 2.0 * _stable_sigmoid_expr(2.0 * x) - 1.0
++    return ex.tanh(x)
+ 
+ 
+ def _stable_softplus_expr(x):
+@@ -70,7 +70,7 @@
+ 
+ def _stable_gelu_expr(x):
+     inner = 0.797884561 * (x + 0.044715 * x * x * x)
+-    return 0.5 * x * (1.0 + _stable_tanh_expr(inner))
++    return 0.5 * x * (1.0 + ex.tanh(inner))
+ 
+ 
+ def _stable_swish_expr(x):
+@@ -151,18 +151,43 @@
+ 
+ 
+ @pytest.mark.cuda
+-def test_stable_tanh_saturates_instead_of_overflowing_exp2x():
++def test_tanh_expression_op_saturates_instead_of_overflowing_exp2x():
+     dtype = thor.DataType.fp32
+     x_np = np.array([-1000.0, -200.0, -100.0, 100.0, 200.0, 1000.0], dtype=np.float32)
+ 
+     x = ex.input("x")
+-    got = _run_expr(_stable_tanh_expr(x), {"x": (x_np, dtype)})
++    got = _run_expr(ex.tanh(x), {"x": (x_np, dtype)})
+ 
+     assert np.isfinite(got).all()
+     np.testing.assert_allclose(got, np.array([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], dtype=np.float32), rtol=0.0, atol=0.0)
+ 
+ 
+ @pytest.mark.cuda
++@pytest.mark.parametrize(
++    ("dtype", "rtol", "atol"),
++    [
++        (thor.DataType.fp32, 1e-5, 1e-6),
++        (thor.DataType.fp16, 3e-3, 3e-3),
++        (thor.DataType.bf16, 8e-3, 8e-3),
++        (thor.DataType.fp8_e4m3, 2.5e-1, 2.5e-1),
++        (thor.DataType.fp8_e5m2, 3.5e-1, 3.5e-1),
++    ],
++)
++def test_tanh_expression_op_matches_numpy_for_supported_storage_dtypes(dtype, rtol, atol):
++    storage_dtype = _numpy_storage_dtype(dtype)
++    x_np = np.linspace(-4.0, 4.0, num=17, dtype=np.float32).astype(storage_dtype)
++
++    x = ex.input("x")
++    got = _run_expr(ex.tanh(x), {"x": (x_np, dtype)})
++    expected = np.tanh(x_np.astype(np.float32)).astype(storage_dtype)
++
++    assert got.dtype == storage_dtype
++    assert got.shape == expected.shape
++    assert np.isfinite(got.astype(np.float32)).all()
++    np.testing.assert_allclose(got, expected, rtol=rtol, atol=atol)
++
++
++@pytest.mark.cuda
+ def test_stable_elu_and_selu_do_not_evaluate_positive_exp_branch():
+     dtype = thor.DataType.fp32
+     x_np = np.array([80.0, 100.0, 200.0, 1000.0], dtype=np.float32)
