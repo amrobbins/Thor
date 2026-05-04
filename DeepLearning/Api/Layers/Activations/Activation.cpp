@@ -1,5 +1,7 @@
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 
+#include <stdexcept>
+
 using namespace std;
 using json = nlohmann::json;
 
@@ -13,7 +15,67 @@ unordered_map<string, Activation::Deserializer>& Activation::get_registry() {
 void Activation::register_layer(string name, Deserializer fn) { get_registry().emplace(std::move(name), std::move(fn)); }
 
 ThorImplementation::Expression Activation::toExpression(const ThorImplementation::Expression& input) const {
-    (void)input;
+    using ThorImplementation::Expression;
+
+    const string layerType = getLayerType();
+
+    if (layerType == "Relu") {
+        return input.max(0.0);
+    }
+
+    if (layerType == "Sigmoid") {
+        Expression one(1.0);
+        return one / (one + (-input).exp());
+    }
+
+    if (layerType == "Tanh") {
+        const Expression exp2x = (input * 2.0).exp();
+        return (exp2x - 1.0) / (exp2x + 1.0);
+    }
+
+    if (layerType == "HardSigmoid") {
+        return ((input * 0.2) + 0.5).min(1.0).max(0.0);
+    }
+
+    if (layerType == "SoftPlus") {
+        return (input.exp() + 1.0).ln();
+    }
+
+    if (layerType == "SoftSign") {
+        return input / (input.abs() + 1.0);
+    }
+
+    if (layerType == "Exponential") {
+        return input.exp();
+    }
+
+    if (layerType == "Gelu") {
+        // Match the existing CUDA activation approximation:
+        // 0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x^3))).
+        const Expression x3 = input * input * input;
+        const Expression inner = (input + (x3 * 0.044715)) * 0.797884561;
+        const Expression exp2Inner = (inner * 2.0).exp();
+        const Expression tanhInner = (exp2Inner - 1.0) / (exp2Inner + 1.0);
+        return input * 0.5 * (tanhInner + 1.0);
+    }
+
+    if (layerType == "Selu") {
+        constexpr double scale = 1.05070098;
+        constexpr double scaleAlpha = 1.758099326;
+        return (input.max(0.0) * scale) + ((input.exp() - 1.0).min(0.0) * scaleAlpha);
+    }
+
+    if (layerType == "Swish") {
+        Expression one(1.0);
+        return input * (one / (one + (-input).exp()));
+    }
+
+    if (layerType == "Softmax") {
+        const Expression shifted = input - input.reduce_max({1}, {});
+        const Expression expShifted = shifted.exp();
+        return expShifted / expShifted.reduce_sum({1}, {});
+    }
+
     throw std::runtime_error("Activation " + getLayerType() + " does not support expression fusion.");
 }
 
