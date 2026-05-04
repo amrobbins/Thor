@@ -198,12 +198,16 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::NEG:
             case ExprOp::ABS:
             case ExprOp::EXP:
+            case ExprOp::EXPM1:
             case ExprOp::EXP2:
             case ExprOp::EXP10:
             case ExprOp::LN:
+            case ExprOp::LOG1P:
             case ExprOp::LOG2:
             case ExprOp::LOG10:
             case ExprOp::SQRT:
+            case ExprOp::TANH:
+            case ExprOp::NORMCDF:
             case ExprOp::TRANSPOSE:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
@@ -698,6 +702,7 @@ class BackwardGraphBuilder {
     }
 
     uint32_t neg(uint32_t value) { return unary(ExprOp::NEG, value); }
+    uint32_t exp(uint32_t value) { return unary(ExprOp::EXP, value); }
     uint32_t add(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::ADD, lhs, rhs); }
     uint32_t sub(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::SUB, lhs, rhs); }
     uint32_t mul(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::MUL, lhs, rhs); }
@@ -1222,12 +1227,16 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::NEG:
             case ExprOp::ABS:
             case ExprOp::EXP:
+            case ExprOp::EXPM1:
             case ExprOp::EXP2:
             case ExprOp::EXP10:
             case ExprOp::LN:
+            case ExprOp::LOG1P:
             case ExprOp::LOG2:
             case ExprOp::LOG10:
             case ExprOp::SQRT:
+            case ExprOp::TANH:
+            case ExprOp::NORMCDF:
                 node_dims[i] = node_dims[node.lhs];
                 break;
             case ExprOp::TRANSPOSE:
@@ -1711,6 +1720,14 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 break;
             }
 
+            case ExprOp::EXPM1: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.exp(lhs)), node_dims);
+                }
+                break;
+            }
+
             case ExprOp::EXP2: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
                     const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
@@ -1733,6 +1750,15 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 if (node_reaches_requested_inputs.at(node.lhs)) {
                     const uint32_t lhs = builder.cloneForward(node.lhs);
                     addContributionToChild(node.lhs, builder.div(grad, lhs), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::LOG1P: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t denom = builder.add(builder.scalar(1.0), lhs);
+                    addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
                 }
                 break;
             }
@@ -1760,6 +1786,27 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
                     const uint32_t denom = builder.mul(builder.scalar(2.0), out);
                     addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::TANH: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t one = builder.scalar(1.0);
+                    const uint32_t one_minus_out_squared = builder.sub(one, builder.mul(out, out));
+                    addContributionToChild(node.lhs, builder.mul(grad, one_minus_out_squared), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::NORMCDF: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t neg_half = builder.scalar(-0.5);
+                    const uint32_t inv_sqrt_two_pi = builder.scalar(0.3989422804014327);
+                    const uint32_t pdf = builder.mul(inv_sqrt_two_pi, builder.exp(builder.mul(neg_half, builder.mul(lhs, lhs))));
+                    addContributionToChild(node.lhs, builder.mul(grad, pdf), node_dims);
                 }
                 break;
             }

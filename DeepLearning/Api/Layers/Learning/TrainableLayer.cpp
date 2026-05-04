@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
+#include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
@@ -121,6 +122,108 @@ uint64_t TrainableLayer::getParameterBytes() const {
         parameterBytes += param->getTotalSizeInBytes();
     }
     return parameterBytes;
+}
+
+json TrainableLayer::architectureJson() const {
+    // Multi-layers will only serialize the single layer, itself.
+    // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
+
+    json j;
+    j["factory"] = Layer::Factory::Learning.value();
+    j["version"] = getLayerVersion();
+    j["layer_type"] = getLayerType();
+    string layerName = string("layer") + to_string(getId());
+    j["layer_name"] = layerName;
+    // j["activation"] = activation->architectureJson();
+
+    if (!parameters.empty()) {
+        json parameters_json = json::object();
+        for (const auto &parameter : parameters) {
+            parameters_json[parameter->getName()] = parameter->architectureJson();
+        }
+        j["parameters"] = parameters_json;
+    }
+
+    // json inputs = json::array();
+    // for (uint32_t i = 0; i < standaloneFCFeatureInputs.size(); ++i) {
+    //     inputs.push_back(standaloneFCFeatureInputs[i].architectureJson());
+    // }
+    // j["inputs"] = inputs;
+    //
+    // // Output connections
+    // json outputs = json::array();
+    // for (uint32_t i = 0; i < standaloneFCFeatureOutputs.size(); ++i) {
+    //     outputs.push_back(standaloneFCFeatureOutputs[i].architectureJson());
+    // }
+    // j["outputs"] = outputs;
+    //
+    // if (weightsInitializer != nullptr) {
+    //     j["weights_initializer"] = weightsInitializer->architectureJson();
+    // }
+    // if (biasesInitializer != nullptr) {
+    //     j["biases_initializer"] = biasesInitializer->architectureJson();
+    // }
+    //
+    // if (hasOptimizer()) {
+    //     j["weights_optimizer"] = weightsOptimizer->architectureJson();
+    //     if (hasBias) {
+    //         j["biases_optimizer"] = biasesOptimizer->architectureJson();
+    //     }
+    // }
+
+    return j;
+}
+
+nlohmann::json TrainableLayer::serialize(thor_file::TarWriter &archiveWriter,
+                                         Stream stream,
+                                         bool saveOptimizerState,
+                                         ThorImplementation::StampedNetwork &stampedNetwork) const {
+    // Multi-layers will only serialize the single layer, itself.
+    // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
+    json j = architectureJson();
+
+    string layerName = string("layer") + to_string(getId());
+
+    // Dump the weights to a file and record its name
+    shared_ptr<ThorImplementation::TrainableLayer> trainableLayer = nullptr;
+    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
+    trainableLayer = dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
+    assert(trainableLayer != nullptr);
+
+    ThorImplementation::Tensor weights;
+    ThorImplementation::Tensor biases;
+    string weightsFile;
+    string biasesFile;
+    if (trainableLayer != nullptr) {
+        // if (hasBias) {
+        //     biasesFile = (layerName + "_biases.gds");
+        //     j["biases_tensor"] = biasesFile;
+        //     biases = trainableLayer->getParameter("biases")->getStorage().get();
+        //     archiveWriter.addArchiveFile(biasesFile, biases);
+        // }
+
+        weightsFile = (layerName + "_weights.gds");
+        j["weights_tensor"] = weightsFile;
+        weights = trainableLayer->getParameter("weights")->getStorage();
+        archiveWriter.addArchiveFile(weightsFile, weights);
+    }
+
+    // if (hasOptimizer()) {
+    //     j["weights_optimizer"] = weightsOptimizer->serialize(archiveWriter,
+    //                                                          stream,
+    //                                                          trainableLayer->getParameter("weights")->getOptimizer(),
+    //                                                          string("layer") + to_string(getId()),
+    //                                                          saveOptimizerState);
+    //     if (hasBias) {
+    //         j["biases_optimizer"] = biasesOptimizer->serialize(archiveWriter,
+    //                                                            stream,
+    //                                                            trainableLayer->getParameter("biases")->getOptimizer(),
+    //                                                            string("layer") + to_string(getId()),
+    //                                                            saveOptimizerState);
+    //     }
+    // }
+
+    return j;
 }
 
 }  // namespace Thor

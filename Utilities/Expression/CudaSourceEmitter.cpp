@@ -420,6 +420,8 @@ static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstre
                 need_fp16 = true;
                 break;
             case DataType::BF16:
+                // BF16 special-function lowering casts through FP16 for CUDA half/half2 intrinsics.
+                need_fp16 = true;
                 need_bf16 = true;
                 break;
             case DataType::FP8_E4M3:
@@ -1022,18 +1024,46 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
 
         case ExprOp::EXP:
             return castScalarExpr("expf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::EXPM1: {
+            if (compute_dtype == DataType::FP32) {
+                return "expm1f(" + x + ")";
+            }
+            const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
+            return castScalarExpr("half(expm1f(float(" + x_h + ")))", DataType::FP16, compute_dtype);
+        }
         case ExprOp::EXP2:
             return castScalarExpr("exp2f(" + x_f + ")", DataType::FP32, compute_dtype);
         case ExprOp::EXP10:
             return castScalarExpr("exp10f(" + x_f + ")", DataType::FP32, compute_dtype);
         case ExprOp::LN:
             return castScalarExpr("logf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::LOG1P: {
+            if (compute_dtype == DataType::FP32) {
+                return "log1pf(" + x + ")";
+            }
+            const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
+            return castScalarExpr("half(log1pf(float(" + x_h + ")))", DataType::FP16, compute_dtype);
+        }
         case ExprOp::LOG2:
             return castScalarExpr("log2f(" + x_f + ")", DataType::FP32, compute_dtype);
         case ExprOp::LOG10:
             return castScalarExpr("log10f(" + x_f + ")", DataType::FP32, compute_dtype);
         case ExprOp::SQRT:
             return castScalarExpr("sqrtf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::TANH: {
+            if (compute_dtype == DataType::FP32) {
+                return "tanhf(" + x + ")";
+            }
+            const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
+            return castScalarExpr("htanh(" + x_h + ")", DataType::FP16, compute_dtype);
+        }
+        case ExprOp::NORMCDF: {
+            if (compute_dtype == DataType::FP32) {
+                return "normcdff(" + x + ")";
+            }
+            const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
+            return castScalarExpr("half(normcdff(float(" + x_h + ")))", DataType::FP16, compute_dtype);
+        }
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
             return x;
@@ -1869,6 +1899,26 @@ static std::string emitVector2Ln(const std::string& x, DataType dtype) { return 
 static std::string emitVector2Log2(const std::string& x, DataType dtype) { return "h2log2(" + x + ")"; }
 static std::string emitVector2Log10(const std::string& x, DataType dtype) { return "h2log10(" + x + ")"; }
 static std::string emitVector2Sqrt(const std::string& x, DataType dtype) { return "h2sqrt(" + x + ")"; }
+static std::string emitVector2SpecialUnary(const std::string& fn, const std::string& x, DataType dtype) {
+    if (dtype == DataType::BF16) {
+        return "__floats2bfloat162_rn(" + fn + "(float(half(float(" + x + ".x)))), " + fn + "(float(half(float(" + x + ".y)))))";
+    }
+    return "__floats2half2_rn(" + fn + "(float(half(" + x + ".x))), " + fn + "(float(half(" + x + ".y))))";
+}
+
+static std::string emitVector2Half2Tanh(const std::string& x, DataType dtype) {
+    if (dtype == DataType::BF16) {
+        const std::string x_half2 = "__float22half2_rn(__bfloat1622float2(" + x + "))";
+        return "__float22bfloat162_rn(__half22float2(h2tanh(" + x_half2 + ")))";
+    }
+
+    return "h2tanh(" + x + ")";
+}
+
+static std::string emitVector2Expm1(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("expm1f", x, dtype); }
+static std::string emitVector2Log1p(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("log1pf", x, dtype); }
+static std::string emitVector2Tanh(const std::string& x, DataType dtype) { return emitVector2Half2Tanh(x, dtype); }
+static std::string emitVector2Normcdf(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("normcdff", x, dtype); }
 static std::string emitVector2Pow(const std::string& a, const std::string& b, DataType dtype) {
     if (dtype == DataType::BF16)
         return "__floats2bfloat162_rn( powf(" + a + ".x, " + b + ".x), powf(" + a + ".y, " + b + ".y) )";
@@ -1997,6 +2047,10 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Exp(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                 break;
+            case ExprOp::EXPM1:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Expm1(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
             case ExprOp::EXP2:
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Exp2(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
@@ -2009,6 +2063,10 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Ln(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                 break;
+            case ExprOp::LOG1P:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Log1p(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
             case ExprOp::LOG2:
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Log2(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
@@ -2020,6 +2078,14 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
             case ExprOp::SQRT:
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Sqrt(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::TANH:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Tanh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::NORMCDF:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Normcdf(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                 break;
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
@@ -2107,6 +2173,10 @@ static void emitFloat2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
                    << emitFloat2UnaryCall("expf", refWithSuffix(n.lhs, suffix)) << ";\n";
                 break;
+            case ExprOp::EXPM1:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("expm1f", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
             case ExprOp::EXP2:
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
                    << emitFloat2UnaryCall("exp2f", refWithSuffix(n.lhs, suffix)) << ";\n";
@@ -2119,6 +2189,10 @@ static void emitFloat2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
                    << emitFloat2UnaryCall("logf", refWithSuffix(n.lhs, suffix)) << ";\n";
                 break;
+            case ExprOp::LOG1P:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("log1pf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
             case ExprOp::LOG2:
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
                    << emitFloat2UnaryCall("log2f", refWithSuffix(n.lhs, suffix)) << ";\n";
@@ -2130,6 +2204,14 @@ static void emitFloat2NodeDefinitionsForSuffix(std::ostringstream& ss,
             case ExprOp::SQRT:
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
                    << emitFloat2UnaryCall("sqrtf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::TANH:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("tanhf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::NORMCDF:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("normcdff", refWithSuffix(n.lhs, suffix)) << ";\n";
                 break;
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
@@ -2179,6 +2261,7 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
         compute_dtype_vector = "__nv_bfloat162";
         storage_dtype_vector = "__nv_bfloat162";
         packs_per_thread = 4;
+        ss << "#include <cuda_fp16.h>\n";
         ss << "#include <cuda_bf16.h>\n";
     } else if (dtype == DataType::FP16) {
         compute_dtype = "half";
@@ -2308,6 +2391,10 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Exp(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                     break;
+                case ExprOp::EXPM1:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Expm1(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
                 case ExprOp::EXP2:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Exp2(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
@@ -2320,6 +2407,10 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Ln(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                     break;
+                case ExprOp::LOG1P:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Log1p(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
                 case ExprOp::LOG2:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Log2(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
@@ -2331,6 +2422,14 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                 case ExprOp::SQRT:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Sqrt(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::TANH:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Tanh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::NORMCDF:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Normcdf(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                     break;
                 case ExprOp::UNSQUEEZE:
                 case ExprOp::SQUEEZE:
@@ -2526,6 +2625,7 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
         compute_dtype_vector = "__nv_bfloat162";
         storage_dtype = "__nv_bfloat16";
         storage_dtype_vector = "__nv_bfloat162";
+        ss << "#include <cuda_fp16.h>\n";
         ss << "#include <cuda_bf16.h>\n";
     } else if (dtype == DataType::FP16) {
         compute_dtype = "half";
@@ -2690,6 +2790,10 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Exp(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
                     break;
+                case ExprOp::EXPM1:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Expm1(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
                 case ExprOp::EXP2:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Exp2(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
@@ -2702,6 +2806,10 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Ln(CudaSourceEmitter::ref(n.lhs), dtype)
                        << ";\n";
                     break;
+                case ExprOp::LOG1P:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Log1p(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
                 case ExprOp::LOG2:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Log2(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
@@ -2713,6 +2821,14 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                 case ExprOp::SQRT:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Sqrt(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::TANH:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Tanh(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::NORMCDF:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Normcdf(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::UNSQUEEZE:
                 case ExprOp::SQUEEZE:

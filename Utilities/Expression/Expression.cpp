@@ -112,18 +112,26 @@ std::string exprOpExternalName(ExprOp op) {
             return "abs";
         case ExprOp::EXP:
             return "exp";
+        case ExprOp::EXPM1:
+            return "expm1";
         case ExprOp::EXP2:
             return "exp2";
         case ExprOp::EXP10:
             return "exp10";
         case ExprOp::LN:
             return "ln";
+        case ExprOp::LOG1P:
+            return "log1p";
         case ExprOp::LOG2:
             return "log2";
         case ExprOp::LOG10:
             return "log10";
         case ExprOp::SQRT:
             return "sqrt";
+        case ExprOp::TANH:
+            return "tanh";
+        case ExprOp::NORMCDF:
+            return "normcdf";
         case ExprOp::FILL:
             return "fill";
         case ExprOp::UNSQUEEZE:
@@ -195,12 +203,16 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"neg", ExprOp::NEG},
         {"abs", ExprOp::ABS},
         {"exp", ExprOp::EXP},
+        {"expm1", ExprOp::EXPM1},
         {"exp2", ExprOp::EXP2},
         {"exp10", ExprOp::EXP10},
         {"ln", ExprOp::LN},
+        {"log1p", ExprOp::LOG1P},
         {"log2", ExprOp::LOG2},
         {"log10", ExprOp::LOG10},
         {"sqrt", ExprOp::SQRT},
+        {"tanh", ExprOp::TANH},
+        {"normcdf", ExprOp::NORMCDF},
         {"fill", ExprOp::FILL},
         {"unsqueeze", ExprOp::UNSQUEEZE},
         {"squeeze", ExprOp::SQUEEZE},
@@ -384,10 +396,18 @@ std::string opName(ExprOp op) {
             return "ABS";
         case ExprOp::EXP:
             return "EXP";
+        case ExprOp::EXPM1:
+            return "EXPM1";
         case ExprOp::LN:
             return "LOG";
+        case ExprOp::LOG1P:
+            return "LOG1P";
         case ExprOp::SQRT:
             return "SQRT";
+        case ExprOp::TANH:
+            return "TANH";
+        case ExprOp::NORMCDF:
+            return "NORMCDF";
         case ExprOp::FILL:
             return "FILL";
         case ExprOp::UNSQUEEZE:
@@ -519,12 +539,16 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::NEG:
         case ExprOp::ABS:
         case ExprOp::EXP:
+        case ExprOp::EXPM1:
         case ExprOp::EXP2:
         case ExprOp::EXP10:
         case ExprOp::LN:
+        case ExprOp::LOG1P:
         case ExprOp::LOG2:
         case ExprOp::LOG10:
         case ExprOp::SQRT:
+        case ExprOp::TANH:
+        case ExprOp::NORMCDF:
         case ExprOp::TRANSPOSE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ")";
             break;
@@ -966,12 +990,16 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::NEG:
         case ExprOp::ABS:
         case ExprOp::EXP:
+        case ExprOp::EXPM1:
         case ExprOp::EXP2:
         case ExprOp::EXP10:
         case ExprOp::LN:
+        case ExprOp::LOG1P:
         case ExprOp::LOG2:
         case ExprOp::LOG10:
         case ExprOp::SQRT:
+        case ExprOp::TANH:
+        case ExprOp::NORMCDF:
         case ExprOp::TRANSPOSE:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
@@ -1425,8 +1453,12 @@ Expression Expression::operator*(const Expression& other) const { return binaryO
 Expression Expression::operator/(const Expression& other) const { return binaryOp(*this, other, ExprOp::DIV); }
 Expression Expression::operator-() const { return unaryOp(*this, ExprOp::NEG); }
 Expression Expression::abs() const { return unaryOp(*this, ExprOp::ABS); }
+Expression Expression::expm1() const { return unaryOp(*this, ExprOp::EXPM1); }
+Expression Expression::log1p() const { return unaryOp(*this, ExprOp::LOG1P); }
 Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
 Expression Expression::sqrt(const Expression& expr) { return unaryOp(expr, ExprOp::SQRT); }
+Expression Expression::tanh() const { return unaryOp(*this, ExprOp::TANH); }
+Expression Expression::normcdf() const { return unaryOp(*this, ExprOp::NORMCDF); }
 
 Expression Expression::unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const {
     if (!expr)

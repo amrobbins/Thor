@@ -97,6 +97,8 @@ void ParameterSpecification::validateReadyForUse() const {
         throw runtime_error("Parameter name cannot be empty.");
     if (name.length() >= 2 && name[0] == '_' && name[1] == '_')
         throw runtime_error("Parameter names cannot start with __; that prefix is reserved. Parameter name " + name + " is illegal.");
+    if (initializer == nullptr)
+        throw runtime_error("All parameters require an initializer, initializer is nullptr.");
     if (optimizer != nullptr && !trainable)
         throw runtime_error("Only trainable parameters may have optimizer overrides.");
 }
