@@ -18,6 +18,8 @@ class Relu : public Activation {
         return myClone;
     }
 
+    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const { return input.max(0.0); }
+
     virtual std::string getLayerType() const { return "Relu"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
