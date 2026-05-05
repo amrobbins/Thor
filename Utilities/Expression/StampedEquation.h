@@ -87,6 +87,35 @@ struct BuiltReduction {
     BuiltReduction& operator=(const BuiltReduction&) = delete;
 };
 
+struct SoftmaxCacheKey {
+    const std::vector<uint64_t> input_dims;
+    const TensorDescriptor::DataType input_dtype;
+    const TensorDescriptor::DataType output_dtype;
+    const cudnnSoftmaxAlgorithm_t algorithm;
+    const cudnnSoftmaxMode_t mode;
+    const int device_num;
+
+    bool operator==(const SoftmaxCacheKey& other) const = default;
+};
+
+struct BuiltSoftmax {
+    SoftmaxCacheKey key;
+    cudnnTensorDescriptor_t x_desc = nullptr;
+    cudnnTensorDescriptor_t y_desc = nullptr;
+
+    explicit BuiltSoftmax(SoftmaxCacheKey key) : key(std::move(key)) {}
+
+    ~BuiltSoftmax() {
+        if (x_desc)
+            cudnnDestroyTensorDescriptor(x_desc);
+        if (y_desc)
+            cudnnDestroyTensorDescriptor(y_desc);
+    }
+
+    BuiltSoftmax(const BuiltSoftmax&) = delete;
+    BuiltSoftmax& operator=(const BuiltSoftmax&) = delete;
+};
+
 struct MatmulCacheKey {
     const ExprOp op;
     const int32_t a_rows;
@@ -211,6 +240,11 @@ class StampedEquation {
                                                           const Tensor& input,
                                                           int device_num);
 
+    static std::shared_ptr<BuiltSoftmax> buildSoftmax(const std::shared_ptr<CompiledSoftmax>& compiled_softmax,
+                                                      const Tensor& input,
+                                                      const Tensor& output,
+                                                      int device_num);
+
     static std::shared_ptr<BuiltMatmul> buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
                                                     const Tensor& lhs,
                                                     const Tensor& rhs,
@@ -289,6 +323,34 @@ class StampedArgMinMax {
     Tensor output;
     const Tensor reduction_value_output;
     const Optional<Tensor> workspace;
+    Stream stream;
+
+    const float alpha_1 = 1.0f;
+    const float beta_0 = 0.0f;
+    const void* alpha = &alpha_1;
+    const void* beta = &beta_0;
+};
+
+class StampedSoftmax {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+    Tensor getOutputTensor() const { return output; }
+
+    StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
+                   std::shared_ptr<BuiltSoftmax> built,
+                   const Tensor& input,
+                   const Tensor& output,
+                   const Stream& stream);
+
+   private:
+    const std::shared_ptr<CompiledSoftmax> compiled_softmax;
+    const std::shared_ptr<BuiltSoftmax> built_softmax;
+    const Tensor input;
+    Tensor output;
     Stream stream;
 
     const float alpha_1 = 1.0f;
@@ -435,7 +497,7 @@ class StampedReduceMinMaxBackward {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     const Kind kind;
 
     const std::vector<uint32_t> dependency_stage_indices;
@@ -445,6 +507,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedEquation> kernel = nullptr;
     const std::shared_ptr<StampedReduction> reduction = nullptr;
     const std::shared_ptr<StampedArgMinMax> arg_minmax = nullptr;
+    const std::shared_ptr<StampedSoftmax> softmax = nullptr;
     const std::shared_ptr<StampedMatmul> matmul = nullptr;
     const std::shared_ptr<StampedConvolution> convolution = nullptr;
     const std::shared_ptr<StampedConvolutionBackward> convolution_backward = nullptr;
@@ -476,6 +539,15 @@ struct StampedExecutionStage {
           gpu_num(arg_minmax->gpuNum()),
           flop_count(flop_count),
           arg_minmax(arg_minmax) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedSoftmax>& softmax,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::Softmax),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(softmax->gpuNum()),
+          flop_count(flop_count),
+          softmax(softmax) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedMatmul>& matmul,
                                    std::vector<uint32_t> dependency_stage_indices = {},
@@ -530,6 +602,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::ArgMinMax) {
             assert(arg_minmax != nullptr);
             arg_minmax->runOn(run_stream);
+        } else if (kind == Kind::Softmax) {
+            assert(softmax != nullptr);
+            softmax->runOn(run_stream);
         } else if (kind == Kind::Matmul) {
             assert(matmul != nullptr);
             if (runtime_scalars.empty())
@@ -636,6 +711,22 @@ struct hash<ThorImplementation::ReductionCacheKey> {
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.compute_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.output_dtype));
         hashCombine(h, hash<bool>{}(k.output_indices));
+        hashCombine(h, hash<int>{}(k.device_num));
+        return h;
+    }
+};
+
+template <>
+struct hash<ThorImplementation::SoftmaxCacheKey> {
+    size_t operator()(const ThorImplementation::SoftmaxCacheKey& k) const noexcept {
+        size_t h = 0;
+        hashCombine(h, hash<size_t>{}(k.input_dims.size()));
+        for (uint64_t d : k.input_dims)
+            hashCombine(h, hash<uint64_t>{}(d));
+        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.input_dtype));
+        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.output_dtype));
+        hashCombine(h, hash<int>{}(static_cast<int>(k.algorithm)));
+        hashCombine(h, hash<int>{}(static_cast<int>(k.mode)));
         hashCombine(h, hash<int>{}(k.device_num));
         return h;
     }

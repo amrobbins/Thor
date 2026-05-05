@@ -121,6 +121,21 @@ struct CompiledReduction {
     }
 };
 
+struct CompiledSoftmax {
+    const cudnnSoftmaxAlgorithm_t algorithm;
+    const cudnnSoftmaxMode_t mode;
+    const TensorDescriptor::DataType input_dtype;
+    const TensorDescriptor::DataType output_dtype;
+
+    bool operator==(const CompiledSoftmax& other) const = default;
+
+    CompiledSoftmax(cudnnSoftmaxAlgorithm_t algorithm,
+                    cudnnSoftmaxMode_t mode,
+                    TensorDescriptor::DataType input_dtype,
+                    TensorDescriptor::DataType output_dtype)
+        : algorithm(algorithm), mode(mode), input_dtype(input_dtype), output_dtype(output_dtype) {}
+};
+
 struct CompiledArgMinMax {
     const ExprOp op;
     std::vector<uint64_t> reduction_axes;

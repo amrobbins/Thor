@@ -30,7 +30,7 @@ struct ParameterFanOverride {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Matmul, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -39,6 +39,8 @@ struct CompiledExecutionStage {
                 return "Reduction";
             case Kind::ArgMinMax:
                 return "ArgMinMax";
+            case Kind::Softmax:
+                return "Softmax";
             case Kind::Matmul:
                 return "Matmul";
             case Kind::Convolution:
@@ -58,6 +60,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledEquation> flat = nullptr;
     const std::shared_ptr<CompiledReduction> reduction = nullptr;
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
+    const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
     const std::shared_ptr<CompiledMatmul> matmul = nullptr;
     const std::shared_ptr<CompiledConvolution> convolution = nullptr;
     const std::shared_ptr<CompiledConvolutionBackward> convolution_backward = nullptr;
@@ -96,6 +99,16 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::ArgMinMax),
           arg_minmax(arg_minmax),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledSoftmax>& softmax,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::Softmax),
+          softmax(softmax),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
@@ -139,7 +152,6 @@ struct CompiledExecutionStage {
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
-
 };
 
 struct CompiledOutputs {
@@ -325,6 +337,12 @@ class FusedEquation {
                                                                    const Optional<Tensor>& preallocatedOutput,
                                                                    const Stream& stream,
                                                                    const std::vector<uint64_t>& requested_output_shape) const;
+
+    [[nodiscard]] std::shared_ptr<StampedSoftmax> stampSoftmax(const std::shared_ptr<CompiledSoftmax>& compiledStage,
+                                                               Tensor& input,
+                                                               const Optional<Tensor>& preallocatedOutput,
+                                                               const Stream& stream,
+                                                               const std::vector<uint64_t>& requested_output_shape) const;
 
     [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(
         const std::shared_ptr<CompiledMatmul>& compiledStage,

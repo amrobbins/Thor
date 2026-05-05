@@ -132,6 +132,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "tanh";
         case ExprOp::NORMCDF:
             return "normcdf";
+        case ExprOp::SOFTMAX:
+            return "softmax";
         case ExprOp::FILL:
             return "fill";
         case ExprOp::UNSQUEEZE:
@@ -213,6 +215,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"sqrt", ExprOp::SQRT},
         {"tanh", ExprOp::TANH},
         {"normcdf", ExprOp::NORMCDF},
+        {"softmax", ExprOp::SOFTMAX},
         {"fill", ExprOp::FILL},
         {"unsqueeze", ExprOp::UNSQUEEZE},
         {"squeeze", ExprOp::SQUEEZE},
@@ -309,6 +312,8 @@ json exprNodeToJson(const ExprNode& node) {
     j["conv_stride_w"] = node.conv_stride_w;
     j["conv_pad_h"] = node.conv_pad_h;
     j["conv_pad_w"] = node.conv_pad_w;
+    j["softmax_algorithm"] = static_cast<int>(node.softmax_algorithm);
+    j["softmax_mode"] = static_cast<int>(node.softmax_mode);
     setOptionalDTypeJson(j, "input_tensor_dtype", node.input_tensor_dtype);
     setOptionalDTypeJson(j, "output_dtype", node.output_dtype);
     setOptionalDTypeJson(j, "compute_dtype", node.compute_dtype);
@@ -340,6 +345,8 @@ ExprNode exprNodeFromJson(const json& j) {
     node.conv_stride_w = j.value("conv_stride_w", 1);
     node.conv_pad_h = j.value("conv_pad_h", 0);
     node.conv_pad_w = j.value("conv_pad_w", 0);
+    node.softmax_algorithm = static_cast<cudnnSoftmaxAlgorithm_t>(j.value("softmax_algorithm", static_cast<int>(CUDNN_SOFTMAX_ACCURATE)));
+    node.softmax_mode = static_cast<cudnnSoftmaxMode_t>(j.value("softmax_mode", static_cast<int>(CUDNN_SOFTMAX_MODE_CHANNEL)));
     parseOptionalDTypeField(j, "input_tensor_dtype", node.input_tensor_dtype);
     parseOptionalDTypeField(j, "output_dtype", node.output_dtype);
     parseOptionalDTypeField(j, "compute_dtype", node.compute_dtype);
@@ -408,6 +415,8 @@ std::string opName(ExprOp op) {
             return "TANH";
         case ExprOp::NORMCDF:
             return "NORMCDF";
+        case ExprOp::SOFTMAX:
+            return "SOFTMAX";
         case ExprOp::FILL:
             return "FILL";
         case ExprOp::UNSQUEEZE:
@@ -552,6 +561,11 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::TRANSPOSE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ")";
             break;
+        case ExprOp::SOFTMAX:
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
+                  ";algorithm=" + std::to_string(static_cast<int>(n.softmax_algorithm)) +
+                  ";mode=" + std::to_string(static_cast<int>(n.softmax_mode)) + ")";
+            break;
         case ExprOp::UNSQUEEZE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
                   ";axes=" + formatUIntVectorCanonical(n.unsqueeze_axes) + ")";
@@ -677,6 +691,9 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
             break;
         case PhysicalExecutionStage::Kind::ArgMinMax:
             ss << "argminmax";
+            break;
+        case PhysicalExecutionStage::Kind::Softmax:
+            ss << "softmax";
             break;
         case PhysicalExecutionStage::Kind::Matmul:
             ss << "matmul";
@@ -1000,6 +1017,7 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::SQRT:
         case ExprOp::TANH:
         case ExprOp::NORMCDF:
+        case ExprOp::SOFTMAX:
         case ExprOp::TRANSPOSE:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
@@ -1459,6 +1477,32 @@ Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
 Expression Expression::sqrt(const Expression& expr) { return unaryOp(expr, ExprOp::SQRT); }
 Expression Expression::tanh() const { return unaryOp(*this, ExprOp::TANH); }
 Expression Expression::normcdf() const { return unaryOp(*this, ExprOp::NORMCDF); }
+
+Expression Expression::softmax(cudnnSoftmaxAlgorithm_t algorithm, cudnnSoftmaxMode_t mode) const {
+    if (algorithm == CUDNN_SOFTMAX_LOG) {
+        throw std::invalid_argument("Expression::softmax computes ordinary softmax; use Expression::logSoftmax for CUDNN_SOFTMAX_LOG.");
+    }
+    if (algorithm != CUDNN_SOFTMAX_FAST && algorithm != CUDNN_SOFTMAX_ACCURATE) {
+        throw std::invalid_argument("Expression::softmax received unsupported cudnnSoftmaxAlgorithm_t.");
+    }
+    if (mode != CUDNN_SOFTMAX_MODE_CHANNEL && mode != CUDNN_SOFTMAX_MODE_INSTANCE) {
+        throw std::invalid_argument("Expression::softmax received unsupported cudnnSoftmaxMode_t.");
+    }
+    Expression out = unaryOp(*this, ExprOp::SOFTMAX);
+    out.expr->nodes[out.nodeIndex].softmax_algorithm = algorithm;
+    out.expr->nodes[out.nodeIndex].softmax_mode = mode;
+    return out;
+}
+
+Expression Expression::logSoftmax(cudnnSoftmaxMode_t mode) const {
+    if (mode != CUDNN_SOFTMAX_MODE_CHANNEL && mode != CUDNN_SOFTMAX_MODE_INSTANCE) {
+        throw std::invalid_argument("Expression::logSoftmax received unsupported cudnnSoftmaxMode_t.");
+    }
+    Expression out = unaryOp(*this, ExprOp::SOFTMAX);
+    out.expr->nodes[out.nodeIndex].softmax_algorithm = CUDNN_SOFTMAX_LOG;
+    out.expr->nodes[out.nodeIndex].softmax_mode = mode;
+    return out;
+}
 
 Expression Expression::unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const {
     if (!expr)

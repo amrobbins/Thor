@@ -62,9 +62,7 @@ ThorImplementation::Expression Activation::toExpression(const ThorImplementation
     }
 
     if (layerType == "Softmax") {
-        const Expression shifted = input - input.reduce_max({1}, {});
-        const Expression expShifted = shifted.exp();
-        return expShifted / expShifted.reduce_sum({1}, {});
+        return input.softmax();
     }
 
     throw std::runtime_error("Activation " + getLayerType() + " does not support expression fusion.");

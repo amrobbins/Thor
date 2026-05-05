@@ -25,19 +25,29 @@ Optional<DataType> stageOutputDType(const CompiledExecutionStage& stage, size_t 
     switch (stage.kind) {
         case CompiledExecutionStage::Kind::FusedKernel:
             return stage.flat->output_dtypes.at(outputIdx);
+
         case CompiledExecutionStage::Kind::Reduction:
             return stage.reduction->output_dtype;
+
         case CompiledExecutionStage::Kind::ArgMinMax:
             return stage.arg_minmax->output_dtype;
+
+        case CompiledExecutionStage::Kind::Softmax:
+            return stage.softmax->output_dtype;
+
         case CompiledExecutionStage::Kind::Matmul:
             return stage.matmul->output_dtype;
+
         case CompiledExecutionStage::Kind::Convolution:
             return stage.convolution->output_dtype;
+
         case CompiledExecutionStage::Kind::ConvolutionBackward:
             return stage.convolution_backward->output_dtype;
+
         case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
             return stage.reduce_minmax_backward->output_dtype;
     }
+
     return Optional<DataType>::empty();
 }
 
