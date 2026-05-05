@@ -14,60 +14,6 @@ unordered_map<string, Activation::Deserializer>& Activation::get_registry() {
 
 void Activation::register_layer(string name, Deserializer fn) { get_registry().emplace(std::move(name), std::move(fn)); }
 
-ThorImplementation::Expression Activation::toExpression(const ThorImplementation::Expression& input) const {
-    using ThorImplementation::Expression;
-
-    const Expression zero(0.0);
-    const Expression one(1.0);
-    const string layerType = getLayerType();
-
-    if (layerType == "Relu") {
-        return input.max(zero);
-    }
-
-    if (layerType == "Sigmoid") {
-        return input.sigmoid();
-    }
-
-    if (layerType == "Tanh") {
-        return input.tanh();
-    }
-
-    if (layerType == "HardSigmoid") {
-        return ((input * Expression(0.2)) + Expression(0.5)).min(one).max(zero);
-    }
-
-    if (layerType == "SoftPlus") {
-        return input.softplus();
-    }
-
-    if (layerType == "SoftSign") {
-        return input / (input.abs() + one);
-    }
-
-    if (layerType == "Exponential") {
-        return input.exp();
-    }
-
-    if (layerType == "Gelu") {
-        return input.gelu();
-    }
-
-    if (layerType == "Selu") {
-        return input.selu();
-    }
-
-    if (layerType == "Swish") {
-        return input.swish();
-    }
-
-    if (layerType == "Softmax") {
-        return input.softmax();
-    }
-
-    throw std::runtime_error("Activation " + getLayerType() + " does not support expression fusion.");
-}
-
 json Activation::architectureJson() const {
     assert(initialized);
     assert(featureInput.isPresent());

@@ -20,6 +20,10 @@ class Sigmoid : public Activation {
         return myClone;
     }
 
+    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+        return input.sigmoid();
+    }
+
     virtual std::string getLayerType() const { return "Sigmoid"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {

@@ -18,6 +18,10 @@ class SoftSign : public Activation {
         return myClone;
     }
 
+    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+        return input / (input.abs() + ThorImplementation::Expression(1.0));
+    }
+
     virtual std::string getLayerType() const { return "SoftSign"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
