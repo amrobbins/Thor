@@ -25,7 +25,11 @@
 
 #include <assert.h>
 
+#include <cstdint>
 #include <functional>
+#include <limits>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "DeepLearning/Api/Layers/Activations/SoftPlus.h"
@@ -35,7 +39,7 @@ namespace Thor {
 
 class FullyConnected : public TrainableLayer {
    public:
-    using ExpressionTransform = std::function<ThorImplementation::Expression(const ThorImplementation::Expression&)>;
+    using ExpressionTransform = std::function<ThorImplementation::Expression(const ThorImplementation::Expression &)>;
 
     class Builder;
 
@@ -54,6 +58,35 @@ class FullyConnected : public TrainableLayer {
 
     nlohmann::json architectureJson() const override;
 
+    static const char *epilogueInputName() { return "__fully_connected_epilogue_input"; }
+    static const char *epilogueOutputName() { return "__fully_connected_epilogue_output"; }
+
+    static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(const ExpressionTransform &transform) {
+        if (!transform) {
+            throw std::invalid_argument("FullyConnected epilogue transform must be callable.");
+        }
+        ThorImplementation::Expression input = ThorImplementation::Expression::input(epilogueInputName());
+        ThorImplementation::Expression output = transform(input);
+        ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
+            ThorImplementation::Expression::outputs({{epilogueOutputName(), output}}));
+        validateEpilogueDefinition(definition);
+        return definition;
+    }
+
+    static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition &definition) {
+        definition.validate();
+        if (definition.outputs.outputs.size() != 1 || definition.outputs.outputs.front().name != epilogueOutputName()) {
+            throw std::invalid_argument("FullyConnected epilogue expression must have exactly one output named " +
+                                        std::string(epilogueOutputName()) + ".");
+        }
+        if (definition.outputs.expr == nullptr || definition.outputs.expr->inputs.size() != 1 ||
+            definition.outputs.expr->inputs.front().name != epilogueInputName() ||
+            definition.outputs.expr->inputs.front().kind != ThorImplementation::NamedInput::Kind::Tensor) {
+            throw std::invalid_argument("FullyConnected epilogue expression must have exactly one tensor input named " +
+                                        std::string(epilogueInputName()) + ".");
+        }
+    }
+
    protected:
     void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) override {
         std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
@@ -67,12 +100,57 @@ class FullyConnected : public TrainableLayer {
         for (uint32_t i = 0; i < inputDimensions.size(); ++i)
             numInputFeatures *= inputDimensions[i];
 
-        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-            gpuNum, batchSize, numInputFeatures, numInputFeatures, numOutputFeatures, false, false, weightsDataType);
-        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-            gpuNum, batchSize, numOutputFeatures, numInputFeatures, numOutputFeatures, false, true, weightsDataType);
-        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-            gpuNum, batchSize, numInputFeatures, batchSize, numOutputFeatures, true, false, weightsDataType);
+        if (batchSize > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+            numInputFeatures > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+            numOutputFeatures > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+            throw std::invalid_argument("FullyConnected matrix dimensions exceed the int32 cuBLASLt interface limit.");
+        }
+
+        const auto matmulDataTypes =
+            cublasLtMatmulDataTypesForFullyConnected(inputTensor.getDataType(), weightsDataType, computeDataType, outputDataType);
+
+        const int batchRows = static_cast<int>(batchSize);
+        const int inputFeatures = static_cast<int>(numInputFeatures);
+        const int outputFeatures = static_cast<int>(numOutputFeatures);
+
+        // Forward shapes: [batch, in_features] @ [in_features, out_features] -> [batch, out_features].
+        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(gpuNum,
+                                                                                               batchRows,
+                                                                                               inputFeatures,
+                                                                                               inputFeatures,
+                                                                                               outputFeatures,
+                                                                                               inputFeatures,
+                                                                                               outputFeatures,
+                                                                                               outputFeatures,
+                                                                                               false,
+                                                                                               false,
+                                                                                               matmulDataTypes);
+
+        // Backward shapes wrt input: [batch, out_features] @ transpose([in_features, out_features]) -> [batch, in_features].
+        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(gpuNum,
+                                                                                               batchRows,
+                                                                                               outputFeatures,
+                                                                                               inputFeatures,
+                                                                                               outputFeatures,
+                                                                                               outputFeatures,
+                                                                                               outputFeatures,
+                                                                                               inputFeatures,
+                                                                                               false,
+                                                                                               true,
+                                                                                               matmulDataTypes);
+
+        // Backward shapes wrt weights: transpose([batch, in_features]) @ [batch, out_features] -> [in_features, out_features].
+        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(gpuNum,
+                                                                                               batchRows,
+                                                                                               inputFeatures,
+                                                                                               batchRows,
+                                                                                               outputFeatures,
+                                                                                               inputFeatures,
+                                                                                               outputFeatures,
+                                                                                               outputFeatures,
+                                                                                               true,
+                                                                                               false,
+                                                                                               matmulDataTypes);
     }
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -103,10 +181,139 @@ class FullyConnected : public TrainableLayer {
     std::shared_ptr<Optimizer> weightsOptimizer;
     std::shared_ptr<Optimizer> biasesOptimizer;
 
-    Optional<ExpressionTransform> prologue;
-    Optional<ExpressionTransform> epilogue;
+    Optional<ThorImplementation::ExpressionDefinition> epilogue;
+
+    static bool isFullyConnectedFloatingDataType(Tensor::DataType dataType) {
+        switch (dataType) {
+            case Tensor::DataType::FP8_E4M3:
+            case Tensor::DataType::FP8_E5M2:
+            case Tensor::DataType::FP16:
+            case Tensor::DataType::BF16:
+            case Tensor::DataType::FP32:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static std::string dataTypeName(Tensor::DataType dataType) {
+        return ThorImplementation::TensorDescriptor::getElementTypeName(dataType);
+    }
+
+    static uint64_t checkedFeatureCount(const std::vector<uint64_t> &dimensions, const std::string &what) {
+        if (dimensions.empty()) {
+            throw std::invalid_argument("FullyConnected " + what + " must have at least one feature dimension.");
+        }
+
+        uint64_t featureCount = 1;
+        for (uint64_t dim : dimensions) {
+            if (dim == 0) {
+                throw std::invalid_argument("FullyConnected " + what + " dimensions must be non-zero.");
+            }
+            if (featureCount > std::numeric_limits<uint64_t>::max() / dim) {
+                throw std::invalid_argument("FullyConnected " + what + " feature count overflows uint64_t.");
+            }
+            featureCount *= dim;
+        }
+
+        if (featureCount > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+            throw std::invalid_argument("FullyConnected " + what + " feature count exceeds the int32 cuBLASLt interface limit.");
+        }
+
+        return featureCount;
+    }
+
+    static void verifyFullyConnectedDataType(Tensor::DataType dataType, const std::string &what) {
+        if (!isFullyConnectedFloatingDataType(dataType)) {
+            throw std::invalid_argument("FullyConnected " + what + " must be one of fp8_e4m3, fp8_e5m2, fp16, bf16, or fp32. Got " +
+                                        dataTypeName(dataType) + ".");
+        }
+    }
+
+    static cudaDataType_t cublasLtCudaDataTypeForFullyConnected(Tensor::DataType dataType) {
+        switch (dataType) {
+            case Tensor::DataType::FP32:
+                return CUDA_R_32F;
+            case Tensor::DataType::BF16:
+                return CUDA_R_16BF;
+            case Tensor::DataType::FP16:
+                return CUDA_R_16F;
+            case Tensor::DataType::FP8_E4M3:
+                return CUDA_R_8F_E4M3;
+            case Tensor::DataType::FP8_E5M2:
+                return CUDA_R_8F_E5M2;
+            default:
+                throw std::invalid_argument("FullyConnected cuBLASLt dtype check does not support " + dataTypeName(dataType) + ".");
+        }
+    }
+
+    static Optional<cublasComputeType_t> cublasLtComputeTypeForFullyConnected(Tensor::DataType computeDataType) {
+        switch (computeDataType) {
+            case Tensor::DataType::FP32:
+                return CUBLAS_COMPUTE_32F;
+            case Tensor::DataType::FP16:
+                return CUBLAS_COMPUTE_32F_FAST_16F;
+            case Tensor::DataType::BF16:
+                return CUBLAS_COMPUTE_32F_FAST_16BF;
+            default:
+                return Optional<cublasComputeType_t>::empty();
+        }
+    }
+
+    static void verifyFullyConnectedComputeDataType(Tensor::DataType dataType) {
+        if (cublasLtComputeTypeForFullyConnected(dataType).isEmpty()) {
+            throw std::invalid_argument(
+                "FullyConnected computeDataType must be fp32, fp16, or bf16 for Thor's current cuBLASLt floating GEMM path. Got " +
+                dataTypeName(dataType) + ".");
+        }
+    }
+
+    static bool isSupportedCublasLtMatmulDataTypesForFullyConnected(
+        const ThorImplementation::CublasMatrixMultiply::MatmulDataTypes &dataTypes) {
+        if (!isFullyConnectedFloatingDataType(dataTypes.A) || !isFullyConnectedFloatingDataType(dataTypes.B) ||
+            !isFullyConnectedFloatingDataType(dataTypes.C) || !isFullyConnectedFloatingDataType(dataTypes.D)) {
+            return false;
+        }
+
+        const Optional<cublasComputeType_t> computeType = cublasLtComputeTypeForFullyConnected(dataTypes.compute);
+        if (computeType.isEmpty()) {
+            return false;
+        }
+
+        const cudaDataType_t ADataType = cublasLtCudaDataTypeForFullyConnected(dataTypes.A);
+        const cudaDataType_t BDataType = cublasLtCudaDataTypeForFullyConnected(dataTypes.B);
+        const cudaDataType_t CDataType = cublasLtCudaDataTypeForFullyConnected(dataTypes.C);
+        const cudaDataType_t DDataType = cublasLtCudaDataTypeForFullyConnected(dataTypes.D);
+
+        return isSupportedCublasLtOperationType(computeType.get(), CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
+    }
+
+    static ThorImplementation::CublasMatrixMultiply::MatmulDataTypes cublasLtMatmulDataTypesForFullyConnected(
+        Tensor::DataType inputDataType,
+        Tensor::DataType weightsDataType,
+        Tensor::DataType computeDataType,
+        Tensor::DataType outputDataType) {
+        using MatmulDataTypes = ThorImplementation::CublasMatrixMultiply::MatmulDataTypes;
+
+        const MatmulDataTypes directDataTypes{inputDataType, weightsDataType, outputDataType, outputDataType, computeDataType};
+        if (isSupportedCublasLtMatmulDataTypesForFullyConnected(directDataTypes)) {
+            return directDataTypes;
+        }
+
+        // This mirrors EquationCompiler's safe fallback: when cuBLASLt does not expose the requested mixed A/B plan,
+        // the expression path can cast the matrix inputs into the resolved output dtype before the matmul stage.
+        const MatmulDataTypes outputDataTypes{outputDataType, outputDataType, outputDataType, outputDataType, computeDataType};
+        if (isSupportedCublasLtMatmulDataTypesForFullyConnected(outputDataTypes)) {
+            return outputDataTypes;
+        }
+
+        throw std::invalid_argument("FullyConnected requested dtype plan is unsupported by Thor's cuBLASLt matmul path. input=" +
+                                    dataTypeName(inputDataType) + ", weights=" + dataTypeName(weightsDataType) +
+                                    ", compute=" + dataTypeName(computeDataType) + ", output=" + dataTypeName(outputDataType) + ".");
+    }
 
     friend class Network;
+    friend class Builder;
 
     // #ifdef THOR_TESTING
     //     FRIEND_TEST(FullyConnectedTest, SerializeProducesExpectedJson);
@@ -139,6 +346,8 @@ class FullyConnected::Builder {
         if (_outputDataType.isEmpty())
             _outputDataType = _featureInputs[0].getDataType();
 
+        verifyConfig();
+
         FullyConnected fullyConnected;
 
         fullyConnected.featureInputs = _featureInputs;
@@ -157,7 +366,6 @@ class FullyConnected::Builder {
         fullyConnected.weightsOptimizer = _weightsOptimizer;
         fullyConnected.biasesOptimizer = _biasesOptimizer;
 
-        fullyConnected.prologue = _prologue;
         fullyConnected.epilogue = _epilogue;
         fullyConnected.initialized = true;
 
@@ -260,19 +468,16 @@ class FullyConnected::Builder {
         return *this;
     }
 
-    virtual FullyConnected::Builder &prologue(ExpressionTransform transform) {
-        assert(this->_prologue.isEmpty());
-        assert(transform);
-
-        _prologue = std::move(transform);
+    virtual FullyConnected::Builder &epilogue(ExpressionTransform transform) {
+        assert(this->_epilogue.isEmpty());
+        _epilogue = FullyConnected::makeEpilogueDefinition(transform);
         return *this;
     }
 
-    virtual FullyConnected::Builder &epilogue(ExpressionTransform transform) {
+    virtual FullyConnected::Builder &epilogue(ThorImplementation::ExpressionDefinition definition) {
         assert(this->_epilogue.isEmpty());
-        assert(transform);
-
-        _epilogue = std::move(transform);
+        FullyConnected::validateEpilogueDefinition(definition);
+        _epilogue = std::move(definition);
         return *this;
     }
 
@@ -289,6 +494,62 @@ class FullyConnected::Builder {
     }
 
    private:
+    void verifyConfig() const {
+        if (!_network.isPresent()) {
+            throw std::invalid_argument("FullyConnected::Builder requires network().");
+        }
+        if (_featureInputs.empty()) {
+            throw std::invalid_argument("FullyConnected::Builder requires at least one featureInput().");
+        }
+        if (!_numOutputFeatures.isPresent()) {
+            throw std::invalid_argument("FullyConnected::Builder requires numOutputFeatures().");
+        }
+        if (_numOutputFeatures.get() == 0) {
+            throw std::invalid_argument("FullyConnected numOutputFeatures must be non-zero.");
+        }
+        if (_numOutputFeatures.get() > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+            throw std::invalid_argument("FullyConnected numOutputFeatures exceeds the int32 cuBLASLt interface limit.");
+        }
+        if (_weightsInitializer == nullptr) {
+            throw std::invalid_argument("FullyConnected weightsInitializer must be non-null.");
+        }
+        if (_hasBias.get() && _biasInitializer == nullptr) {
+            throw std::invalid_argument("FullyConnected biasInitializer must be non-null when hasBias is true.");
+        }
+        if (!_activationExplicitlyRemoved && _activation == nullptr) {
+            throw std::invalid_argument("FullyConnected activation must be non-null unless noActivation() was requested.");
+        }
+        if (_epilogue.isPresent()) {
+            FullyConnected::validateEpilogueDefinition(_epilogue.get());
+        }
+
+        const Tensor::DataType inputDataType = _featureInputs.front().getDataType();
+        const std::vector<uint64_t> inputDimensions = _featureInputs.front().getDimensions();
+        FullyConnected::checkedFeatureCount(inputDimensions, "feature input");
+        FullyConnected::verifyFullyConnectedDataType(inputDataType, "feature input data type");
+        FullyConnected::verifyFullyConnectedDataType(_weightsDataType.get(), "weightsDataType");
+        FullyConnected::verifyFullyConnectedComputeDataType(_computeDataType.get());
+        FullyConnected::verifyFullyConnectedDataType(_outputDataType.get(), "outputDataType");
+
+        // Validate the matmul data-type plan against the same cuBLASLt support table used by CublasMatrixMultiply.
+        (void)FullyConnected::cublasLtMatmulDataTypesForFullyConnected(
+            inputDataType, _weightsDataType.get(), _computeDataType.get(), _outputDataType.get());
+
+        for (uint32_t i = 0; i < _featureInputs.size(); ++i) {
+            const Tensor &featureInput = _featureInputs[i];
+            if (!featureInput.isInitialized()) {
+                throw std::invalid_argument("FullyConnected featureInput " + std::to_string(i) + " is not initialized.");
+            }
+            if (featureInput.getDataType() != inputDataType) {
+                throw std::invalid_argument("FullyConnected all feature inputs must have the same data type.");
+            }
+            if (featureInput.getDimensions() != inputDimensions) {
+                throw std::invalid_argument("FullyConnected all feature inputs must have the same dimensions.");
+            }
+            FullyConnected::checkedFeatureCount(featureInput.getDimensions(), "feature input " + std::to_string(i));
+        }
+    }
+
     Optional<Network *> _network;
     std::vector<Tensor> _featureInputs;
     Optional<uint32_t> _numOutputFeatures;
@@ -304,9 +565,8 @@ class FullyConnected::Builder {
     std::shared_ptr<Optimizer> _biasesOptimizer;
     bool _activationExplicitlyRemoved;
 
-    // FIXME: Future optimization, automatically fuse adjacent prologue and epilogue expressions from adjacent layers.
-    Optional<ExpressionTransform> _prologue;
-    Optional<ExpressionTransform> _epilogue;
+    // FIXME: Future optimization, automatically fuse adjacent epilogue expressions from adjacent layers.
+    Optional<ThorImplementation::ExpressionDefinition> _epilogue;
 };
 
 }  // namespace Thor

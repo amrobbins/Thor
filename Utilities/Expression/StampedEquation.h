@@ -133,6 +133,7 @@ struct MatmulCacheKey {
     const TensorDescriptor::DataType b_dtype;
     const TensorDescriptor::DataType c_dtype;
     const TensorDescriptor::DataType d_dtype;
+    const TensorDescriptor::DataType compute_dtype;
     const int device_num;
 
     bool operator==(const MatmulCacheKey& other) const = default;
@@ -153,6 +154,7 @@ struct MatmulCacheKey {
                    TensorDescriptor::DataType b_dtype,
                    TensorDescriptor::DataType c_dtype,
                    TensorDescriptor::DataType d_dtype,
+                   TensorDescriptor::DataType compute_dtype,
                    int device_num)
         : op(op),
           a_rows(a_rows),
@@ -170,6 +172,7 @@ struct MatmulCacheKey {
           b_dtype(b_dtype),
           c_dtype(c_dtype),
           d_dtype(d_dtype),
+          compute_dtype(compute_dtype),
           device_num(device_num) {}
 };
 
@@ -751,6 +754,7 @@ struct hash<ThorImplementation::MatmulCacheKey> {
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.b_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.c_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.d_dtype));
+        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.compute_dtype));
         hashCombine(h, hash<int>{}(k.device_num));
         return h;
     }

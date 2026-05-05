@@ -2072,7 +2072,7 @@ TEST(CublasMatrixMultiply, HeuristicGemmRejectsFp8InputsAndFp32OutputInTNLayoutW
     } catch (const std::invalid_argument &e) {
         const std::string message(e.what());
         EXPECT_NE(message.find("FP8 GEMM scale configuration is incomplete"), std::string::npos) << message;
-        EXPECT_NE(message.find("{A=FP8_E4M3, B=FP8_E5M2, C=FP32, D=FP32}"), std::string::npos) << message;
+        EXPECT_NE(message.find("{A=FP8_E4M3, B=FP8_E5M2, C=FP32, D=FP32, compute=FP32}"), std::string::npos) << message;
         EXPECT_NE(message.find("A_SCALE_POINTER"), std::string::npos) << message;
         EXPECT_NE(message.find("B_SCALE_POINTER"), std::string::npos) << message;
     }
