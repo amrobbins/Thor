@@ -45,6 +45,28 @@ class TensorDescriptor {
         BF16 = 25,
     };
 
+    static DataType resolveFloatingPointDataTypePromotion(DataType a, DataType b) {
+        if (a == b)
+            return a;
+        else if (a == DataType::BF16 && b == DataType::FP16)
+            return DataType::FP32;
+        else if (a == DataType::FP16 && b == DataType::BF16)
+            return DataType::FP32;
+        else if (a == DataType::FP8_E4M3 && b == DataType::FP8_E5M2)
+            return DataType::FP16;
+        else if (a == DataType::FP8_E5M2 && b == DataType::FP8_E4M3)
+            return DataType::FP16;
+        else if (a == DataType::FP32 || b == DataType::FP32)
+            return DataType::FP32;
+        else if (a == DataType::FP16 || b == DataType::FP16)
+            return DataType::FP16;
+        else if (a == DataType::BF16 || b == DataType::BF16)
+            return DataType::BF16;
+        else
+            throw std::runtime_error("Cannot resolve floating point type promotion between types " + std::to_string(static_cast<int>(a)) +
+                                     " and " + std::to_string(static_cast<int>(b)));
+    }
+
     TensorDescriptor() {}
 
     TensorDescriptor(DataType dataType, const std::vector<uint64_t> &dimensions) : dataType(dataType), dimensions(dimensions) {

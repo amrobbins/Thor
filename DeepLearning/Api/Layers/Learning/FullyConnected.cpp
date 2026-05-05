@@ -7,87 +7,116 @@ namespace Thor {
 
 namespace {
 
-ThorImplementation::DynamicExpression buildFullyConnectedExpression(
-    bool hasBias,
-    ThorImplementation::TensorPlacement placement,
-    std::shared_ptr<Thor::Activation> activation) {
-    using ImplDataType = ThorImplementation::TensorDescriptor::DataType;
+ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias,
+                                                                    ThorImplementation::TensorPlacement placement,
+                                                                    Tensor::DataType weightsDataType,
+                                                                    Tensor::DataType computeDataType,
+                                                                    Tensor::DataType outputDataType,
+                                                                    Optional<FullyConnected::ExpressionTransform> prologue,
+                                                                    std::shared_ptr<Thor::Activation> activation,
+                                                                    Optional<FullyConnected::ExpressionTransform> epilogue) {
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
     using ThorImplementation::Expression;
     using ThorImplementation::FusedEquation;
     using ThorImplementation::Tensor;
 
-    return DynamicExpression([hasBias, placement, activation = std::move(activation)](const DynamicExpression::TensorMap& inputs,
-                                                                                     const DynamicExpression::TensorMap& outputs,
-                                                                                     Stream& stream) -> DynamicExpressionBuild {
-        (void)stream;
+    std::vector<std::string> expectedInputNames = {"feature_input", "weights"};
+    if (hasBias) {
+        expectedInputNames.push_back("biases");
+    }
 
-        const Tensor& featureInputTensor = inputs.at("feature_input");
-        const Tensor& wTensor = inputs.at("weights");
-        assert(wTensor.getDimensions().size() == 2);
-        assert(wTensor.getPlacement() == placement);
-        assert(featureInputTensor.getDimensions()[1] == wTensor.getDimensions()[0]);
-        assert(featureInputTensor.getPlacement() == placement);
-        if (outputs.contains("feature_output")) {
-            const Tensor& featureOutputTensor = outputs.at("feature_output");
-            assert(featureOutputTensor.getDimensions().size() == 2);
-            assert(featureOutputTensor.getDimensions()[1] == wTensor.getDimensions()[1]);
-            assert(featureOutputTensor.getPlacement() == placement);
-        }
+    return DynamicExpression(
+        std::move(expectedInputNames),
+        {"feature_output"},
+        [hasBias,
+         placement,
+         weightsDataType,
+         computeDataType,
+         outputDataType,
+         activation = std::move(activation),
+         prologue,
+         epilogue](const DynamicExpression::TensorMap& inputs,
+                   const DynamicExpression::TensorMap& outputs,
+                   Stream& stream) -> DynamicExpressionBuild {
+            (void)stream;
 
-        const ImplDataType weightsDType = wTensor.getDescriptor().getDataType();
+            const Tensor& featureInputTensor = inputs.at("feature_input");
+            const Tensor& wTensor = inputs.at("weights");
+            assert(wTensor.getDimensions().size() == 2);
+            assert(wTensor.getDataType() == weightsDataType);
+            assert(wTensor.getPlacement() == placement);
+            assert(featureInputTensor.getDimensions().size() == 2);
+            assert(featureInputTensor.getDimensions()[1] == wTensor.getDimensions()[0]);
+            assert(featureInputTensor.getPlacement() == placement);
+            if (outputs.contains("feature_output")) {
+                const Tensor& featureOutputTensor = outputs.at("feature_output");
+                assert(featureOutputTensor.getDimensions().size() == 2);
+                assert(featureOutputTensor.getDimensions()[1] == wTensor.getDimensions()[1]);
+                assert(featureOutputTensor.getDataType() == outputDataType);
+                assert(featureOutputTensor.getPlacement() == placement);
+            }
 
-        auto fin = Expression::input("feature_input");
-        auto w = Expression::input("weights", weightsDType, weightsDType);
+            auto fin = Expression::input("feature_input", featureInputTensor.getDataType(), featureInputTensor.getDataType());
+            if (prologue.isPresent()) {
+                fin = prologue.get()(fin);
+            }
 
-        Expression fout = Expression::matmul(fin, w);
+            auto w = Expression::input("weights", weightsDataType, weightsDataType);
 
-        if (hasBias) {
-            const Tensor& bTensor = inputs.at("biases");
-            assert(bTensor.getDimensions().size() == 1);
-            assert(bTensor.getDimensions()[0] == wTensor.getDimensions()[1]);
+            // [batch, in_features] @ [in_features, out_features]
+            Expression fout = Expression::matmul(fin, w, false, false, computeDataType, outputDataType);
 
-            const ImplDataType biasDType = bTensor.getDescriptor().getDataType();
-            auto b = Expression::input("biases", biasDType, biasDType);
-            fout = fout + b;
-        }
+            if (hasBias) {
+                const Tensor& bTensor = inputs.at("biases");
+                assert(bTensor.getDimensions().size() == 1);
+                assert(bTensor.getDimensions()[0] == wTensor.getDimensions()[1]);
+                assert(bTensor.getDataType() == weightsDataType);
 
-        if (activation != nullptr) {
-            fout = activation->toExpression(fout);
-        }
+                auto b = Expression::input("biases", weightsDataType, weightsDataType);
 
-        auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
+                // Broadcast [out_features] over batch.
+                fout = fout + b;
+            }
 
-        return DynamicExpressionBuild{
-            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
-            inputs,
-            {},
-            {outputs},
-            {},
-        };
-    });
+            if (activation != nullptr) {
+                fout = activation->toExpression(fout);
+            }
+            if (epilogue.isPresent()) {
+                fout = epilogue.get()(fout);
+            }
+
+            // The API layer's declared output tensor dtype is authoritative.
+            fout = fout.withOutputDType(outputDataType);
+
+            auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
+
+            return DynamicExpressionBuild{
+                std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+                inputs,
+                {},
+                outputs,
+                {},
+            };
+        });
 }
 
 }  // namespace
 
 std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementation::TensorPlacement placement,
-                                                                  std::shared_ptr<ThorImplementation::Layer> drivingLayer,
-                                                                  std::shared_ptr<Thor::Layer> drivingApiLayer,
-                                                                  Thor::Tensor connectingApiTensor,
-                                                                  const bool inferenceOnly) const {
+                                                                 std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                                 std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                                 Thor::Tensor connectingApiTensor,
+                                                                 const bool inferenceOnly) const {
     (void)drivingLayer;
     (void)drivingApiLayer;
 
     assert(initialized);
     assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
-    // Note: Network notes when a layer has already been stamped and only adds a connection, does not re-stamp the layer.
-    // FIXME: add support for data type.
-    Tensor::DataType weightsDataType = Tensor::DataType::FP16;
-
+    // Note: Network notices when a layer has already been stamped and only adds a connection; it does not re-stamp the layer.
     std::shared_ptr<ThorImplementation::CustomLayer> physicalFullyConnected = std::make_shared<ThorImplementation::CustomLayer>(
-        buildFullyConnectedExpression(hasBias, placement, activation),
+        buildFullyConnectedExpression(hasBias, placement, weightsDataType, computeDataType, outputDataType, prologue, activation, epilogue),
         placement,
         ThorImplementation::FullyConnected::defineParameters(numOutputFeatures, hasBias, weightsDataType),
         inferenceOnly,
@@ -96,77 +125,6 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
     physicalFullyConnected->setLayerName(getLayerType());
 
     return physicalFullyConnected;
-}
-
-void FullyConnected::buildSupportLayersAndAddToNetwork(Network *network) {
-    // current feature inputs needs to go away and every connection gets named
-    vector<Tensor> currentFeatureInputs;
-
-    for (uint32_t i = 0; i < featureInputs.size(); ++i)
-        currentFeatureInputs.push_back(featureInputs[i]);
-
-    // Flatten to 2 dimensions {batchSize, numInputFeatures} if not already a 2d tensor.
-    vector<uint64_t> featureInputDimensions = featureInputs.front().getDimensions();
-    assert(!featureInputDimensions.empty());
-    if (featureInputDimensions.size() > 1) {
-        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            Flatten flatten = Flatten::Builder().network(*network).featureInput(currentFeatureInputs[i]).numOutputDimensions(1).build();
-            currentFeatureInputs[i] = flatten.getFeatureOutput();
-        }
-    }
-
-    // Force the input tensor to this type of layer to be FP16
-    if (featureInputs.front().getDataType() != Tensor::DataType::FP16) {
-        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            TypeConverter typeConverter = TypeConverter::Builder()
-                                              .network(*network)
-                                              .featureInput(currentFeatureInputs[i])
-                                              .newDataType(Tensor::DataType::FP16)
-                                              .build();
-            currentFeatureInputs[i] = typeConverter.getFeatureOutput();
-        }
-    }
-
-    vector<uint64_t> dimensions = currentFeatureInputs[0].getDimensions();
-
-    // I do actually need a second one because the connections of this multi-layer don't match the one that
-    // the network will use.
-    FullyConnected::Builder fullyConnectedBuilder;
-    fullyConnectedBuilder.network(*network)
-        .numOutputFeatures(numOutputFeatures)
-        .hasBias(hasBias)
-        .weightsInitializer(weightsInitializer)
-        .biasInitializer(biasesInitializer)
-        .noActivation();
-    for (uint32_t i = 0; i < featureInputs.size(); ++i)
-        fullyConnectedBuilder.featureInput(currentFeatureInputs[i]);
-    FullyConnected standAloneFullyConnected =
-        fullyConnectedBuilder.weightsOptimizer(weightsOptimizer).biasesOptimizer(biasesOptimizer).build();
-    this->id = standAloneFullyConnected.getId();
-
-    standaloneFCFeatureInputs = standAloneFullyConnected.getFeatureInputs();
-    standaloneFCFeatureOutputs = standAloneFullyConnected.getFeatureOutputs();
-
-    currentFeatureInputs = standaloneFCFeatureOutputs;
-
-    if (activation != nullptr) {
-        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            currentFeatureInputs[i] = dynamic_pointer_cast<Activation>(activation->clone())->addToNetwork(currentFeatureInputs[i], network);
-        }
-    }
-    activation = nullptr;
-
-    // Replace the outputs on the compound layer to be the outputs of the last stage
-    // i.e. tunnel the actual inputs to actual outputs of the compound layer,
-    // these are not necessarily the outputs of the stand-alone fully connected layer.
-    // Network uses single layers, user uses compound layer.
-    outputTensorFromInputTensor.clear();
-    inputTensorFromOutputTensor.clear();
-    featureOutputs = currentFeatureInputs;
-    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        outputTensorFromInputTensor[featureInputs[i]] = featureOutputs[i];
-        inputTensorFromOutputTensor[featureOutputs[i]] = featureInputs[i];
-    }
 }
 
 json FullyConnected::architectureJson() const {
@@ -181,18 +139,21 @@ json FullyConnected::architectureJson() const {
     j["layer_name"] = layerName;
     j["num_output_features"] = numOutputFeatures;
     j["has_bias"] = hasBias;
+    j["weights_data_type"] = weightsDataType;
+    j["compute_data_type"] = computeDataType;
+    j["output_data_type"] = outputDataType;
 
     // Input connections
     json inputs = json::array();
-    for (uint32_t i = 0; i < standaloneFCFeatureInputs.size(); ++i) {
-        inputs.push_back(standaloneFCFeatureInputs[i].architectureJson());
+    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+        inputs.push_back(featureInputs[i].architectureJson());
     }
     j["inputs"] = inputs;
 
     // Output connections
     json outputs = json::array();
-    for (uint32_t i = 0; i < standaloneFCFeatureOutputs.size(); ++i) {
-        outputs.push_back(standaloneFCFeatureOutputs[i].architectureJson());
+    for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
+        outputs.push_back(featureOutputs[i].architectureJson());
     }
     j["outputs"] = outputs;
 
@@ -213,10 +174,10 @@ json FullyConnected::architectureJson() const {
     return j;
 }
 
-json FullyConnected::serialize(thor_file::TarWriter &archiveWriter,
+json FullyConnected::serialize(thor_file::TarWriter& archiveWriter,
                                Stream stream,
                                bool saveOptimizerState,
-                               ThorImplementation::StampedNetwork &stampedNetwork) const {
+                               ThorImplementation::StampedNetwork& stampedNetwork) const {
     // Multi-layers will only serialize the single layer, itself.
     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
     json j = architectureJson();
@@ -265,7 +226,7 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter,
     return j;
 }
 
-void FullyConnected::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
+void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
     // FIXME
     // if (j.at("version").get<std::string>() != "1.0.0")
     //     throw runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
