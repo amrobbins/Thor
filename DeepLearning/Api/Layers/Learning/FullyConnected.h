@@ -101,26 +101,7 @@ class FullyConnected : public TrainableLayer {
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
-                                                     const bool inferenceOnly) const override {
-        assert(initialized);
-        assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
-
-        // Note: Network notes when a layer has already been stamped and only adds a connection, does not re-stamp the layer
-        // FIXME: add support for data type.
-        Tensor::DataType weightsDataType = Tensor::DataType::FP16;
-        ThorImplementation::FullyConnected::ExpressionTransform activationTransform = nullptr;
-        if (activation != nullptr) {
-            std::shared_ptr<Activation> activationTemplate = activation;
-            activationTransform = [activationTemplate](const ThorImplementation::Expression &input) {
-                return activationTemplate->toExpression(input);
-            };
-        }
-
-        std::shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected = std::make_shared<ThorImplementation::FullyConnected>(
-            numOutputFeatures, hasBias, weightsDataType, placement, inferenceOnly, getId(), activationTransform);
-
-        return physicalFullyConnected;
-    }
+                                                     const bool inferenceOnly) const override;
 
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                   bool isFirstStamp,

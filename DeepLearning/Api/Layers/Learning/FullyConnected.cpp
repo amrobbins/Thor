@@ -5,6 +5,99 @@ using json = nlohmann::json;
 
 namespace Thor {
 
+namespace {
+
+ThorImplementation::DynamicExpression buildFullyConnectedExpression(
+    bool hasBias,
+    ThorImplementation::TensorPlacement placement,
+    std::shared_ptr<Thor::Activation> activation) {
+    using ImplDataType = ThorImplementation::TensorDescriptor::DataType;
+    using ThorImplementation::DynamicExpression;
+    using ThorImplementation::DynamicExpressionBuild;
+    using ThorImplementation::Expression;
+    using ThorImplementation::FusedEquation;
+    using ThorImplementation::Tensor;
+
+    return DynamicExpression([hasBias, placement, activation = std::move(activation)](const DynamicExpression::TensorMap& inputs,
+                                                                                     const DynamicExpression::TensorMap& outputs,
+                                                                                     Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+
+        const Tensor& featureInputTensor = inputs.at("feature_input");
+        const Tensor& wTensor = inputs.at("weights");
+        assert(wTensor.getDimensions().size() == 2);
+        assert(wTensor.getPlacement() == placement);
+        assert(featureInputTensor.getDimensions()[1] == wTensor.getDimensions()[0]);
+        assert(featureInputTensor.getPlacement() == placement);
+        if (outputs.contains("feature_output")) {
+            const Tensor& featureOutputTensor = outputs.at("feature_output");
+            assert(featureOutputTensor.getDimensions().size() == 2);
+            assert(featureOutputTensor.getDimensions()[1] == wTensor.getDimensions()[1]);
+            assert(featureOutputTensor.getPlacement() == placement);
+        }
+
+        const ImplDataType weightsDType = wTensor.getDescriptor().getDataType();
+
+        auto fin = Expression::input("feature_input");
+        auto w = Expression::input("weights", weightsDType, weightsDType);
+
+        Expression fout = Expression::matmul(fin, w);
+
+        if (hasBias) {
+            const Tensor& bTensor = inputs.at("biases");
+            assert(bTensor.getDimensions().size() == 1);
+            assert(bTensor.getDimensions()[0] == wTensor.getDimensions()[1]);
+
+            const ImplDataType biasDType = bTensor.getDescriptor().getDataType();
+            auto b = Expression::input("biases", biasDType, biasDType);
+            fout = fout + b;
+        }
+
+        if (activation != nullptr) {
+            fout = activation->toExpression(fout);
+        }
+
+        auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
+
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            {outputs},
+            {},
+        };
+    });
+}
+
+}  // namespace
+
+std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementation::TensorPlacement placement,
+                                                                  std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                                  std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                                  Thor::Tensor connectingApiTensor,
+                                                                  const bool inferenceOnly) const {
+    (void)drivingLayer;
+    (void)drivingApiLayer;
+
+    assert(initialized);
+    assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+
+    // Note: Network notes when a layer has already been stamped and only adds a connection, does not re-stamp the layer.
+    // FIXME: add support for data type.
+    Tensor::DataType weightsDataType = Tensor::DataType::FP16;
+
+    std::shared_ptr<ThorImplementation::CustomLayer> physicalFullyConnected = std::make_shared<ThorImplementation::CustomLayer>(
+        buildFullyConnectedExpression(hasBias, placement, activation),
+        placement,
+        ThorImplementation::FullyConnected::defineParameters(numOutputFeatures, hasBias, weightsDataType),
+        inferenceOnly,
+        getId(),
+        false);
+    physicalFullyConnected->setLayerName(getLayerType());
+
+    return physicalFullyConnected;
+}
+
 void FullyConnected::buildSupportLayersAndAddToNetwork(Network *network) {
     // current feature inputs needs to go away and every connection gets named
     vector<Tensor> currentFeatureInputs;

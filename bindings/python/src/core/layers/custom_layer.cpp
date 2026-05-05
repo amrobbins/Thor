@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -333,6 +334,17 @@ std::vector<std::pair<std::string, Expression>> expressionsFromPythonDict(nb::di
     return namedExpressions;
 }
 
+void applyActivationToNamedExpressions(std::vector<std::pair<std::string, Expression>>& namedExpressions,
+                                       const std::shared_ptr<Activation>& activation) {
+    if (activation == nullptr)
+        return;
+
+    for (auto& [name, expression] : namedExpressions) {
+        (void)name;
+        expression = activation->toExpression(expression);
+    }
+}
+
 PhysicalTensorMap selectNamedTensors(const PhysicalTensorMap& tensors, const std::vector<std::string>& names, const std::string& what) {
     PhysicalTensorMap selected;
     for (const std::string& name : names) {
@@ -434,11 +446,16 @@ DynamicExpressionBuild callBuildCallableForContext(nb::callable callable,
                                                    const PhysicalTensorMap& parameterTensors,
                                                    const PhysicalTensorMap& outputs,
                                                    Stream& stream,
-                                                   bool useFastMath) {
+                                                   bool useFastMath,
+                                                   std::shared_ptr<Activation> activation) {
     CustomLayerBuildContext context(featureInputs, parameterTensors, outputs, stream, useFastMath);
     nb::object result = callable(nb::cast(context));
 
     if (nb::isinstance<DynamicExpressionBuild>(result)) {
+        if (activation != nullptr) {
+            throw std::runtime_error(
+                "CustomLayer activation can only be stitched when build(context) returns dict[str, thor.physical.Expression].");
+        }
         DynamicExpressionBuild build = nb::cast<DynamicExpressionBuild>(result);
         validateCustomLayerExpressionInputs(expectedInputNames, toNameSet(build.stamp_inputs));
         validateCustomLayerForwardOutputs(outputNames, toNameSet(build.equation->getOutputNames()));
@@ -450,7 +467,9 @@ DynamicExpressionBuild callBuildCallableForContext(nb::callable callable,
             "CustomLayer build(context) must return dict[str, thor.physical.Expression] or thor.physical.DynamicExpressionBuild.");
     }
 
-    Outputs expressionOutputs = Expression::outputs(expressionsFromPythonDict(nb::cast<nb::dict>(result)));
+    std::vector<std::pair<std::string, Expression>> namedExpressions = expressionsFromPythonDict(nb::cast<nb::dict>(result));
+    applyActivationToNamedExpressions(namedExpressions, activation);
+    Outputs expressionOutputs = Expression::outputs(namedExpressions);
     std::set<std::string> actualInputNames = expressionOutputs.expression()->getInputNames();
     validateCustomLayerExpressionInputs(expectedInputNames, actualInputNames);
     validateDeclaredParametersReferenced(parameterTensors, actualInputNames, outputNames);
@@ -471,7 +490,8 @@ DynamicExpression makeDynamicExpressionFromCallable(nb::callable buildCallable,
                                                     std::vector<std::string> featureInputNames,
                                                     std::vector<std::string> outputNames,
                                                     std::vector<std::string> parameterNames,
-                                                    bool useFastMath) {
+                                                    bool useFastMath,
+                                                    std::shared_ptr<Activation> activation) {
     std::vector<std::string> expectedInputNames = concatenateInputNames(featureInputNames, parameterNames);
     auto buildCallableRef = std::make_shared<GilSafePythonObject>(buildCallable);
 
@@ -483,14 +503,15 @@ DynamicExpression makeDynamicExpressionFromCallable(nb::callable buildCallable,
          outputNames = std::move(outputNames),
          featureInputNames = std::move(featureInputNames),
          parameterNames = std::move(parameterNames),
-         useFastMath](const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
+         useFastMath,
+         activation = std::move(activation)](const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
             nb::gil_scoped_acquire gil;
 
             PhysicalTensorMap featureInputs = selectNamedTensors(inputs, featureInputNames, "feature input");
             PhysicalTensorMap parameterTensors = selectNamedTensors(inputs, parameterNames, "parameter");
             nb::callable callable = nb::borrow<nb::callable>(buildCallableRef->get());
             return callBuildCallableForContext(
-                callable, expectedInputNames, outputNames, inputs, featureInputs, parameterTensors, outputs, stream, useFastMath);
+                callable, expectedInputNames, outputNames, inputs, featureInputs, parameterTensors, outputs, stream, useFastMath, activation);
         });
 }
 
@@ -498,7 +519,8 @@ DynamicExpression makeDynamicExpressionFromSelf(nb::handle selfHandle,
                                                 std::vector<std::string> featureInputNames,
                                                 std::vector<std::string> outputNames,
                                                 std::vector<std::string> parameterNames,
-                                                bool useFastMath) {
+                                                bool useFastMath,
+                                                std::shared_ptr<Activation> activation) {
     nb::gil_scoped_acquire gil;
     nb::object weakrefModule = nb::module_::import_("weakref");
     nb::object selfWeakref = weakrefModule.attr("ref")(nb::borrow<nb::object>(selfHandle));
@@ -513,7 +535,8 @@ DynamicExpression makeDynamicExpressionFromSelf(nb::handle selfHandle,
          outputNames = std::move(outputNames),
          featureInputNames = std::move(featureInputNames),
          parameterNames = std::move(parameterNames),
-         useFastMath](const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
+         useFastMath,
+         activation = std::move(activation)](const PhysicalTensorMap& inputs, const PhysicalTensorMap& outputs, Stream& stream) -> DynamicExpressionBuild {
             nb::gil_scoped_acquire gil;
 
             nb::object owner = nb::borrow<nb::object>(selfWeakrefRef->get())();
@@ -536,7 +559,8 @@ DynamicExpression makeDynamicExpressionFromSelf(nb::handle selfHandle,
                                                parameterTensors,
                                                outputs,
                                                stream,
-                                               useFastMath);
+                                               useFastMath,
+                                               activation);
         });
 }
 
@@ -580,7 +604,8 @@ void bind_custom_layer(nb::module_& layers) {
            nb::object buildObj,
            nb::object parametersObj,
            std::shared_ptr<Optimizer> optimizer,
-           bool useFastMath) {
+           bool useFastMath,
+           std::shared_ptr<Activation> activation) {
             OrderedApiTensorMap inputs = normalizeInputs(inputsObj);
             CustomLayer* self = nb::inst_ptr<CustomLayer>(pySelf.ptr());
 
@@ -606,10 +631,18 @@ void bind_custom_layer(nb::module_& layers) {
 
             DynamicExpression expr =
                 buildObj.is_none()
-                    ? makeDynamicExpressionFromSelf(
-                          pySelfObj.is_valid() ? nb::handle(pySelfObj) : pySelf, inputs.names, outputNames, paramNames, useFastMath)
-                    : makeDynamicExpressionFromCallable(
-                          callableFromPythonObject(buildObj, "build"), inputs.names, outputNames, paramNames, useFastMath);
+                    ? makeDynamicExpressionFromSelf(pySelfObj.is_valid() ? nb::handle(pySelfObj) : pySelf,
+                                                    inputs.names,
+                                                    outputNames,
+                                                    paramNames,
+                                                    useFastMath,
+                                                    activation)
+                    : makeDynamicExpressionFromCallable(callableFromPythonObject(buildObj, "build"),
+                                                        inputs.names,
+                                                        outputNames,
+                                                        paramNames,
+                                                        useFastMath,
+                                                        activation);
 
             CustomLayer::Builder builder;
             builder.network(network)
@@ -635,6 +668,7 @@ void bind_custom_layer(nb::module_& layers) {
         "parameters"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "use_fast_math"_a = false,
+        "activation"_a.none() = nb::none(),
         R"nbdoc(
 Python-facing CustomLayer.
 
@@ -646,6 +680,7 @@ and build(context).
 Convenience forms:
 - inputs=<thor.Tensor> defaults to {"feature_input": tensor}
 - output_names omitted defaults to ["feature_output"]
+- activation=<thor.activations.Activation> stitches that activation onto each returned expression before compilation
         )nbdoc");
 
     custom_layer.def("parameters", [](nb::handle) { return nb::list(); });
