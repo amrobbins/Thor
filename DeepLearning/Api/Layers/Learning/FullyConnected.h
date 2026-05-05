@@ -25,12 +25,18 @@
 
 #include <assert.h>
 
+#include <functional>
+#include <utility>
+
+#include "DeepLearning/Api/Layers/Activations/SoftPlus.h"
 #include "TrainableLayer.h"
 
 namespace Thor {
 
 class FullyConnected : public TrainableLayer {
    public:
+    using ExpressionTransform = std::function<ThorImplementation::Expression(const ThorImplementation::Expression&)>;
+
     class Builder;
 
     FullyConnected() {}
@@ -49,13 +55,6 @@ class FullyConnected : public TrainableLayer {
     nlohmann::json architectureJson() const override;
 
    protected:
-    virtual bool isMultiLayer() const {
-        assert(featureInputs.size() > 0);
-        return featureInputs.front().getDimensions().size() > 1 || featureInputs.front().getDataType() != Tensor::DataType::FP16;
-    }
-
-    virtual void buildSupportLayersAndAddToNetwork(Network *network);
-
     void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) override {
         std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
         int gpuNum = stream.getGpuNum();
@@ -69,32 +68,11 @@ class FullyConnected : public TrainableLayer {
             numInputFeatures *= inputDimensions[i];
 
         ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-            gpuNum,
-            batchSize,
-            numInputFeatures,
-            numInputFeatures,
-            numOutputFeatures,
-            false,
-            false,
-            ThorImplementation::TensorDescriptor::DataType::FP16);
+            gpuNum, batchSize, numInputFeatures, numInputFeatures, numOutputFeatures, false, false, weightsDataType);
         ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-            gpuNum,
-            batchSize,
-            numOutputFeatures,
-            numInputFeatures,
-            numOutputFeatures,
-            false,
-            true,
-            ThorImplementation::TensorDescriptor::DataType::FP16);
+            gpuNum, batchSize, numOutputFeatures, numInputFeatures, numOutputFeatures, false, true, weightsDataType);
         ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-            gpuNum,
-            batchSize,
-            numInputFeatures,
-            batchSize,
-            numOutputFeatures,
-            true,
-            false,
-            ThorImplementation::TensorDescriptor::DataType::FP16);
+            gpuNum, batchSize, numInputFeatures, batchSize, numOutputFeatures, true, false, weightsDataType);
     }
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -110,13 +88,13 @@ class FullyConnected : public TrainableLayer {
 
     std::string getLayerType() const override { return "FullyConnected"; }
 
-    std::vector<Tensor> standaloneFCFeatureInputs;
-    std::vector<Tensor> standaloneFCFeatureOutputs;
-
    private:
     uint32_t numOutputFeatures;
     bool hasBias;
     std::shared_ptr<Activation> activation;
+    Tensor::DataType weightsDataType;
+    Tensor::DataType computeDataType;
+    Tensor::DataType outputDataType;
 
     // FIXME: These should not be part of Thor::FullyConnected, the builder yes, but the builder should
     //        associate these with the parameters
@@ -124,6 +102,9 @@ class FullyConnected : public TrainableLayer {
     std::shared_ptr<Initializer> biasesInitializer;
     std::shared_ptr<Optimizer> weightsOptimizer;
     std::shared_ptr<Optimizer> biasesOptimizer;
+
+    Optional<ExpressionTransform> prologue;
+    Optional<ExpressionTransform> epilogue;
 
     friend class Network;
 
@@ -150,12 +131,13 @@ class FullyConnected::Builder {
         if (_biasInitializer == nullptr)
             _biasInitializer = Glorot::Builder().build();
         if (!_activation && !_activationExplicitlyRemoved)
-            _activation = Relu::Builder().build();
-        if (_dropProportion.isEmpty())
-            _dropProportion = 0.0f;
-        if (_useBatchNormalization.isEmpty()) {
-            _useBatchNormalization = false;
-        }
+            _activation = SoftPlus::Builder().build();
+        if (_weightsDataType.isEmpty())
+            _weightsDataType = _featureInputs[0].getDataType();
+        if (_computeDataType.isEmpty())
+            _computeDataType = _featureInputs[0].getDataType();
+        if (_outputDataType.isEmpty())
+            _outputDataType = _featureInputs[0].getDataType();
 
         FullyConnected fullyConnected;
 
@@ -167,30 +149,21 @@ class FullyConnected::Builder {
         fullyConnected.biasesInitializer = _biasInitializer->clone();
         if (_activation != nullptr)
             fullyConnected.activation = _activation;
+        fullyConnected.weightsDataType = _weightsDataType;
+        fullyConnected.computeDataType = _computeDataType;
+        fullyConnected.outputDataType = _outputDataType;
 
         // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
         fullyConnected.weightsOptimizer = _weightsOptimizer;
         fullyConnected.biasesOptimizer = _biasesOptimizer;
 
+        fullyConnected.prologue = _prologue;
+        fullyConnected.epilogue = _epilogue;
         fullyConnected.initialized = true;
 
-        // When the config requires supporting layers then this layer is not actually added to the network but a subnetwork of layers
-        // is added to support the config. It is important that after this happens then the getFeatureOutput() function, called on this
-        // stand-in pseudo layer returns the actual featureOut of the real subnetwork.
-        if (fullyConnected.isMultiLayer()) {
-            fullyConnected.buildSupportLayersAndAddToNetwork(_network);
-        } else {
-            for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
-                fullyConnected.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {fullyConnected.numOutputFeatures}));
-                fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
-                fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
-            }
-
-            fullyConnected.standaloneFCFeatureInputs = fullyConnected.getFeatureInputs();
-            fullyConnected.standaloneFCFeatureOutputs = fullyConnected.getFeatureOutputs();
-
-            fullyConnected.addToNetwork(_network.get());
-        }
+        for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i)
+            fullyConnected.featureOutputs.push_back(Tensor(fullyConnected.outputDataType, {fullyConnected.numOutputFeatures}));
+        fullyConnected.addToNetwork(_network.get());
 
         return fullyConnected;
     }
@@ -262,10 +235,44 @@ class FullyConnected::Builder {
         return *this;
     }
 
+    virtual FullyConnected::Builder &weightsDataType(Tensor::DataType _weightsDataType) {
+        assert(this->_weightsDataType.isEmpty());
+        this->_weightsDataType = _weightsDataType;
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &computeDataType(Tensor::DataType _computeDataType) {
+        assert(this->_computeDataType.isEmpty());
+        this->_computeDataType = _computeDataType;
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &outputDataType(Tensor::DataType _outputDataType) {
+        assert(this->_outputDataType.isEmpty());
+        this->_outputDataType = _outputDataType;
+        return *this;
+    }
+
     virtual FullyConnected::Builder &noActivation() {
         assert(!this->_activation);
 
         _activationExplicitlyRemoved = true;
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &prologue(ExpressionTransform transform) {
+        assert(this->_prologue.isEmpty());
+        assert(transform);
+
+        _prologue = std::move(transform);
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &epilogue(ExpressionTransform transform) {
+        assert(this->_epilogue.isEmpty());
+        assert(transform);
+
+        _epilogue = std::move(transform);
         return *this;
     }
 
@@ -280,44 +287,26 @@ class FullyConnected::Builder {
         this->_biasesOptimizer = _biasesOptimizer;
         return *this;
     }
-    // FIXME: batchNormalization and dropOut should be passed as builders. To support this Layer::Builder will need to be created with
-    // virtual std::shared_ptr<Layer::Builder> clone.
-
-    // Adds a BatchNormalization layer before this FullyConnected layer and before the DropOut layer when that is also present
-    // exponentialRunningAverageFactor and epsilon will be set to good default values when not specified.
-    virtual FullyConnected::Builder &batchNormalization(Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
-                                                        Optional<double> epsilon = Optional<double>::empty()) {
-        assert(!_useBatchNormalization.isPresent());
-        this->_useBatchNormalization = true;
-        this->_batchNormExponentialRunningAverageFactor = exponentialRunningAverageFactor;
-        this->_batchNormEpsilon = epsilon;
-        return *this;
-    }
-
-    // Adds a DropOut layer before this FullyConnected layer, but after the BatchNormalization layer when that is also present.
-    virtual FullyConnected::Builder &dropOut(float _dropProportion) {
-        assert(!this->_dropProportion.isPresent());
-        this->_dropProportion = _dropProportion;
-        return *this;
-    }
 
    private:
     Optional<Network *> _network;
     std::vector<Tensor> _featureInputs;
     Optional<uint32_t> _numOutputFeatures;
     Optional<bool> _hasBias;
+    std::shared_ptr<Activation> _activation;
+    Optional<Tensor::DataType> _weightsDataType;
+    Optional<Tensor::DataType> _computeDataType;
+    Optional<Tensor::DataType> _outputDataType;
+
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasInitializer;
-    std::shared_ptr<Activation> _activation;
     std::shared_ptr<Optimizer> _weightsOptimizer;
     std::shared_ptr<Optimizer> _biasesOptimizer;
     bool _activationExplicitlyRemoved;
 
-    Optional<float> _dropProportion;
-
-    Optional<bool> _useBatchNormalization;
-    Optional<double> _batchNormExponentialRunningAverageFactor;
-    Optional<double> _batchNormEpsilon;
+    // FIXME: Future optimization, automatically fuse adjacent prologue and epilogue expressions from adjacent layers.
+    Optional<ExpressionTransform> _prologue;
+    Optional<ExpressionTransform> _epilogue;
 };
 
 }  // namespace Thor
