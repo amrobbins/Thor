@@ -786,6 +786,64 @@ def test_python_custom_layer_bound_parameter_rejects_unknown_name_after_place():
         layer.get_bound_parameter(placed, "missing")
 
 
+def test_python_custom_layer_direct_construction_stitches_activation_into_expression_build():
+    network = thor.Network("custom-layer-direct-activation")
+    x = thor.Tensor([6], thor.DataType.fp32)
+
+    build_calls: list[dict[str, object]] = []
+
+    def build(context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+        build_calls.append(
+            {
+                "input_dims": context.input_tensor("feature_input").get_dimensions(),
+                "output_names": sorted(context.outputs.keys()),
+            })
+        return {
+            "feature_output": context.input("feature_input") - 1.0,
+        }
+
+    layer = thor.layers.CustomLayer(
+        network=network,
+        inputs=x,
+        build=build,
+        activation=thor.activations.Relu(),
+    )
+
+    y = layer["feature_output"]
+    assert y.get_dimensions() == [6]
+    assert y.get_data_type() == thor.DataType.fp32
+    assert layer.get_input_names() == ["feature_input"]
+    assert layer.get_output_names() == ["feature_output"]
+    assert build_calls
+    assert build_calls[0]["input_dims"] == [1, 6]
+
+
+def test_python_custom_layer_activation_rejects_dynamic_expression_build_return():
+    network = thor.Network("custom-layer-activation-dynamic-build")
+    x = thor.Tensor([3], thor.DataType.fp32)
+
+    def build(context: thor.layers.CustomLayerBuildContext) -> thor.physical.DynamicExpressionBuild:
+        expression_outputs = thor.physical.Expression.outputs({
+            "feature_output": context.input("feature_input"),
+        })
+        equation = expression_outputs.compile(context.device_num)
+        return thor.physical.DynamicExpressionBuild(
+            equation=equation,
+            stamp_inputs=context.inputs,
+            tensor_scalar_inputs={},
+            preallocated_outputs=context.outputs,
+            requested_output_shapes={},
+        )
+
+    with pytest.raises(RuntimeError, match="activation can only be stitched"):
+        thor.layers.CustomLayer(
+            network=network,
+            inputs=x,
+            build=build,
+            activation=thor.activations.Relu(),
+        )
+
+
 def test_python_custom_layer_direct_construction_builds_logical_output_interface():
     network = thor.Network("custom-layer-direct-logical")
     x = thor.Tensor([6], thor.DataType.fp32)
