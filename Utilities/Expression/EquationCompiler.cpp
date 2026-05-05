@@ -150,8 +150,10 @@ struct StageNodeKey {
     bool transpose_lhs = false;
     bool transpose_rhs = false;
     bool transpose_aux = false;
+    int32_t conv_stride_d = 1;
     int32_t conv_stride_h = 1;
     int32_t conv_stride_w = 1;
+    int32_t conv_pad_d = 0;
     int32_t conv_pad_h = 0;
     int32_t conv_pad_w = 0;
     int32_t input_tensor_dtype = -1;
@@ -182,8 +184,10 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<bool>{}(k.transpose_lhs));
         hashCombine(h, std::hash<bool>{}(k.transpose_rhs));
         hashCombine(h, std::hash<bool>{}(k.transpose_aux));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_stride_d));
         hashCombine(h, std::hash<int32_t>{}(k.conv_stride_h));
         hashCombine(h, std::hash<int32_t>{}(k.conv_stride_w));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_pad_d));
         hashCombine(h, std::hash<int32_t>{}(k.conv_pad_h));
         hashCombine(h, std::hash<int32_t>{}(k.conv_pad_w));
         hashCombine(h, std::hash<int32_t>{}(k.input_tensor_dtype));
@@ -229,8 +233,10 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.transpose_lhs = n.transpose_lhs;
     key.transpose_rhs = n.transpose_rhs;
     key.transpose_aux = n.transpose_aux;
+    key.conv_stride_d = n.conv_stride_d;
     key.conv_stride_h = n.conv_stride_h;
     key.conv_stride_w = n.conv_stride_w;
+    key.conv_pad_d = n.conv_pad_d;
     key.conv_pad_h = n.conv_pad_h;
     key.conv_pad_w = n.conv_pad_w;
     key.alpha_bits = scalarBits(n.alpha_fp);
@@ -413,8 +419,11 @@ static void compactFusedStageInputs(PhysicalExpression& stage_expr, std::vector<
 
 static bool isArgMinMaxOp(ExprOp op) { return op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX; }
 static bool isMatmulOp(ExprOp op) { return op == ExprOp::MATMUL || op == ExprOp::GEMM; }
-static bool isConvolutionForwardOp(ExprOp op) { return op == ExprOp::CONV2D; }
-static bool isConvolutionBackwardOp(ExprOp op) { return op == ExprOp::CONV2D_BACKWARD_DATA || op == ExprOp::CONV2D_BACKWARD_FILTER; }
+static bool isConvolutionForwardOp(ExprOp op) { return op == ExprOp::CONV2D || op == ExprOp::CONV3D; }
+static bool isConvolutionBackwardOp(ExprOp op) {
+    return op == ExprOp::CONV2D_BACKWARD_DATA || op == ExprOp::CONV2D_BACKWARD_FILTER || op == ExprOp::CONV3D_BACKWARD_DATA ||
+           op == ExprOp::CONV3D_BACKWARD_FILTER;
+}
 static bool isConvolutionOp(ExprOp op) { return isConvolutionForwardOp(op) || isConvolutionBackwardOp(op); }
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
 static bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
@@ -612,6 +621,12 @@ static const char* fusedOpTag(ExprOp op) {
             return "CONV2D_BWD_DATA";
         case ExprOp::CONV2D_BACKWARD_FILTER:
             return "CONV2D_BWD_FILTER";
+        case ExprOp::CONV3D:
+            return "CONV3D";
+        case ExprOp::CONV3D_BACKWARD_DATA:
+            return "CONV3D_BWD_DATA";
+        case ExprOp::CONV3D_BACKWARD_FILTER:
+            return "CONV3D_BWD_FILTER";
         default:
             throw std::runtime_error("Unsupported op in fusedRegionSignature, value: " + to_string((int)op));
     }
@@ -1301,11 +1316,11 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
     }
 
     const ExprNode& node = expr.nodes[expr.output_node];
-    if (node.op != ExprOp::CONV2D) {
-        throw std::runtime_error("Convolution stage output node is not CONV2D.");
+    if (!isConvolutionForwardOp(node.op)) {
+        throw std::runtime_error("Convolution stage output node is not a supported convolution forward op.");
     }
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX) {
-        throw std::runtime_error("CONV2D node is missing required inputs.");
+        throw std::runtime_error("Convolution forward node is missing required inputs.");
     }
     if (expr.numInputs() < 2) {
         throw std::runtime_error("Convolution stage must have at least two inputs.");
@@ -1329,7 +1344,7 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
     const ExprNode& filter_node = validate_local_input(node.rhs, "rhs");
 
     if (!node.output_dtype.isPresent()) {
-        throw std::runtime_error("CONV2D node missing resolved output_dtype.");
+        throw std::runtime_error("Convolution forward node missing resolved output_dtype.");
     }
 
     const DataType logical_input_dtype =
@@ -1337,11 +1352,14 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
     const DataType supported_input_dtype = toSupportedInputDType(node.op, logical_input_dtype);
 
     if (supported_input_dtype != DataType::FP16 || node.output_dtype.get() != DataType::FP16) {
-        throw std::runtime_error("CONV2D staged path currently supports FP16 input/filter/output tensors only.");
+        throw std::runtime_error("Convolution staged path currently supports FP16 input/filter/output tensors only.");
     }
 
-    return make_shared<CompiledConvolution>(node.conv_stride_h,
+    return make_shared<CompiledConvolution>(node.op == ExprOp::CONV3D,
+                                            node.conv_stride_d,
+                                            node.conv_stride_h,
                                             node.conv_stride_w,
+                                            node.conv_pad_d,
                                             node.conv_pad_h,
                                             node.conv_pad_w,
                                             supported_input_dtype,
@@ -1395,8 +1413,10 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
     }
 
     return make_shared<CompiledConvolutionBackward>(node.op,
+                                                    node.conv_stride_d,
                                                     node.conv_stride_h,
                                                     node.conv_stride_w,
+                                                    node.conv_pad_d,
                                                     node.conv_pad_h,
                                                     node.conv_pad_w,
                                                     supported_input_dtype,

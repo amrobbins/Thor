@@ -188,7 +188,29 @@ struct BuiltMatmul {
 
 struct BuiltConvolution {
     Optional<ConvolutionKernelRequirement> requirement = Optional<ConvolutionKernelRequirement>::empty();
+    bool use_cudnn_nd = false;
+    cudnnTensorDescriptor_t x_desc = nullptr;
+    cudnnFilterDescriptor_t w_desc = nullptr;
+    cudnnTensorDescriptor_t y_desc = nullptr;
+    cudnnConvolutionDescriptor_t conv_desc = nullptr;
+    cudnnConvolutionFwdAlgo_t fwd_algo{};
+    cudnnConvolutionBwdDataAlgo_t bwd_data_algo{};
+    cudnnConvolutionBwdFilterAlgo_t bwd_filter_algo{};
     size_t workspace_bytes = 0;
+
+    BuiltConvolution() = default;
+    BuiltConvolution(const BuiltConvolution&) = delete;
+    BuiltConvolution& operator=(const BuiltConvolution&) = delete;
+    ~BuiltConvolution() {
+        if (x_desc != nullptr)
+            (void)cudnnDestroyTensorDescriptor(x_desc);
+        if (w_desc != nullptr)
+            (void)cudnnDestroyFilterDescriptor(w_desc);
+        if (y_desc != nullptr)
+            (void)cudnnDestroyTensorDescriptor(y_desc);
+        if (conv_desc != nullptr)
+            (void)cudnnDestroyConvolutionDescriptor(conv_desc);
+    }
 };
 
 class StampedEquation {

@@ -286,42 +286,50 @@ static std::vector<uint64_t> inferExpressionMatmulOutputDims(const ExprNode& nod
     return out_dims;
 }
 
+static bool isConv3DOp(ExprOp op) {
+    return op == ExprOp::CONV3D || op == ExprOp::CONV3D_BACKWARD_DATA || op == ExprOp::CONV3D_BACKWARD_FILTER;
+}
+
 static std::vector<uint64_t> inferExpressionConvolutionOutputDims(const ExprNode& node,
                                                                   const std::vector<uint64_t>& input_dims,
                                                                   const std::vector<uint64_t>& filter_dims) {
-    if (input_dims.size() != 4 || filter_dims.size() != 4) {
-        throw std::runtime_error("CONV2D shape inference currently requires rank-4 NCHW input and KCRS filter tensors.");
+    const bool is_3d = isConv3DOp(node.op);
+    const size_t rank = is_3d ? 5 : 4;
+    if (input_dims.size() != rank || filter_dims.size() != rank) {
+        throw std::runtime_error(is_3d ? "CONV3D shape inference requires rank-5 NCDHW input/filter tensors."
+                                       : "CONV2D shape inference requires rank-4 NCHW input/filter tensors.");
     }
 
-    const uint64_t n = input_dims[0];
-    const uint64_t c = input_dims[1];
-    const uint64_t h = input_dims[2];
-    const uint64_t w = input_dims[3];
-    const uint64_t k = filter_dims[0];
-    const uint64_t c_filter = filter_dims[1];
-    const uint64_t r = filter_dims[2];
-    const uint64_t s = filter_dims[3];
-
-    if (c != c_filter) {
-        throw std::runtime_error("CONV2D shape inference found mismatched input/filter channels.");
+    if (input_dims[1] != filter_dims[1]) {
+        throw std::runtime_error("Convolution shape inference found mismatched input/filter channels.");
     }
 
-    const int64_t numer_h = static_cast<int64_t>(h) + 2LL * node.conv_pad_h - static_cast<int64_t>(r);
-    const int64_t numer_w = static_cast<int64_t>(w) + 2LL * node.conv_pad_w - static_cast<int64_t>(s);
-    if (numer_h < 0 || numer_w < 0) {
-        throw std::runtime_error("CONV2D shape inference produced negative output extent.");
+    std::vector<uint64_t> out_dims{input_dims[0], filter_dims[0]};
+    const std::vector<int32_t> strides = is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
+                                               : std::vector<int32_t>{node.conv_stride_h, node.conv_stride_w};
+    const std::vector<int32_t> pads = is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
+                                           : std::vector<int32_t>{node.conv_pad_h, node.conv_pad_w};
+
+    for (size_t i = 0; i < strides.size(); ++i) {
+        const size_t dim_idx = 2 + i;
+        const int64_t numer = static_cast<int64_t>(input_dims[dim_idx]) + 2LL * pads[i] - static_cast<int64_t>(filter_dims[dim_idx]);
+        if (numer < 0) {
+            throw std::runtime_error("Convolution shape inference produced negative output extent.");
+        }
+        out_dims.push_back(static_cast<uint64_t>(numer / strides[i] + 1));
     }
 
-    const uint64_t out_h = static_cast<uint64_t>(numer_h / node.conv_stride_h + 1);
-    const uint64_t out_w = static_cast<uint64_t>(numer_w / node.conv_stride_w + 1);
-    return {n, k, out_h, out_w};
+    return out_dims;
 }
 
 static std::vector<uint64_t> inferExpressionConvolutionBackwardDataOutputDims(const ExprNode& node,
                                                                               const std::vector<uint64_t>& filter_dims,
                                                                               const std::vector<uint64_t>& grad_output_dims) {
-    if (filter_dims.size() != 4 || grad_output_dims.size() != 4) {
-        throw std::runtime_error("CONV2D_BACKWARD_DATA shape inference currently requires rank-4 filter/output-grad tensors.");
+    const bool is_3d = isConv3DOp(node.op);
+    const size_t rank = is_3d ? 5 : 4;
+    if (filter_dims.size() != rank || grad_output_dims.size() != rank) {
+        throw std::runtime_error(is_3d ? "CONV3D_BACKWARD_DATA shape inference requires rank-5 tensors."
+                                       : "CONV2D_BACKWARD_DATA shape inference requires rank-4 tensors.");
     }
 
     const uint64_t k = filter_dims[0];
@@ -330,69 +338,77 @@ static std::vector<uint64_t> inferExpressionConvolutionBackwardDataOutputDims(co
     const uint64_t grad_k = grad_output_dims[1];
 
     if (k != grad_k) {
-        throw std::runtime_error("CONV2D_BACKWARD_DATA shape inference found mismatched filter/output channels.");
+        throw std::runtime_error("Convolution backward-data shape inference found mismatched filter/output channels.");
     }
     if (!node.fill_dims.empty()) {
-        if (node.fill_dims.size() != 4) {
-            throw std::runtime_error("CONV2D_BACKWARD_DATA explicit output shape must be rank-4.");
+        if (node.fill_dims.size() != rank) {
+            throw std::runtime_error("Convolution backward-data explicit output shape rank mismatch.");
         }
         if (node.fill_dims[0] != n || node.fill_dims[1] != c) {
-            throw std::runtime_error("CONV2D_BACKWARD_DATA explicit output shape is incompatible with batch/channels.");
+            throw std::runtime_error("Convolution backward-data explicit output shape is incompatible with batch/channels.");
         }
         return node.fill_dims;
     }
 
-    const uint64_t r = filter_dims[2];
-    const uint64_t s = filter_dims[3];
-    const uint64_t oh = grad_output_dims[2];
-    const uint64_t ow = grad_output_dims[3];
-
-    const int64_t h = static_cast<int64_t>(oh - 1) * node.conv_stride_h - 2LL * node.conv_pad_h + static_cast<int64_t>(r);
-    const int64_t w = static_cast<int64_t>(ow - 1) * node.conv_stride_w - 2LL * node.conv_pad_w + static_cast<int64_t>(s);
-    if (h <= 0 || w <= 0) {
-        throw std::runtime_error("CONV2D_BACKWARD_DATA shape inference produced non-positive output extent.");
+    std::vector<uint64_t> out_dims{n, c};
+    const std::vector<int32_t> strides = is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
+                                               : std::vector<int32_t>{node.conv_stride_h, node.conv_stride_w};
+    const std::vector<int32_t> pads = is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
+                                           : std::vector<int32_t>{node.conv_pad_h, node.conv_pad_w};
+    for (size_t i = 0; i < strides.size(); ++i) {
+        const size_t dim_idx = 2 + i;
+        const int64_t extent = static_cast<int64_t>(grad_output_dims[dim_idx] - 1) * strides[i] - 2LL * pads[i] +
+                               static_cast<int64_t>(filter_dims[dim_idx]);
+        if (extent <= 0) {
+            throw std::runtime_error("Convolution backward-data shape inference produced non-positive output extent.");
+        }
+        out_dims.push_back(static_cast<uint64_t>(extent));
     }
 
-    return {n, c, static_cast<uint64_t>(h), static_cast<uint64_t>(w)};
+    return out_dims;
 }
 
 static std::vector<uint64_t> inferExpressionConvolutionBackwardFilterOutputDims(const ExprNode& node,
                                                                                 const std::vector<uint64_t>& input_dims,
                                                                                 const std::vector<uint64_t>& grad_output_dims) {
-    if (input_dims.size() != 4 || grad_output_dims.size() != 4) {
-        throw std::runtime_error("CONV2D_BACKWARD_FILTER shape inference currently requires rank-4 input/output-grad tensors.");
+    const bool is_3d = isConv3DOp(node.op);
+    const size_t rank = is_3d ? 5 : 4;
+    if (input_dims.size() != rank || grad_output_dims.size() != rank) {
+        throw std::runtime_error(is_3d ? "CONV3D_BACKWARD_FILTER shape inference requires rank-5 tensors."
+                                       : "CONV2D_BACKWARD_FILTER shape inference requires rank-4 tensors.");
     }
 
-    const uint64_t n = input_dims[0];
+    if (input_dims[0] != grad_output_dims[0]) {
+        throw std::runtime_error("Convolution backward-filter shape inference found mismatched batch sizes.");
+    }
     const uint64_t c = input_dims[1];
-    const uint64_t grad_n = grad_output_dims[0];
     const uint64_t k = grad_output_dims[1];
-
-    if (n != grad_n) {
-        throw std::runtime_error("CONV2D_BACKWARD_FILTER shape inference found mismatched batch sizes.");
-    }
     if (!node.fill_dims.empty()) {
-        if (node.fill_dims.size() != 4) {
-            throw std::runtime_error("CONV2D_BACKWARD_FILTER explicit output shape must be rank-4.");
+        if (node.fill_dims.size() != rank) {
+            throw std::runtime_error("Convolution backward-filter explicit output shape rank mismatch.");
         }
         if (node.fill_dims[0] != k || node.fill_dims[1] != c) {
-            throw std::runtime_error("CONV2D_BACKWARD_FILTER explicit output shape is incompatible with channels.");
+            throw std::runtime_error("Convolution backward-filter explicit output shape is incompatible with channels.");
         }
         return node.fill_dims;
     }
 
-    const uint64_t h = input_dims[2];
-    const uint64_t w = input_dims[3];
-    const uint64_t oh = grad_output_dims[2];
-    const uint64_t ow = grad_output_dims[3];
-
-    const int64_t r = static_cast<int64_t>(h) + 2LL * node.conv_pad_h - static_cast<int64_t>(oh - 1) * node.conv_stride_h;
-    const int64_t s = static_cast<int64_t>(w) + 2LL * node.conv_pad_w - static_cast<int64_t>(ow - 1) * node.conv_stride_w;
-    if (r <= 0 || s <= 0) {
-        throw std::runtime_error("CONV2D_BACKWARD_FILTER shape inference produced non-positive filter extent.");
+    std::vector<uint64_t> out_dims{k, c};
+    const std::vector<int32_t> strides = is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
+                                               : std::vector<int32_t>{node.conv_stride_h, node.conv_stride_w};
+    const std::vector<int32_t> pads = is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
+                                           : std::vector<int32_t>{node.conv_pad_h, node.conv_pad_w};
+    for (size_t i = 0; i < strides.size(); ++i) {
+        const size_t dim_idx = 2 + i;
+        const int64_t extent = static_cast<int64_t>(input_dims[dim_idx]) + 2LL * pads[i] -
+                               static_cast<int64_t>(grad_output_dims[dim_idx] - 1) * strides[i];
+        if (extent <= 0) {
+            throw std::runtime_error("Convolution backward-filter shape inference produced non-positive filter extent.");
+        }
+        out_dims.push_back(static_cast<uint64_t>(extent));
     }
 
-    return {k, c, static_cast<uint64_t>(r), static_cast<uint64_t>(s)};
+    return out_dims;
 }
 
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims) {
@@ -497,12 +513,15 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 node_dims[i] = inferExpressionMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs], &node_dims[node.aux]);
                 break;
             case ExprOp::CONV2D:
+            case ExprOp::CONV3D:
                 node_dims[i] = inferExpressionConvolutionOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
             case ExprOp::CONV2D_BACKWARD_DATA:
+            case ExprOp::CONV3D_BACKWARD_DATA:
                 node_dims[i] = inferExpressionConvolutionBackwardDataOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
             case ExprOp::CONV2D_BACKWARD_FILTER:
+            case ExprOp::CONV3D_BACKWARD_FILTER:
                 node_dims[i] = inferExpressionConvolutionBackwardFilterOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
             case ExprOp::REDUCE_MIN_BACKWARD:
@@ -867,9 +886,11 @@ static std::vector<uint64_t> resolveConvolutionOutputDimsFromInputs(const Compil
     }
 
     ExprNode node{};
-    node.op = ExprOp::CONV2D;
+    node.op = compiled_stage.is_3d ? ExprOp::CONV3D : ExprOp::CONV2D;
+    node.conv_stride_d = compiled_stage.stride_d;
     node.conv_stride_h = compiled_stage.stride_h;
     node.conv_stride_w = compiled_stage.stride_w;
+    node.conv_pad_d = compiled_stage.pad_d;
     node.conv_pad_h = compiled_stage.pad_h;
     node.conv_pad_w = compiled_stage.pad_w;
     return inferExpressionConvolutionOutputDims(node, stage_input_dims[0], stage_input_dims[1]);
@@ -883,15 +904,17 @@ static std::vector<uint64_t> resolveConvolutionBackwardOutputDimsFromInputs(cons
 
     ExprNode node{};
     node.op = compiled_stage.op;
+    node.conv_stride_d = compiled_stage.stride_d;
     node.conv_stride_h = compiled_stage.stride_h;
     node.conv_stride_w = compiled_stage.stride_w;
+    node.conv_pad_d = compiled_stage.pad_d;
     node.conv_pad_h = compiled_stage.pad_h;
     node.conv_pad_w = compiled_stage.pad_w;
     node.fill_dims = compiled_stage.explicit_output_dims;
-    if (compiled_stage.op == ExprOp::CONV2D_BACKWARD_DATA) {
+    if (compiled_stage.op == ExprOp::CONV2D_BACKWARD_DATA || compiled_stage.op == ExprOp::CONV3D_BACKWARD_DATA) {
         return inferExpressionConvolutionBackwardDataOutputDims(node, stage_input_dims[0], stage_input_dims[1]);
     }
-    if (compiled_stage.op == ExprOp::CONV2D_BACKWARD_FILTER) {
+    if (compiled_stage.op == ExprOp::CONV2D_BACKWARD_FILTER || compiled_stage.op == ExprOp::CONV3D_BACKWARD_FILTER) {
         return inferExpressionConvolutionBackwardFilterOutputDims(node, stage_input_dims[0], stage_input_dims[1]);
     }
     throw std::runtime_error("resolveConvolutionBackwardOutputDimsFromInputs received unsupported op.");
@@ -1975,6 +1998,9 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::CONV2D:
             case ExprOp::CONV2D_BACKWARD_DATA:
             case ExprOp::CONV2D_BACKWARD_FILTER:
+            case ExprOp::CONV3D:
+            case ExprOp::CONV3D_BACKWARD_DATA:
+            case ExprOp::CONV3D_BACKWARD_FILTER:
                 throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unexpected convolution op in fused stage.");
             default:
                 throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unknown ExprOp.");
@@ -2065,6 +2091,9 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::CONV2D:
             case ExprOp::CONV2D_BACKWARD_DATA:
             case ExprOp::CONV2D_BACKWARD_FILTER:
+            case ExprOp::CONV3D:
+            case ExprOp::CONV3D_BACKWARD_DATA:
+            case ExprOp::CONV3D_BACKWARD_FILTER:
             case ExprOp::REDUCE_MIN_BACKWARD:
             case ExprOp::REDUCE_MAX_BACKWARD:
                 throw std::runtime_error("Unexpected staged op inside fused kernel while computing FLOPs.");
@@ -2133,78 +2162,51 @@ static uint64_t computeMatmulStageFlops(const CompiledMatmul& matmul, const std:
     return total;
 }
 
+static uint64_t multiplyDimsForFlops(uint64_t value, const std::vector<uint64_t>& dims, size_t begin, const char* where) {
+    for (size_t i = begin; i < dims.size(); ++i) {
+        value = checkedMulU64(value, dims.at(i), where);
+    }
+    return value;
+}
+
 static uint64_t computeConvolutionStageFlops(const CompiledConvolution& convolution,
                                              const std::vector<std::vector<uint64_t>>& stage_input_dims) {
     const std::vector<uint64_t> out_dims = resolveConvolutionOutputDimsFromInputs(convolution, stage_input_dims);
-
     const auto& filter_dims = stage_input_dims.at(1);
-    const uint64_t n = out_dims.at(0);
-    const uint64_t k = out_dims.at(1);
-    const uint64_t oh = out_dims.at(2);
-    const uint64_t ow = out_dims.at(3);
-    const uint64_t c = filter_dims.at(1);
-    const uint64_t r = filter_dims.at(2);
-    const uint64_t s = filter_dims.at(3);
 
     uint64_t macs = 1;
-    macs = checkedMulU64(macs, n, "computeConvolutionStageFlops");
-    macs = checkedMulU64(macs, k, "computeConvolutionStageFlops");
-    macs = checkedMulU64(macs, oh, "computeConvolutionStageFlops");
-    macs = checkedMulU64(macs, ow, "computeConvolutionStageFlops");
-    macs = checkedMulU64(macs, c, "computeConvolutionStageFlops");
-    macs = checkedMulU64(macs, r, "computeConvolutionStageFlops");
-    macs = checkedMulU64(macs, s, "computeConvolutionStageFlops");
+    macs = multiplyDimsForFlops(macs, out_dims, 0, "computeConvolutionStageFlops");
+    macs = checkedMulU64(macs, filter_dims.at(1), "computeConvolutionStageFlops");
+    macs = multiplyDimsForFlops(macs, filter_dims, 2, "computeConvolutionStageFlops");
 
     return checkedMulU64(macs, 2, "computeConvolutionStageFlops");
 }
 
 static uint64_t computeConvolutionBackwardStageFlops(const CompiledConvolutionBackward& convolution_backward,
                                                      const std::vector<std::vector<uint64_t>>& stage_input_dims) {
-    if (convolution_backward.op == ExprOp::CONV2D_BACKWARD_DATA) {
+    if (convolution_backward.op == ExprOp::CONV2D_BACKWARD_DATA || convolution_backward.op == ExprOp::CONV3D_BACKWARD_DATA) {
         const auto& filter_dims = stage_input_dims.at(0);
         const auto& grad_dims = stage_input_dims.at(1);
 
-        const uint64_t n = grad_dims.at(0);
-        const uint64_t k = grad_dims.at(1);
-        const uint64_t oh = grad_dims.at(2);
-        const uint64_t ow = grad_dims.at(3);
-        const uint64_t c = filter_dims.at(1);
-        const uint64_t r = filter_dims.at(2);
-        const uint64_t s = filter_dims.at(3);
-
         uint64_t macs = 1;
-        macs = checkedMulU64(macs, n, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, k, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, oh, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, ow, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, c, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, r, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, s, "computeConvolutionBackwardStageFlops");
+        macs = multiplyDimsForFlops(macs, grad_dims, 0, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, filter_dims.at(1), "computeConvolutionBackwardStageFlops");
+        macs = multiplyDimsForFlops(macs, filter_dims, 2, "computeConvolutionBackwardStageFlops");
 
         return checkedMulU64(macs, 2, "computeConvolutionBackwardStageFlops");
     }
 
-    if (convolution_backward.op == ExprOp::CONV2D_BACKWARD_FILTER) {
+    if (convolution_backward.op == ExprOp::CONV2D_BACKWARD_FILTER || convolution_backward.op == ExprOp::CONV3D_BACKWARD_FILTER) {
         const auto& input_dims = stage_input_dims.at(0);
         const auto& grad_dims = stage_input_dims.at(1);
         const std::vector<uint64_t> filter_dims = resolveConvolutionBackwardOutputDimsFromInputs(convolution_backward, stage_input_dims);
 
-        const uint64_t n = input_dims.at(0);
-        const uint64_t c = input_dims.at(1);
-        const uint64_t k = grad_dims.at(1);
-        const uint64_t oh = grad_dims.at(2);
-        const uint64_t ow = grad_dims.at(3);
-        const uint64_t r = filter_dims.at(2);
-        const uint64_t s = filter_dims.at(3);
-
         uint64_t macs = 1;
-        macs = checkedMulU64(macs, n, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, k, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, oh, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, ow, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, c, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, r, "computeConvolutionBackwardStageFlops");
-        macs = checkedMulU64(macs, s, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, input_dims.at(0), "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, grad_dims.at(1), "computeConvolutionBackwardStageFlops");
+        macs = multiplyDimsForFlops(macs, grad_dims, 2, "computeConvolutionBackwardStageFlops");
+        macs = checkedMulU64(macs, input_dims.at(1), "computeConvolutionBackwardStageFlops");
+        macs = multiplyDimsForFlops(macs, filter_dims, 2, "computeConvolutionBackwardStageFlops");
 
         return checkedMulU64(macs, 2, "computeConvolutionBackwardStageFlops");
     }

@@ -114,3 +114,26 @@ def test_conv2d_rejects_wrong_types_and_arity():
 
     with pytest.raises(TypeError):
         thor.layers.Convolution2d(n, "not a tensor", 8, 3, 3)
+
+
+def test_conv2d_accepts_stitched_activation_without_extra_api_layer():
+    n = _net()
+    x = _chw_input(n, 3, 8, 8, thor.DataType.fp16)
+
+    conv = thor.layers.Convolution2d(
+        n,
+        x,
+        num_output_channels=4,
+        filter_height=3,
+        filter_width=3,
+        vertical_stride=1,
+        horizontal_stride=1,
+        vertical_padding=1,
+        horizontal_padding=1,
+        has_bias=True,
+        activation=thor.activations.Tanh(),
+    )
+
+    y = conv.get_feature_output()
+    assert y.get_dimensions() == [4, 8, 8]
+    assert y.get_data_type() == thor.DataType.fp16

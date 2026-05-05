@@ -7,6 +7,7 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
@@ -16,6 +17,10 @@
 using namespace std;
 
 namespace ThorImplementation {
+
+namespace {
+constexpr int MAX_CUDNN_CONV_ALGOS = 5000;
+}
 
 void StampedEquation::run() { runOn(stream); }
 
@@ -98,7 +103,7 @@ void StampedReduction::runOn(Stream& run_stream) const {
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
         assert(workspace.isPresent());
-        workspace_ptr = workspace.get().getMemPtr();
+        workspace_ptr = (void*)workspace.get().getMemPtr();
     }
 
     CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
@@ -149,7 +154,7 @@ void StampedArgMinMax::runOn(Stream& run_stream) const {
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
         assert(workspace.isPresent());
-        workspace_ptr = workspace.get().getMemPtr();
+        workspace_ptr = (void*)workspace.get().getMemPtr();
     }
 
     CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
@@ -211,7 +216,31 @@ StampedConvolution::StampedConvolution(std::shared_ptr<CompiledConvolution> comp
 void StampedConvolution::run() { runOn(stream); }
 
 void StampedConvolution::runOn(Stream& run_stream) const {
-    if (!built_convolution || !built_convolution->requirement.isPresent()) {
+    if (!built_convolution) {
+        throw std::runtime_error("StampedConvolution missing built convolution payload.");
+    }
+
+    if (built_convolution->use_cudnn_nd) {
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+        void* workspace_ptr = workspace.isPresent() ? const_cast<void*>(workspace.get().getMemPtr()) : nullptr;
+        CUDNN_CHECK(cudnnConvolutionForward(run_stream.getCudnnHandle(),
+                                            &alpha,
+                                            built_convolution->x_desc,
+                                            input.getMemPtr(),
+                                            built_convolution->w_desc,
+                                            filter.getMemPtr(),
+                                            built_convolution->conv_desc,
+                                            built_convolution->fwd_algo,
+                                            workspace_ptr,
+                                            built_convolution->workspace_bytes,
+                                            &beta,
+                                            built_convolution->y_desc,
+                                            const_cast<void*>(output.getMemPtr())));
+        return;
+    }
+
+    if (!built_convolution->requirement.isPresent()) {
         throw std::runtime_error("StampedConvolution missing built convolution requirement.");
     }
 
@@ -237,11 +266,54 @@ StampedConvolutionBackward::StampedConvolutionBackward(std::shared_ptr<CompiledC
 void StampedConvolutionBackward::run() { runOn(stream); }
 
 void StampedConvolutionBackward::runOn(Stream& run_stream) const {
-    if (!built_convolution || !built_convolution->requirement.isPresent()) {
-        throw std::runtime_error("StampedConvolutionBackward missing built convolution requirement.");
+    if (!built_convolution) {
+        throw std::runtime_error("StampedConvolutionBackward missing built convolution payload.");
     }
     if (!compiled_convolution_backward) {
         throw std::runtime_error("StampedConvolutionBackward missing compiled convolution payload.");
+    }
+
+    if (built_convolution->use_cudnn_nd) {
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+        void* workspace_ptr = workspace.isPresent() ? const_cast<void*>(workspace.get().getMemPtr()) : nullptr;
+        if (compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_DATA) {
+            CUDNN_CHECK(cudnnConvolutionBackwardData(run_stream.getCudnnHandle(),
+                                                     &alpha,
+                                                     built_convolution->w_desc,
+                                                     input.getMemPtr(),
+                                                     built_convolution->y_desc,
+                                                     grad_output.getMemPtr(),
+                                                     built_convolution->conv_desc,
+                                                     built_convolution->bwd_data_algo,
+                                                     workspace_ptr,
+                                                     built_convolution->workspace_bytes,
+                                                     &beta,
+                                                     built_convolution->x_desc,
+                                                     const_cast<void*>(output.getMemPtr())));
+            return;
+        }
+        if (compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_FILTER) {
+            CUDNN_CHECK(cudnnConvolutionBackwardFilter(run_stream.getCudnnHandle(),
+                                                       &alpha,
+                                                       built_convolution->x_desc,
+                                                       input.getMemPtr(),
+                                                       built_convolution->y_desc,
+                                                       grad_output.getMemPtr(),
+                                                       built_convolution->conv_desc,
+                                                       built_convolution->bwd_filter_algo,
+                                                       workspace_ptr,
+                                                       built_convolution->workspace_bytes,
+                                                       &beta,
+                                                       built_convolution->w_desc,
+                                                       const_cast<void*>(output.getMemPtr())));
+            return;
+        }
+        throw std::runtime_error("StampedConvolutionBackward received unsupported cuDNN nD convolution backward op.");
+    }
+
+    if (!built_convolution->requirement.isPresent()) {
+        throw std::runtime_error("StampedConvolutionBackward missing built convolution requirement.");
     }
 
     if (compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_DATA) {
@@ -617,7 +689,7 @@ void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
         assert(workspace.isPresent());
-        workspace_ptr = workspace.get().getMemPtr();
+        workspace_ptr = (void*)workspace.get().getMemPtr();
     }
 
     CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
@@ -907,6 +979,47 @@ static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<uint64_t>
     return desc;
 }
 
+static void validateCudnnIntDims(const std::vector<uint64_t>& dims, const char* what) {
+    for (uint64_t dim : dims) {
+        if (dim > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error(std::string(what) + " dimension exceeds cuDNN int descriptor limit.");
+        }
+    }
+}
+
+static std::vector<int> toCudnnIntVector(const std::vector<uint64_t>& dims, const char* what) {
+    validateCudnnIntDims(dims, what);
+    return std::vector<int>(dims.begin(), dims.end());
+}
+
+static cudnnFilterDescriptor_t createCudnnFilterDescriptor(const std::vector<uint64_t>& dims, TensorDescriptor::DataType dtype) {
+    if (dims.size() < 4 || dims.size() > 5) {
+        throw std::runtime_error("cuDNN convolution filter descriptor supports rank-4 or rank-5 filters here.");
+    }
+    std::vector<int> cudnn_dims = toCudnnIntVector(dims, "filter");
+    cudnnFilterDescriptor_t desc;
+    CUDNN_CHECK(cudnnCreateFilterDescriptor(&desc));
+    CUDNN_CHECK(cudnnSetFilterNdDescriptor(
+        desc, toCudnnDataType(dtype), CUDNN_TENSOR_NCHW, static_cast<int>(cudnn_dims.size()), cudnn_dims.data()));
+    return desc;
+}
+
+static cudnnConvolutionDescriptor_t createCudnnConvolutionNdDescriptor(TensorDescriptor::DataType compute_dtype,
+                                                                       const std::vector<int>& pads,
+                                                                       const std::vector<int>& strides) {
+    std::vector<int> dilations(pads.size(), 1);
+    cudnnConvolutionDescriptor_t desc;
+    CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&desc));
+    CUDNN_CHECK(cudnnSetConvolutionNdDescriptor(desc,
+                                                static_cast<int>(pads.size()),
+                                                pads.data(),
+                                                strides.data(),
+                                                dilations.data(),
+                                                CUDNN_CROSS_CORRELATION,
+                                                toCudnnDataType(compute_dtype)));
+    return desc;
+}
+
 static cudnnReduceTensorDescriptor_t createCudnnReduceDescriptor(ExprOp op, TensorDescriptor::DataType compute_dtype, bool output_indices) {
     cudnnReduceTensorDescriptor_t desc;
     CUDNN_CHECK(cudnnCreateReduceTensorDescriptor(&desc));
@@ -1093,14 +1206,51 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
     if (!compiled_convolution) {
         throw std::runtime_error("buildConvolution requires non-null compiled payload.");
     }
-    if (input.getDimensions().size() != 4 || filter.getDimensions().size() != 4 || output.getDimensions().size() != 4) {
-        throw std::runtime_error("buildConvolution currently only supports rank-4 tensors.");
+    const size_t expected_rank = compiled_convolution->is_3d ? 5 : 4;
+    if (input.getDimensions().size() != expected_rank || filter.getDimensions().size() != expected_rank ||
+        output.getDimensions().size() != expected_rank) {
+        throw std::runtime_error(compiled_convolution->is_3d ? "buildConvolution expected rank-5 tensors for CONV3D."
+                                                             : "buildConvolution expected rank-4 tensors for CONV2D.");
     }
 
     const std::vector<uint64_t> input_dims = input.getDimensions();
     const std::vector<uint64_t> filter_dims = filter.getDimensions();
 
     auto built = std::make_shared<BuiltConvolution>();
+
+    if (compiled_convolution->is_3d) {
+        built->use_cudnn_nd = true;
+        built->x_desc = createCudnnTensorDescriptor(input.getDimensions(), compiled_convolution->input_dtype);
+        built->w_desc = createCudnnFilterDescriptor(filter.getDimensions(), compiled_convolution->input_dtype);
+        built->y_desc = createCudnnTensorDescriptor(output.getDimensions(), compiled_convolution->output_dtype);
+        built->conv_desc = createCudnnConvolutionNdDescriptor(
+            compiled_convolution->compute_dtype,
+            {compiled_convolution->pad_d, compiled_convolution->pad_h, compiled_convolution->pad_w},
+            {compiled_convolution->stride_d, compiled_convolution->stride_h, compiled_convolution->stride_w});
+
+        int returned_algo_count = 0;
+        cudnnConvolutionFwdAlgoPerf_t perf_results[MAX_CUDNN_CONV_ALGOS];
+        CUDNN_CHECK(cudnnFindConvolutionForwardAlgorithm(stream.getCudnnHandle(),
+                                                         built->x_desc,
+                                                         built->w_desc,
+                                                         built->conv_desc,
+                                                         built->y_desc,
+                                                         MAX_CUDNN_CONV_ALGOS,
+                                                         &returned_algo_count,
+                                                         perf_results));
+        if (returned_algo_count <= 0) {
+            throw std::runtime_error("cuDNN did not return a CONV3D forward algorithm.");
+        }
+        built->fwd_algo = perf_results[0].algo;
+        CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(stream.getCudnnHandle(),
+                                                            built->x_desc,
+                                                            built->w_desc,
+                                                            built->conv_desc,
+                                                            built->y_desc,
+                                                            built->fwd_algo,
+                                                            &built->workspace_bytes));
+        return built;
+    }
 
     const std::string gpuType = MachineEvaluator::instance().getGpuType(device_num);
     built->requirement = ConvolutionKernelRequirement(gpuType,
@@ -1131,8 +1281,14 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
     if (!compiled_convolution_backward) {
         throw std::runtime_error("buildConvolutionBackward requires non-null compiled payload.");
     }
-    if (input.getDimensions().size() != 4 || grad_output.getDimensions().size() != 4 || output.getDimensions().size() != 4) {
-        throw std::runtime_error("buildConvolutionBackward currently only supports rank-4 tensors.");
+
+    const bool is_3d = compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_DATA ||
+                       compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_FILTER;
+    const size_t expected_rank = is_3d ? 5 : 4;
+    if (input.getDimensions().size() != expected_rank || grad_output.getDimensions().size() != expected_rank ||
+        output.getDimensions().size() != expected_rank) {
+        throw std::runtime_error(is_3d ? "buildConvolutionBackward expected rank-5 tensors for CONV3D backward."
+                                       : "buildConvolutionBackward expected rank-4 tensors for CONV2D backward.");
     }
 
     const std::vector<uint64_t> input_dims = input.getDimensions();
@@ -1140,6 +1296,74 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
     const std::vector<uint64_t> output_dims = output.getDimensions();
 
     auto built = std::make_shared<BuiltConvolution>();
+
+    if (is_3d) {
+        built->use_cudnn_nd = true;
+        built->conv_desc = createCudnnConvolutionNdDescriptor(
+            compiled_convolution_backward->compute_dtype,
+            {compiled_convolution_backward->pad_d, compiled_convolution_backward->pad_h, compiled_convolution_backward->pad_w},
+            {compiled_convolution_backward->stride_d, compiled_convolution_backward->stride_h, compiled_convolution_backward->stride_w});
+
+        if (compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_DATA) {
+            built->w_desc = createCudnnFilterDescriptor(input.getDimensions(), compiled_convolution_backward->input_dtype);
+            built->y_desc = createCudnnTensorDescriptor(grad_output.getDimensions(), compiled_convolution_backward->grad_output_dtype);
+            built->x_desc = createCudnnTensorDescriptor(output.getDimensions(), compiled_convolution_backward->output_dtype);
+
+            int returned_algo_count = 0;
+            cudnnConvolutionBwdDataAlgoPerf_t perf_results[MAX_CUDNN_CONV_ALGOS];
+            CUDNN_CHECK(cudnnFindConvolutionBackwardDataAlgorithm(stream.getCudnnHandle(),
+                                                                  built->w_desc,
+                                                                  built->y_desc,
+                                                                  built->conv_desc,
+                                                                  built->x_desc,
+                                                                  MAX_CUDNN_CONV_ALGOS,
+                                                                  &returned_algo_count,
+                                                                  perf_results));
+            if (returned_algo_count <= 0) {
+                throw std::runtime_error("cuDNN did not return a CONV3D backward-data algorithm.");
+            }
+            built->bwd_data_algo = perf_results[0].algo;
+            CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(stream.getCudnnHandle(),
+                                                                     built->w_desc,
+                                                                     built->y_desc,
+                                                                     built->conv_desc,
+                                                                     built->x_desc,
+                                                                     built->bwd_data_algo,
+                                                                     &built->workspace_bytes));
+            return built;
+        }
+
+        if (compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_FILTER) {
+            built->x_desc = createCudnnTensorDescriptor(input.getDimensions(), compiled_convolution_backward->input_dtype);
+            built->y_desc = createCudnnTensorDescriptor(grad_output.getDimensions(), compiled_convolution_backward->grad_output_dtype);
+            built->w_desc = createCudnnFilterDescriptor(output.getDimensions(), compiled_convolution_backward->output_dtype);
+
+            int returned_algo_count = 0;
+            cudnnConvolutionBwdFilterAlgoPerf_t perf_results[MAX_CUDNN_CONV_ALGOS];
+            CUDNN_CHECK(cudnnFindConvolutionBackwardFilterAlgorithm(stream.getCudnnHandle(),
+                                                                    built->x_desc,
+                                                                    built->y_desc,
+                                                                    built->conv_desc,
+                                                                    built->w_desc,
+                                                                    MAX_CUDNN_CONV_ALGOS,
+                                                                    &returned_algo_count,
+                                                                    perf_results));
+            if (returned_algo_count <= 0) {
+                throw std::runtime_error("cuDNN did not return a CONV3D backward-filter algorithm.");
+            }
+            built->bwd_filter_algo = perf_results[0].algo;
+            CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(stream.getCudnnHandle(),
+                                                                       built->x_desc,
+                                                                       built->y_desc,
+                                                                       built->conv_desc,
+                                                                       built->w_desc,
+                                                                       built->bwd_filter_algo,
+                                                                       &built->workspace_bytes));
+            return built;
+        }
+
+        throw std::runtime_error("buildConvolutionBackward received unsupported CONV3D backward op.");
+    }
 
     const std::string gpuType = MachineEvaluator::instance().getGpuType(device_num);
     if (compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_DATA) {

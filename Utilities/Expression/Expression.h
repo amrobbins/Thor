@@ -59,6 +59,9 @@ enum class ExprOp : uint16_t {
     CONV2D,
     CONV2D_BACKWARD_DATA,
     CONV2D_BACKWARD_FILTER,
+    CONV3D,
+    CONV3D_BACKWARD_DATA,
+    CONV3D_BACKWARD_FILTER,
     REDUCE_SUM,
     REDUCE_PROD,
     REDUCE_MIN,
@@ -117,8 +120,10 @@ struct ExprNode {
     bool transpose_lhs = false;
     bool transpose_rhs = false;
     bool transpose_aux = false;
+    int32_t conv_stride_d = 1;
     int32_t conv_stride_h = 1;
     int32_t conv_stride_w = 1;
+    int32_t conv_pad_d = 0;
     int32_t conv_pad_h = 0;
     int32_t conv_pad_w = 0;
     cudnnSoftmaxAlgorithm_t softmax_algorithm = CUDNN_SOFTMAX_ACCURATE;
@@ -332,6 +337,17 @@ class Expression {
         const Expression& filter,
         int32_t stride_h = 1,
         int32_t stride_w = 1,
+        int32_t pad_h = 0,
+        int32_t pad_w = 0,
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
+        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+    [[nodiscard]] static Expression conv3d(
+        const Expression& input,
+        const Expression& filter,
+        int32_t stride_d = 1,
+        int32_t stride_h = 1,
+        int32_t stride_w = 1,
+        int32_t pad_d = 0,
         int32_t pad_h = 0,
         int32_t pad_w = 0,
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),

@@ -5,6 +5,124 @@ using json = nlohmann::json;
 
 namespace Thor {
 
+
+namespace {
+
+ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
+                                                                    uint32_t strideH,
+                                                                    uint32_t strideW,
+                                                                    uint32_t padH,
+                                                                    uint32_t padW,
+                                                                    ThorImplementation::TensorPlacement placement,
+                                                                    std::shared_ptr<Thor::Activation> activation) {
+    using ImplDataType = ThorImplementation::TensorDescriptor::DataType;
+    using ThorImplementation::DynamicExpression;
+    using ThorImplementation::DynamicExpressionBuild;
+    using ThorImplementation::Expression;
+    using ThorImplementation::FusedEquation;
+    using ThorImplementation::Tensor;
+
+    return DynamicExpression([hasBias, strideH, strideW, padH, padW, placement, activation = std::move(activation)](
+                                 const DynamicExpression::TensorMap& inputs,
+                                 const DynamicExpression::TensorMap& outputs,
+                                 Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+
+        const Tensor& featureInputTensor = inputs.at("feature_input");
+        const Tensor& wTensor = inputs.at("weights");
+        assert(wTensor.getPlacement() == placement);
+
+        if (featureInputTensor.getDimensions().size() != 4) {
+            throw std::runtime_error("Convolution2d expects feature_input to be 4D NCHW.");
+        }
+        if (wTensor.getDimensions().size() != 4) {
+            throw std::runtime_error("Convolution2d expects weights to be 4D KCRS.");
+        }
+        if (featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
+            throw std::runtime_error("Convolution2d input channels must match weight channels.");
+        }
+        assert(featureInputTensor.getPlacement() == placement);
+
+        const uint64_t expectedOutputRows = (featureInputTensor.getDimensions()[2] + 2 * padH - wTensor.getDimensions()[2]) / strideH + 1;
+        const uint64_t expectedOutputCols = (featureInputTensor.getDimensions()[3] + 2 * padW - wTensor.getDimensions()[3]) / strideW + 1;
+
+        if (outputs.contains("feature_output")) {
+            const Tensor& featureOutputTensor = outputs.at("feature_output");
+            if (featureOutputTensor.getDimensions().size() != 4) {
+                throw std::runtime_error("Convolution2d expects feature_output to be 4D NCHW.");
+            }
+            if (featureOutputTensor.getDimensions()[0] != featureInputTensor.getDimensions()[0] ||
+                featureOutputTensor.getDimensions()[1] != wTensor.getDimensions()[0] ||
+                featureOutputTensor.getDimensions()[2] != expectedOutputRows ||
+                featureOutputTensor.getDimensions()[3] != expectedOutputCols) {
+                throw std::runtime_error("Convolution2d feature_output shape does not match the implied convolution output shape.");
+            }
+            assert(featureOutputTensor.getPlacement() == placement);
+        }
+
+        const ImplDataType weightsDType = wTensor.getDescriptor().getDataType();
+
+        auto fin = Expression::input("feature_input");
+        auto w = Expression::input("weights", weightsDType, weightsDType);
+
+        Expression fout = Expression::conv2d(fin, w, strideH, strideW, padH, padW);
+
+        if (hasBias) {
+            const Tensor& bTensor = inputs.at("biases");
+            if (bTensor.getDimensions().size() != 1) {
+                throw std::runtime_error("Convolution2d expects biases to be 1D [K].");
+            }
+            if (bTensor.getDimensions()[0] != wTensor.getDimensions()[0]) {
+                throw std::runtime_error("Convolution2d bias size must match number of output channels.");
+            }
+
+            const ImplDataType biasDType = bTensor.getDescriptor().getDataType();
+            auto b = Expression::input("biases", biasDType, biasDType).unsqueeze({0, 2, 3});
+            fout = fout + b;
+        }
+
+        if (activation != nullptr) {
+            fout = activation->toExpression(fout);
+        }
+
+        auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
+
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            {outputs},
+            {},
+        };
+    });
+}
+
+}  // namespace
+
+std::shared_ptr<ThorImplementation::Layer> Convolution2d::stamp(ThorImplementation::TensorPlacement placement,
+                                                                 std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                                 std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                                 Thor::Tensor connectingApiTensor,
+                                                                 const bool inferenceOnly) const {
+    (void)drivingLayer;
+    (void)drivingApiLayer;
+
+    assert(initialized);
+    assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+
+    Tensor::DataType weightsDataType = Tensor::DataType::FP16;
+    std::shared_ptr<ThorImplementation::CustomLayer> physicalConvolution2d = std::make_shared<ThorImplementation::CustomLayer>(
+        buildConvolution2dExpression(hasBias, verticalStride, horizontalStride, verticalPadding, horizontalPadding, placement, activation),
+        placement,
+        ThorImplementation::Convolution2d::defineParameters(numOutputChannels, hasBias, filterWidth, filterHeight, weightsDataType),
+        inferenceOnly,
+        getId(),
+        false);
+    physicalConvolution2d->setLayerName(getLayerType());
+
+    return physicalConvolution2d;
+}
+
 void Convolution2d::buildSupportLayersAndAddToNetwork(Network *network) {
     Convolution2d::Builder convolution2dBuilder;
     convolution2dBuilder.network(*network)
@@ -19,8 +137,12 @@ void Convolution2d::buildSupportLayersAndAddToNetwork(Network *network) {
         .weightsInitializer(weightsInitializer)
         .biasInitializer(biasInitializer)
         .weightsOptimizer(weightsOptimizer)
-        .biasesOptimizer(biasesOptimizer)
-        .noActivation();
+        .biasesOptimizer(biasesOptimizer);
+    if (activation != nullptr) {
+        convolution2dBuilder.activation(std::dynamic_pointer_cast<Activation>(activation->clone()));
+    } else {
+        convolution2dBuilder.noActivation();
+    }
 
     vector<Tensor> currentFeatureInputs;
 
@@ -70,13 +192,6 @@ void Convolution2d::buildSupportLayersAndAddToNetwork(Network *network) {
 
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         currentFeatureInputs[i] = standaloneLayerFeatureOutputs[i];
-
-    if (activation != nullptr) {
-        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            currentFeatureInputs[i] = activation->addToNetwork(currentFeatureInputs[i], network);
-        }
-    }
-    activation = nullptr;
 
     // Replace the outputs on the compound layer to be the outputs of the last stage
     // i.e. tunnel the actual inputs to actual outputs of the compound layer,

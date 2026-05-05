@@ -164,6 +164,12 @@ std::string exprOpExternalName(ExprOp op) {
             return "conv2d_backward_data";
         case ExprOp::CONV2D_BACKWARD_FILTER:
             return "conv2d_backward_filter";
+        case ExprOp::CONV3D:
+            return "conv3d";
+        case ExprOp::CONV3D_BACKWARD_DATA:
+            return "conv3d_backward_data";
+        case ExprOp::CONV3D_BACKWARD_FILTER:
+            return "conv3d_backward_filter";
         case ExprOp::REDUCE_SUM:
             return "reduce_sum";
         case ExprOp::REDUCE_PROD:
@@ -231,6 +237,9 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"conv2d", ExprOp::CONV2D},
         {"conv2d_backward_data", ExprOp::CONV2D_BACKWARD_DATA},
         {"conv2d_backward_filter", ExprOp::CONV2D_BACKWARD_FILTER},
+        {"conv3d", ExprOp::CONV3D},
+        {"conv3d_backward_data", ExprOp::CONV3D_BACKWARD_DATA},
+        {"conv3d_backward_filter", ExprOp::CONV3D_BACKWARD_FILTER},
         {"reduce_sum", ExprOp::REDUCE_SUM},
         {"reduce_prod", ExprOp::REDUCE_PROD},
         {"reduce_min", ExprOp::REDUCE_MIN},
@@ -308,8 +317,10 @@ json exprNodeToJson(const ExprNode& node) {
     j["transpose_lhs"] = node.transpose_lhs;
     j["transpose_rhs"] = node.transpose_rhs;
     j["transpose_aux"] = node.transpose_aux;
+    j["conv_stride_d"] = node.conv_stride_d;
     j["conv_stride_h"] = node.conv_stride_h;
     j["conv_stride_w"] = node.conv_stride_w;
+    j["conv_pad_d"] = node.conv_pad_d;
     j["conv_pad_h"] = node.conv_pad_h;
     j["conv_pad_w"] = node.conv_pad_w;
     j["softmax_algorithm"] = static_cast<int>(node.softmax_algorithm);
@@ -341,8 +352,10 @@ ExprNode exprNodeFromJson(const json& j) {
     node.transpose_lhs = j.value("transpose_lhs", false);
     node.transpose_rhs = j.value("transpose_rhs", false);
     node.transpose_aux = j.value("transpose_aux", false);
+    node.conv_stride_d = j.value("conv_stride_d", 1);
     node.conv_stride_h = j.value("conv_stride_h", 1);
     node.conv_stride_w = j.value("conv_stride_w", 1);
+    node.conv_pad_d = j.value("conv_pad_d", 0);
     node.conv_pad_h = j.value("conv_pad_h", 0);
     node.conv_pad_w = j.value("conv_pad_w", 0);
     node.softmax_algorithm = static_cast<cudnnSoftmaxAlgorithm_t>(j.value("softmax_algorithm", static_cast<int>(CUDNN_SOFTMAX_ACCURATE)));
@@ -455,6 +468,12 @@ std::string opName(ExprOp op) {
             return "CONV2D_BWD_DATA";
         case ExprOp::CONV2D_BACKWARD_FILTER:
             return "CONV2D_BWD_FILTER";
+        case ExprOp::CONV3D:
+            return "CONV3D";
+        case ExprOp::CONV3D_BACKWARD_DATA:
+            return "CONV3D_BWD_DATA";
+        case ExprOp::CONV3D_BACKWARD_FILTER:
+            return "CONV3D_BWD_FILTER";
         case ExprOp::REDUCE_SUM:
             return "RSUM";
         case ExprOp::REDUCE_PROD:
@@ -612,7 +631,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::MATMUL:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
-        case ExprOp::CONV2D_BACKWARD_FILTER: {
+        case ExprOp::CONV2D_BACKWARD_FILTER:
+        case ExprOp::CONV3D:
+        case ExprOp::CONV3D_BACKWARD_DATA:
+        case ExprOp::CONV3D_BACKWARD_FILTER: {
             std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
             std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
 
@@ -623,7 +645,12 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             if (n.op == ExprOp::MATMUL) {
                 out += ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0);
                 out += ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0);
-            } else if (n.op == ExprOp::CONV2D || n.op == ExprOp::CONV2D_BACKWARD_DATA || n.op == ExprOp::CONV2D_BACKWARD_FILTER) {
+            } else if (n.op == ExprOp::CONV2D || n.op == ExprOp::CONV2D_BACKWARD_DATA || n.op == ExprOp::CONV2D_BACKWARD_FILTER ||
+                       n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
+                if (n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
+                    out += ";sD=" + std::to_string(n.conv_stride_d);
+                    out += ";pD=" + std::to_string(n.conv_pad_d);
+                }
                 out += ";sH=" + std::to_string(n.conv_stride_h);
                 out += ";sW=" + std::to_string(n.conv_stride_w);
                 out += ";pH=" + std::to_string(n.conv_pad_h);
@@ -1053,6 +1080,9 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
+        case ExprOp::CONV3D:
+        case ExprOp::CONV3D_BACKWARD_DATA:
+        case ExprOp::CONV3D_BACKWARD_FILTER:
         case ExprOp::REDUCE_MIN_BACKWARD:
         case ExprOp::REDUCE_MAX_BACKWARD:
             return true;
@@ -1699,6 +1729,40 @@ Expression Expression::conv2d(const Expression& input,
     ExprNode& node = out.expr->nodes[out.nodeIndex];
     node.conv_stride_h = stride_h;
     node.conv_stride_w = stride_w;
+    node.conv_pad_h = pad_h;
+    node.conv_pad_w = pad_w;
+    if (compute_dtype.isPresent()) {
+        node.compute_dtype = compute_dtype.get();
+    }
+    if (output_dtype.isPresent()) {
+        node.output_dtype = output_dtype.get();
+    }
+    return out;
+}
+
+Expression Expression::conv3d(const Expression& input,
+                              const Expression& filter,
+                              int32_t stride_d,
+                              int32_t stride_h,
+                              int32_t stride_w,
+                              int32_t pad_d,
+                              int32_t pad_h,
+                              int32_t pad_w,
+                              Optional<DataType> compute_dtype,
+                              Optional<DataType> output_dtype) {
+    if (stride_d <= 0 || stride_h <= 0 || stride_w <= 0) {
+        throw std::runtime_error("conv3d stride must be positive.");
+    }
+    if (pad_d < 0 || pad_h < 0 || pad_w < 0) {
+        throw std::runtime_error("conv3d padding must be non-negative.");
+    }
+
+    Expression out = binaryOp(input, filter, ExprOp::CONV3D);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.conv_stride_d = stride_d;
+    node.conv_stride_h = stride_h;
+    node.conv_stride_w = stride_w;
+    node.conv_pad_d = pad_d;
     node.conv_pad_h = pad_h;
     node.conv_pad_w = pad_w;
     if (compute_dtype.isPresent()) {
