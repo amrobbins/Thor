@@ -18,6 +18,10 @@ class Swish : public Activation {
         return myClone;
     }
 
+    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+        return input.swish();
+    }
+
     virtual std::string getLayerType() const { return "Swish"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {

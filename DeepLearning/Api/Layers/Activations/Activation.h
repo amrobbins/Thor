@@ -26,7 +26,7 @@ class Activation : public Layer {
 
     // Returns an expression equivalent to applying this activation to the input expression.
     // This is used by expression-backed learning layers to fuse the activation into the layer equation.
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const;
+    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const = 0;
 
     virtual std::string getLayerType() const = 0;
 
@@ -37,7 +37,6 @@ class Activation : public Layer {
     using Deserializer = std::function<void(const nlohmann::json&, Network*)>;
     static std::unordered_map<std::string, Deserializer>& get_registry();
     static void register_layer(std::string name, Deserializer fn);
-    void toExpression();
 
    private:
     using Layer::serialize;

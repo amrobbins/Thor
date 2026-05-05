@@ -20,6 +20,10 @@ class Softmax : public Activation {
         return myClone;
     }
 
+    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+        return input.softmax();
+    }
+
     virtual std::string getLayerType() const { return "Softmax"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {

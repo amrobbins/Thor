@@ -18,6 +18,12 @@ class HardSigmoid : public Activation {
         return myClone;
     }
 
+    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+        const ThorImplementation::Expression zero(0.0);
+        const ThorImplementation::Expression one(1.0);
+        return ((input * ThorImplementation::Expression(0.2)) + ThorImplementation::Expression(0.5)).min(one).max(zero);
+    }
+
     virtual std::string getLayerType() const { return "HardSigmoid"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
