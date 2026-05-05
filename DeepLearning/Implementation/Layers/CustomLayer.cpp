@@ -425,11 +425,53 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildBackwardAdditionalInputs(
 
 PreparedDynamicExpression::TensorMap CustomLayer::buildBackwardInputGradOutputs(uint32_t applicationIndex) const {
     PreparedDynamicExpression::TensorMap outputs;
+    if (applicationIndex >= applications.size()) {
+        return outputs;
+    }
+
+    const ApplicationState& app = applications[applicationIndex];
+
     for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
         const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
-        if (flat < errorOutputs.size() && errorOutputs[flat].isPresent()) {
-            outputs[errorOutputNameForInput(inputPort)] = errorOutputs[flat].get();
+        if (flat >= errorOutputs.size() || errorOutputs[flat].isEmpty()) {
+            continue;
         }
+
+        Tensor gradOutput = errorOutputs[flat].get();
+
+        // The public graph-level error output must keep the same shape as the connected feature input so that the
+        // previous layer receives the gradient shape it expects. However, DynamicExpression may have intentionally
+        // rebound this input to a different logical view, e.g. FullyConnected collapses [batch, C, H, W] to
+        // [batch, C * H * W] before matmul. In that case, stamp the backward expression with a metadata-only view of
+        // the same gradient storage that matches the logical input seen by the expression, while leaving
+        // errorOutputs[flat] itself unchanged for upstream propagation.
+        if (app.forwardPrepared != nullptr) {
+            const auto& logicalInputs = app.forwardPrepared->stampInputs();
+            const auto logicalIt = logicalInputs.find(inputNames[inputPort]);
+            if (logicalIt != logicalInputs.end()) {
+                const Tensor& logicalInput = logicalIt->second;
+
+                if (gradOutput.getPlacement() != logicalInput.getPlacement()) {
+                    throw runtime_error("CustomLayer backward gradient output placement does not match logical input placement for port '" +
+                                        inputNames[inputPort] + "'.");
+                }
+                if (gradOutput.getDescriptor().getDataType() != logicalInput.getDescriptor().getDataType()) {
+                    throw runtime_error("CustomLayer backward gradient output dtype does not match logical input dtype for port '" +
+                                        inputNames[inputPort] + "'.");
+                }
+                if (gradOutput.getDescriptor().getTotalNumElements() != logicalInput.getDescriptor().getTotalNumElements()) {
+                    throw runtime_error(
+                        "CustomLayer backward gradient output element count does not match logical input element count for port '" +
+                        inputNames[inputPort] + "'.");
+                }
+
+                if (gradOutput.getDimensions() != logicalInput.getDimensions()) {
+                    gradOutput.reshape(logicalInput.getDimensions());
+                }
+            }
+        }
+
+        outputs[errorOutputNameForInput(inputPort)] = gradOutput;
     }
     return outputs;
 }

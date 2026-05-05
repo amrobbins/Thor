@@ -515,7 +515,8 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
         const CublasMatrixMultiply::MatmulDataTypes dataTypes{lhs.getDescriptor().getDataType(),
                                                               rhs.getDescriptor().getDataType(),
                                                               output.getDescriptor().getDataType(),
-                                                              output.getDescriptor().getDataType()};
+                                                              output.getDescriptor().getDataType(),
+                                                              compiled_matmul->compute_dtype};
         CublasMatrixMultiply::instance().multiply(lhs,
                                                   rhs,
                                                   output,
@@ -556,7 +557,8 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{lhs.getDescriptor().getDataType(),
                                                           rhs.getDescriptor().getDataType(),
                                                           addend.get().getDescriptor().getDataType(),
-                                                          output.getDescriptor().getDataType()};
+                                                          output.getDescriptor().getDataType(),
+                                                          compiled_matmul->compute_dtype};
     CublasMatrixMultiply::instance().gemm(lhs,
                                           rhs,
                                           addend.get(),
@@ -984,7 +986,8 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         lhs.getDescriptor().getDataType(),
         rhs.getDescriptor().getDataType(),
         addend.isPresent() ? addend.get().getDescriptor().getDataType() : output.getDescriptor().getDataType(),
-        output.getDescriptor().getDataType()};
+        output.getDescriptor().getDataType(),
+        compiled_matmul->compute_dtype};
 
     if (dataTypes.A != compiled_matmul->lhs_dtype || dataTypes.B != compiled_matmul->rhs_dtype ||
         dataTypes.C != (compiled_matmul->op == ExprOp::GEMM ? compiled_matmul->aux_dtype : compiled_matmul->output_dtype) ||
@@ -1008,6 +1011,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                        dataTypes.B,
                        dataTypes.C,
                        dataTypes.D,
+                       dataTypes.compute,
                        device_num);
 
     std::shared_ptr<BuiltMatmul> hit = cacheLookup(key);

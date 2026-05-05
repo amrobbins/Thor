@@ -1,5 +1,9 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 
+#include <cstdint>
+#include <limits>
+#include <unordered_map>
+
 using namespace std;
 using json = nlohmann::json;
 
@@ -7,14 +11,106 @@ namespace Thor {
 
 namespace {
 
+uint32_t cloneExpressionSubtreeWithSubstitution(const ThorImplementation::PhysicalExpression& src,
+                                                uint32_t srcNodeIndex,
+                                                const std::string& substituteInputName,
+                                                uint32_t substituteNodeIndex,
+                                                ThorImplementation::PhysicalExpression& dst,
+                                                std::unordered_map<uint32_t, uint32_t>& oldToNew) {
+    using ThorImplementation::ExprNode;
+    using ThorImplementation::ExprOp;
+    using ThorImplementation::Expression;
+
+    auto it = oldToNew.find(srcNodeIndex);
+    if (it != oldToNew.end()) {
+        return it->second;
+    }
+    if (srcNodeIndex >= src.nodes.size()) {
+        throw std::runtime_error("Epilogue expression node index is out of range.");
+    }
+
+    const ExprNode& srcNode = src.nodes[srcNodeIndex];
+    if (srcNode.op == ExprOp::INPUT) {
+        if (srcNode.input_slot >= src.inputs.size()) {
+            throw std::runtime_error("Epilogue expression input slot is out of range.");
+        }
+        const ThorImplementation::NamedInput& input = src.inputs[srcNode.input_slot];
+        if (input.name != substituteInputName) {
+            throw std::runtime_error("FullyConnected epilogue expression contains unsupported input '" + input.name + "'.");
+        }
+        oldToNew[srcNodeIndex] = substituteNodeIndex;
+        return substituteNodeIndex;
+    }
+    if (srcNode.op == ExprOp::RUNTIME_SCALAR || srcNode.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+        throw std::runtime_error("FullyConnected epilogue expression cannot contain runtime scalar inputs.");
+    }
+
+    ExprNode newNode = srcNode;
+    if (Expression::isUnaryOp(srcNode.op)) {
+        newNode.lhs = cloneExpressionSubtreeWithSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        newNode.rhs = UINT32_MAX;
+        newNode.aux = UINT32_MAX;
+    } else if (Expression::isBinaryOp(srcNode.op)) {
+        newNode.lhs = cloneExpressionSubtreeWithSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        newNode.rhs = cloneExpressionSubtreeWithSubstitution(src, srcNode.rhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        newNode.aux = UINT32_MAX;
+    } else if (Expression::isTernaryOp(srcNode.op)) {
+        newNode.lhs = cloneExpressionSubtreeWithSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        newNode.rhs = cloneExpressionSubtreeWithSubstitution(src, srcNode.rhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        newNode.aux = cloneExpressionSubtreeWithSubstitution(src, srcNode.aux, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        if (srcNode.alpha_node != UINT32_MAX) {
+            newNode.alpha_node = cloneExpressionSubtreeWithSubstitution(
+                src, srcNode.alpha_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        }
+        if (srcNode.beta_node != UINT32_MAX) {
+            newNode.beta_node = cloneExpressionSubtreeWithSubstitution(
+                src, srcNode.beta_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        }
+    } else if (Expression::isLeafOp(srcNode.op)) {
+        // constants/fill nodes have no children and can be copied directly.
+    } else {
+        throw std::runtime_error("Unsupported op while applying FullyConnected epilogue expression: " +
+                                 std::to_string(static_cast<int>(srcNode.op)));
+    }
+
+    const uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
+    dst.nodes.push_back(std::move(newNode));
+    oldToNew[srcNodeIndex] = newIndex;
+    return newIndex;
+}
+
+ThorImplementation::Expression applyFullyConnectedEpilogue(const ThorImplementation::Expression& input,
+                                                           const ThorImplementation::ExpressionDefinition& epilogue) {
+    FullyConnected::validateEpilogueDefinition(epilogue);
+
+    ThorImplementation::PhysicalExpression inputPhysical = input.expression();
+    if (inputPhysical.output_node >= inputPhysical.nodes.size()) {
+        throw std::runtime_error("FullyConnected epilogue input expression has an invalid output node.");
+    }
+
+    auto composed = std::make_shared<ThorImplementation::PhysicalExpression>();
+    composed->inputs = inputPhysical.inputs;
+    composed->nodes = inputPhysical.nodes;
+
+    const uint32_t epilogueRoot = epilogue.outputs.outputs.front().node_idx;
+    std::unordered_map<uint32_t, uint32_t> oldToNew;
+    const uint32_t composedRoot = cloneExpressionSubtreeWithSubstitution(*epilogue.outputs.expr,
+                                                                         epilogueRoot,
+                                                                         FullyConnected::epilogueInputName(),
+                                                                         inputPhysical.output_node,
+                                                                         *composed,
+                                                                         oldToNew);
+    composed->output_node = composedRoot;
+    return ThorImplementation::Expression::fromPhysicalNode(std::move(composed), composedRoot);
+}
+
 ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias,
                                                                     ThorImplementation::TensorPlacement placement,
                                                                     Tensor::DataType weightsDataType,
                                                                     Tensor::DataType computeDataType,
                                                                     Tensor::DataType outputDataType,
-                                                                    Optional<FullyConnected::ExpressionTransform> prologue,
                                                                     std::shared_ptr<Thor::Activation> activation,
-                                                                    Optional<FullyConnected::ExpressionTransform> epilogue) {
+                                                                    Optional<ThorImplementation::ExpressionDefinition> epilogue) {
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
     using ThorImplementation::Expression;
@@ -29,39 +125,81 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
     return DynamicExpression(
         std::move(expectedInputNames),
         {"feature_output"},
-        [hasBias,
-         placement,
-         weightsDataType,
-         computeDataType,
-         outputDataType,
-         activation = std::move(activation),
-         prologue,
-         epilogue](const DynamicExpression::TensorMap& inputs,
-                   const DynamicExpression::TensorMap& outputs,
-                   Stream& stream) -> DynamicExpressionBuild {
+        [hasBias, placement, weightsDataType, computeDataType, outputDataType, activation = std::move(activation), epilogue](
+            const DynamicExpression::TensorMap& inputs,
+            const DynamicExpression::TensorMap& outputs,
+            Stream& stream) -> DynamicExpressionBuild {
             (void)stream;
 
-            const Tensor& featureInputTensor = inputs.at("feature_input");
+            Tensor featureInputTensor = inputs.at("feature_input");
             const Tensor& wTensor = inputs.at("weights");
-            assert(wTensor.getDimensions().size() == 2);
-            assert(wTensor.getDataType() == weightsDataType);
-            assert(wTensor.getPlacement() == placement);
-            assert(featureInputTensor.getDimensions().size() == 2);
-            assert(featureInputTensor.getDimensions()[1] == wTensor.getDimensions()[0]);
-            assert(featureInputTensor.getPlacement() == placement);
+            if (wTensor.getDimensions().size() != 2) {
+                throw std::runtime_error("FullyConnected weights tensor must be rank 2.");
+            }
+            if (wTensor.getDataType() != weightsDataType) {
+                throw std::runtime_error("FullyConnected weights tensor dtype does not match weightsDataType.");
+            }
+            if (wTensor.getPlacement() != placement) {
+                throw std::runtime_error("FullyConnected weights tensor placement does not match the layer placement.");
+            }
+
+            std::vector<uint64_t> featureInputDimensions = featureInputTensor.getDimensions();
+            if (featureInputDimensions.size() < 2) {
+                throw std::runtime_error("FullyConnected dynamic expression requires a feature input tensor with batch plus at least one feature dimension.");
+            }
+            if (featureInputTensor.getPlacement() != placement) {
+                throw std::runtime_error("FullyConnected feature input placement does not match the layer placement.");
+            }
+
+            // Treat any rank > 2 input as [batch, flattened_features] for the matrix multiply, without touching the
+            // original Tensor object owned by the surrounding graph. Tensor is a lightweight metadata/storage alias,
+            // so this reshape changes only this DynamicExpression's logical view.
+            if (featureInputDimensions.size() > 2) {
+                const uint64_t batchSize = featureInputDimensions[0];
+                if (batchSize == 0) {
+                    throw std::runtime_error("FullyConnected runtime batch dimension must be non-zero.");
+                }
+                uint64_t flattenedFeatures = 1;
+                for (uint32_t i = 1; i < featureInputDimensions.size(); ++i) {
+                    if (featureInputDimensions[i] == 0) {
+                        throw std::runtime_error("FullyConnected runtime feature dimensions must be non-zero.");
+                    }
+                    if (flattenedFeatures > std::numeric_limits<uint64_t>::max() / featureInputDimensions[i]) {
+                        throw std::runtime_error("FullyConnected flattened feature count overflows uint64_t.");
+                    }
+                    flattenedFeatures *= featureInputDimensions[i];
+                }
+                featureInputTensor.reshape({batchSize, flattenedFeatures});
+                featureInputDimensions = featureInputTensor.getDimensions();
+            }
+
+            if (featureInputDimensions.size() != 2) {
+                throw std::runtime_error("FullyConnected logical feature input tensor must be rank 2 after flattening.");
+            }
+            if (featureInputDimensions[0] == 0 || featureInputDimensions[1] == 0) {
+                throw std::runtime_error("FullyConnected logical feature input tensor dimensions must be non-zero.");
+            }
+            if (featureInputDimensions[1] != wTensor.getDimensions()[0]) {
+                throw std::runtime_error("FullyConnected input feature count does not match weights rows.");
+            }
             if (outputs.contains("feature_output")) {
                 const Tensor& featureOutputTensor = outputs.at("feature_output");
-                assert(featureOutputTensor.getDimensions().size() == 2);
-                assert(featureOutputTensor.getDimensions()[1] == wTensor.getDimensions()[1]);
-                assert(featureOutputTensor.getDataType() == outputDataType);
-                assert(featureOutputTensor.getPlacement() == placement);
+                if (featureOutputTensor.getDimensions().size() != 2) {
+                    throw std::runtime_error("FullyConnected feature output tensor must be rank 2.");
+                }
+                if (featureOutputTensor.getDimensions()[0] != featureInputDimensions[0] ||
+                    featureOutputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
+                    throw std::runtime_error("FullyConnected feature output tensor dimensions are incompatible with the matmul output.");
+                }
+                if (featureOutputTensor.getDataType() != outputDataType) {
+                    throw std::runtime_error("FullyConnected feature output tensor dtype does not match outputDataType.");
+                }
+                if (featureOutputTensor.getPlacement() != placement) {
+                    throw std::runtime_error("FullyConnected feature output tensor placement does not match the layer placement.");
+                }
             }
 
             auto fin = Expression::input("feature_input", featureInputTensor.getDataType(), featureInputTensor.getDataType());
-            if (prologue.isPresent()) {
-                fin = prologue.get()(fin);
-            }
-
             auto w = Expression::input("weights", weightsDataType, weightsDataType);
 
             // [batch, in_features] @ [in_features, out_features]
@@ -69,9 +207,15 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
 
             if (hasBias) {
                 const Tensor& bTensor = inputs.at("biases");
-                assert(bTensor.getDimensions().size() == 1);
-                assert(bTensor.getDimensions()[0] == wTensor.getDimensions()[1]);
-                assert(bTensor.getDataType() == weightsDataType);
+                if (bTensor.getDimensions().size() != 1 || bTensor.getDimensions()[0] != wTensor.getDimensions()[1]) {
+                    throw std::runtime_error("FullyConnected biases tensor dimensions are incompatible with the weights tensor.");
+                }
+                if (bTensor.getDataType() != weightsDataType) {
+                    throw std::runtime_error("FullyConnected biases tensor dtype does not match weightsDataType.");
+                }
+                if (bTensor.getPlacement() != placement) {
+                    throw std::runtime_error("FullyConnected biases tensor placement does not match the layer placement.");
+                }
 
                 auto b = Expression::input("biases", weightsDataType, weightsDataType);
 
@@ -83,7 +227,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                 fout = activation->toExpression(fout);
             }
             if (epilogue.isPresent()) {
-                fout = epilogue.get()(fout);
+                fout = applyFullyConnectedEpilogue(fout, epilogue.get());
             }
 
             // The API layer's declared output tensor dtype is authoritative.
@@ -91,9 +235,12 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
 
             auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
 
+            DynamicExpression::TensorMap stampInputs = inputs;
+            stampInputs["feature_input"] = featureInputTensor;
+
             return DynamicExpressionBuild{
                 std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
-                inputs,
+                stampInputs,
                 {},
                 outputs,
                 {},
@@ -116,7 +263,7 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
 
     // Note: Network notices when a layer has already been stamped and only adds a connection; it does not re-stamp the layer.
     std::shared_ptr<ThorImplementation::CustomLayer> physicalFullyConnected = std::make_shared<ThorImplementation::CustomLayer>(
-        buildFullyConnectedExpression(hasBias, placement, weightsDataType, computeDataType, outputDataType, prologue, activation, epilogue),
+        buildFullyConnectedExpression(hasBias, placement, weightsDataType, computeDataType, outputDataType, activation, epilogue),
         placement,
         ThorImplementation::FullyConnected::defineParameters(numOutputFeatures, hasBias, weightsDataType),
         inferenceOnly,
@@ -142,6 +289,9 @@ json FullyConnected::architectureJson() const {
     j["weights_data_type"] = weightsDataType;
     j["compute_data_type"] = computeDataType;
     j["output_data_type"] = outputDataType;
+    if (epilogue.isPresent()) {
+        j["epilogue"] = epilogue.get().architectureJson();
+    }
 
     // Input connections
     json inputs = json::array();

@@ -4,6 +4,7 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelRequirement.h"
 
 #include "Utilities/Cache/LruCache.h"
+#include "Utilities/Common/Optional.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
@@ -57,8 +58,24 @@ class CublasMatrixMultiply {
         DataType B;
         DataType C;
         DataType D;
+        DataType compute;
 
-        static MatmulDataTypes same(DataType dataType) { return MatmulDataTypes{dataType, dataType, dataType, dataType}; }
+        MatmulDataTypes(DataType A, DataType B, DataType C, DataType D)
+            : A(A), B(B), C(C), D(D), compute(defaultComputeDataType(A, B, C, D)) {}
+
+        MatmulDataTypes(DataType A, DataType B, DataType C, DataType D, DataType compute)
+            : A(A), B(B), C(C), D(D), compute(compute) {}
+
+        static DataType defaultComputeDataType(DataType A, DataType B, DataType C, DataType D) {
+            if (A == DataType::INT8 && B == DataType::INT8 && C == DataType::INT8 && D == DataType::INT8) {
+                return DataType::INT32;
+            }
+            return DataType::FP32;
+        }
+
+        static MatmulDataTypes same(DataType dataType) {
+            return MatmulDataTypes{dataType, dataType, dataType, dataType, defaultComputeDataType(dataType, dataType, dataType, dataType)};
+        }
 
         // bool operator==(const MatmulDataTypes &other) const = default;
     };
@@ -621,6 +638,7 @@ class CublasMatrixMultiply {
     CublasMatrixMultiply() : optimalKernels(MAX_KERNEL_CACHE_OCCUPANCY), knownHeuristicAlgorithms(MAX_KERNEL_CACHE_OCCUPANCY) {}
 
     cudaDataType_t mapToCublasDataType(TensorDescriptor::DataType dataType);
+    Optional<cublasComputeType_t> mapToCublasComputeType(TensorDescriptor::DataType dataType);
     OperationType makeOperationType(MatmulDataTypes dataTypes);
     OperationType makeOperationType(TensorDescriptor::DataType ABCDDataType);
     bool isSupportedMatmulDataTypes(MatmulDataTypes dataTypes);

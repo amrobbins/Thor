@@ -590,6 +590,21 @@ cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(TensorDescriptor::DataT
     }
 }
 
+Optional<cublasComputeType_t> CublasMatrixMultiply::mapToCublasComputeType(TensorDescriptor::DataType dataType) {
+    switch (dataType) {
+        case TensorDescriptor::DataType::FP32:
+            return CUBLAS_COMPUTE_32F;
+        case TensorDescriptor::DataType::FP16:
+            return CUBLAS_COMPUTE_32F_FAST_16F;
+        case TensorDescriptor::DataType::BF16:
+            return CUBLAS_COMPUTE_32F_FAST_16BF;
+        case TensorDescriptor::DataType::INT32:
+            return CUBLAS_COMPUTE_32I;
+        default:
+            return Optional<cublasComputeType_t>::empty();
+    }
+}
+
 bool CublasMatrixMultiply::isSupportedMatmulDataTypes(MatmulDataTypes dataTypes) {
     switch (dataTypes.A) {
         case TensorDescriptor::DataType::FP32:
@@ -644,10 +659,11 @@ bool CublasMatrixMultiply::isSupportedMatmulDataTypes(MatmulDataTypes dataTypes)
     const cudaDataType_t CDataType = mapToCublasDataType(dataTypes.C);
     const cudaDataType_t DDataType = mapToCublasDataType(dataTypes.D);
 
-    const bool allInt8 = dataTypes.A == TensorDescriptor::DataType::INT8 && dataTypes.B == TensorDescriptor::DataType::INT8 &&
-                         dataTypes.C == TensorDescriptor::DataType::INT8 && dataTypes.D == TensorDescriptor::DataType::INT8;
-    const cublasComputeType_t computeType = allInt8 ? CUBLAS_COMPUTE_32I : CUBLAS_COMPUTE_32F;
-    return isSupportedCublasLtOperationType(computeType, CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
+    const Optional<cublasComputeType_t> computeType = mapToCublasComputeType(dataTypes.compute);
+    if (computeType.isEmpty()) {
+        return false;
+    }
+    return isSupportedCublasLtOperationType(computeType.get(), CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
 }
 
 bool CublasMatrixMultiply::isSupportedSameDataTypeMatmul(TensorDescriptor::DataType ABCDDataType) {
@@ -666,12 +682,13 @@ OperationType CublasMatrixMultiply::makeOperationType(MatmulDataTypes dataTypes)
     const cudaDataType_t CDataType = mapToCublasDataType(dataTypes.C);
     const cudaDataType_t DDataType = mapToCublasDataType(dataTypes.D);
 
-    const bool allInt8 = dataTypes.A == TensorDescriptor::DataType::INT8 && dataTypes.B == TensorDescriptor::DataType::INT8 &&
-                         dataTypes.C == TensorDescriptor::DataType::INT8 && dataTypes.D == TensorDescriptor::DataType::INT8;
-    const cublasComputeType_t computeType = allInt8 ? CUBLAS_COMPUTE_32I : CUBLAS_COMPUTE_32F;
+    const Optional<cublasComputeType_t> computeType = mapToCublasComputeType(dataTypes.compute);
+    if (computeType.isEmpty()) {
+        throw std::invalid_argument("Unsupported Thor compute dtype for cuBLASLt GEMM: " + dataTypeToString(dataTypes.compute));
+    }
 
     // Thor's GEMM scale plumbing passes alpha/beta as float host/device pointers, so the cublasLt scale type is CUDA_R_32F.
-    return OperationType(computeType, CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
+    return OperationType(computeType.get(), CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
 }
 
 std::string CublasMatrixMultiply::dataTypeToString(TensorDescriptor::DataType dataType) {
@@ -688,6 +705,8 @@ std::string CublasMatrixMultiply::dataTypeToString(TensorDescriptor::DataType da
             return "FP8_E5M2";
         case TensorDescriptor::DataType::INT8:
             return "INT8";
+        case TensorDescriptor::DataType::INT32:
+            return "INT32";
         default:
             return "unsupported";
     }
@@ -695,7 +714,8 @@ std::string CublasMatrixMultiply::dataTypeToString(TensorDescriptor::DataType da
 
 std::string CublasMatrixMultiply::dataTypesToString(MatmulDataTypes dataTypes) {
     return std::string("{A=") + dataTypeToString(dataTypes.A) + ", B=" + dataTypeToString(dataTypes.B) +
-           ", C=" + dataTypeToString(dataTypes.C) + ", D=" + dataTypeToString(dataTypes.D) + "}";
+           ", C=" + dataTypeToString(dataTypes.C) + ", D=" + dataTypeToString(dataTypes.D) +
+           ", compute=" + dataTypeToString(dataTypes.compute) + "}";
 }
 
 bool CublasMatrixMultiply::isFp8DataType(TensorDescriptor::DataType dataType) {
