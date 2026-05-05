@@ -1,62 +1,65 @@
 #pragma once
-#include <assert.h>
-#include <memory>
+
+#include <exception>
+#include <optional>
+#include <utility>
 
 struct CalledGetOnEmptyOptionalException : public std::exception {
-    const char *what() const throw() { return "Tried to get the value of an empty optional."; }
+    const char* what() const throw() override { return "Tried to get the value of an empty optional."; }
 };
 
 template <typename T>
 class Optional {
    public:
-    Optional() { clear(); }
+    Optional() = default;
+    Optional(const T& value) : value(value) {}
+    Optional(T&& value) : value(std::move(value)) {}
 
-    Optional(const T &value) { set(value); }
+    Optional(const Optional<T>& other) = default;
+    Optional(Optional<T>&& other) noexcept = default;
+    Optional<T>& operator=(const Optional<T>& other) = default;
+    Optional<T>& operator=(Optional<T>&& other) noexcept = default;
 
-    Optional(const Optional<T> &other) {
-        // implemented using operator=
-        *this = other;
-    }
-
-    bool isPresent() const { return present; }
+    bool isPresent() const { return value.has_value(); }
     bool isEmpty() const { return !isPresent(); }
-    void clear() {
-        present = false;
-        pValue.reset();
+
+    void clear() { value.reset(); }
+
+    T& get() {
+        if (isEmpty()) {
+            throw CalledGetOnEmptyOptionalException();
+        }
+        return *value;
     }
 
-    T &get() const {
-        assert(!isEmpty());
-        return *pValue;
+    const T& get() const {
+        if (isEmpty()) {
+            throw CalledGetOnEmptyOptionalException();
+        }
+        return *value;
     }
 
-    operator T &() { return get(); }
+    operator T&() { return get(); }
+    operator const T&() const { return get(); }
 
-    void set(const T &value) {
-        present = true;
-        this->pValue.reset(new T(value));
-    }
+    void set(const T& newValue) { value = newValue; }
+    void set(T&& newValue) { value = std::move(newValue); }
 
-    Optional<T> &operator=(const T &value) {
-        set(value);
+    Optional<T>& operator=(const T& newValue) {
+        set(newValue);
         return *this;
     }
 
-    void set(const Optional<T> &other) {
-        if (other.isPresent())
-            set(other.get());
-        else
-            this->clear();
-    }
-
-    Optional<T> &operator=(const Optional<T> &other) {
-        set(other);
+    Optional<T>& operator=(T&& newValue) {
+        set(std::move(newValue));
         return *this;
     }
+
+    void set(const Optional<T>& other) { value = other.value; }
+    void set(Optional<T>&& other) { value = std::move(other.value); }
 
     static Optional<T> empty() { return Optional<T>(); }
 
    private:
-    std::unique_ptr<T> pValue;
-    bool present;
+    std::optional<T> value;
 };

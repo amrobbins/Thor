@@ -44,8 +44,7 @@ class Convolution2d : public TrainableLayer {
 
    protected:
     virtual bool isMultiLayer() const {
-        return useBatchNormalization || dropProportion > 0.0f || activation ||
-               featureInputs.front().getDataType() != Tensor::DataType::FP16;
+        return useBatchNormalization || dropProportion > 0.0f || featureInputs.front().getDataType() != Tensor::DataType::FP16;
     }
     virtual void buildSupportLayersAndAddToNetwork(Network *network);
 
@@ -78,28 +77,7 @@ class Convolution2d : public TrainableLayer {
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
-                                                     const bool inferenceOnly) const override {
-        assert(initialized);
-        assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
-
-        // FIXME: add support for data type
-        Tensor::DataType weightsDataType = Tensor::DataType::FP16;
-        std::shared_ptr<ThorImplementation::Convolution2d> physicalConvolution2d =
-            std::make_shared<ThorImplementation::Convolution2d>(filterWidth,
-                                                                filterHeight,
-                                                                horizontalStride,
-                                                                verticalStride,
-                                                                horizontalPadding,
-                                                                verticalPadding,
-                                                                numOutputChannels,
-                                                                hasBias,
-                                                                weightsDataType,
-                                                                placement,
-                                                                inferenceOnly,
-                                                                getId());
-
-        return physicalConvolution2d;
-    }
+                                                     const bool inferenceOnly) const override;
 
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                   bool isFirstStamp,

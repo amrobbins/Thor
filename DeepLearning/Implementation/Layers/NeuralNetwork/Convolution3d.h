@@ -7,16 +7,19 @@
 
 namespace ThorImplementation {
 
-class Convolution2d : public CustomLayer {
+class Convolution3d : public CustomLayer {
    public:
-    ~Convolution2d() override = default;
+    ~Convolution3d() override = default;
 
-    Convolution2d(uint32_t filterWidth,
+    Convolution3d(uint32_t filterWidth,
                   uint32_t filterHeight,
+                  uint32_t filterDepth,
                   uint32_t filterHorizontalStride,
                   uint32_t filterVerticalStride,
+                  uint32_t filterDepthStride,
                   uint32_t leftAndRightPadWidth,
                   uint32_t topAndBottomPadHeight,
+                  uint32_t frontAndBackPadDepth,
                   uint32_t numOutputChannels,
                   bool hasBias,
                   Optional<TensorDescriptor::DataType> weightsDataType,
@@ -24,7 +27,7 @@ class Convolution2d : public CustomLayer {
                   bool inferenceOnly,
                   int64_t stampedId = -1);
 
-    std::string getLayerType() override { return "Convolution2d"; }
+    std::string getLayerType() override { return "Convolution3d"; }
 
     Tensor getWeights() { return getParameterStorage("weights"); }
     Optional<Tensor> getBiases() {
@@ -39,11 +42,18 @@ class Convolution2d : public CustomLayer {
                                                                              bool hasBias,
                                                                              uint32_t filterWidth,
                                                                              uint32_t filterHeight,
+                                                                             uint32_t filterDepth,
                                                                              Optional<TensorDescriptor::DataType> weightsDataType);
 
    private:
-    static DynamicExpression buildExpression(
-        bool hasBias, uint32_t strideH, uint32_t strideW, uint32_t padH, uint32_t padW, const TensorPlacement& placement);
+    static DynamicExpression buildExpression(bool hasBias,
+                                             uint32_t strideD,
+                                             uint32_t strideH,
+                                             uint32_t strideW,
+                                             uint32_t padD,
+                                             uint32_t padH,
+                                             uint32_t padW,
+                                             const TensorPlacement& placement);
 };
 
 }  // namespace ThorImplementation
