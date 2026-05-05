@@ -166,6 +166,33 @@ void StampedArgMinMax::runOn(Stream& run_stream) const {
                                   (void*)reduction_value_output.getMemPtr()));
 }
 
+StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
+                               std::shared_ptr<BuiltSoftmax> built,
+                               const Tensor& input,
+                               const Tensor& output,
+                               const Stream& stream)
+    : compiled_softmax(std::move(compiled)), built_softmax(std::move(built)), input(input), output(output), stream(stream) {
+    if (!compiled_softmax || !built_softmax) {
+        throw std::runtime_error("StampedSoftmax requires compiled and built softmax payloads.");
+    }
+    assert(input.getDataType() == built_softmax->key.input_dtype);
+    assert(output.getDataType() == built_softmax->key.output_dtype);
+}
+
+void StampedSoftmax::run() { runOn(stream); }
+
+void StampedSoftmax::runOn(Stream& run_stream) const {
+    CUDNN_CHECK(cudnnSoftmaxForward(run_stream.getCudnnHandle(),
+                                    built_softmax->key.algorithm,
+                                    built_softmax->key.mode,
+                                    alpha,
+                                    built_softmax->x_desc,
+                                    input.getMemPtr(),
+                                    beta,
+                                    built_softmax->y_desc,
+                                    (void*)output.getMemPtr()));
+}
+
 StampedConvolution::StampedConvolution(std::shared_ptr<CompiledConvolution> compiled,
                                        std::shared_ptr<BuiltConvolution> built,
                                        const Tensor& input,
@@ -736,6 +763,16 @@ static shared_ptr<BuiltReduction> cacheLookup(const ReductionCacheKey& key) {
     return nullptr;
 }
 
+static LruCacheThreadSafe<SoftmaxCacheKey, shared_ptr<BuiltSoftmax>> builtSoftmaxCache(10'000);
+
+static shared_ptr<BuiltSoftmax> cacheLookup(const SoftmaxCacheKey& key) {
+    optional<shared_ptr<BuiltSoftmax>> hit = builtSoftmaxCache.get(key);
+    if (hit.has_value()) {
+        return hit.value();
+    }
+    return nullptr;
+}
+
 static LruCacheThreadSafe<MatmulCacheKey, shared_ptr<BuiltMatmul>> builtMatmulCache(10'000);
 
 static shared_ptr<BuiltMatmul> cacheLookup(const MatmulCacheKey& key) {
@@ -1185,6 +1222,44 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
     }
 
     builtReductionCache.put(key, built);
+    return built;
+}
+
+std::shared_ptr<BuiltSoftmax> StampedEquation::buildSoftmax(const std::shared_ptr<CompiledSoftmax>& compiled_softmax,
+                                                            const Tensor& input,
+                                                            const Tensor& output,
+                                                            int device_num) {
+    if (!compiled_softmax) {
+        throw std::runtime_error("buildSoftmax requires compiled_softmax.");
+    }
+    if (input.getDimensions() != output.getDimensions()) {
+        throw std::runtime_error("Softmax input and output dimensions must match.");
+    }
+    if (input.getDataType() != compiled_softmax->input_dtype) {
+        throw std::runtime_error("Softmax input dtype does not match compiled input dtype.");
+    }
+    if (output.getDataType() != compiled_softmax->output_dtype) {
+        throw std::runtime_error("Softmax output dtype does not match compiled output dtype.");
+    }
+
+    SoftmaxCacheKey key{
+        .input_dims = input.getDimensions(),
+        .input_dtype = compiled_softmax->input_dtype,
+        .output_dtype = compiled_softmax->output_dtype,
+        .algorithm = compiled_softmax->algorithm,
+        .mode = compiled_softmax->mode,
+        .device_num = device_num,
+    };
+
+    std::shared_ptr<BuiltSoftmax> hit = cacheLookup(key);
+    if (hit)
+        return hit;
+
+    auto built = std::make_shared<BuiltSoftmax>(key);
+    built->x_desc = createCudnnTensorDescriptor(input.getDimensions(), built->key.input_dtype);
+    built->y_desc = createCudnnTensorDescriptor(output.getDimensions(), built->key.output_dtype);
+
+    builtSoftmaxCache.put(key, built);
     return built;
 }
 

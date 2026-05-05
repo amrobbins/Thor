@@ -411,6 +411,50 @@ Return the elementwise standard normal CDF of the input expression x.
 This lowers to Thor's NORMCDF expression op, which is emitted with CUDA's built-in normcdf implementation.
 )nbdoc");
 
+    auto parse_softmax_mode = [](const std::string& mode) -> cudnnSoftmaxMode_t {
+        if (mode == "channel") {
+            return CUDNN_SOFTMAX_MODE_CHANNEL;
+        }
+        if (mode == "instance") {
+            return CUDNN_SOFTMAX_MODE_INSTANCE;
+        }
+        throw std::runtime_error("softmax mode must be 'channel' or 'instance'.");
+    };
+
+    auto parse_softmax_algorithm = [](const std::string& algorithm) -> cudnnSoftmaxAlgorithm_t {
+        if (algorithm == "accurate") {
+            return CUDNN_SOFTMAX_ACCURATE;
+        }
+        if (algorithm == "fast") {
+            return CUDNN_SOFTMAX_FAST;
+        }
+        throw std::runtime_error("softmax algorithm must be 'accurate' or 'fast'. Use log_softmax for CUDNN_SOFTMAX_LOG.");
+    };
+
+    expr.def_static(
+        "softmax",
+        [parse_softmax_mode, parse_softmax_algorithm](const Expression& x, const std::string& algorithm, const std::string& mode) {
+            return x.softmax(parse_softmax_algorithm(algorithm), parse_softmax_mode(mode));
+        },
+        "x"_a,
+        "algorithm"_a = "accurate",
+        "mode"_a = "channel",
+        R"nbdoc(
+Return cuDNN softmax of the input expression x.
+
+algorithm may be 'accurate' (default) or 'fast'. Log-softmax is a different operation; use log_softmax().
+mode may be 'channel' (default) or 'instance'.
+)nbdoc");
+
+    expr.def_static(
+        "log_softmax",
+        [parse_softmax_mode](const Expression& x, const std::string& mode) { return x.logSoftmax(parse_softmax_mode(mode)); },
+        "x"_a,
+        "mode"_a = "channel",
+        R"nbdoc(
+Return cuDNN log-softmax of the input expression x.
+)nbdoc");
+
     // Reductions
     auto parse_axes = [](const nb::object& axis) -> std::vector<uint64_t> {
         if (axis.is_none()) {

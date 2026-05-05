@@ -1404,6 +1404,11 @@ static DataType compiledStageOutputDType(const CompiledExecutionStage& stage, si
                 throw std::runtime_error("compiledStageOutputDType missing arg-min/max stage.");
             }
             return stage.arg_minmax->output_dtype;
+        case CompiledExecutionStage::Kind::Softmax:
+            if (!stage.softmax) {
+                throw std::runtime_error("compiledStageOutputDType missing softmax stage.");
+            }
+            return stage.softmax->output_dtype;
         case CompiledExecutionStage::Kind::Matmul:
             if (!stage.matmul) {
                 throw std::runtime_error("compiledStageOutputDType missing matmul/gemm stage.");
@@ -2054,6 +2059,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             }
 
             case ExprOp::TRANSPOSE:
+            case ExprOp::SOFTMAX:
             case ExprOp::MATMUL:
             case ExprOp::GEMM:
             case ExprOp::CONV2D:
@@ -2234,6 +2240,11 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
                 throw std::runtime_error("ArgMinMax stage missing payload while computing FLOPs.");
             return computeArgMinMaxStageFlops(*stage.arg_minmax, stage_input_dims);
 
+        case CompiledExecutionStage::Kind::Softmax:
+            if (stage_input_dims.empty())
+                throw std::runtime_error("Softmax stage missing input dims while computing FLOPs.");
+            return numelFromDims(stage_input_dims[0]) * 5;
+
         case CompiledExecutionStage::Kind::Matmul:
             if (!stage.matmul)
                 throw std::runtime_error("Matmul stage missing payload while computing FLOPs.");
@@ -2292,6 +2303,13 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
             const auto reduction_axes = resolveReductionAxesForInputRank(stage.arg_minmax->reduction_axes, stage_input_dims[0].size());
 
             return StampedEquation::computeReductionOutputDims(stage_input_dims[0], reduction_axes, stage.arg_minmax->squeeze_axes);
+        }
+
+        case CompiledExecutionStage::Kind::Softmax: {
+            if (stage_input_dims.empty()) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput softmax stage expected one input shape.");
+            }
+            return stage_input_dims[0];
         }
 
         case CompiledExecutionStage::Kind::ReduceMinMaxBackward: {
@@ -3083,6 +3101,14 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
 
             value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
                 stage_input_dims[0], stage.arg_minmax->reduction_axes, stage.arg_minmax->squeeze_axes);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Softmax) {
+            if (!stage.softmax) {
+                throw std::runtime_error("Missing compiled softmax stage.");
+            }
+            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Softmax stage expected exactly one input and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
         } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");
@@ -3964,6 +3990,46 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
     return make_shared<StampedArgMinMax>(std::move(built), adaptedInput, output, reductionValueOutput, stream, workspace);
 }
 
+std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_ptr<CompiledSoftmax>& compiledStage,
+                                                            Tensor& input,
+                                                            const Optional<Tensor>& preallocatedOutput,
+                                                            const Stream& stream,
+                                                            const std::vector<uint64_t>& requested_output_shape) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampSoftmax requires non-null compiled stage.");
+    }
+
+    Tensor adaptedInput = adaptReductionInputDTypeIfNeeded(input, compiledStage->input_dtype, ExprOp::SOFTMAX, stream);
+
+    const std::vector<uint64_t> resolved_output_dimensions = adaptedInput.getDimensions();
+    std::vector<uint64_t> output_dimensions = resolved_output_dimensions;
+    if (!requested_output_shape.empty()) {
+        verifyRequestedOutputLayout(requested_output_shape, resolved_output_dimensions);
+        output_dimensions = requested_output_shape;
+    }
+
+    Tensor output;
+    if (preallocatedOutput.isPresent()) {
+        output = preallocatedOutput.get();
+        if (output.getPlacement() != adaptedInput.getPlacement()) {
+            throw std::runtime_error("Preallocated softmax output tensor placement does not match the softmax input placement.");
+        }
+        if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
+            throw std::runtime_error("Preallocated softmax output tensor dtype does not match the compiled softmax output dtype.");
+        }
+        verifyRequestedOutputLayout(output.getDimensions(), resolved_output_dimensions);
+        if (!requested_output_shape.empty() && output.getDimensions() != output_dimensions) {
+            throw std::runtime_error("Preallocated softmax output tensor shape does not match the requested output shape.");
+        }
+    } else {
+        TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dimensions);
+        output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
+    }
+
+    std::shared_ptr<BuiltSoftmax> built = StampedEquation::buildSoftmax(compiledStage, adaptedInput, output, stream.getGpuNum());
+    return make_shared<StampedSoftmax>(compiledStage, std::move(built), adaptedInput, output, stream);
+}
+
 std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::shared_ptr<CompiledConvolution>& compiledStage,
                                                                     Tensor& input,
                                                                     Tensor& filter,
@@ -4587,6 +4653,41 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedArgMinMax, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
+            case CompiledExecutionStage::Kind::Softmax: {
+                if (!stage.softmax) {
+                    throw std::runtime_error("Softmax stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 1) {
+                    throw std::runtime_error("Softmax stage expects exactly one input.");
+                }
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Softmax stage expects exactly one output.");
+                }
+
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto requested_it = effectiveRequestedOutputShapes.find(stageOutput.name);
+                if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                    verifyRequestedOutputLayout(requested_it->second, output_dims);
+                    output_dims = requested_it->second;
+                }
+
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Optional<Tensor> preallocated = Optional<Tensor>::empty();
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    preallocated = preallocated_it->second;
+                }
+
+                std::shared_ptr<StampedSoftmax> stampedSoftmax =
+                    stampSoftmax(stage.softmax, inputTensor, preallocated, stream, output_dims);
+                Tensor outputTensor = stampedSoftmax->getOutputTensor();
+
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedSoftmax, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
             case CompiledExecutionStage::Kind::Matmul: {
                 if (!stage.matmul) {
                     throw std::runtime_error("Matmul/gemm stage missing compiled payload.");
@@ -5065,6 +5166,14 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             }
             value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
                 stage_input_dims[0], stage.arg_minmax->reduction_axes, stage.arg_minmax->squeeze_axes);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Softmax) {
+            if (!stage.softmax) {
+                throw std::runtime_error("Missing compiled softmax stage.");
+            }
+            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Softmax stage expected exactly one input and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
         } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");

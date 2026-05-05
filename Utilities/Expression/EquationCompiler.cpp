@@ -417,10 +417,12 @@ static bool isConvolutionForwardOp(ExprOp op) { return op == ExprOp::CONV2D; }
 static bool isConvolutionBackwardOp(ExprOp op) { return op == ExprOp::CONV2D_BACKWARD_DATA || op == ExprOp::CONV2D_BACKWARD_FILTER; }
 static bool isConvolutionOp(ExprOp op) { return isConvolutionForwardOp(op) || isConvolutionBackwardOp(op); }
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
+static bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
-    return isCudnnReduceOp(op) || isMatmulOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isTransposeOp(op);
+    return isCudnnReduceOp(op) || isSoftmaxOp(op) || isMatmulOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) ||
+           isTransposeOp(op);
 }
 
 static uint32_t peelExplicitTransposeChain(const PhysicalExpression& expr, uint32_t node_idx, bool& transpose_toggled) {
@@ -554,6 +556,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "TANH";
         case ExprOp::NORMCDF:
             return "NORMCDF";
+        case ExprOp::SOFTMAX:
+            return "SOFTMAX";
         case ExprOp::FILL:
             return "FILL";
         case ExprOp::UNSQUEEZE:
@@ -709,6 +713,10 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",axes=" + uintVecSignature(node.reduction_axes) +
                 ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
+        } else if (isSoftmaxOp(node.op)) {
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs +
+                ",algorithm=" + std::to_string(static_cast<int>(node.softmax_algorithm)) +
+                ",mode=" + std::to_string(static_cast<int>(node.softmax_mode)) + ")";
         } else if (isMatmulOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
 
@@ -1102,6 +1110,40 @@ shared_ptr<CompiledArgMinMax> EquationCompiler::compileArgMinMax(const PhysicalE
 
     return make_shared<CompiledArgMinMax>(
         node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.get(), node.compute_dtype);
+}
+
+shared_ptr<CompiledSoftmax> EquationCompiler::compileSoftmax(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 1) {
+        throw std::runtime_error("Softmax stage must have exactly one input.");
+    }
+
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("Softmax stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isSoftmaxOp(node.op)) {
+        throw std::runtime_error("Softmax stage output node is not SOFTMAX.");
+    }
+
+    if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
+        throw std::runtime_error("Softmax node is missing its input.");
+    }
+
+    const ExprNode& input_node = expr.nodes[node.lhs];
+    if (input_node.op != ExprOp::INPUT) {
+        throw std::runtime_error("Softmax stage input must be a local INPUT node.");
+    }
+
+    if (!input_node.input_tensor_dtype.isPresent()) {
+        throw std::runtime_error("Softmax input node missing resolved input_tensor_dtype.");
+    }
+    if (!node.output_dtype.isPresent()) {
+        throw std::runtime_error("Softmax node missing resolved output_dtype.");
+    }
+
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.get());
+    return make_shared<CompiledSoftmax>(node.softmax_algorithm, node.softmax_mode, supported_input_dtype, node.output_dtype.get());
 }
 
 shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpression& expr) {
@@ -1732,6 +1774,81 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
 
     return PhysicalExecutionStage{
         .kind = isArgMinMaxOp(node.op) ? PhysicalExecutionStage::Kind::ArgMinMax : PhysicalExecutionStage::Kind::Reduction,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = std::move(stage_outputs),
+    };
+}
+
+static PhysicalExecutionStage buildSoftmaxStage(const PhysicalExpression& expr,
+                                                uint32_t node_idx,
+                                                uint32_t output_value_id,
+                                                const std::string& output_name,
+                                                const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isSoftmaxOp(node.op)) {
+        throw std::runtime_error("buildSoftmaxStage called on non-softmax node.");
+    }
+
+    if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
+        throw std::runtime_error("Softmax node missing lhs input.");
+    }
+
+    PhysicalExpression stage_expr;
+    stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
+
+    ExprNode softmax = node;
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(1);
+    Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+
+    const uint32_t parent_idx = softmax.lhs;
+    const ExprNode& parent = expr.nodes[parent_idx];
+    auto out_it = node_output_value_id.find(parent_idx);
+    if (out_it != node_output_value_id.end()) {
+        input_value_ids.push_back(out_it->second);
+        actual_input_dtype = parent.output_dtype;
+    } else if (parent.op == ExprOp::INPUT) {
+        input_value_ids.push_back(parent.input_slot);
+        actual_input_dtype = parent.input_tensor_dtype;
+    } else {
+        throw std::runtime_error("Missing value id for softmax input.");
+    }
+
+    if (!parent.output_dtype.isPresent()) {
+        throw std::runtime_error("Softmax parent node is missing resolved output_dtype.");
+    }
+    if (!actual_input_dtype.isPresent()) {
+        throw std::runtime_error("Softmax parent node is missing resolved actual input dtype.");
+    }
+
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, actual_input_dtype.get());
+
+    ExprNode input_node;
+    input_node.op = ExprOp::INPUT;
+    input_node.input_slot = 0;
+    input_node.input_tensor_dtype = supported_input_dtype;
+    input_node.output_dtype = supported_input_dtype;
+    input_node.compute_dtype = defaultComputeDType(supported_input_dtype);
+    input_node.backward_output_dtype = supported_input_dtype;
+    input_node.backward_compute_dtype = defaultComputeDType(supported_input_dtype);
+
+    stage_expr.nodes.push_back(std::move(input_node));
+
+    softmax.lhs = 0;
+    softmax.rhs = UINT32_MAX;
+    stage_expr.nodes.push_back(std::move(softmax));
+    stage_expr.output_node = 1;
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{
+        .name = output_name,
+        .local_node_idx = 1,
+        .value_id = output_value_id,
+    });
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::Softmax,
         .expr = std::move(stage_expr),
         .input_value_ids = std::move(input_value_ids),
         .outputs = std::move(stage_outputs),
@@ -2444,6 +2561,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             node_output_value_id[root_idx] = stage_out_id;
             if (isReduceMinMaxBackwardOp(root.op)) {
                 planned.stages.push_back(buildReduceMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isSoftmaxOp(root.op)) {
+                planned.stages.push_back(buildSoftmaxStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isMatmulOp(root.op)) {
                 planned.stages.push_back(buildMatmulStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isConvolutionBackwardOp(root.op)) {
@@ -2626,6 +2745,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (isReduceMinMaxBackwardOp(root.op)) {
                 planned.stages.push_back(
                     buildReduceMinMaxBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isSoftmaxOp(root.op)) {
+                planned.stages.push_back(
+                    buildSoftmaxStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isMatmulOp(root.op)) {
                 planned.stages.push_back(
                     buildMatmulStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -2761,6 +2883,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::ArgMinMax: {
                 std::shared_ptr<CompiledArgMinMax> arg_minmax = compileArgMinMax(stage.expr);
                 compiled->stages.emplace_back(arg_minmax, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::Softmax: {
+                std::shared_ptr<CompiledSoftmax> softmax = compileSoftmax(stage.expr);
+                compiled->stages.emplace_back(softmax, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::Matmul: {

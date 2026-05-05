@@ -43,6 +43,7 @@ enum class ExprOp : uint16_t {
     SQRT,
     TANH,
     NORMCDF,
+    SOFTMAX,
     FILL,
     UNSQUEEZE,
     SQUEEZE,
@@ -76,6 +77,8 @@ inline bool isCudnnReduceOp(ExprOp op) {
            op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX || op == ExprOp::REDUCE_AVG || op == ExprOp::REDUCE_NORM1 ||
            op == ExprOp::REDUCE_NORM2;
 }
+
+inline bool isCudnnSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
 
 inline cudnnReduceTensorOp_t toCudnnReduceOp(ExprOp op) {
     switch (op) {
@@ -118,6 +121,8 @@ struct ExprNode {
     int32_t conv_stride_w = 1;
     int32_t conv_pad_h = 0;
     int32_t conv_pad_w = 0;
+    cudnnSoftmaxAlgorithm_t softmax_algorithm = CUDNN_SOFTMAX_ACCURATE;
+    cudnnSoftmaxMode_t softmax_mode = CUDNN_SOFTMAX_MODE_CHANNEL;
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     Optional<TensorDescriptor::DataType> input_tensor_dtype = Optional<TensorDescriptor::DataType>::empty();
@@ -291,6 +296,9 @@ class Expression {
     [[nodiscard]] Expression selu() const;
     [[nodiscard]] Expression gelu() const;
     [[nodiscard]] Expression swish() const;
+    [[nodiscard]] Expression softmax(cudnnSoftmaxAlgorithm_t algorithm = CUDNN_SOFTMAX_ACCURATE,
+                                     cudnnSoftmaxMode_t mode = CUDNN_SOFTMAX_MODE_CHANNEL) const;
+    [[nodiscard]] Expression logSoftmax(cudnnSoftmaxMode_t mode = CUDNN_SOFTMAX_MODE_CHANNEL) const;
 
     [[nodiscard]] static Expression matmul(
         const Expression& lhs,

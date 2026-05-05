@@ -208,6 +208,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::SOFTMAX:
             case ExprOp::TRANSPOSE:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
@@ -676,6 +677,15 @@ class BackwardGraphBuilder {
         node.reduction_axes = reduction_axes;
         node.squeeze_axes = squeeze_axes;
         node.compute_dtype = compute_dtype;
+        return push(std::move(node));
+    }
+
+    uint32_t softmax(uint32_t lhs, cudnnSoftmaxAlgorithm_t algorithm, cudnnSoftmaxMode_t mode) {
+        ExprNode node{};
+        node.op = ExprOp::SOFTMAX;
+        node.lhs = lhs;
+        node.softmax_algorithm = algorithm;
+        node.softmax_mode = mode;
         return push(std::move(node));
     }
 
@@ -1237,6 +1247,7 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::SOFTMAX:
                 node_dims[i] = node_dims[node.lhs];
                 break;
             case ExprOp::TRANSPOSE:
@@ -1807,6 +1818,40 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     const uint32_t inv_sqrt_two_pi = builder.scalar(0.3989422804014327);
                     const uint32_t pdf = builder.mul(inv_sqrt_two_pi, builder.exp(builder.mul(neg_half, builder.mul(lhs, lhs))));
                     addContributionToChild(node.lhs, builder.mul(grad, pdf), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::SOFTMAX: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const std::vector<uint64_t>& lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
+
+                    if (lhs_dims.size() < 2) {
+                        throw std::runtime_error("Autodiff for cuDNN softmax currently expects rank >= 2 tensors.");
+                    }
+
+                    std::vector<uint64_t> axes;
+                    if (node.softmax_mode == CUDNN_SOFTMAX_MODE_CHANNEL) {
+                        axes = {1};
+                    } else if (node.softmax_mode == CUDNN_SOFTMAX_MODE_INSTANCE) {
+                        for (uint64_t axis = 1; axis < lhs_dims.size(); ++axis) {
+                            axes.push_back(axis);
+                        }
+                    } else {
+                        throw std::runtime_error("Autodiff for cuDNN softmax received unsupported mode.");
+                    }
+
+                    if (node.softmax_algorithm == CUDNN_SOFTMAX_LOG) {
+                        const uint32_t lhs = builder.cloneForward(node.lhs);
+                        const uint32_t ordinary_softmax = builder.softmax(lhs, CUDNN_SOFTMAX_ACCURATE, node.softmax_mode);
+                        const uint32_t sum_grad = builder.reduction(ExprOp::REDUCE_SUM, grad, axes, {});
+                        const uint32_t correction = builder.mul(ordinary_softmax, sum_grad);
+                        addContributionToChild(node.lhs, builder.sub(grad, correction), node_dims);
+                    } else {
+                        const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                        const uint32_t sum_grad_times_out = builder.reduction(ExprOp::REDUCE_SUM, builder.mul(grad, out), axes, {});
+                        addContributionToChild(node.lhs, builder.mul(out, builder.sub(grad, sum_grad_times_out)), node_dims);
+                    }
                 }
                 break;
             }

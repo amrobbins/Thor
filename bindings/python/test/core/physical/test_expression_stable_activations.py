@@ -299,7 +299,8 @@ def test_stable_elu_and_selu_do_not_evaluate_positive_exp_branch():
         ("tanh", lambda x: ex.tanh(x), np.tanh, [-6.0, -3.0, -2.0, -1.0, -0.25, 0.0, 0.25, 1.0, 2.0, 6.0]),
     ],
 )
-def test_special_function_expression_ops_match_numpy_for_low_precision_storage_dtypes(dtype, rtol, atol, name, expr_builder, np_builder, values):
+def test_special_function_expression_ops_match_numpy_for_low_precision_storage_dtypes(
+        dtype, rtol, atol, name, expr_builder, np_builder, values):
     del name
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -315,3 +316,58 @@ def test_special_function_expression_ops_match_numpy_for_low_precision_storage_d
     assert got.shape == expected.shape
     assert np.isfinite(got.astype(np.float32)).all()
     np.testing.assert_allclose(got, expected, rtol=rtol, atol=atol)
+
+
+def _softmax_np(x: np.ndarray, axis: int = 1) -> np.ndarray:
+    shifted = x - np.max(x, axis=axis, keepdims=True)
+    exp_shifted = np.exp(shifted)
+    return exp_shifted / np.sum(exp_shifted, axis=axis, keepdims=True)
+
+
+def _log_softmax_np(x: np.ndarray, axis: int = 1) -> np.ndarray:
+    shifted = x - np.max(x, axis=axis, keepdims=True)
+    return shifted - np.log(np.sum(np.exp(shifted), axis=axis, keepdims=True))
+
+
+@pytest.mark.cuda
+def test_cudnn_softmax_expression_matches_stable_numpy_for_extreme_fp32_inputs():
+    dtype = thor.DataType.fp32
+    x_np = np.array(
+        [
+            [1000.0, 999.0, 998.0, -1000.0],
+            [-1000.0, -999.0, -998.0, 1000.0],
+            [0.0, 1.0, -1.0, 2.0],
+        ],
+        dtype=np.float32,
+    )
+
+    x = ex.input("x")
+    got = _run_expr(ex.softmax(x), {
+        "x": (x_np, dtype)
+    })
+    expected = _softmax_np(x_np).astype(np.float32)
+
+    assert np.isfinite(got).all()
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.cuda
+def test_cudnn_log_softmax_expression_matches_stable_numpy_for_extreme_fp32_inputs():
+    dtype = thor.DataType.fp32
+    x_np = np.array(
+        [
+            [1000.0, 999.0, 998.0, -1000.0],
+            [-1000.0, -999.0, -998.0, 1000.0],
+            [0.0, 1.0, -1.0, 2.0],
+        ],
+        dtype=np.float32,
+    )
+
+    x = ex.input("x")
+    got = _run_expr(ex.log_softmax(x), {
+        "x": (x_np, dtype)
+    })
+    expected = _log_softmax_np(x_np).astype(np.float32)
+
+    assert np.isfinite(got).all()
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)

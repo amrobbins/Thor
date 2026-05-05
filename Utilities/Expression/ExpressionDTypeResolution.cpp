@@ -22,6 +22,7 @@ bool isSupportedFusionFloatingType(DataType dtype) {
 bool isFp8Type(DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2; }
 
 static bool isReductionComputeOp(ExprOp op) { return isCudnnReduceOp(op); }
+static bool isCudnnSingleInputStageOp(ExprOp op) { return isCudnnReduceOp(op) || isCudnnSoftmaxOp(op); }
 
 DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
     if (!isSupportedFusionFloatingType(requested_compute_dtype)) {
@@ -82,7 +83,7 @@ DataType toSupportedInputDType(ExprOp op, DataType dtype) {
         throw std::runtime_error("Unsupported dtype in toSupportedInputDType.");
     }
 
-    if (isReductionComputeOp(op)) {
+    if (isCudnnSingleInputStageOp(op)) {
         switch (dtype) {
             case DataType::FP16:
             case DataType::FP32:
@@ -92,7 +93,8 @@ DataType toSupportedInputDType(ExprOp op, DataType dtype) {
             case DataType::BF16:
                 return DataType::FP16;
             default:
-                throw std::runtime_error("Unhandled reduction dtype conversion, from: " + TensorDescriptor::getElementTypeName(dtype));
+                throw std::runtime_error("Unhandled cuDNN single-input stage dtype conversion, from: " +
+                                         TensorDescriptor::getElementTypeName(dtype));
         }
     } else {
         return dtype;
