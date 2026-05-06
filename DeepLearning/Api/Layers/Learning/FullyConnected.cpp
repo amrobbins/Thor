@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <limits>
-#include <unordered_map>
 
 using namespace std;
 using json = nlohmann::json;
@@ -11,97 +10,9 @@ namespace Thor {
 
 namespace {
 
-uint32_t cloneExpressionSubtreeWithSubstitution(const ThorImplementation::PhysicalExpression& src,
-                                                uint32_t srcNodeIndex,
-                                                const std::string& substituteInputName,
-                                                uint32_t substituteNodeIndex,
-                                                ThorImplementation::PhysicalExpression& dst,
-                                                std::unordered_map<uint32_t, uint32_t>& oldToNew) {
-    using ThorImplementation::ExprNode;
-    using ThorImplementation::ExprOp;
-    using ThorImplementation::Expression;
-
-    auto it = oldToNew.find(srcNodeIndex);
-    if (it != oldToNew.end()) {
-        return it->second;
-    }
-    if (srcNodeIndex >= src.nodes.size()) {
-        throw std::runtime_error("Epilogue expression node index is out of range.");
-    }
-
-    const ExprNode& srcNode = src.nodes[srcNodeIndex];
-    if (srcNode.op == ExprOp::INPUT) {
-        if (srcNode.input_slot >= src.inputs.size()) {
-            throw std::runtime_error("Epilogue expression input slot is out of range.");
-        }
-        const ThorImplementation::NamedInput& input = src.inputs[srcNode.input_slot];
-        if (input.name != substituteInputName) {
-            throw std::runtime_error("FullyConnected epilogue expression contains unsupported input '" + input.name + "'.");
-        }
-        oldToNew[srcNodeIndex] = substituteNodeIndex;
-        return substituteNodeIndex;
-    }
-    if (srcNode.op == ExprOp::RUNTIME_SCALAR || srcNode.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
-        throw std::runtime_error("FullyConnected epilogue expression cannot contain runtime scalar inputs.");
-    }
-
-    ExprNode newNode = srcNode;
-    if (Expression::isUnaryOp(srcNode.op)) {
-        newNode.lhs = cloneExpressionSubtreeWithSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        newNode.rhs = UINT32_MAX;
-        newNode.aux = UINT32_MAX;
-    } else if (Expression::isBinaryOp(srcNode.op)) {
-        newNode.lhs = cloneExpressionSubtreeWithSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        newNode.rhs = cloneExpressionSubtreeWithSubstitution(src, srcNode.rhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        newNode.aux = UINT32_MAX;
-    } else if (Expression::isTernaryOp(srcNode.op)) {
-        newNode.lhs = cloneExpressionSubtreeWithSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        newNode.rhs = cloneExpressionSubtreeWithSubstitution(src, srcNode.rhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        newNode.aux = cloneExpressionSubtreeWithSubstitution(src, srcNode.aux, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        if (srcNode.alpha_node != UINT32_MAX) {
-            newNode.alpha_node = cloneExpressionSubtreeWithSubstitution(
-                src, srcNode.alpha_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        }
-        if (srcNode.beta_node != UINT32_MAX) {
-            newNode.beta_node = cloneExpressionSubtreeWithSubstitution(
-                src, srcNode.beta_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
-        }
-    } else if (Expression::isLeafOp(srcNode.op)) {
-        // constants/fill nodes have no children and can be copied directly.
-    } else {
-        throw std::runtime_error("Unsupported op while applying FullyConnected epilogue expression: " +
-                                 std::to_string(static_cast<int>(srcNode.op)));
-    }
-
-    const uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
-    dst.nodes.push_back(std::move(newNode));
-    oldToNew[srcNodeIndex] = newIndex;
-    return newIndex;
-}
-
 ThorImplementation::Expression applyFullyConnectedEpilogue(const ThorImplementation::Expression& input,
-                                                           const ThorImplementation::ExpressionDefinition& epilogue) {
-    FullyConnected::validateEpilogueDefinition(epilogue);
-
-    ThorImplementation::PhysicalExpression inputPhysical = input.expression();
-    if (inputPhysical.output_node >= inputPhysical.nodes.size()) {
-        throw std::runtime_error("FullyConnected epilogue input expression has an invalid output node.");
-    }
-
-    auto composed = std::make_shared<ThorImplementation::PhysicalExpression>();
-    composed->inputs = inputPhysical.inputs;
-    composed->nodes = inputPhysical.nodes;
-
-    const uint32_t epilogueRoot = epilogue.outputs.outputs.front().node_idx;
-    std::unordered_map<uint32_t, uint32_t> oldToNew;
-    const uint32_t composedRoot = cloneExpressionSubtreeWithSubstitution(*epilogue.outputs.expr,
-                                                                         epilogueRoot,
-                                                                         FullyConnected::epilogueInputName(),
-                                                                         inputPhysical.output_node,
-                                                                         *composed,
-                                                                         oldToNew);
-    composed->output_node = composedRoot;
-    return ThorImplementation::Expression::fromPhysicalNode(std::move(composed), composedRoot);
+                                                           const ThorImplementation::Expression& epilogue) {
+    return epilogue.substituteInput(FullyConnected::epilogueInputName(), input);
 }
 
 ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias,
@@ -110,7 +21,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                                                                     Tensor::DataType computeDataType,
                                                                     Tensor::DataType outputDataType,
                                                                     std::shared_ptr<Thor::Activation> activation,
-                                                                    Optional<ThorImplementation::ExpressionDefinition> epilogue) {
+                                                                    Optional<ThorImplementation::Expression> epilogue) {
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
     using ThorImplementation::Expression;
@@ -145,7 +56,8 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
 
             std::vector<uint64_t> featureInputDimensions = featureInputTensor.getDimensions();
             if (featureInputDimensions.size() < 2) {
-                throw std::runtime_error("FullyConnected dynamic expression requires a feature input tensor with batch plus at least one feature dimension.");
+                throw std::runtime_error(
+                    "FullyConnected dynamic expression requires a feature input tensor with batch plus at least one feature dimension.");
             }
             if (featureInputTensor.getPlacement() != placement) {
                 throw std::runtime_error("FullyConnected feature input placement does not match the layer placement.");
@@ -290,7 +202,9 @@ json FullyConnected::architectureJson() const {
     j["compute_data_type"] = computeDataType;
     j["output_data_type"] = outputDataType;
     if (epilogue.isPresent()) {
-        j["epilogue"] = epilogue.get().architectureJson();
+        if (serializableEpilogue.isEmpty())
+            serializableEpilogue = makeEpilogueDefinition(epilogue.get());
+        j["epilogue"] = serializableEpilogue.get().architectureJson();
     }
 
     // Input connections

@@ -26,7 +26,6 @@
 #include <assert.h>
 
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -39,11 +38,9 @@ namespace Thor {
 
 class FullyConnected : public TrainableLayer {
    public:
-    using ExpressionTransform = std::function<ThorImplementation::Expression(const ThorImplementation::Expression &)>;
-
     class Builder;
 
-    FullyConnected() {}
+    FullyConnected(const Optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
 
     virtual ~FullyConnected() = default;
 
@@ -61,17 +58,22 @@ class FullyConnected : public TrainableLayer {
     static const char *epilogueInputName() { return "__fully_connected_epilogue_input"; }
     static const char *epilogueOutputName() { return "__fully_connected_epilogue_output"; }
 
-    static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(const ExpressionTransform &transform) {
-        if (!transform) {
-            throw std::invalid_argument("FullyConnected epilogue transform must be callable.");
-        }
-        ThorImplementation::Expression input = ThorImplementation::Expression::input(epilogueInputName());
-        ThorImplementation::Expression output = transform(input);
+    [[nodiscard]] static ThorImplementation::Expression epilogueInput(
+        Optional<ThorImplementation::TensorDescriptor::DataType> computeDType =
+            Optional<ThorImplementation::TensorDescriptor::DataType>::empty(),
+        Optional<ThorImplementation::TensorDescriptor::DataType> outputDType =
+            Optional<ThorImplementation::TensorDescriptor::DataType>::empty()) {
+        return ThorImplementation::Expression::input(epilogueInputName(), computeDType, outputDType);
+    }
+
+    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(const ThorImplementation::Expression &expression) {
         ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
-            ThorImplementation::Expression::outputs({{epilogueOutputName(), output}}));
+            ThorImplementation::Expression::outputs({{epilogueOutputName(), expression}}));
         validateEpilogueDefinition(definition);
         return definition;
     }
+
+    static void validateEpilogueExpression(const ThorImplementation::Expression &expression) { (void)makeEpilogueDefinition(expression); }
 
     static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition &definition) {
         definition.validate();
@@ -181,7 +183,8 @@ class FullyConnected : public TrainableLayer {
     std::shared_ptr<Optimizer> weightsOptimizer;
     std::shared_ptr<Optimizer> biasesOptimizer;
 
-    Optional<ThorImplementation::ExpressionDefinition> epilogue;
+    const Optional<ThorImplementation::Expression> epilogue;
+    mutable Optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
 
     static bool isFullyConnectedFloatingDataType(Tensor::DataType dataType) {
         switch (dataType) {
@@ -348,7 +351,7 @@ class FullyConnected::Builder {
 
         verifyConfig();
 
-        FullyConnected fullyConnected;
+        FullyConnected fullyConnected(_epilogue);
 
         fullyConnected.featureInputs = _featureInputs;
         fullyConnected.numOutputFeatures = _numOutputFeatures;
@@ -366,7 +369,6 @@ class FullyConnected::Builder {
         fullyConnected.weightsOptimizer = _weightsOptimizer;
         fullyConnected.biasesOptimizer = _biasesOptimizer;
 
-        fullyConnected.epilogue = _epilogue;
         fullyConnected.initialized = true;
 
         for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i)
@@ -468,16 +470,10 @@ class FullyConnected::Builder {
         return *this;
     }
 
-    virtual FullyConnected::Builder &epilogue(ExpressionTransform transform) {
+    virtual FullyConnected::Builder &epilogue(const ThorImplementation::Expression &expression) {
         assert(this->_epilogue.isEmpty());
-        _epilogue = FullyConnected::makeEpilogueDefinition(transform);
-        return *this;
-    }
-
-    virtual FullyConnected::Builder &epilogue(ThorImplementation::ExpressionDefinition definition) {
-        assert(this->_epilogue.isEmpty());
-        FullyConnected::validateEpilogueDefinition(definition);
-        _epilogue = std::move(definition);
+        FullyConnected::validateEpilogueExpression(expression);
+        _epilogue = expression;
         return *this;
     }
 
@@ -520,7 +516,7 @@ class FullyConnected::Builder {
             throw std::invalid_argument("FullyConnected activation must be non-null unless noActivation() was requested.");
         }
         if (_epilogue.isPresent()) {
-            FullyConnected::validateEpilogueDefinition(_epilogue.get());
+            FullyConnected::validateEpilogueExpression(_epilogue.get());
         }
 
         const Tensor::DataType inputDataType = _featureInputs.front().getDataType();
@@ -565,8 +561,9 @@ class FullyConnected::Builder {
     std::shared_ptr<Optimizer> _biasesOptimizer;
     bool _activationExplicitlyRemoved;
 
-    // FIXME: Future optimization, automatically fuse adjacent epilogue expressions from adjacent layers.
-    Optional<ThorImplementation::ExpressionDefinition> _epilogue;
+    // FIXME: Future optimization, automatically fuse adjacent expressions from adjacent layers.
+    //        For now epilogue gives access to post layer fusion, if that optimization goes in, it can remain as a convenience feature.
+    Optional<ThorImplementation::Expression> _epilogue;
 };
 
 }  // namespace Thor

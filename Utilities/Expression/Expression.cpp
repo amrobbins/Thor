@@ -1228,6 +1228,81 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
     return newIndex;
 }
 
+uint32_t cloneSubtreeWithInputSubstitution(const PhysicalExpression& src,
+                                           uint32_t srcNodeIndex,
+                                           const std::string& substituteInputName,
+                                           uint32_t substituteNodeIndex,
+                                           PhysicalExpression& dst,
+                                           std::unordered_map<uint32_t, uint32_t>& oldToNew) {
+    auto it = oldToNew.find(srcNodeIndex);
+    if (it != oldToNew.end()) {
+        return it->second;
+    }
+    if (srcNodeIndex >= src.nodes.size()) {
+        throw std::runtime_error("Expression substitution source node index is out of range.");
+    }
+
+    const ExprNode& srcNode = src.nodes[srcNodeIndex];
+    ExprNode newNode = srcNode;
+
+    if (srcNode.op == ExprOp::INPUT || srcNode.op == ExprOp::RUNTIME_SCALAR || srcNode.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+        if (srcNode.input_slot >= src.inputs.size()) {
+            throw std::runtime_error("Expression substitution input slot is out of range.");
+        }
+
+        const NamedInput& input = src.inputs[srcNode.input_slot];
+        if (input.name == substituteInputName) {
+            oldToNew[srcNodeIndex] = substituteNodeIndex;
+            return substituteNodeIndex;
+        }
+
+        const uint32_t dstSlot = dst.getOrCreateInputSlot(input.name, input.kind);
+        newNode.input_slot = dstSlot;
+        newNode.lhs = UINT32_MAX;
+        newNode.rhs = UINT32_MAX;
+        newNode.aux = UINT32_MAX;
+    } else if (Expression::isUnaryOp(srcNode.op)) {
+        if (srcNode.lhs == UINT32_MAX) {
+            throw std::runtime_error("Malformed expression: missing lhs for unary op while substituting input.");
+        }
+        newNode.lhs = cloneSubtreeWithInputSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        newNode.rhs = UINT32_MAX;
+        newNode.aux = UINT32_MAX;
+    } else if (Expression::isBinaryOp(srcNode.op)) {
+        if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX) {
+            throw std::runtime_error("Malformed expression: missing child for binary op while substituting input.");
+        }
+        newNode.lhs = cloneSubtreeWithInputSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        newNode.rhs = cloneSubtreeWithInputSubstitution(src, srcNode.rhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        newNode.aux = UINT32_MAX;
+    } else if (Expression::isTernaryOp(srcNode.op)) {
+        if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX || srcNode.aux == UINT32_MAX) {
+            throw std::runtime_error("Malformed expression: missing child for ternary op while substituting input.");
+        }
+        newNode.lhs = cloneSubtreeWithInputSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        newNode.rhs = cloneSubtreeWithInputSubstitution(src, srcNode.rhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        newNode.aux = cloneSubtreeWithInputSubstitution(src, srcNode.aux, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        if (srcNode.alpha_node != UINT32_MAX) {
+            newNode.alpha_node =
+                cloneSubtreeWithInputSubstitution(src, srcNode.alpha_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        }
+        if (srcNode.beta_node != UINT32_MAX) {
+            newNode.beta_node =
+                cloneSubtreeWithInputSubstitution(src, srcNode.beta_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        }
+    } else if (Expression::isLeafOp(srcNode.op)) {
+        // constants/fill nodes have no children and can be copied directly.
+    } else {
+        throw std::runtime_error("Unsupported op while substituting expression input: " +
+                                 std::to_string(static_cast<int>(srcNode.op)));
+    }
+
+    const uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
+    dst.nodes.push_back(std::move(newNode));
+    oldToNew[srcNodeIndex] = newIndex;
+    return newIndex;
+}
+
 }  // namespace
 
 Expression Expression::input(const std::string& name, Optional<DataType> compute_dtype, Optional<DataType> output_dtype) {
@@ -1317,6 +1392,33 @@ PhysicalExpression Expression::expression() const {
     PhysicalExpression out = *expr;
     out.output_node = nodeIndex;
     return out;
+}
+
+Expression Expression::substituteInput(const std::string& input_name, const Expression& replacement) const {
+    if (input_name.empty()) {
+        throw std::invalid_argument("Expression::substituteInput requires a non-empty input name.");
+    }
+    if (!expr) {
+        throw std::runtime_error("Expression::substituteInput called on an expression with no underlying graph.");
+    }
+    if (!replacement.expr) {
+        throw std::runtime_error("Expression::substituteInput replacement has no underlying graph.");
+    }
+    if (replacement.nodeIndex >= replacement.expr->nodes.size()) {
+        throw std::runtime_error("Expression::substituteInput replacement node index is out of range.");
+    }
+    if (nodeIndex >= expr->nodes.size()) {
+        throw std::runtime_error("Expression::substituteInput source node index is out of range.");
+    }
+
+    auto composed = std::make_shared<PhysicalExpression>(*replacement.expr);
+    composed->output_node = replacement.nodeIndex;
+
+    std::unordered_map<uint32_t, uint32_t> oldToNew;
+    const uint32_t composedRoot =
+        cloneSubtreeWithInputSubstitution(*expr, nodeIndex, input_name, replacement.nodeIndex, *composed, oldToNew);
+    composed->output_node = composedRoot;
+    return Expression(std::move(composed), composedRoot);
 }
 
 struct MergeInputsResult {

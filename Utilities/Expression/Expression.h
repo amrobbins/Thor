@@ -403,6 +403,8 @@ class Expression {
     [[nodiscard]] Expression withComputeDType(TensorDescriptor::DataType compute_dtype) const;
     [[nodiscard]] Expression withOutputDType(TensorDescriptor::DataType output_dtype) const;
 
+    [[nodiscard]] Expression substituteInput(const std::string& input_name, const Expression& replacement) const;
+
     [[nodiscard]] static bool isLeafOp(ExprOp op);
     [[nodiscard]] static bool isUnaryOp(ExprOp op);
     [[nodiscard]] static bool isBinaryOp(ExprOp op);
