@@ -47,8 +47,8 @@ def _preload_cuda_user_space_libs() -> None:
         "libnvJitLink.so.13",
         "libcublas.so.13",
         "libcublasLt.so.13",
-        "libcusolver.so.13",
-        "libcusparse.so.13",
+        "libcusolver.so.12",
+        "libcusparse.so.12",
         "libnvrtc-builtins.so.13.2",
         "libcudnn.so.9",
     ]
