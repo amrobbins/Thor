@@ -1,5 +1,7 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 
+#include "DeepLearning/Implementation/Layers/CustomLayer.h"
+
 #include <cstdint>
 #include <limits>
 
@@ -173,11 +175,17 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
     assert(initialized);
     assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
+    std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>> physicalParameters;
+    for (const auto& parameter : getParameters()) {
+        assert(parameter != nullptr);
+        physicalParameters.push_back(parameter->stamp());
+    }
+
     // Note: Network notices when a layer has already been stamped and only adds a connection; it does not re-stamp the layer.
     std::shared_ptr<ThorImplementation::CustomLayer> physicalFullyConnected = std::make_shared<ThorImplementation::CustomLayer>(
         buildFullyConnectedExpression(hasBias, placement, weightsDataType, computeDataType, outputDataType, activation, epilogue),
         placement,
-        ThorImplementation::FullyConnected::defineParameters(numOutputFeatures, hasBias, weightsDataType),
+        physicalParameters,
         inferenceOnly,
         getId(),
         false);
@@ -201,6 +209,12 @@ json FullyConnected::architectureJson() const {
     j["weights_data_type"] = weightsDataType;
     j["compute_data_type"] = computeDataType;
     j["output_data_type"] = outputDataType;
+
+    if (activation != nullptr) {
+        j["activation"] = activation->architectureJson();
+    } else {
+        j["activation"] = nullptr;
+    }
     if (epilogue.isPresent()) {
         if (serializableEpilogue.isEmpty())
             serializableEpilogue = makeEpilogueDefinition(epilogue.get());
@@ -221,19 +235,12 @@ json FullyConnected::architectureJson() const {
     }
     j["outputs"] = outputs;
 
-    if (weightsInitializer != nullptr) {
-        j["weights_initializer"] = weightsInitializer->architectureJson();
+    json parameters = json::object();
+    for (const auto& parameter : getParameters()) {
+        assert(parameter != nullptr);
+        parameters[parameter->getName()] = parameter->architectureJson();
     }
-    if (biasesInitializer != nullptr) {
-        j["biases_initializer"] = biasesInitializer->architectureJson();
-    }
-
-    if (hasOptimizer()) {
-        j["weights_optimizer"] = weightsOptimizer->architectureJson();
-        if (hasBias) {
-            j["biases_optimizer"] = biasesOptimizer->architectureJson();
-        }
-    }
+    j["parameters"] = parameters;
 
     return j;
 }
@@ -272,18 +279,22 @@ json FullyConnected::serialize(thor_file::TarWriter& archiveWriter,
         archiveWriter.addArchiveFile(weightsFile, weights);
     }
 
-    if (hasOptimizer()) {
-        j["weights_optimizer"] = weightsOptimizer->serialize(archiveWriter,
-                                                             stream,
-                                                             twbLayer->getParameter("weights")->getOptimizer(),
-                                                             string("layer") + to_string(getId()),
-                                                             saveOptimizerState);
-        if (hasBias) {
-            j["biases_optimizer"] = biasesOptimizer->serialize(archiveWriter,
-                                                               stream,
-                                                               twbLayer->getParameter("biases")->getOptimizer(),
-                                                               string("layer") + to_string(getId()),
-                                                               saveOptimizerState);
+    std::shared_ptr<Optimizer> weightsOptimizerSpec = getParameterSpecification("weights")->getOptimizer();
+    if (weightsOptimizerSpec != nullptr) {
+        j["weights_optimizer"] = weightsOptimizerSpec->serialize(archiveWriter,
+                                                                 stream,
+                                                                 twbLayer->getParameter("weights")->getOptimizer(),
+                                                                 string("layer") + to_string(getId()),
+                                                                 saveOptimizerState);
+    }
+    if (hasBias) {
+        std::shared_ptr<Optimizer> biasesOptimizerSpec = getParameterSpecification("biases")->getOptimizer();
+        if (biasesOptimizerSpec != nullptr) {
+            j["biases_optimizer"] = biasesOptimizerSpec->serialize(archiveWriter,
+                                                                   stream,
+                                                                   twbLayer->getParameter("biases")->getOptimizer(),
+                                                                   string("layer") + to_string(getId()),
+                                                                   saveOptimizerState);
         }
     }
 

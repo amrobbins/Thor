@@ -121,11 +121,16 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
         // Now that all layers are constructed, connected and compiled, initialize all layers
         // (that in turn initialize their optimizers)
         for (shared_ptr<Layer> layer : allLayersInNetworkList) {
-            shared_ptr<ThorImplementation::Layer> implementationLayer = stampedNetwork.apiLayerToPhysicalLayerShared[layer->getId()];
+            auto physicalLayerIt = stampedNetwork.apiLayerToPhysicalLayerShared.find(layer->getId());
+            if (physicalLayerIt == stampedNetwork.apiLayerToPhysicalLayerShared.end() || physicalLayerIt->second == nullptr)
+                continue;
+
+            shared_ptr<ThorImplementation::Layer> implementationLayer = physicalLayerIt->second;
             shared_ptr<TrainableLayer> trainableLayer = dynamic_pointer_cast<TrainableLayer>(layer);
             if (trainableLayer != nullptr) {
                 shared_ptr<ThorImplementation::TrainableLayer> implementationTrainableLayer =
                     dynamic_pointer_cast<ThorImplementation::TrainableLayer>(implementationLayer);
+                assert(implementationTrainableLayer != nullptr);
                 vector<Event> layerEvents =
                     trainableLayer->initialize(implementationTrainableLayer, true, nullptr, Optional<Event>::empty());
                 initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));

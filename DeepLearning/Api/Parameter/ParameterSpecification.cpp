@@ -209,6 +209,10 @@ std::shared_ptr<ThorImplementation::PhysicalParameter> ParameterSpecification::s
         physicalParameter->setInitializer(initializer->stamp());
     }
 
+    if (optimizer != nullptr) {
+        physicalParameter->setOptimizer(optimizer->stamp(nullptr));
+    }
+
     if (trainable && !trainingInitiallyEnabled) {
         physicalParameter->setTrainingEnabled(false);
     }
@@ -230,6 +234,7 @@ ParameterSpecification ParameterSpecification::Builder::build() {
     assert(_initializer != nullptr);
 
     ParameterSpecification p;
+    p.initialized = true;
     p.name = _name;
     p.trainable = _trainable;
     p.initializer = _initializer->clone();
@@ -266,6 +271,7 @@ ParameterSpecification ParameterSpecification::Builder::build() {
         p.storageContextCreateStorage = _storageContextCreateStorage;
     }
 
+    p.validateReadyForUse();
     return p;
 }
 
