@@ -56,7 +56,7 @@ class Layer {
             return 0UL;
         return featureOutput.get().getTotalSizeInBytes() * batchSize;
     }
- [[nodiscard]] virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+    [[nodiscard]] virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
                                                                          ThorImplementation::TensorPlacement tensorPlacement) const {
         return getOutputTensorBytes(batchSize);
     }
@@ -136,7 +136,12 @@ class Layer {
     virtual void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) { physicalLayer->compile(); }
 
     // initialize() is called for a layer after it has been stamped, connected and then compiled.
-    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Layer> physicalLayer) { return {}; }
+    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Layer> physicalLayer) {
+        if (physicalLayer == nullptr)
+            return {};
+        physicalLayer->initialize();
+        return {};
+    }
 
     virtual void addToNetwork(Network *network);
 

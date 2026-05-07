@@ -100,7 +100,28 @@ std::vector<Event> TrainableLayer::initialize(std::shared_ptr<ThorImplementation
     (void)isFirstStamp;
     (void)sisterLayer;
     (void)sisterLayerLoadedEvent;
-    return MultiConnectionLayer::initialize(layer);
+
+    assert(layer != nullptr);
+
+    std::vector<Event> initDoneEvents = MultiConnectionLayer::initialize(layer);
+
+    for (const std::string &parameterName : layer->listParameters()) {
+        std::shared_ptr<ThorImplementation::PhysicalParameter> parameter = layer->getParameter(parameterName);
+        if (parameter == nullptr || !parameter->hasInitializer()) {
+            continue;
+        }
+
+        Optional<ThorImplementation::Tensor> storage = parameter->getStorage();
+        assert(storage.isPresent());
+
+        const ThorImplementation::TensorPlacement placement = storage.get().getPlacement();
+        const int gpuNum = placement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU ? placement.getDeviceNum() : 0;
+        Stream initStream = Stream::getNextUploadStream(gpuNum);
+        parameter->initialize(initStream);
+        initDoneEvents.push_back(initStream.putEvent(false, true));
+    }
+
+    return initDoneEvents;
 }
 
 void TrainableLayer::deserializeParameterArchitectureJson(const json &j, shared_ptr<thor_file::TarReader> &archiveReader) {

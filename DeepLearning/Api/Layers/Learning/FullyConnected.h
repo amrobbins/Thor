@@ -11,7 +11,6 @@
 #include "DeepLearning/Api/Layers/Utility/Flatten.h"
 #include "DeepLearning/Api/Layers/Utility/Reshape.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
-#include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h"
 #include "DeepLearning/Implementation/Layers/Utility/Flatten.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
@@ -89,72 +88,21 @@ class FullyConnected : public TrainableLayer {
         }
     }
 
-   protected:
-    void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) override {
-        std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
-        int gpuNum = stream.getGpuNum();
-        assert(!inputDimensions.empty());
-
-        // No matter the incoming shape, the tensor is treated as a one dimensional tensor for fully connected purposes
-        // It becomes a matrix when the batch dimension is included.
-        assert(inputDimensions.size() >= 1);
-        uint64_t numInputFeatures = 1;
-        for (uint32_t i = 0; i < inputDimensions.size(); ++i)
-            numInputFeatures *= inputDimensions[i];
-
-        if (batchSize > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
-            numInputFeatures > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
-            numOutputFeatures > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
-            throw std::invalid_argument("FullyConnected matrix dimensions exceed the int32 cuBLASLt interface limit.");
+    int getConnectionType(Tensor connectingTensor) const override {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            if (connectingTensor == featureInputs[i])
+                return static_cast<int>(i);
         }
 
-        const auto matmulDataTypes =
-            cublasLtMatmulDataTypesForFullyConnected(inputTensor.getDataType(), weightsDataType, computeDataType, outputDataType);
+        for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
+            if (connectingTensor == featureOutputs[i])
+                return static_cast<int>(i);
+        }
 
-        const int batchRows = static_cast<int>(batchSize);
-        const int inputFeatures = static_cast<int>(numInputFeatures);
-        const int outputFeatures = static_cast<int>(numOutputFeatures);
-
-        // Forward shapes: [batch, in_features] @ [in_features, out_features] -> [batch, out_features].
-        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(gpuNum,
-                                                                                               batchRows,
-                                                                                               inputFeatures,
-                                                                                               inputFeatures,
-                                                                                               outputFeatures,
-                                                                                               inputFeatures,
-                                                                                               outputFeatures,
-                                                                                               outputFeatures,
-                                                                                               false,
-                                                                                               false,
-                                                                                               matmulDataTypes);
-
-        // Backward shapes wrt input: [batch, out_features] @ transpose([in_features, out_features]) -> [batch, in_features].
-        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(gpuNum,
-                                                                                               batchRows,
-                                                                                               outputFeatures,
-                                                                                               inputFeatures,
-                                                                                               outputFeatures,
-                                                                                               outputFeatures,
-                                                                                               outputFeatures,
-                                                                                               inputFeatures,
-                                                                                               false,
-                                                                                               true,
-                                                                                               matmulDataTypes);
-
-        // Backward shapes wrt weights: transpose([batch, in_features]) @ [batch, out_features] -> [in_features, out_features].
-        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(gpuNum,
-                                                                                               batchRows,
-                                                                                               inputFeatures,
-                                                                                               batchRows,
-                                                                                               outputFeatures,
-                                                                                               inputFeatures,
-                                                                                               outputFeatures,
-                                                                                               outputFeatures,
-                                                                                               true,
-                                                                                               false,
-                                                                                               matmulDataTypes);
+        throw std::runtime_error("Tensor is not connected to this FullyConnected layer.");
     }
 
+   protected:
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
@@ -175,13 +123,6 @@ class FullyConnected : public TrainableLayer {
     Tensor::DataType weightsDataType;
     Tensor::DataType computeDataType;
     Tensor::DataType outputDataType;
-
-    // FIXME: These should not be part of Thor::FullyConnected, the builder yes, but the builder should
-    //        associate these with the parameters
-    std::shared_ptr<Initializer> weightsInitializer;
-    std::shared_ptr<Initializer> biasesInitializer;
-    std::shared_ptr<Optimizer> weightsOptimizer;
-    std::shared_ptr<Optimizer> biasesOptimizer;
 
     const Optional<ThorImplementation::Expression> epilogue;
     mutable Optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
@@ -354,25 +295,53 @@ class FullyConnected::Builder {
         FullyConnected fullyConnected(_epilogue);
 
         fullyConnected.featureInputs = _featureInputs;
-        fullyConnected.numOutputFeatures = _numOutputFeatures;
+        fullyConnected.numOutputFeatures = _numOutputFeatures.get();
 
-        fullyConnected.hasBias = _hasBias;
-        fullyConnected.weightsInitializer = _weightsInitializer->clone();
-        fullyConnected.biasesInitializer = _biasInitializer->clone();
+        fullyConnected.hasBias = _hasBias.get();
         if (_activation != nullptr)
             fullyConnected.activation = _activation;
-        fullyConnected.weightsDataType = _weightsDataType;
-        fullyConnected.computeDataType = _computeDataType;
-        fullyConnected.outputDataType = _outputDataType;
+        fullyConnected.weightsDataType = _weightsDataType.get();
+        fullyConnected.computeDataType = _computeDataType.get();
+        fullyConnected.outputDataType = _outputDataType.get();
 
-        // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
-        fullyConnected.weightsOptimizer = _weightsOptimizer;
-        fullyConnected.biasesOptimizer = _biasesOptimizer;
+        // Own parameter intent at the API layer. The stamped implementation layer is now the generic
+        // CustomLayer, so there is no implementation FullyConnected class left to define parameters.
+        std::shared_ptr<Initializer> weightsInitializer = _weightsInitializer->clone();
+        std::shared_ptr<Initializer> biasInitializer = _hasBias.get() ? _biasInitializer->clone() : nullptr;
+        const uint64_t inputFeatures = FullyConnected::checkedFeatureCount(_featureInputs.front().getDimensions(), "feature input");
+
+        ParameterSpecification::Builder weightsParameterBuilder;
+        weightsParameterBuilder.name("weights")
+            .shape({inputFeatures, fullyConnected.numOutputFeatures})
+            .dtype(fullyConnected.weightsDataType)
+            .initializer(weightsInitializer)
+            .trainable(true);
+        if (_weightsOptimizer != nullptr)
+            weightsParameterBuilder.optimizer(_weightsOptimizer);
+        fullyConnected.addParameter(std::make_shared<ParameterSpecification>(weightsParameterBuilder.build()));
+
+        if (fullyConnected.hasBias) {
+            ParameterSpecification::Builder biasesParameterBuilder;
+            biasesParameterBuilder.name("biases")
+                .shape({fullyConnected.numOutputFeatures})
+                .dtype(fullyConnected.weightsDataType)
+                .initializer(biasInitializer)
+                .trainable(true);
+            if (_biasesOptimizer != nullptr)
+                biasesParameterBuilder.optimizer(_biasesOptimizer);
+            fullyConnected.addParameter(std::make_shared<ParameterSpecification>(biasesParameterBuilder.build()));
+        }
 
         fullyConnected.initialized = true;
 
-        for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i)
-            fullyConnected.featureOutputs.push_back(Tensor(fullyConnected.outputDataType, {fullyConnected.numOutputFeatures}));
+        for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
+            Tensor out(fullyConnected.outputDataType, {fullyConnected.numOutputFeatures});
+            fullyConnected.featureOutputs.push_back(out);
+
+            fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = out;
+            fullyConnected.inputTensorFromOutputTensor[out] = fullyConnected.featureInputs[i];
+        }
+
         fullyConnected.addToNetwork(_network.get());
 
         return fullyConnected;
