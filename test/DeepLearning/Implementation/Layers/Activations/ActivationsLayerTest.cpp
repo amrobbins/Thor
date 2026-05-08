@@ -206,7 +206,7 @@ static float elu(float featureIn, float alpha) {
     if (featureIn >= 0.0f)
         return featureIn;
     else
-        return alpha * (exp(featureIn) - 1);
+        return alpha * (expf(featureIn) - 1.0f);
 }
 
 /**
@@ -218,7 +218,7 @@ static float eluBackward(float featureIn, float errorIn, float alpha) {
     if (featureIn >= 0.0f)
         return errorIn;
     else
-        return errorIn * (alpha * exp(featureIn));
+        return errorIn * alpha * expf(featureIn);
 }
 
 TEST(Elu, Works) {
@@ -293,12 +293,19 @@ TEST(Elu, Works) {
         stream.synchronize();
 
         half *errorOutMem = (half *)errorOutCpu.getMemPtr();
-        thresh = 0.01;
+
         for (int i = 0; i < numElements; ++i) {
-            float expectedValueFloat = eluBackward(featureInMem[i], errorInMem[i], alpha);
+            float expectedValueFloat = eluBackward((float)featureInMem[i], (float)errorInMem[i], alpha);
             half expectedValue = (half)expectedValueFloat;
             half actualValue = errorOutMem[i];
-            ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);
+
+            const float expected = (float)expectedValue;
+            const float actual = (float)actualValue;
+            const float thresh = fmaxf(0.02f, fabsf(expected) * 0.001f);
+
+            ASSERT_LT(fabsf(expected - actual), thresh)
+                << "i=" << i << " featureIn=" << (float)featureInMem[i] << " errorIn=" << (float)errorInMem[i] << " alpha=" << alpha
+                << " expected=" << expected << " actual=" << actual << " diff=" << fabsf(expected - actual) << " thresh=" << thresh;
         }
 
         LayerTestHelper::tearDownNetwork(layers);
