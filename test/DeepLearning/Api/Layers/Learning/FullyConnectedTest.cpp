@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Optimizers/Adam.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
@@ -229,6 +230,108 @@ vector<float> runForward(Impl::NetworkInput& physicalInput,
     Event featureOutReadyEvent = physicalOutput.getOutputReadyEvent();
     featureOutReadyEvent.synchronize();
     return readCpuTensor(physicalOutput.getFeatureOutput());
+}
+
+struct FullyConnectedAdamPassReference {
+    vector<float> featureOut;
+    vector<float> errorOut;
+
+    vector<float> weightsGrad;
+    vector<float> weightsM;
+    vector<float> weightsV;
+    vector<float> weightsAfter;
+
+    vector<float> biasesGrad;
+    vector<float> biasesM;
+    vector<float> biasesV;
+    vector<float> biasesAfter;
+};
+
+vector<FullyConnectedAdamPassReference> computeFullyConnectedAdamReferenceSequence(const vector<vector<float>>& inputValuesByPass,
+                                                                                   const vector<vector<float>>& errorInputValuesByPass,
+                                                                                   const vector<float>& initialWeightValues,
+                                                                                   const vector<float>& initialBiasValues,
+                                                                                   uint64_t batchSize,
+                                                                                   uint64_t numInputFeatures,
+                                                                                   uint64_t numOutputFeatures,
+                                                                                   bool hasBias,
+                                                                                   float lossScalingFactor,
+                                                                                   float alpha,
+                                                                                   float beta1,
+                                                                                   float beta2,
+                                                                                   float epsilon) {
+    EXPECT_EQ(inputValuesByPass.size(), errorInputValuesByPass.size());
+
+    vector<FullyConnectedAdamPassReference> refs;
+    refs.reserve(inputValuesByPass.size());
+
+    vector<float> weights = initialWeightValues;
+    vector<float> weightsM(weights.size(), 0.0f);
+    vector<float> weightsV(weights.size(), 0.0f);
+
+    vector<float> biases = initialBiasValues;
+    vector<float> biasesM(hasBias ? biases.size() : 0, 0.0f);
+    vector<float> biasesV(hasBias ? biases.size() : 0, 0.0f);
+
+    const float scale = 1.0f / (static_cast<float>(batchSize) * lossScalingFactor);
+
+    for (uint64_t pass = 0; pass < inputValuesByPass.size(); ++pass) {
+        FullyConnectedAdamPassReference ref;
+
+        ref.featureOut =
+            fullyConnectedReference(inputValuesByPass[pass], weights, biases, batchSize, numInputFeatures, numOutputFeatures, hasBias);
+
+        ref.errorOut =
+            fullyConnectedBackwardErrorReference(errorInputValuesByPass[pass], weights, batchSize, numInputFeatures, numOutputFeatures);
+
+        ref.weightsGrad = fullyConnectedWeightGradReference(
+            inputValuesByPass[pass], errorInputValuesByPass[pass], batchSize, numInputFeatures, numOutputFeatures);
+
+        const uint64_t t = pass + 1;
+        const double alphaT64 =
+            static_cast<double>(alpha) * sqrt(1.0 - pow(static_cast<double>(beta2), t)) / (1.0 - pow(static_cast<double>(beta1), t));
+        const float alphaT = static_cast<float>(alphaT64);
+
+        ref.weightsM.resize(weights.size());
+        ref.weightsV.resize(weights.size());
+        ref.weightsAfter.resize(weights.size());
+
+        for (uint64_t i = 0; i < weights.size(); ++i) {
+            const float g = ref.weightsGrad[i] * scale;
+
+            weightsM[i] = beta1 * weightsM[i] + (1.0f - beta1) * g;
+            weightsV[i] = beta2 * weightsV[i] + (1.0f - beta2) * g * g;
+            weights[i] = weights[i] - alphaT * weightsM[i] / (sqrt(weightsV[i]) + epsilon);
+
+            ref.weightsM[i] = weightsM[i];
+            ref.weightsV[i] = weightsV[i];
+            ref.weightsAfter[i] = weights[i];
+        }
+
+        if (hasBias) {
+            ref.biasesGrad = fullyConnectedBiasGradReference(errorInputValuesByPass[pass], batchSize, numOutputFeatures);
+
+            ref.biasesM.resize(biases.size());
+            ref.biasesV.resize(biases.size());
+            ref.biasesAfter.resize(biases.size());
+
+            for (uint64_t i = 0; i < biases.size(); ++i) {
+                const float g = ref.biasesGrad[i] * scale;
+
+                biasesM[i] = beta1 * biasesM[i] + (1.0f - beta1) * g;
+                biasesV[i] = beta2 * biasesV[i] + (1.0f - beta2) * g * g;
+                biases[i] = biases[i] - alphaT * biasesM[i] / (sqrt(biasesV[i]) + epsilon);
+
+                ref.biasesM[i] = biasesM[i];
+                ref.biasesV[i] = biasesV[i];
+                ref.biasesAfter[i] = biases[i];
+            }
+        }
+
+        refs.push_back(std::move(ref));
+    }
+
+    return refs;
 }
 
 }  // namespace
@@ -597,3 +700,250 @@ TEST(FullyConnectedApi, BackwardNumericalWithSgdUpdate) {
     expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 1e-5f, 1e-5f, "weights after");
     expectAllClose(readCpuTensor(biasesAfterHost), expectedBiasesAfter, 1e-5f, 1e-5f, "biases after");
 }
+
+void runFullyConnectedAdamThreePasses(bool hasBias) {
+    constexpr uint32_t batchSize = 3;
+    constexpr uint32_t numInputFeatures = 4;
+    constexpr uint32_t numOutputFeatures = 3;
+
+    constexpr float alpha = 0.001f;
+    constexpr float beta1 = 0.9f;
+    constexpr float beta2 = 0.999f;
+    constexpr float epsilon = 1e-7f;
+
+    const DataType dataType = DataType::FP32;
+
+    const vector<float> initialWeightValues = {
+        0.25f,
+        -0.50f,
+        0.75f,
+        1.00f,
+        -0.25f,
+        0.50f,
+        -0.75f,
+        0.30f,
+        -0.60f,
+        0.40f,
+        0.90f,
+        -0.20f,
+    };
+
+    const vector<float> initialBiasValues = hasBias ? vector<float>{0.10f, -0.20f, 0.30f} : vector<float>{};
+
+    const vector<vector<float>> inputValuesByPass = {
+        {
+            1.00f,
+            -2.00f,
+            0.50f,
+            0.25f,
+            3.00f,
+            -1.50f,
+            2.00f,
+            -0.75f,
+            -0.25f,
+            1.25f,
+            -3.00f,
+            0.50f,
+        },
+        {
+            -1.00f,
+            0.75f,
+            2.25f,
+            -0.50f,
+            0.50f,
+            -2.50f,
+            1.00f,
+            1.50f,
+            2.00f,
+            0.25f,
+            -1.25f,
+            -0.75f,
+        },
+        {
+            1.50f,
+            0.50f,
+            -0.25f,
+            2.00f,
+            -2.00f,
+            1.75f,
+            0.75f,
+            -1.50f,
+            0.25f,
+            -0.50f,
+            1.25f,
+            3.00f,
+        },
+    };
+
+    const vector<vector<float>> errorInputValuesByPass = {
+        {
+            0.50f,
+            -1.00f,
+            1.50f,
+            -0.25f,
+            0.75f,
+            -1.25f,
+            1.00f,
+            0.25f,
+            -0.50f,
+        },
+        {
+            -1.50f,
+            0.50f,
+            0.25f,
+            1.25f,
+            -0.75f,
+            1.00f,
+            0.50f,
+            1.50f,
+            -1.00f,
+        },
+        {
+            0.75f,
+            1.25f,
+            -0.25f,
+            -1.00f,
+            0.50f,
+            1.75f,
+            1.50f,
+            -1.25f,
+            0.25f,
+        },
+    };
+
+    shared_ptr<Api::Adam> weightsAdam = Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).build();
+    shared_ptr<Api::Adam> biasesAdam =
+        hasBias ? Api::Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).build() : nullptr;
+
+    Api::Network network(hasBias ? "fullyConnectedAdamThreePassesWithBias" : "fullyConnectedAdamThreePassesWithoutBias");
+
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({numInputFeatures}).dataType(dataType).build();
+
+    Api::GradientRivet inputRivet = Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput()).build();
+
+    Api::FullyConnected::Builder fcBuilder;
+    fcBuilder.network(network)
+        .featureInput(inputRivet.getFeatureOutput())
+        .numOutputFeatures(numOutputFeatures)
+        .hasBias(hasBias)
+        .weightsDataType(dataType)
+        .computeDataType(DataType::FP32)
+        .outputDataType(dataType)
+        .weightsOptimizer(weightsAdam)
+        .noActivation();
+
+    if (hasBias)
+        fcBuilder.biasesOptimizer(biasesAdam);
+
+    Api::FullyConnected fc = fcBuilder.build();
+
+    Api::GradientRivet outputRivet = Api::GradientRivet::Builder().network(network).tensor(fc.getFeatureOutput()).build();
+
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput())
+                                    .dataType(dataType)
+                                    .build();
+
+    PlacedFullyConnectedFixture fixture = placeSingleFullyConnectedNetwork(network, input, output, fc, batchSize, false);
+
+    ASSERT_NE(fixture.physicalFc->getParameter("weights"), nullptr);
+    ASSERT_NE(fixture.physicalFc->getParameter("weights")->getOptimizer(), nullptr);
+    ASSERT_TRUE(fixture.physicalFc->getParameter("weights")->getStorage().isPresent());
+
+    if (hasBias) {
+        ASSERT_NE(fixture.physicalFc->getParameter("biases"), nullptr);
+        ASSERT_NE(fixture.physicalFc->getParameter("biases")->getOptimizer(), nullptr);
+        ASSERT_TRUE(fixture.physicalFc->getParameter("biases")->getStorage().isPresent());
+    }
+
+    Stream stream = fixture.physicalFc->getStreams()[0];
+    setParameterTensor(fixture.physicalFc->getParameter("weights"), initialWeightValues, stream);
+    if (hasBias)
+        setParameterTensor(fixture.physicalFc->getParameter("biases"), initialBiasValues, stream);
+    stream.synchronize();
+
+    const float lossScalingFactor = Impl::Loss::getLossScalingFactor();
+    const vector<FullyConnectedAdamPassReference> references = computeFullyConnectedAdamReferenceSequence(inputValuesByPass,
+                                                                                                          errorInputValuesByPass,
+                                                                                                          initialWeightValues,
+                                                                                                          initialBiasValues,
+                                                                                                          batchSize,
+                                                                                                          numInputFeatures,
+                                                                                                          numOutputFeatures,
+                                                                                                          hasBias,
+                                                                                                          lossScalingFactor,
+                                                                                                          alpha,
+                                                                                                          beta1,
+                                                                                                          beta2,
+                                                                                                          epsilon);
+
+    ASSERT_EQ(references.size(), inputValuesByPass.size());
+
+    ASSERT_GT(fixture.physicalFc->getErrorInputs().size(), 0u);
+    ASSERT_TRUE(fixture.physicalFc->getErrorInputs()[0].isPresent());
+    ASSERT_GT(fixture.physicalFc->getErrorOutputs().size(), 0u);
+    ASSERT_TRUE(fixture.physicalFc->getErrorOutputs()[0].isPresent());
+    ASSERT_TRUE(fixture.physicalFc->getGradientUpdateStream().isPresent());
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numInputFeatures}));
+    Impl::Tensor fcErrorInput = fixture.physicalFc->getErrorInputs()[0];
+    Impl::Tensor fcErrorInputHost = fcErrorInput.clone(cpuPlacement);
+
+    shared_ptr<Impl::Optimizer> physicalWeightsAdam = fixture.physicalFc->getParameter("weights")->getOptimizer();
+    shared_ptr<Impl::Optimizer> physicalBiasesAdam = hasBias ? fixture.physicalFc->getParameter("biases")->getOptimizer() : nullptr;
+
+    for (uint64_t pass = 0; pass < inputValuesByPass.size(); ++pass) {
+        SCOPED_TRACE(::testing::Message() << "pass=" << pass << " hasBias=" << hasBias);
+
+        writeCpuTensor(featureInHost, inputValuesByPass[pass]);
+
+        const vector<float> actualFeatureOut = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+
+        writeCpuTensor(fcErrorInputHost, errorInputValuesByPass[pass]);
+        fcErrorInput.copyFromAsync(fcErrorInputHost, stream);
+        fixture.physicalFc->backward(fcErrorInput, batchSize);
+
+        Stream gradientStream = fixture.physicalFc->getGradientUpdateStream();
+
+        Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalFc->getErrorOutputs()[0], stream);
+        Impl::Tensor weightsGradHost = copyTensorToCpu(physicalWeightsAdam->getWeightsGradient().get(), gradientStream);
+        Impl::Tensor weightsAfterHost = copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage(), gradientStream);
+        Impl::Tensor weightsMHost = copyTensorToCpu(physicalWeightsAdam->getOptimizerParameterTensor("m"), gradientStream);
+        Impl::Tensor weightsVHost = copyTensorToCpu(physicalWeightsAdam->getOptimizerParameterTensor("v"), gradientStream);
+
+        stream.synchronize();
+        gradientStream.synchronize();
+
+        const FullyConnectedAdamPassReference& reference = references[pass];
+
+        expectAllClose(actualFeatureOut, reference.featureOut, 2e-4f, 2e-4f, "feature out");
+        expectAllClose(readCpuTensor(errorOutputHost), reference.errorOut, 2e-4f, 2e-4f, "error out");
+        expectAllClose(readCpuTensor(weightsGradHost), reference.weightsGrad, 2e-4f, 2e-4f, "weights grad");
+        expectAllClose(readCpuTensor(weightsMHost), reference.weightsM, 2e-4f, 2e-4f, "weights m");
+        expectAllClose(readCpuTensor(weightsVHost), reference.weightsV, 2e-4f, 2e-4f, "weights v");
+        expectAllClose(readCpuTensor(weightsAfterHost), reference.weightsAfter, 2e-4f, 2e-4f, "weights after");
+
+        if (hasBias) {
+            ASSERT_NE(physicalBiasesAdam, nullptr);
+
+            Impl::Tensor biasesGradHost = copyTensorToCpu(physicalBiasesAdam->getWeightsGradient().get(), gradientStream);
+            Impl::Tensor biasesAfterHost = copyTensorToCpu(fixture.physicalFc->getParameter("biases")->getStorage(), gradientStream);
+            Impl::Tensor biasesMHost = copyTensorToCpu(physicalBiasesAdam->getOptimizerParameterTensor("m"), gradientStream);
+            Impl::Tensor biasesVHost = copyTensorToCpu(physicalBiasesAdam->getOptimizerParameterTensor("v"), gradientStream);
+
+            gradientStream.synchronize();
+
+            expectAllClose(readCpuTensor(biasesGradHost), reference.biasesGrad, 2e-4f, 2e-4f, "biases grad");
+            expectAllClose(readCpuTensor(biasesMHost), reference.biasesM, 2e-4f, 2e-4f, "biases m");
+            expectAllClose(readCpuTensor(biasesVHost), reference.biasesV, 2e-4f, 2e-4f, "biases v");
+            expectAllClose(readCpuTensor(biasesAfterHost), reference.biasesAfter, 2e-4f, 2e-4f, "biases after");
+        }
+    }
+}
+
+TEST(FullyConnectedApi, AdamThreePassesForwardBackwardAndUpdateWithBias) { runFullyConnectedAdamThreePasses(true); }
+
+TEST(FullyConnectedApi, AdamThreePassesForwardBackwardAndUpdateWithoutBias) { runFullyConnectedAdamThreePasses(false); }
