@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+#include "DeepLearning/Api/Layers/Activations/Relu.h"
+
 using namespace std;
 namespace Api = Thor;
 namespace Impl = ThorImplementation;
