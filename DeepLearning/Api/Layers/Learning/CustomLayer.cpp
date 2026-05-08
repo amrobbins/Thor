@@ -579,7 +579,7 @@ json CustomLayer::architectureJson() const {
     j["output_names"] = outputNames;
     j["input_interfaces"] = json::array();
     j["output_interfaces"] = json::array();
-    j["parameters"] = json::array();
+    j["parameters"] = json::object();
 
     for (const TensorMap& inputInterface : inputInterfaces) {
         json interfaceJson;
@@ -599,7 +599,7 @@ json CustomLayer::architectureJson() const {
 
     for (const auto& parameter : parameters) {
         if (parameter != nullptr)
-            j["parameters"].push_back(parameter->architectureJson());
+            j["parameters"][parameter->getName()] = parameter->architectureJson();
     }
 
     auto serializedDefinition = expr.getSerializedDefinition();
@@ -646,9 +646,22 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
     }
 
     std::vector<std::shared_ptr<ParameterSpecification>> parameters;
-    for (const json& parameterJson : j.at("parameters")) {
-        ParameterSpecification parameter = ParameterSpecification::deserialize(parameterJson, archiveReader);
-        parameters.push_back(std::make_shared<ParameterSpecification>(std::move(parameter)));
+    if (j.contains("parameters")) {
+        const json& parametersJson = j.at("parameters");
+        if (parametersJson.is_object()) {
+            for (auto it = parametersJson.begin(); it != parametersJson.end(); ++it) {
+                ParameterSpecification parameter = ParameterSpecification::deserialize(it.value(), archiveReader);
+                parameters.push_back(std::make_shared<ParameterSpecification>(std::move(parameter)));
+            }
+        } else if (parametersJson.is_array()) {
+            // Backward-compatible with the transitional CustomLayer schema.
+            for (const json& parameterJson : parametersJson) {
+                ParameterSpecification parameter = ParameterSpecification::deserialize(parameterJson, archiveReader);
+                parameters.push_back(std::make_shared<ParameterSpecification>(std::move(parameter)));
+            }
+        } else {
+            throw runtime_error("CustomLayer parameters must be an object keyed by parameter name.");
+        }
     }
 
     CustomLayer customLayer(DynamicExpression::fromExpressionDefinition(expressionDefinition, useFastMath),
@@ -666,14 +679,9 @@ json CustomLayer::serialize(thor_file::TarWriter& archiveWriter,
                             Stream stream,
                             bool saveOptimizerState,
                             ThorImplementation::StampedNetwork& stampedNetwork) const {
-    (void)archiveWriter;
-    (void)stream;
-    (void)saveOptimizerState;
-    (void)stampedNetwork;
-
-    // FIXME: Will need to serialize the parameters and sometimes optimizer parameters.
-
-    return architectureJson();
+    json j = architectureJson();
+    Parameterizable::serializeParameters(j["parameters"], archiveWriter, stream, saveOptimizerState, stampedNetwork, "layer" + to_string(getId()));
+    return j;
 }
 
 }  // namespace Thor

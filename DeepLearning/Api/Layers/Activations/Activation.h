@@ -34,6 +34,7 @@ class Activation : public Layer {
     virtual nlohmann::json serialize(thor_file::TarWriter& archiveWriter, Stream stream) const { return architectureJson(); }
 
     static void deserialize(const nlohmann::json& j, Network* network);
+    static std::shared_ptr<Activation> deserializeTemplate(const nlohmann::json& j);
     using Deserializer = std::function<void(const nlohmann::json&, Network*)>;
     static std::unordered_map<std::string, Deserializer>& get_registry();
     static void register_layer(std::string name, Deserializer fn);

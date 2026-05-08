@@ -35,10 +35,18 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
         expectedInputNames.push_back("biases");
     }
 
+    std::shared_ptr<Thor::Activation> activationClone = nullptr;
+    if (activation != nullptr) {
+        activationClone = std::dynamic_pointer_cast<Thor::Activation>(activation->clone());
+        if (activationClone == nullptr) {
+            throw std::runtime_error("FullyConnected activation clone did not produce an Activation.");
+        }
+    }
+
     return DynamicExpression(
         std::move(expectedInputNames),
         {"feature_output"},
-        [hasBias, placement, weightsDataType, computeDataType, outputDataType, activation = std::move(activation), epilogue](
+        [hasBias, placement, weightsDataType, computeDataType, outputDataType, activation = std::move(activationClone), epilogue](
             const DynamicExpression::TensorMap& inputs,
             const DynamicExpression::TensorMap& outputs,
             Stream& stream) -> DynamicExpressionBuild {
@@ -219,6 +227,8 @@ json FullyConnected::architectureJson() const {
         if (serializableEpilogue.isEmpty())
             serializableEpilogue = makeEpilogueDefinition(epilogue.get());
         j["epilogue"] = serializableEpilogue.get().architectureJson();
+    } else {
+        j["epilogue"] = nullptr;
     }
 
     // Input connections
@@ -235,12 +245,7 @@ json FullyConnected::architectureJson() const {
     }
     j["outputs"] = outputs;
 
-    json parameters = json::object();
-    for (const auto& parameter : getParameters()) {
-        assert(parameter != nullptr);
-        parameters[parameter->getName()] = parameter->architectureJson();
-    }
-    j["parameters"] = parameters;
+    j["parameters"] = getParametersArchitectureJson()["parameters"];
 
     return j;
 }
@@ -249,114 +254,72 @@ json FullyConnected::serialize(thor_file::TarWriter& archiveWriter,
                                Stream stream,
                                bool saveOptimizerState,
                                ThorImplementation::StampedNetwork& stampedNetwork) const {
-    // Multi-layers will only serialize the single layer, itself.
-    // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
     json j = architectureJson();
-
-    string layerName = string("layer") + to_string(getId());
-
-    // Dump the weights to a file and record its name
-    shared_ptr<ThorImplementation::TrainableLayer> twbLayer = nullptr;
-    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-    twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
-    assert(twbLayer != nullptr);
-
-    ThorImplementation::Tensor weights;
-    ThorImplementation::Tensor biases;
-    string weightsFile;
-    string biasesFile;
-    if (twbLayer != nullptr) {
-        if (hasBias) {
-            biasesFile = (layerName + "_biases.gds");
-            j["biases_tensor"] = biasesFile;
-            biases = twbLayer->getParameter("biases")->getStorage().get();
-            archiveWriter.addArchiveFile(biasesFile, biases);
-        }
-
-        weightsFile = (layerName + "_weights.gds");
-        j["weights_tensor"] = weightsFile;
-        weights = twbLayer->getParameter("weights")->getStorage();
-        archiveWriter.addArchiveFile(weightsFile, weights);
-    }
-
-    std::shared_ptr<Optimizer> weightsOptimizerSpec = getParameterSpecification("weights")->getOptimizer();
-    if (weightsOptimizerSpec != nullptr) {
-        j["weights_optimizer"] = weightsOptimizerSpec->serialize(archiveWriter,
-                                                                 stream,
-                                                                 twbLayer->getParameter("weights")->getOptimizer(),
-                                                                 string("layer") + to_string(getId()),
-                                                                 saveOptimizerState);
-    }
-    if (hasBias) {
-        std::shared_ptr<Optimizer> biasesOptimizerSpec = getParameterSpecification("biases")->getOptimizer();
-        if (biasesOptimizerSpec != nullptr) {
-            j["biases_optimizer"] = biasesOptimizerSpec->serialize(archiveWriter,
-                                                                   stream,
-                                                                   twbLayer->getParameter("biases")->getOptimizer(),
-                                                                   string("layer") + to_string(getId()),
-                                                                   saveOptimizerState);
-        }
-    }
-
+    Parameterizable::serializeParameters(j["parameters"], archiveWriter, stream, saveOptimizerState, stampedNetwork, "layer" + to_string(getId()));
     return j;
 }
 
 void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
-    // FIXME
-    // if (j.at("version").get<std::string>() != "1.0.0")
-    //     throw runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
-    // if (j.at("layer_type").get<std::string>() != "fully_connected")
-    //     throw runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
-    //
-    // uint32_t numOutputFeatures = j.at("num_output_features").get<uint32_t>();
-    // bool hasBias = j.at("has_bias").get<bool>();
-    //
-    // vector<Tensor> featureInputs;
-    // for (const json &input : j["inputs"]) {
-    //     uint64_t originalTensorId = input.at("id").get<uint64_t>();
-    //     Tensor tensor = network->getApiTensorByOriginalId(originalTensorId);
-    //     featureInputs.push_back(tensor);
-    // }
-    //
-    // vector<Tensor> featureOutputs;
-    // for (const json &output : j["outputs"]) {
-    //     featureOutputs.push_back(Tensor::deserialize(output));
-    // }
-    //
-    // FullyConnected fullyConnected = FullyConnected();
-    // fullyConnected.numOutputFeatures = numOutputFeatures;
-    // fullyConnected.hasBias = hasBias;
-    // fullyConnected.featureInputs = featureInputs;
-    // fullyConnected.standaloneFCFeatureInputs = featureInputs;
-    // for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
-    //     fullyConnected.featureOutputs.push_back(featureOutputs[i]);
-    //     fullyConnected.standaloneFCFeatureOutputs.push_back(featureOutputs[i]);
-    //     fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
-    //     fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
-    // }
-    // fullyConnected.archiveReader = archiveReader;
-    // if (j.contains("weights_tensor")) {
-    //     fullyConnected.weightsFile = j.at("weights_tensor").get<string>();
-    //     if (hasBias)
-    //         fullyConnected.biasesFile = j.at("biases_tensor").get<string>();
-    // }
-    //
-    // if (j.contains("weights_initializer")) {
-    //     fullyConnected.weightsInitializer = Initializer::deserialize(j.at("weights_initializer"));
-    // }
-    // if (j.contains("biases_initializer")) {
-    //     fullyConnected.biasesInitializer = Initializer::deserialize(j.at("biases_initializer"));
-    // }
-    //
-    // if (j.contains("weights_optimizer")) {
-    //     fullyConnected.weightsOptimizer = Optimizer::deserialize(archiveReader, j.at("weights_optimizer"), network);
-    // }
-    // if (j.contains("biases_optimizer")) {
-    //     fullyConnected.weightsOptimizer = Optimizer::deserialize(archiveReader, j.at("biases_optimizer"), network);
-    // }
-    //
-    // fullyConnected.initialized = true;
-    // fullyConnected.addToNetwork(network);
+    if (j.at("version").get<std::string>() != "1.0.0")
+        throw runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
+    if (j.at("layer_type").get<std::string>() != "fully_connected")
+        throw runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
+
+    Optional<ThorImplementation::Expression> epilogue = Optional<ThorImplementation::Expression>::empty();
+    if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
+        ThorImplementation::ExpressionDefinition epilogueDefinition =
+            ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
+        validateEpilogueDefinition(epilogueDefinition);
+        const ThorImplementation::NamedOutput& epilogueOutput = epilogueDefinition.outputs.outputs.front();
+        epilogue = ThorImplementation::Expression::fromPhysicalNode(epilogueDefinition.outputs.expr, epilogueOutput.node_idx);
+    }
+
+    FullyConnected fullyConnected(epilogue);
+    fullyConnected.numOutputFeatures = j.at("num_output_features").get<uint32_t>();
+    fullyConnected.hasBias = j.at("has_bias").get<bool>();
+    fullyConnected.weightsDataType = j.at("weights_data_type").get<Tensor::DataType>();
+    fullyConnected.computeDataType = j.at("compute_data_type").get<Tensor::DataType>();
+    fullyConnected.outputDataType = j.at("output_data_type").get<Tensor::DataType>();
+
+    if (j.contains("activation") && !j.at("activation").is_null()) {
+        fullyConnected.activation = Activation::deserializeTemplate(j.at("activation"));
+    }
+
+    for (const json& inputJson : j.at("inputs")) {
+        uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();
+        fullyConnected.featureInputs.push_back(network->getApiTensorByOriginalId(originalTensorId));
+    }
+    for (const json& outputJson : j.at("outputs")) {
+        fullyConnected.featureOutputs.push_back(Tensor::deserialize(outputJson, archiveReader.get()));
+    }
+    if (fullyConnected.featureInputs.size() != fullyConnected.featureOutputs.size()) {
+        throw runtime_error("FullyConnected deserialize expected equal numbers of inputs and outputs.");
+    }
+    for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
+        fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs[i];
+        fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs[i]] = fullyConnected.featureInputs[i];
+    }
+
+    if (j.contains("parameters")) {
+        const json& parametersJson = j.at("parameters");
+        if (!parametersJson.is_object()) {
+            throw runtime_error("FullyConnected parameters must be an object keyed by parameter name.");
+        }
+        for (auto it = parametersJson.begin(); it != parametersJson.end(); ++it) {
+            ParameterSpecification parameter = ParameterSpecification::deserialize(it.value(), archiveReader);
+            fullyConnected.addParameter(std::make_shared<ParameterSpecification>(std::move(parameter)));
+        }
+    }
+
+    if (!fullyConnected.hasParameter("weights")) {
+        throw runtime_error("FullyConnected deserialize did not find required weights parameter.");
+    }
+    if (fullyConnected.hasBias && !fullyConnected.hasParameter("biases")) {
+        throw runtime_error("FullyConnected deserialize did not find required biases parameter.");
+    }
+
+    fullyConnected.initialized = true;
+    fullyConnected.addToNetwork(network);
 }
 
 vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::TrainableLayer> physicalLayer,

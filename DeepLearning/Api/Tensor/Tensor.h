@@ -87,6 +87,7 @@ class Tensor {
     }
 
     nlohmann::json architectureJson() const;
+    nlohmann::json serialize(thor_file::TarWriter &archiveWriter) const;
     static Tensor deserialize(const nlohmann::json &j, thor_file::TarReader *archiveReader = nullptr);
 
     std::string getVersion() const { return "1.0.0"; }

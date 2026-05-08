@@ -98,40 +98,55 @@ string Parameterizable::listParametersString() const {
 
 json Parameterizable::getParametersArchitectureJson() const {
     json j;
-    if (parameters.empty()) {
-        j["parameters"] = json::array();
-        for (const auto& parameter : getParameters()) {
-            if (parameter != nullptr) {
-                // Optimizer and initializer serialization is parameter's job.
-                j["parameters"].push_back(parameter->architectureJson());
-            }
+    j["parameters"] = json::object();
+    for (const auto& parameter : getParameters()) {
+        if (parameter == nullptr) {
+            continue;
         }
+        j["parameters"][parameter->getName()] = parameter->architectureJson();
     }
     return j;
 }
 
-// Pass j["parameters"] as parameterJson to serialize. j["parameters"] is created by getParametersArchitectureJson().
+// Pass j["parameters"] as parametersJson. It should be the object created by getParametersArchitectureJson().
 void Parameterizable::serializeParameters(nlohmann::json& parametersJson,
                                           thor_file::TarWriter& archiveWriter,
                                           Stream stream,
                                           bool saveOptimizerState,
                                           ThorImplementation::StampedNetwork& stampedNetwork,
                                           const string& filenamePrefix) const {
-    assert(parametersJson.is_object());
+    if (parameters.empty()) {
+        parametersJson = json::object();
+        return;
+    }
+    if (!parametersJson.is_object()) {
+        throw runtime_error("Parameterizable::serializeParameters expected a JSON object keyed by parameter name.");
+    }
 
     const uint64_t apiLayerId = getParameterizableId();
-    std::shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(apiLayerId);
-    std::shared_ptr<ThorImplementation::TrainableLayer> physicalTrainableLayer =
-        std::dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
-    assert(physicalTrainableLayer != nullptr);
-
     for (const auto& parameterSpecification : parameters) {
+        if (parameterSpecification == nullptr) {
+            throw runtime_error("Parameterizable contains a null ParameterSpecification.");
+        }
+
         const string& paramName = parameterSpecification->getName();
+        if (!parametersJson.contains(paramName)) {
+            parametersJson[paramName] = parameterSpecification->architectureJson();
+        }
+
         json parameterJson = parametersJson.at(paramName);
-        assert(parameterJson.is_object());
-        parametersJson = BoundParameter::serialize(
-            parameterJson, parameterSpecification, archiveWriter, stream, saveOptimizerState, stampedNetwork, filenamePrefix, apiLayerId);
-        parametersJson[paramName] = parametersJson;
+        if (!parameterJson.is_object()) {
+            throw runtime_error("Parameter JSON for '" + paramName + "' must be an object.");
+        }
+
+        parametersJson[paramName] = BoundParameter::serialize(parameterJson,
+                                                             parameterSpecification,
+                                                             archiveWriter,
+                                                             stream,
+                                                             saveOptimizerState,
+                                                             stampedNetwork,
+                                                             filenamePrefix + "_" + paramName,
+                                                             apiLayerId);
     }
 }
 

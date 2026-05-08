@@ -8,6 +8,7 @@
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 
 #include <algorithm>
+#include <iterator>
 #include <stdexcept>
 
 using namespace Thor;
@@ -50,12 +51,17 @@ void TrainableLayer::attachDefaultOptimizer(std::shared_ptr<Optimizer> optimizer
 }
 
 bool TrainableLayer::hasOptimizer() const {
+    bool foundTrainable = false;
     for (const auto &parameter : parameters) {
-        if (parameter != nullptr && parameter->isTrainable() && parameter->hasOptimizer()) {
-            return true;
+        if (parameter == nullptr || !parameter->isTrainable()) {
+            continue;
+        }
+        foundTrainable = true;
+        if (!parameter->hasOptimizer()) {
+            return false;
         }
     }
-    return false;
+    return foundTrainable;
 }
 
 // void TrainableLayer::stampOptimizer(const std::shared_ptr<ThorImplementation::TrainableLayer> &physicalTrainableLayer) const {
@@ -97,10 +103,6 @@ std::vector<Event> TrainableLayer::initialize(std::shared_ptr<ThorImplementation
                                               bool isFirstStamp,
                                               std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
                                               Optional<Event> sisterLayerLoadedEvent) {
-    (void)isFirstStamp;
-    (void)sisterLayer;
-    (void)sisterLayerLoadedEvent;
-
     assert(layer != nullptr);
 
     std::vector<Event> initDoneEvents = MultiConnectionLayer::initialize(layer);
@@ -119,17 +121,48 @@ std::vector<Event> TrainableLayer::initialize(std::shared_ptr<ThorImplementation
         Stream initStream = Stream::getNextUploadStream(gpuNum);
         parameter->initialize(initStream);
         initDoneEvents.push_back(initStream.putEvent(false, true));
+
+        if (parameter->hasOptimizer() && hasParameter(parameterName)) {
+            std::shared_ptr<Optimizer> apiOptimizer = getParameterSpecification(parameterName)->getOptimizer();
+            if (apiOptimizer != nullptr) {
+                std::shared_ptr<ThorImplementation::Optimizer> sisterOptimizer = nullptr;
+                if (sisterLayer != nullptr) {
+                    std::shared_ptr<ThorImplementation::PhysicalParameter> sisterParameter = sisterLayer->getParameter(parameterName);
+                    if (sisterParameter != nullptr && sisterParameter->hasOptimizer()) {
+                        sisterOptimizer = sisterParameter->getOptimizer();
+                    }
+                }
+
+                std::vector<Event> optimizerEvents = apiOptimizer->initialize(
+                    parameter->getOptimizer(), isFirstStamp, sisterOptimizer, sisterLayerLoadedEvent);
+                initDoneEvents.insert(initDoneEvents.end(),
+                                      make_move_iterator(optimizerEvents.begin()),
+                                      make_move_iterator(optimizerEvents.end()));
+            }
+        }
     }
 
     return initDoneEvents;
 }
 
 void TrainableLayer::deserializeParameterArchitectureJson(const json &j, shared_ptr<thor_file::TarReader> &archiveReader) {
-    if (j.contains("parameters")) {
-        for (const json &parameterJson : j.at("parameters")) {
+    if (!j.contains("parameters")) {
+        return;
+    }
+
+    const json &parametersJson = j.at("parameters");
+    if (parametersJson.is_object()) {
+        for (auto it = parametersJson.begin(); it != parametersJson.end(); ++it) {
+            ParameterSpecification parameter = ParameterSpecification::deserialize(it.value(), archiveReader);
+            addParameter(std::make_shared<ParameterSpecification>(std::move(parameter)));
+        }
+    } else if (parametersJson.is_array()) {
+        for (const json &parameterJson : parametersJson) {
             ParameterSpecification parameter = ParameterSpecification::deserialize(parameterJson, archiveReader);
             addParameter(std::make_shared<ParameterSpecification>(std::move(parameter)));
         }
+    } else {
+        throw runtime_error("TrainableLayer parameters must be an object keyed by parameter name.");
     }
 }
 
@@ -199,51 +232,10 @@ nlohmann::json TrainableLayer::serialize(thor_file::TarWriter &archiveWriter,
                                          Stream stream,
                                          bool saveOptimizerState,
                                          ThorImplementation::StampedNetwork &stampedNetwork) const {
-    // Multi-layers will only serialize the single layer, itself.
-    // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
     json j = architectureJson();
-
-    string layerName = string("layer") + to_string(getId());
-
-    // Dump the weights to a file and record its name
-    shared_ptr<ThorImplementation::TrainableLayer> trainableLayer = nullptr;
-    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-    trainableLayer = dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
-    assert(trainableLayer != nullptr);
-
-    ThorImplementation::Tensor weights;
-    ThorImplementation::Tensor biases;
-    string weightsFile;
-    string biasesFile;
-    if (trainableLayer != nullptr) {
-        // if (hasBias) {
-        //     biasesFile = (layerName + "_biases.gds");
-        //     j["biases_tensor"] = biasesFile;
-        //     biases = trainableLayer->getParameter("biases")->getStorage().get();
-        //     archiveWriter.addArchiveFile(biasesFile, biases);
-        // }
-
-        weightsFile = (layerName + "_weights.gds");
-        j["weights_tensor"] = weightsFile;
-        weights = trainableLayer->getParameter("weights")->getStorage();
-        archiveWriter.addArchiveFile(weightsFile, weights);
+    if (j.contains("parameters")) {
+        Parameterizable::serializeParameters(j["parameters"], archiveWriter, stream, saveOptimizerState, stampedNetwork, "layer" + to_string(getId()));
     }
-
-    // if (hasOptimizer()) {
-    //     j["weights_optimizer"] = weightsOptimizer->serialize(archiveWriter,
-    //                                                          stream,
-    //                                                          trainableLayer->getParameter("weights")->getOptimizer(),
-    //                                                          string("layer") + to_string(getId()),
-    //                                                          saveOptimizerState);
-    //     if (hasBias) {
-    //         j["biases_optimizer"] = biasesOptimizer->serialize(archiveWriter,
-    //                                                            stream,
-    //                                                            trainableLayer->getParameter("biases")->getOptimizer(),
-    //                                                            string("layer") + to_string(getId()),
-    //                                                            saveOptimizerState);
-    //     }
-    // }
-
     return j;
 }
 
