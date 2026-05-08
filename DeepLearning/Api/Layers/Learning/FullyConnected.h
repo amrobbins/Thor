@@ -281,8 +281,14 @@ class FullyConnected::Builder {
             _weightsInitializer = Glorot::Builder().build();
         if (_biasInitializer == nullptr)
             _biasInitializer = Glorot::Builder().build();
-        if (!_activation && !_activationExplicitlyRemoved)
+        if (!_activation && !_activationExplicitlyRemoved) {
             _activation = SoftPlus::Builder().build();
+        } else if (_activation != nullptr) {
+            _activation = std::dynamic_pointer_cast<Activation>(_activation->clone());
+            if (_activation == nullptr) {
+                throw std::runtime_error("FullyConnected activation clone did not produce an Activation.");
+            }
+        }
         if (_weightsDataType.isEmpty())
             _weightsDataType = _featureInputs[0].getDataType();
         if (_computeDataType.isEmpty())

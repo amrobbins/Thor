@@ -7,6 +7,7 @@
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "Utilities/Common/Optional.h"
+#include "Utilities/TarFile/TarReader.h"
 
 #include <stdexcept>
 #include <utility>
@@ -46,6 +47,35 @@ class ApiBackedImplementationParameter : public ThorImplementation::PhysicalPara
 
    private:
     Thor::ParameterSpecification::StorageContextStorageFactory storageContextCreateStorage;
+};
+
+class ArchiveTensorInitializer : public ThorImplementation::Initializer {
+   public:
+    ArchiveTensorInitializer(std::shared_ptr<thor_file::TarReader> archiveReader, std::string fileName)
+        : archiveReader(std::move(archiveReader)), fileName(std::move(fileName)) {
+        if (this->archiveReader == nullptr) {
+            throw std::runtime_error("ArchiveTensorInitializer requires a TarReader.");
+        }
+        if (this->fileName.empty()) {
+            throw std::runtime_error("ArchiveTensorInitializer requires a non-empty file name.");
+        }
+    }
+
+    void initialize(Stream initStream) override {
+        (void)initStream;
+        if (archiveReader == nullptr) {
+            throw std::runtime_error("ArchiveTensorInitializer cannot initialize after its archive reader has been consumed.");
+        }
+        archiveReader->registerReadRequest(fileName, weights);
+        archiveReader = nullptr;
+        fileName.clear();
+    }
+
+    std::shared_ptr<ThorImplementation::Initializer> clone() override { return std::make_shared<ArchiveTensorInitializer>(*this); }
+
+   private:
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    std::string fileName;
 };
 }  // namespace
 
@@ -152,7 +182,9 @@ ParameterSpecification ParameterSpecification::deserialize(const json &j, std::s
     ParameterSpecification deserialized;
     deserialized.name = j.at("name").get<std::string>();
     if (j.contains("storage")) {
-        deserialized.storage = Tensor::deserialize(j["storage"]);
+        deserialized.storage = Tensor::deserialize(j["storage"], archiveReader.get());
+        deserialized.shape = deserialized.storage.getDimensions();
+        deserialized.dtype = deserialized.storage.getDataType();
     } else {
         if (!j.contains("shape") || !j.contains("dtype")) {
             throw std::runtime_error(
@@ -161,16 +193,32 @@ ParameterSpecification ParameterSpecification::deserialize(const json &j, std::s
         deserialized.shape = j.at("shape").get<std::vector<uint64_t>>();
         deserialized.dtype = j.at("dtype").get<DataType>();
     }
+
+    const char *storageFileKey = nullptr;
+    if (j.contains("storage_file")) {
+        storageFileKey = "storage_file";
+    } else if (j.contains("parameter_storage")) {
+        // Backward-compatible while the old key is phased out.
+        storageFileKey = "parameter_storage";
+    }
+    if (storageFileKey != nullptr) {
+        deserialized.archiveReader = archiveReader;
+        deserialized.storageFile = j.at(storageFileKey).get<std::string>();
+    }
+
     deserialized.trainable = j.at("trainable").get<bool>();
     if (deserialized.trainable)
-        deserialized.trainingInitiallyEnabled = j.at("training_enabled").get<bool>();
+        deserialized.trainingInitiallyEnabled = j.value("training_enabled", true);
     else
         deserialized.trainingInitiallyEnabled = false;
     if (j.contains("initializer"))
         deserialized.initializer = Initializer::deserialize(j["initializer"]);
     if (j.contains("optimizer_override"))
         deserialized.optimizer = Optimizer::deserialize(archiveReader, j["optimizer_override"], nullptr);
+    else if (j.contains("optimizer"))
+        deserialized.optimizer = Optimizer::deserialize(archiveReader, j["optimizer"], nullptr);
     deserialized.initialized = true;
+    deserialized.validateReadyForUse();
     return deserialized;
 }
 std::string ParameterSpecification::getVersion() { return "1.0.0"; }
@@ -205,7 +253,11 @@ std::shared_ptr<ThorImplementation::PhysicalParameter> ParameterSpecification::s
         physicalParameter = std::make_shared<ThorImplementation::PhysicalParameter>(name, trainable, shape.get(), dtype.get());
     }
 
-    if (initializer != nullptr) {
+    if (storageFile.isPresent()) {
+        std::shared_ptr<ThorImplementation::Initializer> archiveInitializer =
+            std::make_shared<ArchiveTensorInitializer>(archiveReader, storageFile.get());
+        physicalParameter->setInitializer(archiveInitializer);
+    } else if (initializer != nullptr) {
         physicalParameter->setInitializer(initializer->stamp());
     }
 

@@ -124,14 +124,14 @@ json BoundParameter::serialize(json parameterJson,
         assert(optimizer != nullptr);
         json optimizerJson =
             optimizer->serialize(archiveWriter, stream, physicalParameter->getOptimizer(), filenamePrefix, saveOptimizerState);
-        parameterJson["optimizer"] = optimizerJson;
+        parameterJson["optimizer_override"] = optimizerJson;
     }
 
     // Serialize the parameter values
     Optional<ThorImplementation::Tensor> physicalStorage = physicalParameter->getStorage();
     assert(physicalStorage.isPresent());
-    string parameterStorageFile = (filenamePrefix + "_parameter_" + parameterSpecification->getName());
-    parameterJson["parameter_storage"] = parameterStorageFile;
+    string parameterStorageFile = (filenamePrefix + "_parameter_" + parameterSpecification->getName() + ".gds");
+    parameterJson["storage_file"] = parameterStorageFile;
     archiveWriter.addArchiveFile(parameterStorageFile, physicalStorage.get());
 
     return parameterJson;

@@ -7,7 +7,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "Utilities/Common/Stream.h"
 #include "Utilities/TarFile/TarWriter.h"
+
+#include <nlohmann/json.hpp>
 
 namespace ThorImplementation {
 class StampedNetwork;
