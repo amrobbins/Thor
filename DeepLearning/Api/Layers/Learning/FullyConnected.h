@@ -92,10 +92,6 @@ class FullyConnected : public TrainableLayer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override;
 
-    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
-                                  bool isFirstStamp,
-                                  std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
-                                  Optional<Event> sisterLayerLoadedEvent);
 
     std::string getLayerType() const override { return "FullyConnected"; }
 

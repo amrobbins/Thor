@@ -213,6 +213,11 @@ json Convolution3d::architectureJson() const {
     j["depth_padding"] = depthPadding;
     j["num_output_channels"] = numOutputChannels;
     j["has_bias"] = hasBias;
+    if (activation != nullptr) {
+        j["activation"] = activation->architectureJson();
+    } else {
+        j["activation"] = nullptr;
+    }
 
     json inputs = json::array();
     for (uint32_t i = 0; i < standaloneLayerFeatureInputs.size(); ++i) {

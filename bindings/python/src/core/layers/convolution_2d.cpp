@@ -1,8 +1,9 @@
 #include <nanobind/nanobind.h>
-#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
 
 #include <memory>
+#include <exception>
 #include <optional>
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
@@ -12,7 +13,6 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
-#include <nanobind/stl/optional.h>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -21,6 +21,38 @@ using namespace std;
 using namespace Thor;
 
 using DataType = ThorImplementation::TensorDescriptor::DataType;
+
+namespace {
+constexpr const char *DEFAULT_ACTIVATION_SENTINEL = "__thor_default_activation__";
+
+bool isDefaultActivationSentinel(const nb::object &activation) {
+    return nb::isinstance<nb::str>(activation) && nb::cast<std::string>(activation) == DEFAULT_ACTIVATION_SENTINEL;
+}
+
+void applyPythonActivation(Convolution2d::Builder &builder, const nb::object &activation) {
+    if (isDefaultActivationSentinel(activation)) {
+        // Leave activation unset so the C++ builder applies the learning-layer default.
+        return;
+    }
+
+    if (activation.is_none()) {
+        builder.noActivation();
+        return;
+    }
+
+    std::shared_ptr<Activation> activationPtr;
+    try {
+        activationPtr = nb::cast<std::shared_ptr<Activation>>(activation);
+    } catch (const std::exception &) {
+        throw nb::type_error("activation must be a thor.activations.Activation instance or None");
+    }
+    if (activationPtr == nullptr) {
+        builder.noActivation();
+    } else {
+        builder.activation(activationPtr);
+    }
+}
+}  // namespace
 
 void bind_convolution_2d(nb::module_ &m) {
     auto convolution_2d = nb::class_<Convolution2d, TrainableLayer>(m, "Convolution2d");
@@ -39,7 +71,7 @@ void bind_convolution_2d(nb::module_ &m) {
            uint32_t verticalPadding,
            uint32_t horizontalPadding,
            bool hasBias,
-           shared_ptr<Activation> activation,
+           nb::object activation,
            shared_ptr<Initializer> weights_initializer,
            shared_ptr<Initializer> biases_initializer) {
             const auto &dims = featureInput.getDimensions();
@@ -104,11 +136,7 @@ void bind_convolution_2d(nb::module_ &m) {
                 .horizontalStride(horizontalStride)
                 .hasBias(hasBias);
 
-            if (activation == nullptr) {
-                builder.noActivation();
-            } else {
-                builder.activation(activation);
-            }
+            applyPythonActivation(builder, activation);
 
             if (weights_initializer != nullptr)
                 builder.weightsInitializer(weights_initializer);
@@ -129,7 +157,7 @@ void bind_convolution_2d(nb::module_ &m) {
         "vertical_padding"_a = 0,
         "horizontal_padding"_a = 0,
         "has_bias"_a = true,
-        "activation"_a = nb::none(),
+        "activation"_a.none() = nb::str(DEFAULT_ACTIVATION_SENTINEL),
         "weights_initializer"_a = nb::none(),
         "biases_initializer"_a = nb::none());
 
@@ -185,7 +213,7 @@ void bind_convolution_2d(nb::module_ &m) {
             input.
         has_bias : bool, default True
             Whether to learn an additive bias per output channel.
-        activation : thor.Activation or None, default thor.activations.Relu()
+        activation : thor.Activation or None, default thor.activations.SoftPlus()
             Activation to apply after the convolution
             Pass ``None`` to not use any activation and keep the layer
             purely linear.

@@ -1,8 +1,10 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
 
 #include <memory>
+#include <exception>
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
@@ -19,6 +21,38 @@ using namespace Thor;
 
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 
+namespace {
+constexpr const char *DEFAULT_ACTIVATION_SENTINEL = "__thor_default_activation__";
+
+bool isDefaultActivationSentinel(const nb::object &activation) {
+    return nb::isinstance<nb::str>(activation) && nb::cast<std::string>(activation) == DEFAULT_ACTIVATION_SENTINEL;
+}
+
+void applyPythonActivation(FullyConnected::Builder &builder, const nb::object &activation) {
+    if (isDefaultActivationSentinel(activation)) {
+        // Leave activation unset so the C++ builder applies the learning-layer default.
+        return;
+    }
+
+    if (activation.is_none()) {
+        builder.noActivation();
+        return;
+    }
+
+    std::shared_ptr<Activation> activationPtr;
+    try {
+        activationPtr = nb::cast<std::shared_ptr<Activation>>(activation);
+    } catch (const std::exception &) {
+        throw nb::type_error("activation must be a thor.activations.Activation instance or None");
+    }
+    if (activationPtr == nullptr) {
+        builder.noActivation();
+    } else {
+        builder.activation(activationPtr);
+    }
+}
+}  // namespace
+
 void bind_fully_connected(nb::module_ &m) {
     auto fully_connected = nb::class_<FullyConnected, TrainableLayer>(m, "FullyConnected");
     fully_connected.attr("__module__") = "thor.layers";
@@ -30,7 +64,7 @@ void bind_fully_connected(nb::module_ &m) {
            Tensor featureInput,
            uint32_t numOutputFeatures,
            bool hasBias,
-           shared_ptr<Activation> activation,
+           nb::object activation,
            shared_ptr<Initializer> weights_initializer,
            shared_ptr<Initializer> biases_initializer,
            shared_ptr<Optimizer> weights_optimizer,
@@ -42,11 +76,7 @@ void bind_fully_connected(nb::module_ &m) {
             FullyConnected::Builder builder;
             builder.network(network).featureInput(featureInput).numOutputFeatures(numOutputFeatures).hasBias(hasBias);
 
-            if (activation == nullptr) {
-                builder.noActivation();
-            } else {
-                builder.activation(activation);
-            }
+            applyPythonActivation(builder, activation);
 
             if (weights_initializer != nullptr)
                 builder.weightsInitializer(weights_initializer);
@@ -63,7 +93,7 @@ void bind_fully_connected(nb::module_ &m) {
         "feature_input"_a,
         "num_output_features"_a,
         "has_bias"_a = true,
-        "activation"_a.none() = nb::none(),
+        "activation"_a.none() = nb::str(DEFAULT_ACTIVATION_SENTINEL),
         "weights_initializer"_a.none() = nb::none(),
         "biases_initializer"_a.none() = nb::none(),
         "weights_optimizer"_a.none() = nb::none(),
@@ -108,9 +138,9 @@ void bind_fully_connected(nb::module_ &m) {
             Number of output features (units) produced by this layer.
         has_bias : bool, default True
             Whether to learn an additive bias term.
-        activation : thor.Activation or None, default thor.activations.Relu()
+        activation : thor.Activation or None, default thor.activations.SoftPlus()
             Activation to apply after the linear transform (and optional
-            batch normalization). Pass ``None`` not use any activation and
+            batch normalization). Pass ``None`` to not use any activation and
             keep the layer purely linear.
         weights_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
             Initializer for the weight matrix.
