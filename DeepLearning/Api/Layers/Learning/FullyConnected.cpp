@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 
 #include "DeepLearning/Api/Initializers/Glorot.h"
@@ -313,9 +314,9 @@ void FullyConnected::verifyFullyConnectedComputeDataType(Tensor::DataType dataTy
 }
 
 FullyConnected FullyConnected::Builder::build() {
-    assert(_network.isPresent());
-    assert(!_featureInputs.empty());
-    assert(_numOutputFeatures.isPresent());
+    THOR_THROW_IF_FALSE(_network.isPresent());
+    THOR_THROW_IF_FALSE(!_featureInputs.empty());
+    THOR_THROW_IF_FALSE(_numOutputFeatures.isPresent());
     if (_hasBias.isEmpty())
         _hasBias = false;
     if (_weightsInitializer == nullptr)
@@ -457,12 +458,12 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
     (void)drivingLayer;
     (void)drivingApiLayer;
 
-    assert(initialized);
-    assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    THOR_THROW_IF_FALSE(initialized);
+    THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
     std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>> physicalParameters;
     for (const auto& parameter : getParameters()) {
-        assert(parameter != nullptr);
+        THOR_THROW_IF_FALSE(parameter != nullptr);
         physicalParameters.push_back(parameter->stamp());
     }
 

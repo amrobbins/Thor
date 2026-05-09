@@ -1,6 +1,6 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
-#include <cassert>
 #include <functional>
 #include <memory>
 #include <string>
@@ -62,8 +62,8 @@ class ParameterSpecification {
     // Build an implementation parameter that delegates storage creation to the factory bound on this API parameter.
     virtual std::shared_ptr<ThorImplementation::PhysicalParameter> stamp();
     uint64_t getTotalSizeInBytes() const {
-        assert(dtype.isPresent());
-        assert(shape.isPresent());
+        THOR_THROW_IF_FALSE(dtype.isPresent());
+        THOR_THROW_IF_FALSE(shape.isPresent());
         uint64_t totalSize = 1;
         for (uint64_t dim : shape.get())
             totalSize *= dim;

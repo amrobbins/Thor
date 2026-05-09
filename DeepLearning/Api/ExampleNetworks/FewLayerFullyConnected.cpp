@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.h"
 
 using namespace Thor;
@@ -30,7 +31,7 @@ Network buildFewLayerFullyConnected() {
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {128};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = FullyConnected::Builder()
                              .network(fewLayerFullyConnected)
@@ -42,7 +43,7 @@ Network buildFewLayerFullyConnected() {
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {128};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = FullyConnected::Builder()
                              .network(fewLayerFullyConnected)
@@ -54,7 +55,7 @@ Network buildFewLayerFullyConnected() {
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {1000};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     Tensor labelsTensor = NetworkInput::Builder()
                               .network(fewLayerFullyConnected)

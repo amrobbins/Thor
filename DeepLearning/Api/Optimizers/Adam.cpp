@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Optimizers/Adam.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 
@@ -50,7 +51,7 @@ shared_ptr<Optimizer> Adam::clone() const { return make_shared<Adam>(*this); }
 
 void Adam::updateParameters(PlacedNetwork *placedNetwork) {
     // FIXME: re-implement
-    // assert(placedNetwork != nullptr);
+    // THOR_THROW_IF_FALSE(placedNetwork != nullptr);
     // uint32_t numStamps = placedNetwork->getNumStamps();
     // for (uint32_t i = 0; i < numStamps; ++i) {
     //     ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
@@ -58,7 +59,7 @@ void Adam::updateParameters(PlacedNetwork *placedNetwork) {
     //     for (uint32_t j = 0; j < numTrainableLayers; ++j) {
     //         shared_ptr<ThorImplementation::TrainableLayer> &trainableLayer = stampedNetwork.getTrainableLayer(j);
     //         Optional<shared_ptr<ThorImplementation::Optimizer>> maybePhysicalOptimizer = trainableLayer->getOptimizer();
-    //         assert(maybePhysicalOptimizer.isPresent());
+    //         THOR_THROW_IF_FALSE(maybePhysicalOptimizer.isPresent());
     //         shared_ptr<ThorImplementation::Optimizer> optimizer = maybePhysicalOptimizer.get();
     //         shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(optimizer);
     //         if (physicalAdam == nullptr || physicalAdam->getId() != getId())
@@ -102,8 +103,8 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
     json j = architectureJson();
 
     if (saveOptimizerState) {
-        assert(physicalOptimizer != nullptr);
-        assert(!filenamePrefix.empty());
+        THOR_THROW_IF_FALSE(physicalOptimizer != nullptr);
+        THOR_THROW_IF_FALSE(!filenamePrefix.empty());
 
         string optimizerName = filenamePrefix + "_adam";
         string mFile = optimizerName + "_m.gds";
@@ -112,7 +113,7 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
         j["v_tensor"] = vFile;
 
         shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
-        assert(physicalAdam != nullptr);
+        THOR_THROW_IF_FALSE(physicalAdam != nullptr);
         Optional<ThorImplementation::Tensor> m = physicalAdam->getParameter("m")->getStorage();
         if (m.isPresent())
             archiveWriter.addArchiveFile(mFile, m);
@@ -145,12 +146,12 @@ shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiv
     Optional<string> mBiasFile;
     Optional<string> vBiasFile;
     if (j.contains("m_tensor")) {
-        assert(j.contains("v_tensor"));
+        THOR_THROW_IF_FALSE(j.contains("v_tensor"));
         mFile = j.at("m_tensor").get<string>();
         vFile = j.at("v_tensor").get<string>();
     }
     if (j.contains("m_bias_tensor")) {
-        assert(j.contains("v_bias_tensor"));
+        THOR_THROW_IF_FALSE(j.contains("v_bias_tensor"));
         mBiasFile = j.at("m_bias_tensor").get<string>();
         vBiasFile = j.at("v_bias_tensor").get<string>();
     }
@@ -174,7 +175,7 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
                                shared_ptr<ThorImplementation::Optimizer> sisterPhysicalOptimizer,
                                Optional<Event> sisterOptimizerLoadedEvent) {
     shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
-    assert(physicalAdam != nullptr);
+    THOR_THROW_IF_FALSE(physicalAdam != nullptr);
 
     ThorImplementation::Tensor m = physicalAdam->getParameter("m")->getStorage();
     ThorImplementation::Tensor v = physicalAdam->getParameter("v")->getStorage();
@@ -187,16 +188,16 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
     // 3. Run an initializer to set the weights - on an untrained network or when the optimizer has not been saved
     if (!isFirstStamp) {
         // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
-        assert(sisterPhysicalOptimizer != nullptr);
+        THOR_THROW_IF_FALSE(sisterPhysicalOptimizer != nullptr);
         if (sisterOptimizerLoadedEvent.isPresent())
             stream.waitEvent(sisterOptimizerLoadedEvent);
         shared_ptr<ThorImplementation::Adam> sisterPhysicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(sisterPhysicalOptimizer);
-        assert(sisterPhysicalAdam != nullptr);
+        THOR_THROW_IF_FALSE(sisterPhysicalAdam != nullptr);
         m.copyFromAsync(sisterPhysicalAdam->getParameter("m")->getStorage(), stream);
         v.copyFromAsync(sisterPhysicalAdam->getParameter("v")->getStorage(), stream);
     } else if (mFile.isPresent()) {
-        assert(vFile.isPresent());
-        assert(archiveReader != nullptr);
+        THOR_THROW_IF_FALSE(vFile.isPresent());
+        THOR_THROW_IF_FALSE(archiveReader != nullptr);
         archiveReader->registerReadRequest(mFile.get(), m);
         archiveReader->registerReadRequest(vFile.get(), v);
 

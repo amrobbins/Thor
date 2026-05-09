@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/Activation/Swish.h"
@@ -50,8 +51,8 @@ class Swish : public Activation {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
 
         std::shared_ptr<ThorImplementation::Swish> swish = std::make_shared<ThorImplementation::Swish>();
         return swish;
@@ -69,7 +70,7 @@ class Swish::Builder : public Activation::Builder {
         std::shared_ptr<Swish> swish = std::make_shared<Swish>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
-            assert(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.isPresent());
             swish->featureInput = _featureInput;
             swish->featureOutput = _featureInput.get().clone();
             swish->initialized = true;

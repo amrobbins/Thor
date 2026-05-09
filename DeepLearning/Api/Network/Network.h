@@ -25,7 +25,6 @@
 #include "Utilities/TarFile/TarReader.h"
 #include "Utilities/TarFile/TarWriter.h"
 
-#include <assert.h>
 #include <deque>
 #include <filesystem>
 #include <set>

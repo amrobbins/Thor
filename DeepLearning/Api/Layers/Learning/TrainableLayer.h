@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include <boost/interprocess/offset_ptr.hpp>
 
@@ -30,7 +31,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
     virtual nlohmann::json architectureJson() const override = 0;
     // Trainable layers cannot use serialize(thor_file::TarWriter &archiveWriter, Stream stream), they use the custom signature below.
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const final { assert(false); }
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const final { THOR_UNREACHABLE(); }
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                                      Stream stream,
                                      bool saveOptimizerState,

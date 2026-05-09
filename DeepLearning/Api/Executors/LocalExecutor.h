@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Executors/ExecutionState.h"
 #include "DeepLearning/Api/Executors/Executor.h"
@@ -105,15 +106,15 @@ class LocalExecutor::Builder {
     }
 
     LocalExecutor::Builder loader(std::shared_ptr<Loader> _loader) {
-        assert(_loader);
-        assert(!this->_loader);
+        THOR_THROW_IF_FALSE(_loader);
+        THOR_THROW_IF_FALSE(!this->_loader);
         this->_loader = _loader;
         return *this;
     }
 
     LocalExecutor::Builder optimizer(std::shared_ptr<Optimizer> _optimizer) {
-        assert(_optimizer);
-        assert(!this->_optimizer);
+        THOR_THROW_IF_FALSE(_optimizer);
+        THOR_THROW_IF_FALSE(!this->_optimizer);
         this->_optimizer = _optimizer;
         return *this;
     }
@@ -126,7 +127,7 @@ class LocalExecutor::Builder {
     }
 
     LocalExecutor::Builder outputDirectory(std::string _outputDirectory) {
-        assert(this->_outputDirectory.isEmpty());
+        THOR_THROW_IF_FALSE(this->_outputDirectory.isEmpty());
         if (_outputDirectory.empty())
             _outputDirectory = "./";
         std::filesystem::path outputPath = std::filesystem::absolute(std::filesystem::path(_outputDirectory));

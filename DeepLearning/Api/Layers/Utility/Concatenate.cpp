@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Utility/Concatenate.h"
 #include "DeepLearning/Api/Network/Network.h"
 
@@ -10,9 +11,9 @@ Concatenate::Concatenate() = default;
 Concatenate::~Concatenate() = default;
 
 json Concatenate::architectureJson() const {
-    assert(initialized);
-    assert(featureInputs.size() > 0);
-    assert(featureOutputs.size() > 0);
+    THOR_THROW_IF_FALSE(initialized);
+    THOR_THROW_IF_FALSE(featureInputs.size() > 0);
+    THOR_THROW_IF_FALSE(featureOutputs.size() > 0);
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();
@@ -53,13 +54,13 @@ void Concatenate::deserialize(const json &j, Network *network) {
         Tensor tensor = network->getApiTensorByOriginalId(originalTensorId);
         featureInputs.push_back(tensor);
     }
-    assert(featureInputs.size() > 1);
+    THOR_THROW_IF_FALSE(featureInputs.size() > 1);
 
     vector<Tensor> featureOutputs;
     for (const json &output : j["outputs"]) {
         featureOutputs.push_back(Tensor::deserialize(output));
     }
-    assert(featureOutputs.size() == 1);
+    THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
 
     Concatenate concatenate;
     concatenate.concatenationAxis = concatenationAxis;

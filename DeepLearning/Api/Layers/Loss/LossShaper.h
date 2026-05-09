@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -36,8 +37,8 @@ class LossShaper : public Layer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == lossInput || connectingApiTensor == lossOutput);
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == lossInput || connectingApiTensor == lossOutput);
 
         std::vector<uint64_t> implementationInputLossDimensions = createRepresentativeImplementationDimensions(lossInput.getDimensions());
         std::vector<uint64_t> implementationOutputLossDimensions =
@@ -109,7 +110,7 @@ class LossShaper : public Layer {
         std::vector<uint64_t> implementationOutputLossDimensions =
             getImplementationOutputDimensions(implementationInputLossDimensions, outputLossType);
 
-        assert(implementationOutputLossDimensions.size() == 2);
+        THOR_THROW_IF_FALSE(implementationOutputLossDimensions.size() == 2);
         std::vector<uint64_t> apiOutputLossDimensions(1, implementationOutputLossDimensions[1]);
         return apiOutputLossDimensions;
     }
@@ -122,10 +123,10 @@ class LossShaper : public Layer {
 class LossShaper::Builder {
    public:
     virtual LossShaper construct() const {
-        assert(_lossInput.isPresent());
-        assert(_lossInput.get().getDimensions().size() == 1);
-        assert(_outputLossType.isPresent());
-        assert(_outputLossType.get() == ThorImplementation::LossShaper::OutputLossType::BATCH ||
+        THOR_THROW_IF_FALSE(_lossInput.isPresent());
+        THOR_THROW_IF_FALSE(_lossInput.get().getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(_outputLossType.isPresent());
+        THOR_THROW_IF_FALSE(_outputLossType.get() == ThorImplementation::LossShaper::OutputLossType::BATCH ||
                _outputLossType.get() == ThorImplementation::LossShaper::OutputLossType::CLASSWISE ||
                _outputLossType.get() == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE);
 
@@ -141,7 +142,7 @@ class LossShaper::Builder {
     }
 
     virtual LossShaper build() {
-        assert(_network.isPresent());
+        THOR_THROW_IF_FALSE(_network.isPresent());
         LossShaper lossShaper;
         lossShaper = construct();
         lossShaper.addToNetwork(_network.get());
@@ -153,13 +154,13 @@ class LossShaper::Builder {
     }
 
     virtual LossShaper::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual LossShaper::Builder &lossInput(Tensor _lossInput) {
-        assert(!this->_lossInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_lossInput.isPresent());
         this->_lossInput = _lossInput;
         // Remember that API layer does not have the batch dimension
         // Batch size is set when stamping a network input
@@ -169,19 +170,19 @@ class LossShaper::Builder {
     }
 
     virtual LossShaper::Builder &reportsBatchLoss() {
-        assert(_outputLossType.isEmpty());
+        THOR_THROW_IF_FALSE(_outputLossType.isEmpty());
         _outputLossType = ThorImplementation::LossShaper::OutputLossType::BATCH;
         return *this;
     }
 
     virtual LossShaper::Builder &reportsClasswiseLoss() {
-        assert(_outputLossType.isEmpty());
+        THOR_THROW_IF_FALSE(_outputLossType.isEmpty());
         _outputLossType = ThorImplementation::LossShaper::OutputLossType::CLASSWISE;
         return *this;
     }
 
     virtual LossShaper::Builder &reportsElementwiseLoss() {
-        assert(_outputLossType.isEmpty());
+        THOR_THROW_IF_FALSE(_outputLossType.isEmpty());
         _outputLossType = ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE;
         return *this;
     }

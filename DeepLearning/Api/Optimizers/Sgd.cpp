@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 
@@ -27,7 +28,7 @@ shared_ptr<Optimizer> Sgd::clone() const { return make_shared<Sgd>(*this); }
  * decay will still apply from epoch 0.
  */
 void Sgd::setDecay(float newDecay, PlacedNetwork *placedNetwork) {
-    assert(decay < 1.0);
+    THOR_THROW_IF_FALSE(decay < 1.0);
 
     decay = newDecay;
     if (placedNetwork != nullptr)
@@ -38,7 +39,7 @@ void Sgd::setDecay(float newDecay, PlacedNetwork *placedNetwork) {
  * decay computation will always apply from epoch 0, not from when setLearningRate() is called.
  */
 void Sgd::setInitialLearningRate(float newInitialLearningRate, PlacedNetwork *placedNetwork) {
-    assert(newInitialLearningRate >= 0.0f);
+    THOR_THROW_IF_FALSE(newInitialLearningRate >= 0.0f);
 
     initialLearningRate = newInitialLearningRate;
     if (placedNetwork != nullptr)
@@ -46,7 +47,7 @@ void Sgd::setInitialLearningRate(float newInitialLearningRate, PlacedNetwork *pl
 }
 
 void Sgd::setMomentum(float newMomentum, PlacedNetwork *placedNetwork) {
-    assert(momentum >= 0.0f);
+    THOR_THROW_IF_FALSE(momentum >= 0.0f);
 
     momentum = newMomentum;
     if (placedNetwork != nullptr)
@@ -61,7 +62,7 @@ void Sgd::setUseNesterovMomentum(bool newUseNesterovMomentum, PlacedNetwork *pla
 
 void Sgd::updateParameters(PlacedNetwork *placedNetwork) {
     // FIXME: re-implement
-    // assert(placedNetwork != nullptr);
+    // THOR_THROW_IF_FALSE(placedNetwork != nullptr);
     // uint32_t numStamps = placedNetwork->getNumStamps();
     // for (uint32_t i = 0; i < numStamps; ++i) {
     //     ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
@@ -69,7 +70,7 @@ void Sgd::updateParameters(PlacedNetwork *placedNetwork) {
     //     for (uint32_t j = 0; j < numTrainableLayers; ++j) {
     //         shared_ptr<ThorImplementation::TrainableLayer> &trainableLayer = stampedNetwork.getTrainableLayer(j);
     //         Optional<shared_ptr<ThorImplementation::Optimizer>> maybePhysicalOptimizer = trainableLayer->getOptimizer();
-    //         assert(maybePhysicalOptimizer.isPresent());
+    //         THOR_THROW_IF_FALSE(maybePhysicalOptimizer.isPresent());
     //         shared_ptr<ThorImplementation::Optimizer> optimizer = maybePhysicalOptimizer.get();
     //         shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
     //         if (physicalSgd == nullptr || physicalSgd->getId() != getId())
@@ -117,9 +118,9 @@ json Sgd::serialize(thor_file::TarWriter &archiveWriter,
                     bool saveOptimizerState) const {
     json j = architectureJson();
     if (saveOptimizerState) {
-        assert(physicalOptimizer != nullptr);
+        THOR_THROW_IF_FALSE(physicalOptimizer != nullptr);
         shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalOptimizer);
-        assert(physicalSgd != nullptr);
+        THOR_THROW_IF_FALSE(physicalSgd != nullptr);
         j["epoch"] = physicalSgd->getEpoch();
     }
     return j;

@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 
@@ -28,7 +29,7 @@ class ApiBackedImplementationParameter : public ThorImplementation::PhysicalPara
 
     void createStorage(const ThorImplementation::PhysicalParameter::StorageContext &context) override {
         // Either use the bound function (C++ or python) that gets input tensor context,
-        // or when it was not supplied then assert that dtype and shape were supplied and create
+        // or when it was not supplied then verify that dtype and shape were supplied and create
         // a tensor co-located with the input tensors having dtype and shape.
         if (storageContextCreateStorage) {
             storage = storageContextCreateStorage(context);
@@ -247,8 +248,8 @@ std::shared_ptr<ThorImplementation::PhysicalParameter> ParameterSpecification::s
     if (storageContextCreateStorage) {
         physicalParameter = std::make_shared<ApiBackedImplementationParameter>(name, trainable, storageContextCreateStorage);
     } else {
-        assert(shape.isPresent());
-        assert(dtype.isPresent());
+        THOR_THROW_IF_FALSE(shape.isPresent());
+        THOR_THROW_IF_FALSE(dtype.isPresent());
 
         physicalParameter = std::make_shared<ThorImplementation::PhysicalParameter>(name, trainable, shape.get(), dtype.get());
     }
@@ -281,9 +282,9 @@ bool ParameterSpecification::setOptimizer(const std::shared_ptr<Optimizer> &opti
 }
 
 ParameterSpecification ParameterSpecification::Builder::build() {
-    assert(!_name.empty());
-    assert(_trainable.isPresent());
-    assert(_initializer != nullptr);
+    THOR_THROW_IF_FALSE(!_name.empty());
+    THOR_THROW_IF_FALSE(_trainable.isPresent());
+    THOR_THROW_IF_FALSE(_initializer != nullptr);
 
     ParameterSpecification p;
     p.initialized = true;
@@ -328,8 +329,8 @@ ParameterSpecification ParameterSpecification::Builder::build() {
 }
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::name(const std::string &_name) {
-    assert(this->_name.empty());
-    assert(!_name.empty());
+    THOR_THROW_IF_FALSE(this->_name.empty());
+    THOR_THROW_IF_FALSE(!_name.empty());
     if (_name.length() >= 2 && _name[0] == '_' && _name[1] == '_')
         throw runtime_error("Parameter names cannot start with __ that is reserved. Parameter name " + _name + " is illegal.");
     this->_name = _name;
@@ -337,19 +338,19 @@ ParameterSpecification::Builder &ParameterSpecification::Builder::name(const std
 }
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::initializer(std::shared_ptr<Initializer> &_initializer) {
-    assert(this->_initializer == nullptr);
+    THOR_THROW_IF_FALSE(this->_initializer == nullptr);
     this->_initializer = _initializer->clone();
     return *this;
 }
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::initializer(std::shared_ptr<Initializer> &&_initializer) {
-    assert(this->_initializer == nullptr);
+    THOR_THROW_IF_FALSE(this->_initializer == nullptr);
     this->_initializer = _initializer->clone();
     return *this;
 }
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::trainable(const bool _trainable) {
-    assert(!this->_trainable.isPresent());
+    THOR_THROW_IF_FALSE(!this->_trainable.isPresent());
     this->_trainable = _trainable;
     return *this;
 }
@@ -363,13 +364,13 @@ ParameterSpecification::Builder &ParameterSpecification::Builder::trainingInitia
 }
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::optimizer(std::shared_ptr<Optimizer> &_optimizerOverride) {
-    assert(this->_optimizerOverride == nullptr);
+    THOR_THROW_IF_FALSE(this->_optimizerOverride == nullptr);
     this->_optimizerOverride = _optimizerOverride;
     return *this;
 }
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::optimizer(std::shared_ptr<Optimizer> &&_optimizerOverride) {
-    assert(this->_optimizerOverride == nullptr);
+    THOR_THROW_IF_FALSE(this->_optimizerOverride == nullptr);
     this->_optimizerOverride = _optimizerOverride;
     return *this;
 };

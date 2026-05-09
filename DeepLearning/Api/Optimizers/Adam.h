@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
@@ -81,42 +82,42 @@ class Adam::Builder {
         adam.beta2 = _beta2;
         adam.epsilon = _epsilon;
 
-        assert(adam.alpha > 0.0f);
-        assert(adam.beta1 >= 0.0f && adam.beta1 < 1.0f);
-        assert(adam.beta2 >= 0.0f && adam.beta2 < 1.0f);
-        assert(adam.epsilon > 0);
+        THOR_THROW_IF_FALSE(adam.alpha > 0.0f);
+        THOR_THROW_IF_FALSE(adam.beta1 >= 0.0f && adam.beta1 < 1.0f);
+        THOR_THROW_IF_FALSE(adam.beta2 >= 0.0f && adam.beta2 < 1.0f);
+        THOR_THROW_IF_FALSE(adam.epsilon > 0);
 
         // When network is passed to the builder, this optimizer becomes the network default optimizer:
         if (_network.isPresent() && _network.get() != nullptr) {
             adam.addToNetwork(_network);
-            assert(std::dynamic_pointer_cast<Adam>(_network.get()->getDefaultOptimizer()) != nullptr);
+            THOR_THROW_IF_FALSE(std::dynamic_pointer_cast<Adam>(_network.get()->getDefaultOptimizer()) != nullptr);
             return std::dynamic_pointer_cast<Adam>(_network.get()->getDefaultOptimizer());
         } else {
             return std::dynamic_pointer_cast<Adam>(adam.clone());
         }
     }
     virtual Adam::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
     virtual Adam::Builder alpha(float _alpha) {
-        assert(!this->_alpha.isPresent());
+        THOR_THROW_IF_FALSE(!this->_alpha.isPresent());
         this->_alpha = _alpha;
         return *this;
     }
     virtual Adam::Builder beta1(float _beta1) {
-        assert(!this->_beta1.isPresent());
+        THOR_THROW_IF_FALSE(!this->_beta1.isPresent());
         this->_beta1 = _beta1;
         return *this;
     }
     virtual Adam::Builder beta2(float _beta2) {
-        assert(!this->_beta2.isPresent());
+        THOR_THROW_IF_FALSE(!this->_beta2.isPresent());
         this->_beta2 = _beta2;
         return *this;
     }
     virtual Adam::Builder epsilon(float _epsilon) {
-        assert(!this->_epsilon.isPresent());
+        THOR_THROW_IF_FALSE(!this->_epsilon.isPresent());
         this->_epsilon = _epsilon;
         return *this;
     }

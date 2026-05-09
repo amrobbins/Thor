@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Activations/Sigmoid.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
@@ -33,8 +34,8 @@ class BinaryCrossEntropy : public Loss {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         // FIXME: How to prune backward then.
-        assert(initialized);
-        assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
         // Sigmoid and LossShaper are connected during multi-layer flattening
         std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy =
@@ -57,20 +58,20 @@ class BinaryCrossEntropy : public Loss {
 class BinaryCrossEntropy::Builder {
    public:
     virtual BinaryCrossEntropy build() {
-        assert(_network.isPresent());
-        assert(_predictions.isPresent());
-        assert(_labels.isPresent());
-        assert(_predictions.get() != _labels.get());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_predictions.isPresent());
+        THOR_THROW_IF_FALSE(_labels.isPresent());
+        THOR_THROW_IF_FALSE(_predictions.get() != _labels.get());
         if (_lossShape.isEmpty())
             _lossShape = LossShape::BATCH;
 
         std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
         // API layer does not have a batch dimension:
-        assert(labelDimensions.size() == 1 && labelDimensions[0] == 1);
+        THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
 
         BinaryCrossEntropy binaryCrossEntropy;
         if (_sigmoidAddedToNetwork.isPresent()) {
-            assert(_sigmoidAddedToNetwork.get() == true);
+            THOR_THROW_IF_FALSE(_sigmoidAddedToNetwork.get() == true);
             binaryCrossEntropy.sigmoidAddedToNetwork = true;
         } else {
             binaryCrossEntropy.sigmoidAddedToNetwork = false;
@@ -79,7 +80,7 @@ class BinaryCrossEntropy::Builder {
         binaryCrossEntropy.labelsTensor = _labels.get();
         if (_lossDataType.isEmpty())
             _lossDataType = Tensor::DataType::FP32;
-        assert(_lossDataType == Tensor::DataType::FP16 || _lossDataType == Tensor::DataType::FP32);
+        THOR_THROW_IF_FALSE(_lossDataType == Tensor::DataType::FP16 || _lossDataType == Tensor::DataType::FP32);
         binaryCrossEntropy.lossDataType = _lossDataType;
 
         if (_lossShape == LossShape::BATCH) {
@@ -93,7 +94,7 @@ class BinaryCrossEntropy::Builder {
         if (binaryCrossEntropy.isMultiLayer()) {
             binaryCrossEntropy.buildSupportLayersAndAddToNetwork();
         } else {
-            assert(binaryCrossEntropy.lossShape == LossShape::ELEMENTWISE);
+            THOR_THROW_IF_FALSE(binaryCrossEntropy.lossShape == LossShape::ELEMENTWISE);
             binaryCrossEntropy.lossTensor = Tensor(_lossDataType, {1});
             binaryCrossEntropy.addToNetwork(_network.get());
         }
@@ -102,21 +103,21 @@ class BinaryCrossEntropy::Builder {
     }
 
     virtual BinaryCrossEntropy::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual BinaryCrossEntropy::Builder &predictions(Tensor _predictions) {
-        assert(!this->_predictions.isPresent());
-        assert(_predictions.getDimensions().size() == 1 && _predictions.getDimensions()[0] == 1);
+        THOR_THROW_IF_FALSE(!this->_predictions.isPresent());
+        THOR_THROW_IF_FALSE(_predictions.getDimensions().size() == 1 && _predictions.getDimensions()[0] == 1);
         this->_predictions = _predictions;
         return *this;
     }
 
     virtual BinaryCrossEntropy::Builder &labels(Tensor _labels) {
-        assert(!this->_labels.isPresent());
-        assert(_labels.getDimensions().size() == 1 && _labels.getDimensions()[0] == 1);
+        THOR_THROW_IF_FALSE(!this->_labels.isPresent());
+        THOR_THROW_IF_FALSE(_labels.getDimensions().size() == 1 && _labels.getDimensions()[0] == 1);
         this->_labels = _labels;
         return *this;
     }
@@ -126,7 +127,7 @@ class BinaryCrossEntropy::Builder {
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
      */
     virtual BinaryCrossEntropy::Builder &reportsBatchLoss() {
-        assert(!_lossShape.isPresent());
+        THOR_THROW_IF_FALSE(!_lossShape.isPresent());
         _lossShape = LossShape::BATCH;
         return *this;
     }
@@ -136,14 +137,14 @@ class BinaryCrossEntropy::Builder {
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
      */
     virtual BinaryCrossEntropy::Builder &reportsElementwiseLoss() {
-        assert(!_lossShape.isPresent());
+        THOR_THROW_IF_FALSE(!_lossShape.isPresent());
         _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
     virtual BinaryCrossEntropy::Builder &lossDataType(Tensor::DataType _lossDataType) {
-        assert(this->_lossDataType.isEmpty());
-        assert(_lossDataType == Tensor::DataType::FP32 || _lossDataType == Tensor::DataType::FP16);
+        THOR_THROW_IF_FALSE(this->_lossDataType.isEmpty());
+        THOR_THROW_IF_FALSE(_lossDataType == Tensor::DataType::FP32 || _lossDataType == Tensor::DataType::FP16);
         this->_lossDataType = _lossDataType;
         return *this;
     }
@@ -155,7 +156,7 @@ class BinaryCrossEntropy::Builder {
      * result in a single layer that can be directly built.
      */
     virtual BinaryCrossEntropy::Builder &sigmoidAddedToNetwork() {
-        assert(!_sigmoidAddedToNetwork.isPresent());
+        THOR_THROW_IF_FALSE(!_sigmoidAddedToNetwork.isPresent());
         _sigmoidAddedToNetwork = true;
         return *this;
     }

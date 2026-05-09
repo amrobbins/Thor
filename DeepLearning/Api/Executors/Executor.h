@@ -1,6 +1,5 @@
 #pragma once
 
-#include <assert.h>
 #include <memory>
 
 namespace Thor {

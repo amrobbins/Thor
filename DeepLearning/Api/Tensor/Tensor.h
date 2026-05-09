@@ -1,10 +1,10 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include <nlohmann/json.hpp>
 
-#include <assert.h>
 #include <atomic>
 #include <cmath>
 #include <utility>
@@ -27,7 +27,7 @@ class Tensor {
         originalId = id;
         // When dimension[0] == 0, it means copy the batch size when it is known.
         for (uint32_t i = 1; i < dimensions.size(); ++i) {
-            assert(dimensions[i] != 0);
+            THOR_THROW_IF_FALSE(dimensions[i] != 0);
         }
     }
     virtual ~Tensor() {}
@@ -37,19 +37,19 @@ class Tensor {
     Tensor clone(DataType dataType) const { return Tensor(dataType, dimensions); }
 
     uint64_t getId() const {
-        assert(initialized);
+        THOR_THROW_IF_FALSE(initialized);
         return id;
     }
     uint64_t getOriginalId() const {
-        assert(initialized);
+        THOR_THROW_IF_FALSE(initialized);
         return originalId;
     }
     DataType getDataType() const {
-        assert(initialized);
+        THOR_THROW_IF_FALSE(initialized);
         return dataType;
     }
     std::vector<uint64_t> getDimensions() const {
-        assert(initialized);
+        THOR_THROW_IF_FALSE(initialized);
         return dimensions;
     }
 
@@ -82,7 +82,7 @@ class Tensor {
     void reshape(std::vector<uint64_t> newDimensions) {
         uint64_t oldNumElements = getTotalNumElements();
         uint64_t newNumElements = getTotalNumElements();
-        assert(oldNumElements == newNumElements);
+        THOR_THROW_IF_FALSE(oldNumElements == newNumElements);
         dimensions = newDimensions;
     }
 

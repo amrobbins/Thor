@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/Activation/SoftSign.h"
@@ -50,8 +51,8 @@ class SoftSign : public Activation {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
 
         std::shared_ptr<ThorImplementation::SoftSign> softSign = std::make_shared<ThorImplementation::SoftSign>();
         return softSign;
@@ -69,7 +70,7 @@ class SoftSign::Builder : public Activation::Builder {
         std::shared_ptr<SoftSign> softSign = std::make_shared<SoftSign>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
-            assert(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.isPresent());
             softSign->featureInput = _featureInput;
             softSign->featureOutput = _featureInput.get().clone();
             softSign->initialized = true;

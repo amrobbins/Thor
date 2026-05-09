@@ -1,9 +1,9 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Initializers/Glorot.h"
 
-#include <assert.h>
 
 namespace Thor {
 
@@ -40,7 +40,7 @@ class Glorot::Builder : public Initializer::Builder {
     }
 
     virtual Glorot::Builder &mode(ThorImplementation::Glorot::Mode _mode) {
-        assert(!this->_mode.isPresent());
+        THOR_THROW_IF_FALSE(!this->_mode.isPresent());
         this->_mode = _mode;
         return *this;
     }

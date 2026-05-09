@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 
 using namespace std;
@@ -30,7 +31,7 @@ unordered_map<string, Loss::Deserializer> &Loss::get_registry() {
 void Loss::register_layer(string name, Deserializer fn) { get_registry().emplace(move(name), move(fn)); }
 
 void Loss::deserialize(const nlohmann::json &j, Network *network) {
-    assert(j.at("factory").get<std::string>() == Layer::Factory::Loss.value());
+    THOR_THROW_IF_FALSE(j.at("factory").get<std::string>() == Layer::Factory::Loss.value());
     std::string type = j.at("layer_type").get<std::string>();
 
     unordered_map<string, Loss::Deserializer> &registry = get_registry();

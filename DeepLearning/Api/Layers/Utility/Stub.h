@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 
@@ -23,7 +24,7 @@ class Stub : public Layer {
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -32,7 +33,7 @@ class Stub : public Layer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
@@ -46,8 +47,8 @@ class Stub : public Layer {
 class Stub::Builder {
    public:
     virtual Stub build() {
-        assert(_network.isPresent());
-        assert(!_inputTensor.isEmpty());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(!_inputTensor.isEmpty());
 
         Stub stub;
         stub.featureInput = _inputTensor;
@@ -57,13 +58,13 @@ class Stub::Builder {
     }
 
     virtual Stub::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual Stub::Builder &inputTensor(Tensor _inputTensor) {
-        assert(_inputTensor.isInitialized());
+        THOR_THROW_IF_FALSE(_inputTensor.isInitialized());
         this->_inputTensor = _inputTensor;
         return *this;
     }

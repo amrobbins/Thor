@@ -1,11 +1,11 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 
 #include <nlohmann/json.hpp>
 
-#include <assert.h>
 #include <atomic>
 #include <utility>
 
@@ -29,7 +29,7 @@ class Loss : public Layer {
     virtual void informThatInputConnectionMade(Tensor inputTensor) {
         numInputConnectionsMade += 1;
         // Only one type of loss is supported at a time.
-        assert(numInputConnectionsMade < 3);
+        THOR_THROW_IF_FALSE(numInputConnectionsMade < 3);
     }
 
     virtual Tensor getPredictions() const { return predictionsTensor; }
@@ -51,7 +51,7 @@ class Loss : public Layer {
         } else {
             return 0;
         }
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {

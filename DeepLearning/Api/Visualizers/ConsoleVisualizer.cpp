@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Visualizers/ConsoleVisualizer.h"
 
 // curses.h creates macros that clash with GraphicsMagick, so the two cannot be used together
@@ -111,14 +112,14 @@ void ConsoleVisualizer::interruptHandler(int sig) {
 void ConsoleVisualizer::noOpHandler(int sig) {}
 
 void ConsoleVisualizer::inputHandler() {
-    assert(executionStateQueue != nullptr);
+    THOR_THROW_IF_FALSE(executionStateQueue != nullptr);
 
     if (originalResizeHandler == nullptr)
         originalResizeHandler = signal(SIGWINCH, resizeHandler);
-    assert(originalResizeHandler != nullptr);
+    THOR_THROW_IF_FALSE(originalResizeHandler != nullptr);
     if (originalInterruptHandler == nullptr)
         originalInterruptHandler = signal(SIGINT, interruptHandler);
-    assert(originalInterruptHandler != nullptr);
+    THOR_THROW_IF_FALSE(originalInterruptHandler != nullptr);
     // if (originalAbortHandler == nullptr)
     //    originalAbortHandler = signal(SIGABRT, abortHandler);
 
@@ -258,9 +259,9 @@ void ConsoleVisualizer::popUpAcknowledge(string message) {
 }
 
 ConsoleVisualizer::ConsoleVisualizer() {
-    assert(win0 == nullptr);
-    assert(win1 == nullptr);
-    assert(win2 == nullptr);
+    THOR_THROW_IF_FALSE(win0 == nullptr);
+    THOR_THROW_IF_FALSE(win1 == nullptr);
+    THOR_THROW_IF_FALSE(win2 == nullptr);
 }
 
 ConsoleVisualizer::~ConsoleVisualizer() {
@@ -727,7 +728,7 @@ void ConsoleVisualizer::drawOverallStatusBar() {
         timePerValidationBatch = mostRecentExecutionState.runningAverageTimePerValidationBatch;
     } else {
         // FIXME: test mode
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     uint64_t trainingBatchesRemaining = totalBatchesToTrain - batchesTrained;

@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 
 using namespace std;
@@ -48,7 +49,7 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
     shared_ptr<ThorImplementation::BatchNormalization> batchNorm;
     shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
     batchNorm = dynamic_pointer_cast<ThorImplementation::BatchNormalization>(physicalLayer);
-    assert(batchNorm != nullptr);
+    THOR_THROW_IF_FALSE(batchNorm != nullptr);
 
     ThorImplementation::Tensor weights;
     ThorImplementation::Tensor biases;
@@ -168,17 +169,17 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
     // // 3. Run an initializer to set the weights - on an untrained network
     // if (!isFirstStamp) {
     //     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
-    //     assert(sisterPhysicalLayer != nullptr);
+    //     THOR_THROW_IF_FALSE(sisterPhysicalLayer != nullptr);
     //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
     //     Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
     //     if (sisterPhysicalLayerLoadedEvent.isPresent())
     //         stream.waitEvent(sisterPhysicalLayerLoadedEvent);
     //     weights.copyFromAsync(sisterPhysicalLayer->getParameter("weights")->getStorage(), stream);
     //
-    //     assert(physicalLayer->getParameter("biases")->getStorage().isPresent());
+    //     THOR_THROW_IF_FALSE(physicalLayer->getParameter("biases")->getStorage().isPresent());
     //     ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage();
     //     Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getParameter("biases")->getStorage();
-    //     assert(sisterLayerBiases.isPresent());
+    //     THOR_THROW_IF_FALSE(sisterLayerBiases.isPresent());
     //     biases.copyFromAsync(sisterLayerBiases.get(), stream);
     //
     //     ThorImplementation::Tensor resultRunningVariance = physicalBatchNorm->getParameter("running_variance")->getStorage().get();
@@ -196,23 +197,23 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
     //     initDoneEvents.emplace_back(false, true);
     // } else if (weightsFile.isPresent()) {
     //     // 2. Copy from a file - when loading a saved network
-    //     assert(archiveReader != nullptr);
-    //     assert(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getMemDevice() ==
+    //     THOR_THROW_IF_FALSE(archiveReader != nullptr);
+    //     THOR_THROW_IF_FALSE(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getMemDevice() ==
     //            ThorImplementation::TensorPlacement::MemDevices::GPU);
     //     Stream stream =
     //         Stream::getNextUploadStream(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getDeviceNum());
     //
     //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
     //     archiveReader->registerReadRequest(weightsFile.get(), weights);
-    //     assert(biasesFile.isPresent());
+    //     THOR_THROW_IF_FALSE(biasesFile.isPresent());
     //     ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().get();
     //     archiveReader->registerReadRequest(biasesFile.get(), biases);
     //
-    //     assert(runningVariancesFile.isPresent());
+    //     THOR_THROW_IF_FALSE(runningVariancesFile.isPresent());
     //     ThorImplementation::Tensor variances = physicalBatchNorm->getParameter("running_variance")->getStorage().get();
     //     archiveReader->registerReadRequest(runningVariancesFile.get(), variances);
     //
-    //     assert(runningMeansFile.isPresent());
+    //     THOR_THROW_IF_FALSE(runningMeansFile.isPresent());
     //     ThorImplementation::Tensor means = physicalBatchNorm->getParameter("running_mean")->getStorage().get();
     //     archiveReader->registerReadRequest(runningMeansFile.get(), means);
     //
@@ -247,7 +248,7 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
     //     //
     //     // UniformRandom::Builder zerosInitializerBuilder = UniformRandom::Builder().minValue(0.0).maxValue(0.0);
     //     //
-    //     // assert(physicalBatchNorm->getParameter("biases")->getStorage().isPresent());
+    //     // THOR_THROW_IF_FALSE(physicalBatchNorm->getParameter("biases")->getStorage().isPresent());
     //     // shared_ptr<Initializer::Builder> biasInitializerBuilder = zerosInitializerBuilder.clone();
     //     // shared_ptr<Initializer> biasInitializer = biasInitializerBuilder->build();
     //     // initDoneEvent = biasInitializer->initialize(physicalBatchNorm->getParameter("biases")->getStorage(), physicalBatchNorm.get());

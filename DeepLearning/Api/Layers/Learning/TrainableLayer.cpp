@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
@@ -30,7 +31,7 @@ unordered_map<string, TrainableLayer::Deserializer> &TrainableLayer::get_registr
 void TrainableLayer::register_layer(string name, Deserializer fn) { get_registry().emplace(std::move(name), std::move(fn)); }
 
 void TrainableLayer::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network) {
-    assert(j.at("factory").get<string>() == Layer::Factory::Learning.value());
+    THOR_THROW_IF_FALSE(j.at("factory").get<string>() == Layer::Factory::Learning.value());
     string type = j.at("layer_type").get<string>();
 
     unordered_map<string, TrainableLayer::Deserializer> &registry = get_registry();
@@ -103,7 +104,7 @@ std::vector<Event> TrainableLayer::initialize(std::shared_ptr<ThorImplementation
                                               bool isFirstStamp,
                                               std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
                                               Optional<Event> sisterLayerLoadedEvent) {
-    assert(layer != nullptr);
+    THOR_THROW_IF_FALSE(layer != nullptr);
 
     std::vector<Event> initDoneEvents = MultiConnectionLayer::initialize(layer);
 
@@ -114,7 +115,7 @@ std::vector<Event> TrainableLayer::initialize(std::shared_ptr<ThorImplementation
         }
 
         Optional<ThorImplementation::Tensor> storage = parameter->getStorage();
-        assert(storage.isPresent());
+        THOR_THROW_IF_FALSE(storage.isPresent());
 
         const ThorImplementation::TensorPlacement placement = storage.get().getPlacement();
         const int gpuNum = placement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU ? placement.getDeviceNum() : 0;

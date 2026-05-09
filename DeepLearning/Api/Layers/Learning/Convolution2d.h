@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Initializers/Initializer.h"
@@ -85,7 +86,7 @@ class Convolution2d : public TrainableLayer {
 
     void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) override {
         std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
-        assert(inputDimensions.size() == 3);
+        THOR_THROW_IF_FALSE(inputDimensions.size() == 3);
 
         uint32_t numInputChannels = inputDimensions[0];
         uint32_t numInputRows = inputDimensions[1];
@@ -155,11 +156,11 @@ class Convolution2d::Builder {
     Builder() { _activationExplicitlyRemoved = false; }
 
     virtual Convolution2d build() {
-        assert(_network.isPresent());
-        assert(!_featureInputs.empty());
-        assert(_numOutputChannels.isPresent());
-        assert(_filterHeight.isPresent());
-        assert(_filterWidth.isPresent());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(!_featureInputs.empty());
+        THOR_THROW_IF_FALSE(_numOutputChannels.isPresent());
+        THOR_THROW_IF_FALSE(_filterHeight.isPresent());
+        THOR_THROW_IF_FALSE(_filterWidth.isPresent());
 
         if (_verticalStride.isEmpty())
             _verticalStride = 1;
@@ -200,22 +201,22 @@ class Convolution2d::Builder {
         convolution2d.verticalStride = _verticalStride;
         convolution2d.horizontalStride = _horizontalStride;
         if (_computeVerticalSamePadding) {
-            assert(convolution2d.verticalStride == 1);
+            THOR_THROW_IF_FALSE(convolution2d.verticalStride == 1);
             convolution2d.verticalPadding = computeSamePadding(
                 convolution2d.featureInputs[0].getDimensions()[1], convolution2d.verticalStride, convolution2d.filterHeight);
         } else {
             convolution2d.verticalPadding = _verticalPadding;
         }
         if (_computeHorizontalSamePadding) {
-            assert(convolution2d.horizontalStride == 1);
+            THOR_THROW_IF_FALSE(convolution2d.horizontalStride == 1);
             convolution2d.horizontalPadding = computeSamePadding(
                 convolution2d.featureInputs[0].getDimensions()[2], convolution2d.horizontalStride, convolution2d.filterWidth);
         } else {
             convolution2d.horizontalPadding = _horizontalPadding;
         }
 
-        assert(convolution2d.verticalPadding < convolution2d.filterHeight);
-        assert(convolution2d.horizontalPadding < convolution2d.filterWidth);
+        THOR_THROW_IF_FALSE(convolution2d.verticalPadding < convolution2d.filterHeight);
+        THOR_THROW_IF_FALSE(convolution2d.horizontalPadding < convolution2d.filterWidth);
 
         uint32_t outputHeight = computeOutputDimension(convolution2d.featureInputs[0].getDimensions()[1],
                                                        convolution2d.verticalStride,
@@ -261,72 +262,72 @@ class Convolution2d::Builder {
     }
 
     virtual Convolution2d::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual Convolution2d::Builder &featureInput(Tensor _featureInput) {
-        assert(_featureInput.getDimensions().size() == 3);
+        THOR_THROW_IF_FALSE(_featureInput.getDimensions().size() == 3);
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1) {
-            assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
-            assert(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
         }
         return *this;
     }
 
     virtual Convolution2d::Builder &numOutputChannels(uint32_t _numOutputChannels) {
-        assert(!this->_numOutputChannels.isPresent());
+        THOR_THROW_IF_FALSE(!this->_numOutputChannels.isPresent());
         this->_numOutputChannels = _numOutputChannels;
         return *this;
     }
 
     virtual Convolution2d::Builder &filterHeight(uint32_t _filterHeight) {
-        assert(!this->_filterHeight.isPresent());
+        THOR_THROW_IF_FALSE(!this->_filterHeight.isPresent());
         this->_filterHeight = _filterHeight;
         return *this;
     }
 
     virtual Convolution2d::Builder &filterWidth(uint32_t _filterWidth) {
-        assert(!this->_filterWidth.isPresent());
+        THOR_THROW_IF_FALSE(!this->_filterWidth.isPresent());
         this->_filterWidth = _filterWidth;
         return *this;
     }
 
     virtual Convolution2d::Builder &verticalStride(uint32_t _verticalStride) {
-        assert(_verticalStride != 0);
-        assert(!this->_verticalStride.isPresent());
+        THOR_THROW_IF_FALSE(_verticalStride != 0);
+        THOR_THROW_IF_FALSE(!this->_verticalStride.isPresent());
         this->_verticalStride = _verticalStride;
         return *this;
     }
 
     virtual Convolution2d::Builder &horizontalStride(uint32_t _horizontalStride) {
-        assert(_horizontalStride != 0);
-        assert(!this->_horizontalStride.isPresent());
+        THOR_THROW_IF_FALSE(_horizontalStride != 0);
+        THOR_THROW_IF_FALSE(!this->_horizontalStride.isPresent());
         this->_horizontalStride = _horizontalStride;
         return *this;
     }
 
     virtual Convolution2d::Builder &verticalPadding(uint32_t _verticalPadding) {
-        assert(!this->_verticalPadding.isPresent());
-        assert(!this->_computeVerticalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
         this->_verticalPadding = _verticalPadding;
         return *this;
     }
 
     virtual Convolution2d::Builder &horizontalPadding(uint32_t _horizontalPadding) {
-        assert(!this->_horizontalPadding.isPresent());
-        assert(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
         this->_horizontalPadding = _horizontalPadding;
         return *this;
     }
 
     virtual Convolution2d::Builder &samePadding() {
-        assert(!this->_verticalPadding.isPresent());
-        assert(!this->_horizontalPadding.isPresent());
-        assert(!this->_computeVerticalSamePadding.isPresent());
-        assert(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
         this->_verticalPadding = 0;
         this->_horizontalPadding = 0;
         this->_computeHorizontalSamePadding = true;
@@ -335,98 +336,98 @@ class Convolution2d::Builder {
     }
 
     virtual Convolution2d::Builder &verticalSamePadding() {
-        assert(!this->_verticalPadding.isPresent());
-        assert(!this->_computeVerticalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
         this->_verticalPadding = 0;
         this->_computeVerticalSamePadding = true;
         return *this;
     }
 
     virtual Convolution2d::Builder &horizontalSamePadding() {
-        assert(!this->_horizontalPadding.isPresent());
-        assert(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
         this->_horizontalPadding = 0;
         this->_computeHorizontalSamePadding = true;
         return *this;
     }
 
     virtual Convolution2d::Builder &noPadding() {
-        assert(!this->_verticalPadding.isPresent());
-        assert(!this->_horizontalPadding.isPresent());
-        assert(!this->_computeVerticalSamePadding.isPresent());
-        assert(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
         this->_verticalPadding = 0;
         this->_horizontalPadding = 0;
         return *this;
     }
 
     virtual Convolution2d::Builder &hasBias(bool _hasBias) {
-        assert(!this->_hasBias.isPresent());
+        THOR_THROW_IF_FALSE(!this->_hasBias.isPresent());
         this->_hasBias = _hasBias;
         return *this;
     }
 
     virtual Convolution2d::Builder &weightsInitializer(std::shared_ptr<Initializer> &_weightsInitializer) {
-        assert(this->_weightsInitializer == nullptr);
+        THOR_THROW_IF_FALSE(this->_weightsInitializer == nullptr);
         this->_weightsInitializer = _weightsInitializer->clone();
         return *this;
     }
 
     virtual Convolution2d::Builder &weightsInitializer(std::shared_ptr<Initializer> &&_weightsInitializer) {
-        assert(this->_weightsInitializer == nullptr);
+        THOR_THROW_IF_FALSE(this->_weightsInitializer == nullptr);
         this->_weightsInitializer = _weightsInitializer->clone();
         return *this;
     }
 
     virtual Convolution2d::Builder &biasInitializer(std::shared_ptr<Initializer> &_biasInitializer) {
-        assert(this->_biasesInitializer == nullptr);
+        THOR_THROW_IF_FALSE(this->_biasesInitializer == nullptr);
         this->_biasesInitializer = _biasInitializer->clone();
         return *this;
     }
 
     virtual Convolution2d::Builder &biasInitializer(std::shared_ptr<Initializer> &&_biasInitializer) {
-        assert(this->_biasesInitializer == nullptr);
+        THOR_THROW_IF_FALSE(this->_biasesInitializer == nullptr);
         this->_biasesInitializer = _biasInitializer->clone();
         return *this;
     }
 
     // Adds an activation layer after this Convolution2d layer
     virtual Convolution2d::Builder &activation(std::shared_ptr<Activation> &_activation) {
-        assert(this->_activation == nullptr);
-        assert(!_activationExplicitlyRemoved);
+        THOR_THROW_IF_FALSE(this->_activation == nullptr);
+        THOR_THROW_IF_FALSE(!_activationExplicitlyRemoved);
         this->_activation = _activation;
         return *this;
     }
 
     virtual Convolution2d::Builder &activation(std::shared_ptr<Activation> &&_activation) {
-        assert(this->_activation == nullptr);
-        assert(!_activationExplicitlyRemoved);
+        THOR_THROW_IF_FALSE(this->_activation == nullptr);
+        THOR_THROW_IF_FALSE(!_activationExplicitlyRemoved);
         this->_activation = _activation;
         return *this;
     }
 
     virtual Convolution2d::Builder &noActivation() {
-        assert(!this->_activation);
+        THOR_THROW_IF_FALSE(!this->_activation);
 
         _activationExplicitlyRemoved = true;
         return *this;
     }
 
     virtual Convolution2d::Builder &epilogue(const ThorImplementation::Expression &expression) {
-        assert(this->_epilogue.isEmpty());
+        THOR_THROW_IF_FALSE(this->_epilogue.isEmpty());
         Convolution2d::validateEpilogueExpression(expression);
         _epilogue = expression;
         return *this;
     }
 
     virtual Convolution2d::Builder &weightsOptimizer(std::shared_ptr<Optimizer> _weightsOptimizer) {
-        assert(this->_weightsOptimizer == nullptr);
+        THOR_THROW_IF_FALSE(this->_weightsOptimizer == nullptr);
         this->_weightsOptimizer = _weightsOptimizer;
         return *this;
     }
 
     virtual Convolution2d::Builder &biasesOptimizer(std::shared_ptr<Optimizer> _biasesOptimizer) {
-        assert(this->_biasesOptimizer == nullptr);
+        THOR_THROW_IF_FALSE(this->_biasesOptimizer == nullptr);
         this->_biasesOptimizer = _biasesOptimizer;
         return *this;
     }
@@ -435,7 +436,7 @@ class Convolution2d::Builder {
     // exponentialRunningAverageFactor and epsilon will be set to good default values when not specified.
     virtual Convolution2d::Builder &batchNormalization(Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
                                                        Optional<double> epsilon = Optional<double>::empty()) {
-        assert(!_useBatchNormalization.isPresent());
+        THOR_THROW_IF_FALSE(!_useBatchNormalization.isPresent());
         this->_useBatchNormalization = true;
         this->_batchNormExponentialRunningAverageFactor = exponentialRunningAverageFactor;
         this->_batchNormEpsilon = epsilon;
@@ -444,14 +445,14 @@ class Convolution2d::Builder {
 
     // Adds a DropOut layer before this Convolution2d layer, but after the BatchNormalization layer when that is also present.
     virtual Convolution2d::Builder &dropOut(float _dropProportion) {
-        assert(!this->_dropProportion.isPresent());
+        THOR_THROW_IF_FALSE(!this->_dropProportion.isPresent());
         this->_dropProportion = _dropProportion;
         return *this;
     }
 
     static uint32_t computeOutputDimension(uint32_t inputSize, uint32_t stride, uint32_t filterSize, uint32_t padding) {
-        assert(filterSize <= inputSize + 2 * padding);
-        assert(stride > 0);
+        THOR_THROW_IF_FALSE(filterSize <= inputSize + 2 * padding);
+        THOR_THROW_IF_FALSE(stride > 0);
         return 1 + (((inputSize + 2 * padding) - filterSize) / stride);
     }
 

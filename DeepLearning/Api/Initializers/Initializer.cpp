@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Network/Network.h"
 
@@ -16,7 +17,7 @@ unordered_map<string, Initializer::Deserializer> &Initializer::getRegistry() {
 void Initializer::registerLayer(string name, Deserializer fn) { getRegistry().emplace(std::move(name), std::move(fn)); }
 
 shared_ptr<Initializer> Initializer::deserialize(const json &j) {
-    assert(j.contains("initializer_type"));
+    THOR_THROW_IF_FALSE(j.contains("initializer_type"));
     string initializerType = j.at("initializer_type").get<string>();
 
     unordered_map<string, Deserializer> &registry = getRegistry();

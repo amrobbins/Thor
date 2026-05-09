@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Learning/Convolution3d.h"
 
 using namespace std;
@@ -32,7 +33,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
 
         const Tensor& featureInputTensor = inputs.at("feature_input");
         const Tensor& wTensor = inputs.at("weights");
-        assert(wTensor.getPlacement() == placement);
+        THOR_THROW_IF_FALSE(wTensor.getPlacement() == placement);
 
         if (featureInputTensor.getDimensions().size() != 5) {
             throw std::runtime_error("Convolution3d expects feature_input to be 5D NCDHW.");
@@ -43,7 +44,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
         if (featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
             throw std::runtime_error("Convolution3d input channels must match weight channels.");
         }
-        assert(featureInputTensor.getPlacement() == placement);
+        THOR_THROW_IF_FALSE(featureInputTensor.getPlacement() == placement);
 
         const uint64_t expectedOutputDepth =
             (featureInputTensor.getDimensions()[2] + 2 * padD - wTensor.getDimensions()[2]) / strideD + 1;
@@ -65,7 +66,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
                 featureOutputTensor.getDimensions()[4] != expectedOutputCols) {
                 throw std::runtime_error("Convolution3d feature_output shape does not match the implied convolution output shape.");
             }
-            assert(featureOutputTensor.getPlacement() == placement);
+            THOR_THROW_IF_FALSE(featureOutputTensor.getPlacement() == placement);
             featureOutputDType = featureOutputTensor.getDescriptor().getDataType();
         }
 
@@ -122,8 +123,8 @@ std::shared_ptr<ThorImplementation::Layer> Convolution3d::stamp(ThorImplementati
     (void)drivingLayer;
     (void)drivingApiLayer;
 
-    assert(initialized);
-    assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    THOR_THROW_IF_FALSE(initialized);
+    THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
     Tensor::DataType weightsDataType = Tensor::DataType::FP16;
     std::shared_ptr<ThorImplementation::CustomLayer> physicalConvolution3d = std::make_shared<ThorImplementation::CustomLayer>(
@@ -278,7 +279,7 @@ json Convolution3d::serialize(thor_file::TarWriter& archiveWriter,
     shared_ptr<ThorImplementation::TrainableLayer> twbLayer = nullptr;
     shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
     twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
-    assert(twbLayer != nullptr);
+    THOR_THROW_IF_FALSE(twbLayer != nullptr);
 
     if (twbLayer != nullptr) {
         if (hasBias) {

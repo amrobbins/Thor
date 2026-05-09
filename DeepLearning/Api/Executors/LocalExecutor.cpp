@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Executors/LocalExecutor.h"
 
 using std::condition_variable;
@@ -12,10 +13,10 @@ using namespace std;
 #define LOCAL_EXECUTOR_PROFILE_NUM_BATCHES 10
 
 shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
-    assert(_loader);
-    assert(_optimizer);
+    THOR_THROW_IF_FALSE(_loader);
+    THOR_THROW_IF_FALSE(_optimizer);
     // FIXME: add hyperparameter controller
-    // assert(_hyperparameterController.isPresent());
+    // THOR_THROW_IF_FALSE(_hyperparameterController.isPresent());
 
     if (_visualizers.isEmpty()) {
         _visualizers = vector<Visualizer *>();
@@ -49,7 +50,7 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     vector<Event> initDoneEvents;
     localExecutor->placedNetwork = _network->place(batchSize, initDoneEvents);
 
-    assert(localExecutor->placedNetwork->getNumStamps() >= 1);
+    THOR_THROW_IF_FALSE(localExecutor->placedNetwork->getNumStamps() >= 1);
 
     localExecutor->batchDataReady = make_shared<map<uint64_t, bool>>();
     localExecutor->batchData = make_shared<unordered_map<uint64_t, unordered_map<string, vector<uint8_t>>>>();
@@ -85,13 +86,13 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
         string tensorName = *it;
         ThorImplementation::Tensor copyFromTensor;
         if (params->batchletInput.count(tensorName) == 1) {
-            assert(params->batchletOutput.count(tensorName) == 0);
+            THOR_THROW_IF_FALSE(params->batchletOutput.count(tensorName) == 0);
             copyFromTensor = params->batchletInput[tensorName];
         } else {
-            assert(params->batchletOutput.count(tensorName) == 1);
+            THOR_THROW_IF_FALSE(params->batchletOutput.count(tensorName) == 1);
             copyFromTensor = params->batchletOutput[tensorName];
         }
-        assert(copyFromTensor.getPlacement() == cpuPlacement);
+        THOR_THROW_IF_FALSE(copyFromTensor.getPlacement() == cpuPlacement);
         uint64_t numTensorBytes = copyFromTensor.getDescriptor().getArraySizeInBytes();
         bufferMap[tensorName] = vector<uint8_t>(numTensorBytes);
         memcpy(&(bufferMap[tensorName][0]), copyFromTensor.getMemPtr(), numTensorBytes);
@@ -139,8 +140,8 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
 }
 
 void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches, ExampleType exampleType, set<string> tensorsToReturn) {
-    assert(batches > 0);
-    assert(initialEpochBatchNum + batches <= *numBatchesInEpoch);
+    THOR_THROW_IF_FALSE(batches > 0);
+    THOR_THROW_IF_FALSE(initialEpochBatchNum + batches <= *numBatchesInEpoch);
 
     bool validationPass = (exampleType != ExampleType::TRAIN);
 
@@ -160,13 +161,13 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
     // Once that happens scheduling does not get any further ahead.
 #if LOCAL_EXECUTOR_PROFILE
     cudaStatus = cudaProfilerStart();
-    assert(cudaStatus == cudaSuccess);
+    THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
 #endif
     for (uint64_t batch = 0; batch < batches; ++batch) {
 #if LOCAL_EXECUTOR_PROFILE
         if (batch == LOCAL_EXECUTOR_PROFILE_NUM_BATCHES) {
             cudaStatus = cudaProfilerStop();
-            assert(cudaStatus == cudaSuccess);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             exit(0);
         }
 #endif
@@ -208,7 +209,7 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
 
             // Note that all work is done for a stamp at the end of any input stream belonging to the stamp
             ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(nextStampToProcess);
-            assert(!stampedNetwork.inputs.empty());
+            THOR_THROW_IF_FALSE(!stampedNetwork.inputs.empty());
             Stream stream = stampedNetwork.inputs[0]->getStream();
 
             // Execute the stamp, noting the time taken using events.
@@ -225,7 +226,7 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
 
             // Copy all data to buffers at the end of the work stream
             cudaStatus = cudaLaunchHostFunc(stream, bufferStampTensors, bufferStampTensorsParams);
-            assert(cudaStatus == cudaSuccess);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             processingFinishedEvents[nextStampToProcess] = stream.putEvent();
 
             nextStampToProcess += 1;

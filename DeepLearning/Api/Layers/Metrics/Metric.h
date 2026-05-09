@@ -1,11 +1,11 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/Metric.h"
 
 #include <nlohmann/json.hpp>
 
-#include <assert.h>
 #include <atomic>
 #include <utility>
 
@@ -29,7 +29,7 @@ class Metric : public Layer {
 
     virtual void informThatInputConnectionMade(Tensor inputTensor) {
         numInputConnectionsMade += 1;
-        assert(numInputConnectionsMade < 3);
+        THOR_THROW_IF_FALSE(numInputConnectionsMade < 3);
     }
 
     virtual Tensor getPredictions() const { return getFeatureInput(); }
@@ -45,11 +45,11 @@ class Metric : public Layer {
             return (int)ThorImplementation::Metric::ConnectionType::LABELS;
         else if (connectingTensor == getMetric())
             return (int)ThorImplementation::Metric::ConnectionType::METRIC;
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
-        assert(inputTensor == getFeatureInput() || inputTensor == getLabels());
+        THOR_THROW_IF_FALSE(inputTensor == getFeatureInput() || inputTensor == getLabels());
         if (numInputConnectionsMade == 2)
             return {metricTensor};
         else

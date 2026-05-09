@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -27,8 +28,8 @@ class Flatten : public Layer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == getFeatureInput());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput());
 
         // Implemenattion has 1 extra dimension due to having the batchSize dimension
         std::shared_ptr<ThorImplementation::Flatten> flatten =
@@ -45,14 +46,14 @@ class Flatten : public Layer {
 class Flatten::Builder {
    public:
     virtual Flatten build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
-        assert(_numOutputDimensions.isPresent());
-        assert(_numOutputDimensions.get() < _featureInput.get().getDimensions().size());
-        assert(_numOutputDimensions.get() > 0);
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(_numOutputDimensions.isPresent());
+        THOR_THROW_IF_FALSE(_numOutputDimensions.get() < _featureInput.get().getDimensions().size());
+        THOR_THROW_IF_FALSE(_numOutputDimensions.get() > 0);
 
         std::vector<uint64_t> inputDimensions = _featureInput.get().getDimensions();
-        assert(inputDimensions.size() > 0);
+        THOR_THROW_IF_FALSE(inputDimensions.size() > 0);
         std::vector<uint64_t> outputDimensions;
         for (uint32_t i = 0; i < inputDimensions.size(); ++i) {
             if (i < _numOutputDimensions)
@@ -70,20 +71,20 @@ class Flatten::Builder {
     }
 
     virtual Flatten::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual Flatten::Builder &featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
         return *this;
     }
 
     virtual Flatten::Builder &numOutputDimensions(float _numOutputDimensions) {
-        assert(!this->_numOutputDimensions.isPresent());
-        assert(_numOutputDimensions > 0);
+        THOR_THROW_IF_FALSE(!this->_numOutputDimensions.isPresent());
+        THOR_THROW_IF_FALSE(_numOutputDimensions > 0);
         this->_numOutputDimensions = _numOutputDimensions;
         return *this;
     }

@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/ExampleNetworks/AlexNet.h"
 
 using namespace Thor;
@@ -28,7 +29,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .getFeatureOutput();
 
     expectedDimensions = {48, 55, 55};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(alexNet)
@@ -47,7 +48,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .getFeatureOutput();
 
     expectedDimensions = {128, 55, 55};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Pooling::Builder()
                              .network(alexNet)
@@ -61,7 +62,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .getFeatureOutput();
 
     expectedDimensions = {128, 27, 27};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(alexNet)
@@ -80,7 +81,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .getFeatureOutput();
 
     expectedDimensions = {192, 27, 27};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Pooling::Builder()
                              .network(alexNet)
@@ -94,7 +95,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .getFeatureOutput();
 
     expectedDimensions = {192, 13, 13};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(alexNet)
@@ -113,7 +114,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .getFeatureOutput();
 
     expectedDimensions = {192, 13, 13};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(alexNet)
@@ -132,7 +133,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .getFeatureOutput();
 
     expectedDimensions = {128, 13, 13};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Pooling::Builder()
                              .network(alexNet)
@@ -146,7 +147,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .getFeatureOutput();
 
     expectedDimensions = {128, 6, 6};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     return latestOutputTensor;
 }
@@ -179,7 +180,7 @@ Network buildAlexNet() {
                                     .getFeatureOutput();
 
     expectedDimensions = {256, 6, 6};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     // Input tensor is automatically flattened when sent to a fully connected layer.
     latestOutputTensor = FullyConnected::Builder()
@@ -194,7 +195,7 @@ Network buildAlexNet() {
                              .getFeatureOutput();
 
     expectedDimensions = {4096};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = FullyConnected::Builder()
                              .network(alexNet)
@@ -219,7 +220,7 @@ Network buildAlexNet() {
                              .getFeatureOutput();
 
     expectedDimensions = {NUM_CLASSES};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     Tensor labelsTensor = NetworkInput::Builder()
                               .network(alexNet)

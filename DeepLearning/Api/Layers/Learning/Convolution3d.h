@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Initializers/Initializer.h"
@@ -123,12 +124,12 @@ class Convolution3d::Builder {
     Builder() { _activationExplicitlyRemoved = false; }
 
     virtual Convolution3d build() {
-        assert(_network.isPresent());
-        assert(!_featureInputs.empty());
-        assert(_numOutputChannels.isPresent());
-        assert(_filterDepth.isPresent());
-        assert(_filterHeight.isPresent());
-        assert(_filterWidth.isPresent());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(!_featureInputs.empty());
+        THOR_THROW_IF_FALSE(_numOutputChannels.isPresent());
+        THOR_THROW_IF_FALSE(_filterDepth.isPresent());
+        THOR_THROW_IF_FALSE(_filterHeight.isPresent());
+        THOR_THROW_IF_FALSE(_filterWidth.isPresent());
 
         if (_depthStride.isEmpty())
             _depthStride = 1;
@@ -168,9 +169,9 @@ class Convolution3d::Builder {
         convolution3d.verticalPadding = _verticalPadding;
         convolution3d.horizontalPadding = _horizontalPadding;
 
-        assert(convolution3d.depthPadding < convolution3d.filterDepth);
-        assert(convolution3d.verticalPadding < convolution3d.filterHeight);
-        assert(convolution3d.horizontalPadding < convolution3d.filterWidth);
+        THOR_THROW_IF_FALSE(convolution3d.depthPadding < convolution3d.filterDepth);
+        THOR_THROW_IF_FALSE(convolution3d.verticalPadding < convolution3d.filterHeight);
+        THOR_THROW_IF_FALSE(convolution3d.horizontalPadding < convolution3d.filterWidth);
 
         uint32_t outputDepth = computeOutputDimension(convolution3d.featureInputs[0].getDimensions()[1],
                                                       convolution3d.depthStride,
@@ -213,118 +214,118 @@ class Convolution3d::Builder {
     }
 
     virtual Convolution3d::Builder& network(Network& _network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual Convolution3d::Builder& featureInput(Tensor _featureInput) {
-        assert(_featureInput.getDimensions().size() == 4);
+        THOR_THROW_IF_FALSE(_featureInput.getDimensions().size() == 4);
         this->_featureInputs.push_back(_featureInput);
         return *this;
     }
 
     virtual Convolution3d::Builder& numOutputChannels(uint32_t _numOutputChannels) {
-        assert(!this->_numOutputChannels.isPresent());
+        THOR_THROW_IF_FALSE(!this->_numOutputChannels.isPresent());
         this->_numOutputChannels = _numOutputChannels;
         return *this;
     }
 
     virtual Convolution3d::Builder& filterDepth(uint32_t value) {
-        assert(!this->_filterDepth.isPresent());
+        THOR_THROW_IF_FALSE(!this->_filterDepth.isPresent());
         this->_filterDepth = value;
         return *this;
     }
     virtual Convolution3d::Builder& filterHeight(uint32_t value) {
-        assert(!this->_filterHeight.isPresent());
+        THOR_THROW_IF_FALSE(!this->_filterHeight.isPresent());
         this->_filterHeight = value;
         return *this;
     }
     virtual Convolution3d::Builder& filterWidth(uint32_t value) {
-        assert(!this->_filterWidth.isPresent());
+        THOR_THROW_IF_FALSE(!this->_filterWidth.isPresent());
         this->_filterWidth = value;
         return *this;
     }
     virtual Convolution3d::Builder& depthStride(uint32_t value) {
-        assert(value != 0);
-        assert(!this->_depthStride.isPresent());
+        THOR_THROW_IF_FALSE(value != 0);
+        THOR_THROW_IF_FALSE(!this->_depthStride.isPresent());
         this->_depthStride = value;
         return *this;
     }
     virtual Convolution3d::Builder& verticalStride(uint32_t value) {
-        assert(value != 0);
-        assert(!this->_verticalStride.isPresent());
+        THOR_THROW_IF_FALSE(value != 0);
+        THOR_THROW_IF_FALSE(!this->_verticalStride.isPresent());
         this->_verticalStride = value;
         return *this;
     }
     virtual Convolution3d::Builder& horizontalStride(uint32_t value) {
-        assert(value != 0);
-        assert(!this->_horizontalStride.isPresent());
+        THOR_THROW_IF_FALSE(value != 0);
+        THOR_THROW_IF_FALSE(!this->_horizontalStride.isPresent());
         this->_horizontalStride = value;
         return *this;
     }
     virtual Convolution3d::Builder& depthPadding(uint32_t value) {
-        assert(!this->_depthPadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_depthPadding.isPresent());
         this->_depthPadding = value;
         return *this;
     }
     virtual Convolution3d::Builder& verticalPadding(uint32_t value) {
-        assert(!this->_verticalPadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
         this->_verticalPadding = value;
         return *this;
     }
     virtual Convolution3d::Builder& horizontalPadding(uint32_t value) {
-        assert(!this->_horizontalPadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
         this->_horizontalPadding = value;
         return *this;
     }
     virtual Convolution3d::Builder& hasBias(bool value) {
-        assert(!this->_hasBias.isPresent());
+        THOR_THROW_IF_FALSE(!this->_hasBias.isPresent());
         this->_hasBias = value;
         return *this;
     }
     virtual Convolution3d::Builder& weightsInitializer(std::shared_ptr<Initializer> initializer) {
-        assert(this->_weightsInitializer == nullptr);
+        THOR_THROW_IF_FALSE(this->_weightsInitializer == nullptr);
         this->_weightsInitializer = initializer->clone();
         return *this;
     }
     virtual Convolution3d::Builder& biasInitializer(std::shared_ptr<Initializer> initializer) {
-        assert(this->_biasesInitializer == nullptr);
+        THOR_THROW_IF_FALSE(this->_biasesInitializer == nullptr);
         this->_biasesInitializer = initializer->clone();
         return *this;
     }
     virtual Convolution3d::Builder& activation(std::shared_ptr<Activation> value) {
-        assert(this->_activation == nullptr);
-        assert(!_activationExplicitlyRemoved);
+        THOR_THROW_IF_FALSE(this->_activation == nullptr);
+        THOR_THROW_IF_FALSE(!_activationExplicitlyRemoved);
         this->_activation = value;
         return *this;
     }
     virtual Convolution3d::Builder& noActivation() {
-        assert(!this->_activation);
+        THOR_THROW_IF_FALSE(!this->_activation);
         _activationExplicitlyRemoved = true;
         return *this;
     }
     virtual Convolution3d::Builder& epilogue(const ThorImplementation::Expression &expression) {
-        assert(this->_epilogue.isEmpty());
+        THOR_THROW_IF_FALSE(this->_epilogue.isEmpty());
         Convolution3d::validateEpilogueExpression(expression);
         _epilogue = expression;
         return *this;
     }
 
     virtual Convolution3d::Builder& weightsOptimizer(std::shared_ptr<Optimizer> value) {
-        assert(this->_weightsOptimizer == nullptr);
+        THOR_THROW_IF_FALSE(this->_weightsOptimizer == nullptr);
         this->_weightsOptimizer = value;
         return *this;
     }
     virtual Convolution3d::Builder& biasesOptimizer(std::shared_ptr<Optimizer> value) {
-        assert(this->_biasesOptimizer == nullptr);
+        THOR_THROW_IF_FALSE(this->_biasesOptimizer == nullptr);
         this->_biasesOptimizer = value;
         return *this;
     }
 
     static uint32_t computeOutputDimension(uint32_t inputSize, uint32_t stride, uint32_t filterSize, uint32_t padding) {
-        assert(filterSize <= inputSize + 2 * padding);
-        assert(stride > 0);
+        THOR_THROW_IF_FALSE(filterSize <= inputSize + 2 * padding);
+        THOR_THROW_IF_FALSE(stride > 0);
         return 1 + (((inputSize + 2 * padding) - filterSize) / stride);
     }
 

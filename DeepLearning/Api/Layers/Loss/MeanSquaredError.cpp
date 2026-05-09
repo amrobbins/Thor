@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "MeanSquaredError.h"
 
 using namespace std;
@@ -30,7 +31,7 @@ void MeanSquaredError::buildSupportLayersAndAddToNetwork() {
         lossTensor = lossShaper.getLossOutput();
     } else {
         // No loss shaper needed
-        assert(lossShape == LossShape::RAW);
+        THOR_THROW_IF_FALSE(lossShape == LossShape::RAW);
         lossTensor = lossShaperInput;
     }
 }

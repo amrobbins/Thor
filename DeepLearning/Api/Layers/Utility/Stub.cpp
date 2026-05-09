@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "DeepLearning/Api/Network/Network.h"
 
@@ -10,9 +11,9 @@ Stub::Stub() = default;
 Stub::~Stub() = default;
 
 json Stub::architectureJson() const {
-    assert(initialized);
-    assert(featureInput.isPresent());
-    assert(featureOutput.isEmpty());
+    THOR_THROW_IF_FALSE(initialized);
+    THOR_THROW_IF_FALSE(featureInput.isPresent());
+    THOR_THROW_IF_FALSE(featureOutput.isEmpty());
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();

@@ -3,7 +3,6 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Loaders/Shard.h"
 
-#include <assert.h>
 #include <map>
 #include <memory>
 #include <string>

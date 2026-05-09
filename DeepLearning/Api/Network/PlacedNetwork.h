@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
@@ -12,7 +13,7 @@ class PlacedNetwork {
     PlacedNetwork(const std::string& networkName, const Network& network, std::vector<ThorImplementation::StampedNetwork>& initialStamps)
         : networkName(networkName), network(network), stampedNetworks(std::exchange(initialStamps, {})) {
         // FIXME: Make a Network deep copy constructor
-        assert(stampedNetworks.size() >= 1);
+        THOR_THROW_IF_FALSE(stampedNetworks.size() >= 1);
     }
 
     ~PlacedNetwork();
@@ -20,14 +21,14 @@ class PlacedNetwork {
     // Deep-copy the network; move the rvalue
     PlacedNetwork(const Network& network, std::vector<ThorImplementation::StampedNetwork>&& initialStamps)
         : network(network), stampedNetworks(std::move(initialStamps)) {
-        assert(stampedNetworks.size() >= 1);
+        THOR_THROW_IF_FALSE(stampedNetworks.size() >= 1);
     }
 
     void save(const std::string& directory, bool overwrite, bool saveOptimizerState);
 
     uint64_t getNumStamps() { return stampedNetworks.size(); }
     ThorImplementation::StampedNetwork& getStampedNetwork(uint64_t i) {
-        assert(i < stampedNetworks.size());
+        THOR_THROW_IF_FALSE(i < stampedNetworks.size());
         return stampedNetworks[i];
     }
     virtual std::string getNetworkName() { return networkName; }

@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -27,9 +28,9 @@ class TypeConverter : public Layer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == getFeatureInput());
-        assert(getFeatureOutput().isPresent());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput());
+        THOR_THROW_IF_FALSE(getFeatureOutput().isPresent());
 
         // Implementation has 1 extra dimension due to having the batchSize dimension
         std::shared_ptr<ThorImplementation::TypeConversion> typeConverter =
@@ -38,7 +39,7 @@ class TypeConverter : public Layer {
     }
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
-        assert(getFeatureOutput().isPresent());
+        THOR_THROW_IF_FALSE(getFeatureOutput().isPresent());
         return getFeatureOutput().get().getTotalSizeInBytes();
     }
 };
@@ -46,9 +47,9 @@ class TypeConverter : public Layer {
 class TypeConverter::Builder {
    public:
     virtual TypeConverter build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
-        assert(_newDataType.isPresent());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(_newDataType.isPresent());
 
         TypeConverter TypeConverter;
         TypeConverter.featureInput = _featureInput;
@@ -59,20 +60,20 @@ class TypeConverter::Builder {
     }
 
     virtual TypeConverter::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual TypeConverter::Builder &featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
         return *this;
     }
 
     virtual TypeConverter::Builder &newDataType(Tensor::DataType _newDataType) {
-        assert(!this->_newDataType.isPresent());
-        assert(Tensor::dataTypeValid(_newDataType));
+        THOR_THROW_IF_FALSE(!this->_newDataType.isPresent());
+        THOR_THROW_IF_FALSE(Tensor::dataTypeValid(_newDataType));
         this->_newDataType = _newDataType;
         return *this;
     }

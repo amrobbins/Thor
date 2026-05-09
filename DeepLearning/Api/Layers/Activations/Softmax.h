@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/Activation/Softmax.h"
@@ -52,8 +53,8 @@ class Softmax : public Activation {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
 
         std::shared_ptr<ThorImplementation::Softmax> softmax = std::make_shared<ThorImplementation::Softmax>(backwardComputedExternally);
         return softmax;
@@ -73,7 +74,7 @@ class Softmax::Builder : public Activation::Builder {
         std::shared_ptr<Softmax> softmax = std::make_shared<Softmax>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
-            assert(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.isPresent());
             softmax->featureInput = _featureInput;
             softmax->featureOutput = _featureInput.get().clone();
             softmax->initialized = true;
@@ -98,7 +99,7 @@ class Softmax::Builder : public Activation::Builder {
 
    protected:
     Softmax::Builder &backwardComputedExternally() {
-        assert(!_backwardComputedExternally.isPresent());
+        THOR_THROW_IF_FALSE(!_backwardComputedExternally.isPresent());
         _backwardComputedExternally = true;
         return *this;
     }

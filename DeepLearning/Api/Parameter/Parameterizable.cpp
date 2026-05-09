@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -70,7 +71,7 @@ std::vector<BoundParameter> Parameterizable::getBoundParameters(PlacedNetwork* p
 
     result.reserve(parameterSpecs.size());
     for (const auto& parameter : parameterSpecs) {
-        assert(parameter != nullptr);
+        THOR_THROW_IF_FALSE(parameter != nullptr);
         result.emplace_back(parameter, placedNetwork, getParameterizableId());
     }
 

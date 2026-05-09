@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
@@ -71,10 +72,10 @@ class Sgd::Builder {
         if (_useNesterovMomentum.isEmpty())
             _useNesterovMomentum = false;
 
-        assert(_initialLearningRate > 0.0f);
-        assert(_decay < 1.0f);
-        assert(_decay >= 0.0f);
-        assert(_momentum >= 0.0f);
+        THOR_THROW_IF_FALSE(_initialLearningRate > 0.0f);
+        THOR_THROW_IF_FALSE(_decay < 1.0f);
+        THOR_THROW_IF_FALSE(_decay >= 0.0f);
+        THOR_THROW_IF_FALSE(_momentum >= 0.0f);
 
         Sgd sgd;
         sgd.initialLearningRate = _initialLearningRate;
@@ -85,7 +86,7 @@ class Sgd::Builder {
         // When network is passed to the builder, this optimizer becomes the network default optimizer:
         if (_network.isPresent() && _network.get() != nullptr) {
             sgd.addToNetwork(_network);
-            assert(std::dynamic_pointer_cast<Sgd>(_network.get()->getDefaultOptimizer()) != nullptr);
+            THOR_THROW_IF_FALSE(std::dynamic_pointer_cast<Sgd>(_network.get()->getDefaultOptimizer()) != nullptr);
             return std::dynamic_pointer_cast<Sgd>(_network.get()->getDefaultOptimizer());
         } else {
             return std::dynamic_pointer_cast<Sgd>(sgd.clone());
@@ -93,31 +94,31 @@ class Sgd::Builder {
     }
 
     virtual Sgd::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual Sgd::Builder initialLearningRate(float _initialLearningRate) {
-        assert(!this->_initialLearningRate.isPresent());
+        THOR_THROW_IF_FALSE(!this->_initialLearningRate.isPresent());
         this->_initialLearningRate = _initialLearningRate;
         return *this;
     }
 
     virtual Sgd::Builder decay(float _decay) {
-        assert(!this->_decay.isPresent());
+        THOR_THROW_IF_FALSE(!this->_decay.isPresent());
         this->_decay = _decay;
         return *this;
     }
 
     virtual Sgd::Builder momentum(float _momentum) {
-        assert(!this->_momentum.isPresent());
+        THOR_THROW_IF_FALSE(!this->_momentum.isPresent());
         this->_momentum = _momentum;
         return *this;
     }
 
     virtual Sgd::Builder useNesterovMomentum(bool _useNesterovMomentum) {
-        assert(!this->_useNesterovMomentum.isPresent());
+        THOR_THROW_IF_FALSE(!this->_useNesterovMomentum.isPresent());
         this->_useNesterovMomentum = _useNesterovMomentum;
         return *this;
     }

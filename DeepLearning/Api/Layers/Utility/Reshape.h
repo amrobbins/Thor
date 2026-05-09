@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -26,8 +27,8 @@ class Reshape : public Layer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == getFeatureInput());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput());
 
         // Implementation has 1 extra dimension due to having the batchSize dimension, this is handled by the builder
         std::shared_ptr<ThorImplementation::Reshape> Reshape = std::make_shared<ThorImplementation::Reshape>(newDimensions);
@@ -45,14 +46,14 @@ class Reshape : public Layer {
 class Reshape::Builder {
    public:
     virtual Reshape build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
-        assert(_newDimensions.isPresent());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(_newDimensions.isPresent());
 
         Reshape reshape;
         reshape.featureInput = _featureInput;
         reshape.featureOutput = Tensor(_featureInput.get().getDataType(), _newDimensions.get());
-        assert(reshape.featureInput.get().getTotalNumElements() == reshape.featureOutput.get().getTotalNumElements());
+        THOR_THROW_IF_FALSE(reshape.featureInput.get().getTotalNumElements() == reshape.featureOutput.get().getTotalNumElements());
 
         // Implementation layer has one extra (batch) dimension, set to 0 to tell implementation layer to get it from featureIn
         reshape.newDimensions.push_back(0);
@@ -65,20 +66,20 @@ class Reshape::Builder {
     }
 
     virtual Reshape::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual Reshape::Builder &featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
         return *this;
     }
 
     virtual Reshape::Builder &newDimensions(std::vector<uint64_t> _newDimensions) {
-        assert(!this->_newDimensions.isPresent());
-        assert(_newDimensions.size() > 0);
+        THOR_THROW_IF_FALSE(!this->_newDimensions.isPresent());
+        THOR_THROW_IF_FALSE(_newDimensions.size() > 0);
         this->_newDimensions = _newDimensions;
         return *this;
     }

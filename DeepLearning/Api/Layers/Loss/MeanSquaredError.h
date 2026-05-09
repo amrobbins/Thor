@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
@@ -35,8 +36,8 @@ class MeanSquaredError : public Loss {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         // FIXME: How to prune backward then.
-        assert(initialized);
-        assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
         std::shared_ptr<ThorImplementation::MeanSquaredError> meanSquaredError =
             std::make_shared<ThorImplementation::MeanSquaredError>(lossDataType);
@@ -62,12 +63,12 @@ class MeanSquaredError : public Loss {
 class MeanSquaredError::Builder {
    public:
     virtual MeanSquaredError build() {
-        assert(_network.isPresent());
-        assert(_predictions.isPresent());
-        assert(_labels.isPresent());
-        assert(_predictions.get() != _labels.get());
-        assert(_predictions.get().getDimensions().size() == 1);
-        assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_predictions.isPresent());
+        THOR_THROW_IF_FALSE(_labels.isPresent());
+        THOR_THROW_IF_FALSE(_predictions.get() != _labels.get());
+        THOR_THROW_IF_FALSE(_predictions.get().getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(_predictions.get().getDimensions() == _labels.get().getDimensions());
 
         if (_lossShape.isEmpty())
             _lossShape = LossShape::BATCH;
@@ -96,51 +97,51 @@ class MeanSquaredError::Builder {
     }
 
     virtual MeanSquaredError::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &predictions(Tensor _predictions) {
-        assert(!this->_predictions.isPresent());
-        assert(!_predictions.getDimensions().empty());
+        THOR_THROW_IF_FALSE(!this->_predictions.isPresent());
+        THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
         this->_predictions = _predictions;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &labels(Tensor _labels) {
-        assert(!this->_labels.isPresent());
-        assert(!_labels.getDimensions().empty());
+        THOR_THROW_IF_FALSE(!this->_labels.isPresent());
+        THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsBatchLoss() {
-        assert(this->_lossShape.isEmpty());
+        THOR_THROW_IF_FALSE(this->_lossShape.isEmpty());
         _lossShape = LossShape::BATCH;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsElementwiseLoss() {
-        assert(this->_lossShape.isEmpty());
+        THOR_THROW_IF_FALSE(this->_lossShape.isEmpty());
         _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsPerOutputLoss() {
-        assert(this->_lossShape.isEmpty());
+        THOR_THROW_IF_FALSE(this->_lossShape.isEmpty());
         _lossShape = LossShape::CLASSWISE;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsRawLoss() {
-        assert(this->_lossShape.isEmpty());
+        THOR_THROW_IF_FALSE(this->_lossShape.isEmpty());
         _lossShape = LossShape::RAW;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &lossDataType(Tensor::DataType _lossDataType) {
-        assert(this->_lossDataType.isEmpty());
+        THOR_THROW_IF_FALSE(this->_lossDataType.isEmpty());
         this->_lossDataType = _lossDataType;
         return *this;
     }

@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
 #include "DeepLearning/Implementation/Layers/Metrics/BinaryAccuracy.h"
@@ -25,8 +26,8 @@ class BinaryAccuracy : public Metric {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == getFeatureInput() || connectingApiTensor == labelsTensor);
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput() || connectingApiTensor == labelsTensor);
 
         std::shared_ptr<ThorImplementation::BinaryAccuracy> BinaryAccuracy = std::make_shared<ThorImplementation::BinaryAccuracy>();
         return BinaryAccuracy;
@@ -45,14 +46,14 @@ class BinaryAccuracy : public Metric {
 class BinaryAccuracy::Builder {
    public:
     virtual BinaryAccuracy build() {
-        assert(_network.isPresent());
-        assert(_predictions.isPresent());
-        assert(_labels.isPresent());
-        assert(_predictions.get() != _labels.get());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_predictions.isPresent());
+        THOR_THROW_IF_FALSE(_labels.isPresent());
+        THOR_THROW_IF_FALSE(_predictions.get() != _labels.get());
         std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
         std::vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
-        assert(labelDimensions.size() == 1 && labelDimensions[0] == 1);
-        assert(predictionDimensions.size() == 1 && predictionDimensions[0] == 1);
+        THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
+        THOR_THROW_IF_FALSE(predictionDimensions.size() == 1 && predictionDimensions[0] == 1);
 
         BinaryAccuracy binaryAccuracy;
         binaryAccuracy.featureInput = _predictions;
@@ -64,21 +65,21 @@ class BinaryAccuracy::Builder {
     }
 
     virtual BinaryAccuracy::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual BinaryAccuracy::Builder &predictions(Tensor _predictions) {
-        assert(!this->_predictions.isPresent());
-        assert(!_predictions.getDimensions().empty());
+        THOR_THROW_IF_FALSE(!this->_predictions.isPresent());
+        THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
         this->_predictions = _predictions;
         return *this;
     }
 
     virtual BinaryAccuracy::Builder &labels(Tensor _labels) {
-        assert(!this->_labels.isPresent());
-        assert(!_labels.getDimensions().empty());
+        THOR_THROW_IF_FALSE(!this->_labels.isPresent());
+        THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
         return *this;
     }
