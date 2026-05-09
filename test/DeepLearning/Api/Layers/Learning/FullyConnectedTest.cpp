@@ -16,7 +16,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -336,6 +338,44 @@ vector<FullyConnectedAdamPassReference> computeFullyConnectedAdamReferenceSequen
     return refs;
 }
 
+std::filesystem::path makeUniqueTestArchiveDir(const std::string& testName) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / (testName + "_" + std::to_string(now));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+template <typename LayerT>
+std::shared_ptr<LayerT> findOnlyLayerOfType(Api::Network& network) {
+    std::shared_ptr<LayerT> found;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < network.getNumLayers(); ++i) {
+        std::shared_ptr<LayerT> candidate = std::dynamic_pointer_cast<LayerT>(network.getLayer(i));
+        if (candidate != nullptr) {
+            found = candidate;
+            ++count;
+        }
+    }
+    EXPECT_EQ(count, 1u);
+    return found;
+}
+
+float softplusReference(float x) {
+    if (x > 20.0f)
+        return x;
+    if (x < -20.0f)
+        return std::exp(x);
+    return std::log1p(std::exp(x));
+}
+
+vector<float> applySoftPlusThenTestEpilogue(const vector<float>& values) {
+    vector<float> out(values.size());
+    for (uint64_t i = 0; i < values.size(); ++i)
+        out[i] = 2.0f * softplusReference(values[i]) + 1.0f;
+    return out;
+}
+
 }  // namespace
 
 TEST(FullyConnectedApi, BuilderCreatesParameterSpecsOutputsAndConnectionTypes) {
@@ -412,6 +452,174 @@ TEST(FullyConnectedApi, StampsAsPhysicalCustomLayerAndAllocatesParameters) {
     EXPECT_EQ(biases.getDimensions(), (vector<uint64_t>{2}));
     EXPECT_EQ(weights.getDataType(), DataType::FP32);
     EXPECT_EQ(biases.getDataType(), DataType::FP32);
+}
+
+
+TEST(FullyConnectedApi, DefaultsToSoftPlusActivationWhenActivationIsOmitted) {
+    Api::Network network("testNetwork");
+    Api::Tensor featureInput(DataType::FP32, {4});
+
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(featureInput)
+                                 .numOutputFeatures(3)
+                                 .hasBias(true)
+                                 .build();
+
+    const nlohmann::json j = fc.architectureJson();
+    ASSERT_TRUE(j.contains("activation"));
+    ASSERT_FALSE(j.at("activation").is_null());
+    EXPECT_EQ(j.at("activation").at("layer_type").get<string>(), "soft_plus");
+}
+
+TEST(FullyConnectedApi, ArchitectureSaveLoadRoundTripPreservesSoftPlusActivationEpilogueParametersAndRuns) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t numInputFeatures = 3;
+    constexpr uint32_t numOutputFeatures = 2;
+    const DataType dataType = DataType::FP32;
+
+    const vector<float> inputValues = {1.0f, -2.0f, 0.5f, -1.0f, 3.0f, 2.0f};
+    const vector<float> weightValues = {0.5f, -1.0f, 1.5f, 0.25f, -0.75f, 2.0f};
+    const vector<float> biasValues = {0.1f, -0.2f};
+
+    const std::string networkName = "fc_arch_round_trip";
+    std::filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input =
+            Api::NetworkInput::Builder().network(network).name("input").dimensions({numInputFeatures}).dataType(dataType).build();
+
+        Impl::Expression epilogueInput = Api::FullyConnected::epilogueInput(dataType, dataType);
+        Impl::Expression epilogue = epilogueInput * 2.0f + 1.0f;
+
+        Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                     .network(network)
+                                     .featureInput(input.getFeatureOutput())
+                                     .numOutputFeatures(numOutputFeatures)
+                                     .hasBias(true)
+                                     .weightsDataType(dataType)
+                                     .computeDataType(dataType)
+                                     .outputDataType(dataType)
+                                     .epilogue(epilogue)
+                                     .build();
+        Api::NetworkOutput output =
+            Api::NetworkOutput::Builder().network(network).name("output").inputTensor(fc.getFeatureOutput()).dataType(dataType).build();
+
+        network.save(archiveDir.string(), true);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+
+        ASSERT_EQ(loadedNetwork.getNumLayers(), 3u);
+        std::shared_ptr<Api::NetworkInput> loadedInput = findOnlyLayerOfType<Api::NetworkInput>(loadedNetwork);
+        std::shared_ptr<Api::FullyConnected> loadedFc = findOnlyLayerOfType<Api::FullyConnected>(loadedNetwork);
+        std::shared_ptr<Api::NetworkOutput> loadedOutput = findOnlyLayerOfType<Api::NetworkOutput>(loadedNetwork);
+        ASSERT_NE(loadedInput, nullptr);
+        ASSERT_NE(loadedFc, nullptr);
+        ASSERT_NE(loadedOutput, nullptr);
+
+        const nlohmann::json j = loadedFc->architectureJson();
+        EXPECT_EQ(j.at("layer_type").get<string>(), "fully_connected");
+        EXPECT_EQ(j.at("num_output_features").get<uint32_t>(), numOutputFeatures);
+        EXPECT_TRUE(j.at("has_bias").get<bool>());
+        EXPECT_EQ(j.at("weights_data_type").get<DataType>(), dataType);
+        EXPECT_EQ(j.at("compute_data_type").get<DataType>(), dataType);
+        EXPECT_EQ(j.at("output_data_type").get<DataType>(), dataType);
+        ASSERT_FALSE(j.at("activation").is_null());
+        EXPECT_EQ(j.at("activation").at("layer_type").get<string>(), "soft_plus");
+        ASSERT_FALSE(j.at("epilogue").is_null());
+        ASSERT_TRUE(j.at("parameters").contains("weights"));
+        ASSERT_TRUE(j.at("parameters").contains("biases"));
+        EXPECT_EQ(j.at("parameters").at("weights").at("shape").get<vector<uint64_t>>(),
+                  (vector<uint64_t>{numInputFeatures, numOutputFeatures}));
+        EXPECT_EQ(j.at("parameters").at("biases").at("shape").get<vector<uint64_t>>(), (vector<uint64_t>{numOutputFeatures}));
+
+        PlacedFullyConnectedFixture fixture =
+            placeSingleFullyConnectedNetwork(loadedNetwork, *loadedInput, *loadedOutput, *loadedFc, batchSize, true);
+        Stream stream = fixture.physicalFc->getStreams()[0];
+        setParameterTensor(fixture.physicalFc->getParameter("weights"), weightValues, stream);
+        setParameterTensor(fixture.physicalFc->getParameter("biases"), biasValues, stream);
+        stream.synchronize();
+
+        Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numInputFeatures}));
+        writeCpuTensor(featureInHost, inputValues);
+
+        const vector<float> actual = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+        const vector<float> affine =
+            fullyConnectedReference(inputValues, weightValues, biasValues, batchSize, numInputFeatures, numOutputFeatures, true);
+        const vector<float> expected = applySoftPlusThenTestEpilogue(affine);
+        expectAllClose(actual, expected, 2e-4f, 2e-4f, "loaded FC SoftPlus+epilogue output");
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
+}
+
+TEST(FullyConnectedApi, PlacedSaveLoadRoundTripRestoresParameterStorageAndRuns) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t numInputFeatures = 3;
+    constexpr uint32_t numOutputFeatures = 2;
+    const DataType dataType = DataType::FP32;
+
+    const vector<float> inputValues = {2.0f, -1.0f, 0.25f, -0.5f, 1.5f, 3.0f};
+    const vector<float> weightValues = {0.25f, -0.5f, 1.25f, 0.75f, -1.5f, 2.0f};
+    const vector<float> biasValues = {0.5f, -1.0f};
+
+    const std::string networkName = "fc_state_round_trip";
+    std::filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input =
+            Api::NetworkInput::Builder().network(network).name("input").dimensions({numInputFeatures}).dataType(dataType).build();
+        Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                     .network(network)
+                                     .featureInput(input.getFeatureOutput())
+                                     .numOutputFeatures(numOutputFeatures)
+                                     .hasBias(true)
+                                     .weightsDataType(dataType)
+                                     .computeDataType(dataType)
+                                     .outputDataType(dataType)
+                                     .noActivation()
+                                     .build();
+        Api::NetworkOutput output =
+            Api::NetworkOutput::Builder().network(network).name("output").inputTensor(fc.getFeatureOutput()).dataType(dataType).build();
+
+        PlacedFullyConnectedFixture fixture = placeSingleFullyConnectedNetwork(network, input, output, fc, batchSize, true);
+        Stream stream = fixture.physicalFc->getStreams()[0];
+        setParameterTensor(fixture.physicalFc->getParameter("weights"), weightValues, stream);
+        setParameterTensor(fixture.physicalFc->getParameter("biases"), biasValues, stream);
+        stream.synchronize();
+
+        fixture.placedNetwork->save(archiveDir.string(), true, false);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+        std::shared_ptr<Api::NetworkInput> loadedInput = findOnlyLayerOfType<Api::NetworkInput>(loadedNetwork);
+        std::shared_ptr<Api::FullyConnected> loadedFc = findOnlyLayerOfType<Api::FullyConnected>(loadedNetwork);
+        std::shared_ptr<Api::NetworkOutput> loadedOutput = findOnlyLayerOfType<Api::NetworkOutput>(loadedNetwork);
+        ASSERT_NE(loadedInput, nullptr);
+        ASSERT_NE(loadedFc, nullptr);
+        ASSERT_NE(loadedOutput, nullptr);
+
+        PlacedFullyConnectedFixture loadedFixture =
+            placeSingleFullyConnectedNetwork(loadedNetwork, *loadedInput, *loadedOutput, *loadedFc, batchSize, true);
+
+        Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numInputFeatures}));
+        writeCpuTensor(featureInHost, inputValues);
+
+        const vector<float> actual =
+            runForward(*loadedFixture.physicalInput, *loadedFixture.physicalOutput, featureInHost, batchSize);
+        const vector<float> expected =
+            fullyConnectedReference(inputValues, weightValues, biasValues, batchSize, numInputFeatures, numOutputFeatures, true);
+        expectAllClose(actual, expected, 2e-4f, 2e-4f, "loaded FC restored parameter output");
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
 }
 
 TEST(FullyConnectedApi, ForwardNumericalWithBias) {

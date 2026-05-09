@@ -3,7 +3,7 @@
 #include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
-#include "DeepLearning/Api/Layers/Activations/Relu.h"
+#include "DeepLearning/Api/Layers/Activations/SoftPlus.h"
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
@@ -142,7 +142,7 @@ class Convolution2d::Builder {
         if (_biasesInitializer == nullptr)
             _biasesInitializer = Glorot::Builder().build();
         if (!_activation && !_activationExplicitlyRemoved)
-            _activation = Relu::Builder().build();
+            _activation = SoftPlus::Builder().build();
         if (_dropProportion.isEmpty())
             _dropProportion = 0.0f;
         if (_useBatchNormalization.isEmpty()) {

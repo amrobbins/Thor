@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 import thor
@@ -10,6 +12,12 @@ def _net():
 def _chw_input(n: thor.Network, c: int, h: int, w: int, dtype=thor.DataType.fp16):
     ni = thor.layers.NetworkInput(n, "input", [c, h, w], dtype)
     return ni.get_feature_output()
+
+
+def _only_layer_architecture(n: thor.Network, layer_type: str):
+    layers = [layer for layer in json.loads(n.get_architecture_json())["layers"] if layer["layer_type"] == layer_type]
+    assert len(layers) == 1
+    return layers[0]
 
 
 def test_conv2d_constructs_and_output_shape_dtype_round_trip():
@@ -44,6 +52,20 @@ def test_conv2d_constructs_and_output_shape_dtype_round_trip():
     # effH=32+2*1=34, outH=(34-3)//2 + 1 = 16
     # effW=32+2*1=34, outW=(34-3)//2 + 1 = 16
     assert y.get_dimensions() == [16, 16, 16]
+
+
+def test_conv2d_omitted_activation_defaults_to_softplus_and_none_disables_activation():
+    default_net = _net()
+    default_x = _chw_input(default_net, 3, 8, 8, thor.DataType.fp16)
+    thor.layers.Convolution2d(default_net, default_x, 4, 3, 3)
+    default_arch = _only_layer_architecture(default_net, "convolution_2d")
+    assert default_arch["activation"]["layer_type"] == "soft_plus"
+
+    linear_net = thor.Network("test_net_conv2d_linear")
+    linear_x = _chw_input(linear_net, 3, 8, 8, thor.DataType.fp16)
+    thor.layers.Convolution2d(linear_net, linear_x, 4, 3, 3, activation=None)
+    linear_arch = _only_layer_architecture(linear_net, "convolution_2d")
+    assert linear_arch["activation"] is None
 
 
 def test_conv2d_rejects_feature_input_wrong_rank():

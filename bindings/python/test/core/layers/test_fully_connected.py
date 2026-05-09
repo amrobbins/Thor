@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 import thor
@@ -10,6 +12,12 @@ def _net():
 def _input_tensor(n: thor.Network, in_features: int, dtype=thor.DataType.fp16):
     ni = thor.layers.NetworkInput(n, "input", [in_features], dtype)
     return ni.get_feature_output()
+
+
+def _only_layer_architecture(n: thor.Network, layer_type: str):
+    layers = [layer for layer in json.loads(n.get_architecture_json())["layers"] if layer["layer_type"] == layer_type]
+    assert len(layers) == 1
+    return layers[0]
 
 
 def test_fully_connected_constructs_defaults_and_output_shape_dtype():
@@ -29,6 +37,9 @@ def test_fully_connected_constructs_defaults_and_output_shape_dtype():
     # Typically FC preserves dtype of feature_input at API level; if your builder forces fp32, change this.
     assert y.get_data_type() == x.get_data_type()
 
+    fc_arch = _only_layer_architecture(n, "fully_connected")
+    assert fc_arch["activation"]["layer_type"] == "soft_plus"
+
 
 def test_fully_connected_constructs_no_activation_when_none():
     n = _net()
@@ -44,6 +55,9 @@ def test_fully_connected_constructs_no_activation_when_none():
     assert isinstance(fc, thor.layers.FullyConnected)
     y = fc.get_feature_output()
     assert y.get_dimensions() == [8]
+
+    fc_arch = _only_layer_architecture(n, "fully_connected")
+    assert fc_arch["activation"] is None
 
 
 def test_fully_connected_constructs_with_activation_and_initializers():

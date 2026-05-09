@@ -222,6 +222,11 @@ json Convolution2d::architectureJson() const {
     j["vertical_padding"] = verticalPadding;
     j["num_output_channels"] = numOutputChannels;
     j["has_bias"] = hasBias;
+    if (activation != nullptr) {
+        j["activation"] = activation->architectureJson();
+    } else {
+        j["activation"] = nullptr;
+    }
 
     // Input connections
     json inputs = json::array();

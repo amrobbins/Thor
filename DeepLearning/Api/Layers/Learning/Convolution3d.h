@@ -3,7 +3,7 @@
 #include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
-#include "DeepLearning/Api/Layers/Activations/Relu.h"
+#include "DeepLearning/Api/Layers/Activations/SoftPlus.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution3d.h"
@@ -111,7 +111,7 @@ class Convolution3d::Builder {
         if (_biasesInitializer == nullptr)
             _biasesInitializer = Glorot::Builder().build();
         if (!_activation && !_activationExplicitlyRemoved)
-            _activation = Relu::Builder().build();
+            _activation = SoftPlus::Builder().build();
 
         Convolution3d convolution3d;
         convolution3d.featureInputs = _featureInputs;
