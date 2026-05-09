@@ -7,7 +7,6 @@
 #include <cudnn_ops.h>
 #include <memory>
 
-#include <assert.h>
 #include <chrono>
 #include <thread>
 

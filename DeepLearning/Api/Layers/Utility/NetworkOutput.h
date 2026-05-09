@@ -13,15 +13,15 @@ class NetworkOutput : public Layer {
 
     NetworkOutput() {}
 
-    virtual ~NetworkOutput() {}
+    ~NetworkOutput() override {}
 
     virtual std::string getName() const { return name; }
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<NetworkOutput>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<NetworkOutput>(*this); }
 
     Tensor::DataType getDataType() const { return dataType; }
 
-    virtual std::string getLayerType() const { return "NetworkOutput"; }
+    std::string getLayerType() const override { return "NetworkOutput"; }
 
     virtual bool isMultiLayer() const {
         THOR_THROW_IF_FALSE(featureInput.isPresent());
@@ -30,7 +30,7 @@ class NetworkOutput : public Layer {
 
     virtual void buildSupportLayersAndAddToNetwork();
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -48,7 +48,7 @@ class NetworkOutput : public Layer {
         return networkOutput;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // If there is a type conversion required, the memory requirement is reported by the TypeConverter layer
         return 0;
     }

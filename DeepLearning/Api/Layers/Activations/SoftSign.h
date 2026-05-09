@@ -11,19 +11,19 @@ class SoftSign : public Activation {
     class Builder;
     SoftSign() {}
 
-    virtual ~SoftSign() {}
+    ~SoftSign() override {}
 
-    virtual std::shared_ptr<Layer> clone() const {
+    std::shared_ptr<Layer> clone() const override {
         std::shared_ptr<SoftSign> myClone = std::make_shared<SoftSign>(*this);
         myClone->id = getUnusedId();
         return myClone;
     }
 
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+    ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
         return input / (input.abs() + ThorImplementation::Expression(1.0));
     }
 
-    virtual std::string getLayerType() const { return "SoftSign"; }
+    std::string getLayerType() const override { return "SoftSign"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
         if (j.at("version").get<std::string>() != "1.0.0")
@@ -58,7 +58,7 @@ class SoftSign : public Activation {
         return softSign;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
@@ -66,7 +66,7 @@ class SoftSign : public Activation {
 
 class SoftSign::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Activation> build() {
+    std::shared_ptr<Activation> build() override {
         std::shared_ptr<SoftSign> softSign = std::make_shared<SoftSign>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
@@ -83,12 +83,12 @@ class SoftSign::Builder : public Activation::Builder {
         return softSign;
     }
 
-    virtual SoftSign::Builder &network(Network &_network) {
+    SoftSign::Builder &network(Network &_network) override {
         Activation::Builder::network(_network);
         return *this;
     }
 
-    virtual SoftSign::Builder &featureInput(Tensor _featureInput) {
+    SoftSign::Builder &featureInput(Tensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

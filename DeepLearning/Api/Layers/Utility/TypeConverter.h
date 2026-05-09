@@ -12,13 +12,13 @@ class TypeConverter : public Layer {
     class Builder;
     TypeConverter();
 
-    virtual ~TypeConverter();
+    ~TypeConverter() override;
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<TypeConverter>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<TypeConverter>(*this); }
 
-    virtual std::string getLayerType() const { return "TypeConverter"; }
+    std::string getLayerType() const override { return "TypeConverter"; }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -38,7 +38,7 @@ class TypeConverter : public Layer {
         return typeConverter;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         THOR_THROW_IF_FALSE(getFeatureOutput().isPresent());
         return getFeatureOutput().get().getTotalSizeInBytes();
     }

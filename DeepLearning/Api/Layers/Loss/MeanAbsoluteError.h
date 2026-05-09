@@ -13,11 +13,11 @@ class MeanAbsoluteError : public Loss {
     class Builder;
     MeanAbsoluteError() {}
 
-    virtual ~MeanAbsoluteError() {}
+    ~MeanAbsoluteError() override {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<MeanAbsoluteError>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<MeanAbsoluteError>(*this); }
 
-    virtual std::string getLayerType() const { return "MeanAbsoluteError"; }
+    std::string getLayerType() const override { return "MeanAbsoluteError"; }
 
     static void deserialize(const nlohmann::json &j, Network *network);
 
@@ -45,7 +45,7 @@ class MeanAbsoluteError : public Loss {
         return meanAbsoluteError;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         uint64_t lossShaperBytes = 0;
         // Loss will be reported either element-wise or batch-wise, the shaper is only required when loss is batch-wise.
         if (isMultiLayer()) {

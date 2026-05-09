@@ -11,21 +11,21 @@ class Elu : public Activation {
     class Builder;
     Elu(float alpha) : alpha(alpha) {}
 
-    virtual ~Elu() {}
+    ~Elu() override {}
 
-    virtual std::shared_ptr<Layer> clone() const {
+    std::shared_ptr<Layer> clone() const override {
         std::shared_ptr<Elu> myClone = std::make_shared<Elu>(*this);
         myClone->id = getUnusedId();
         return myClone;
     }
 
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+    ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
         return input.elu(alpha);
     }
 
-    virtual std::string getLayerType() const { return "Elu"; }
+    std::string getLayerType() const override { return "Elu"; }
 
-    virtual nlohmann::json architectureJson() const {
+    nlohmann::json architectureJson() const override {
         nlohmann::json j = Activation::architectureJson();
         j["alpha"] = alpha;
         return j;
@@ -65,7 +65,7 @@ class Elu : public Activation {
         return elu;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
@@ -75,7 +75,7 @@ class Elu : public Activation {
 
 class Elu::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Activation> build() {
+    std::shared_ptr<Activation> build() override {
         float alpha = 1.0f;
         if (_alpha.isPresent())
             alpha = _alpha;
@@ -103,12 +103,12 @@ class Elu::Builder : public Activation::Builder {
         return *this;
     }
 
-    virtual Elu::Builder &network(Network &_network) {
+    Elu::Builder &network(Network &_network) override {
         Activation::Builder::network(_network);
         return *this;
     }
 
-    virtual Elu::Builder &featureInput(Tensor _featureInput) {
+    Elu::Builder &featureInput(Tensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

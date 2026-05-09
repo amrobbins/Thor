@@ -19,9 +19,9 @@ class Sgd : public Optimizer {
     Sgd();
     Sgd(uint64_t originalId);
 
-    virtual ~Sgd() = default;
+    ~Sgd() override = default;
 
-    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(std::shared_ptr<ThorImplementation::TrainableLayer> trainableLayer);
+    std::shared_ptr<ThorImplementation::Optimizer> stamp(std::shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) override;
 
     virtual void setConstantLearningRate(float newCurrentLearningRate, PlacedNetwork *placedNetwork);
     virtual void setInitialLearningRate(float newInitialLearningRate, PlacedNetwork *placedNetwork);
@@ -34,21 +34,21 @@ class Sgd : public Optimizer {
     virtual bool getUseNesterovMomentum();
     virtual uint64_t getEpoch();
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+    nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                                      Stream stream,
                                      std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
                                      std::string filenamePrefix,
-                                     bool saveOptimizerState) const;
+                                     bool saveOptimizerState) const override;
     static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader,
                                                   const nlohmann::json &j,
                                                   Network *network);
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
 
-    virtual std::string getType() const { return "SGD"; }
+    std::string getType() const override { return "SGD"; }
 
    protected:
-    virtual std::shared_ptr<Optimizer> clone() const;
+    std::shared_ptr<Optimizer> clone() const override;
 
     void updateParameters(PlacedNetwork *placedNetwork);
 

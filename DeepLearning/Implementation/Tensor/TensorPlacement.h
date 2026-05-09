@@ -2,7 +2,6 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 
-#include <assert.h>
 #include <string>
 
 namespace ThorImplementation {

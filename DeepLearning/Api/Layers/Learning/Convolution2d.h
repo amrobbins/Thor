@@ -25,7 +25,7 @@ class Convolution2d : public TrainableLayer {
 
     Convolution2d() {}
     explicit Convolution2d(const Optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
-    virtual ~Convolution2d() = default;
+    ~Convolution2d() override = default;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Convolution2d>(*this); }
 

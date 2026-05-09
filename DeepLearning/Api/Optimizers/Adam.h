@@ -17,13 +17,13 @@ class Adam : public Optimizer {
     class Builder;
     Adam();
     Adam(uint64_t originalId);
-    virtual ~Adam() = default;
+    ~Adam() override = default;
 
-    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(std::shared_ptr<ThorImplementation::TrainableLayer> trainableLayer);
-    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
+    std::shared_ptr<ThorImplementation::Optimizer> stamp(std::shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) override;
+    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
-                                          Optional<Event> sisterOptimizerLoadedEvent);
+                                          Optional<Event> sisterOptimizerLoadedEvent) override;
     virtual void setAlpha(float newAlpha, PlacedNetwork *placedNetwork);
     virtual float getAlpha();
     virtual void setBeta1(float newBeta1, PlacedNetwork *placedNetwork);
@@ -33,23 +33,23 @@ class Adam : public Optimizer {
     virtual void setEpsilon(float newEpsilon, PlacedNetwork *placedNetwork);
     virtual float getEpsilon();
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+    nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                                      Stream stream,
                                      std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
                                      std::string filenamePrefix,
-                                     bool saveOptimizerState) const;
+                                     bool saveOptimizerState) const override;
     static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader,
                                                   const nlohmann::json &j,
                                                   Network *network);
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
 
-    virtual std::string getType() const { return "Adam"; }
+    std::string getType() const override { return "Adam"; }
 
    protected:
     void updateParameters(PlacedNetwork *placedNetwork);
 
-    virtual std::shared_ptr<Optimizer> clone() const;
+    std::shared_ptr<Optimizer> clone() const override;
 
    private:
     float t = 0.0f;

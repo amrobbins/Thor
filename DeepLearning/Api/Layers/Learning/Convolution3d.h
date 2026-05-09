@@ -19,7 +19,7 @@ class Convolution3d : public TrainableLayer {
 
     Convolution3d() {}
     explicit Convolution3d(const Optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
-    virtual ~Convolution3d() = default;
+    ~Convolution3d() override = default;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Convolution3d>(*this); }
 

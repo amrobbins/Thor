@@ -11,19 +11,19 @@ class Swish : public Activation {
     class Builder;
     Swish() {}
 
-    virtual ~Swish() {}
+    ~Swish() override {}
 
-    virtual std::shared_ptr<Layer> clone() const {
+    std::shared_ptr<Layer> clone() const override {
         std::shared_ptr<Swish> myClone = std::make_shared<Swish>(*this);
         myClone->id = getUnusedId();
         return myClone;
     }
 
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+    ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
         return input.swish();
     }
 
-    virtual std::string getLayerType() const { return "Swish"; }
+    std::string getLayerType() const override { return "Swish"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
         if (j.at("version").get<std::string>() != "1.0.0")
@@ -58,7 +58,7 @@ class Swish : public Activation {
         return swish;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
@@ -66,7 +66,7 @@ class Swish : public Activation {
 
 class Swish::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Activation> build() {
+    std::shared_ptr<Activation> build() override {
         std::shared_ptr<Swish> swish = std::make_shared<Swish>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
@@ -83,12 +83,12 @@ class Swish::Builder : public Activation::Builder {
         return swish;
     }
 
-    virtual Swish::Builder &network(Network &_network) {
+    Swish::Builder &network(Network &_network) override {
         Activation::Builder::network(_network);
         return *this;
     }
 
-    virtual Swish::Builder &featureInput(Tensor _featureInput) {
+    Swish::Builder &featureInput(Tensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

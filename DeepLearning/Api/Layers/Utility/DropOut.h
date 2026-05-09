@@ -12,15 +12,15 @@ namespace Thor {
 class DropOut : public Layer {
    public:
     class Builder;
-    virtual ~DropOut() {}
+    ~DropOut() override {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<DropOut>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<DropOut>(*this); }
 
     virtual float getDropProportion() { return dropProportion; }
 
-    virtual std::string getLayerType() const { return "DropOut"; }
+    std::string getLayerType() const override { return "DropOut"; }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -37,7 +37,7 @@ class DropOut : public Layer {
         return dropOut;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         THOR_THROW_IF_FALSE(tensorPlacement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         uint32_t gpuNum = tensorPlacement.getDeviceNum();
         cudnnHandle_t cudnnHandle = ThorImplementation::CudnnHelper::getCudnnHandle(gpuNum);

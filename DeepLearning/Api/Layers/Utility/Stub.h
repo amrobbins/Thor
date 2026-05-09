@@ -11,15 +11,15 @@ class Stub : public Layer {
     class Builder;
 
     Stub();
-    virtual ~Stub();
+    ~Stub() override;
 
-    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return std::vector<Tensor>(); }
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override { return std::vector<Tensor>(); }
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Stub>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<Stub>(*this); }
 
-    virtual std::string getLayerType() const { return "Stub"; }
+    std::string getLayerType() const override { return "Stub"; }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -36,7 +36,7 @@ class Stub : public Layer {
         THOR_UNREACHABLE();
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         return 0;
     }
 

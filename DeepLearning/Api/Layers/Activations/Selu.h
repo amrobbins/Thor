@@ -11,19 +11,19 @@ class Selu : public Activation {
     class Builder;
     Selu() {}
 
-    virtual ~Selu() {}
+    ~Selu() override {}
 
-    virtual std::shared_ptr<Layer> clone() const {
+    std::shared_ptr<Layer> clone() const override {
         std::shared_ptr<Selu> myClone = std::make_shared<Selu>(*this);
         myClone->id = getUnusedId();
         return myClone;
     }
 
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+    ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
         return input.selu();
     }
 
-    virtual std::string getLayerType() const { return "Selu"; }
+    std::string getLayerType() const override { return "Selu"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
         if (j.at("version").get<std::string>() != "1.0.0")
@@ -58,7 +58,7 @@ class Selu : public Activation {
         return selu;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
@@ -66,7 +66,7 @@ class Selu : public Activation {
 
 class Selu::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Activation> build() {
+    std::shared_ptr<Activation> build() override {
         std::shared_ptr<Selu> selu = std::make_shared<Selu>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
@@ -83,12 +83,12 @@ class Selu::Builder : public Activation::Builder {
         return selu;
     }
 
-    virtual Selu::Builder &network(Network &_network) {
+    Selu::Builder &network(Network &_network) override {
         Activation::Builder::network(_network);
         return *this;
     }
 
-    virtual Selu::Builder &featureInput(Tensor _featureInput) {
+    Selu::Builder &featureInput(Tensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

@@ -11,19 +11,19 @@ class Tanh : public Activation {
     class Builder;
     Tanh() {}
 
-    virtual ~Tanh() {}
+    ~Tanh() override {}
 
-    virtual std::shared_ptr<Layer> clone() const {
+    std::shared_ptr<Layer> clone() const override {
         std::shared_ptr<Tanh> myClone = std::make_shared<Tanh>(*this);
         myClone->id = getUnusedId();
         return myClone;
     }
 
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+    ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
         return input.tanh();
     }
 
-    virtual std::string getLayerType() const { return "Tanh"; }
+    std::string getLayerType() const override { return "Tanh"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
         if (j.at("version").get<std::string>() != "1.0.0")
@@ -58,7 +58,7 @@ class Tanh : public Activation {
         return tanh;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
@@ -66,7 +66,7 @@ class Tanh : public Activation {
 
 class Tanh::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Activation> build() {
+    std::shared_ptr<Activation> build() override {
         std::shared_ptr<Tanh> tanh = std::make_shared<Tanh>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
@@ -83,12 +83,12 @@ class Tanh::Builder : public Activation::Builder {
         return tanh;
     }
 
-    virtual Tanh::Builder &network(Network &_network) {
+    Tanh::Builder &network(Network &_network) override {
         Activation::Builder::network(_network);
         return *this;
     }
 
-    virtual Tanh::Builder &featureInput(Tensor _featureInput) {
+    Tanh::Builder &featureInput(Tensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

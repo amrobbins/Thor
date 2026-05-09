@@ -15,7 +15,7 @@ class Activation : public Layer {
     class Builder;
 
     Activation() {}
-    virtual ~Activation() {}
+    ~Activation() override {}
 
     // Layer::addToNetwork is used during deserialization when an activation is an actual attached layer - or when the activation
     // is used as a standalone layer.
@@ -28,10 +28,10 @@ class Activation : public Layer {
     // This is used by expression-backed learning layers to fuse the activation into the layer equation.
     virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const = 0;
 
-    virtual std::string getLayerType() const = 0;
+    std::string getLayerType() const override = 0;
 
-    virtual nlohmann::json architectureJson() const;
-    virtual nlohmann::json serialize(thor_file::TarWriter& archiveWriter, Stream stream) const { return architectureJson(); }
+    nlohmann::json architectureJson() const override;
+    nlohmann::json serialize(thor_file::TarWriter& archiveWriter, Stream stream) const override { return architectureJson(); }
 
     static void deserialize(const nlohmann::json& j, Network* network);
     static std::shared_ptr<Activation> deserializeTemplate(const nlohmann::json& j);

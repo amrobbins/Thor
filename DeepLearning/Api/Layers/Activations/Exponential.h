@@ -11,19 +11,19 @@ class Exponential : public Activation {
     class Builder;
     Exponential() {}
 
-    virtual ~Exponential() {}
+    ~Exponential() override {}
 
-    virtual std::shared_ptr<Layer> clone() const {
+    std::shared_ptr<Layer> clone() const override {
         std::shared_ptr<Exponential> myClone = std::make_shared<Exponential>(*this);
         myClone->id = getUnusedId();
         return myClone;
     }
 
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+    ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
         return input.exp();
     }
 
-    virtual std::string getLayerType() const { return "Exponential"; }
+    std::string getLayerType() const override { return "Exponential"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
         if (j.at("version").get<std::string>() != "1.0.0")
@@ -58,7 +58,7 @@ class Exponential : public Activation {
         return exponential;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
@@ -66,7 +66,7 @@ class Exponential : public Activation {
 
 class Exponential::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Activation> build() {
+    std::shared_ptr<Activation> build() override {
         std::shared_ptr<Exponential> exponential = std::make_shared<Exponential>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
@@ -83,12 +83,12 @@ class Exponential::Builder : public Activation::Builder {
         return exponential;
     }
 
-    virtual Exponential::Builder &network(Network &_network) {
+    Exponential::Builder &network(Network &_network) override {
         Activation::Builder::network(_network);
         return *this;
     }
 
-    virtual Exponential::Builder &featureInput(Tensor _featureInput) {
+    Exponential::Builder &featureInput(Tensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

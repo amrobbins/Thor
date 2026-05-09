@@ -15,15 +15,15 @@ class CategoricalCrossEntropy : public Loss {
     class Builder;
     CategoricalCrossEntropy() {}
 
-    virtual ~CategoricalCrossEntropy() {}
+    ~CategoricalCrossEntropy() override {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<CategoricalCrossEntropy>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<CategoricalCrossEntropy>(*this); }
 
-    virtual std::string getLayerType() const { return "CategoricalCrossEntropy"; }
+    std::string getLayerType() const override { return "CategoricalCrossEntropy"; }
 
-    virtual Tensor getPredictions() const { return softmaxOutput; }
+    Tensor getPredictions() const override { return softmaxOutput; }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:

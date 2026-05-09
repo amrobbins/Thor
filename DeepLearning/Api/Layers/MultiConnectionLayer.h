@@ -10,15 +10,15 @@ namespace Thor {
 
 class MultiConnectionLayer : public Layer {
    public:
-    virtual ~MultiConnectionLayer() {}
+    ~MultiConnectionLayer() override {}
 
     // When there is only one connection, you may use the following version:
-    virtual Optional<Tensor> getFeatureOutput() const {
+    Optional<Tensor> getFeatureOutput() const override {
         THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
         return featureOutputs[0];
     }
 
-    virtual Optional<Tensor> getFeatureInput() const {
+    Optional<Tensor> getFeatureInput() const override {
         THOR_THROW_IF_FALSE(featureInputs.size() == 1);
         return featureInputs[0];
     }
@@ -36,7 +36,7 @@ class MultiConnectionLayer : public Layer {
         return it->second;
     }
 
-    virtual int getConnectionType(Tensor connectingTensor) const {
+    int getConnectionType(Tensor connectingTensor) const override {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
             if (connectingTensor == featureInputs[i])
                 return 0;
@@ -48,9 +48,9 @@ class MultiConnectionLayer : public Layer {
         THOR_UNREACHABLE();
     }
 
-    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return {getFeatureOutput(inputTensor)}; }
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override { return {getFeatureOutput(inputTensor)}; }
 
-    virtual std::vector<Tensor> getAllOutputTensors() const { return featureOutputs; }
+    std::vector<Tensor> getAllOutputTensors() const override { return featureOutputs; }
 
     // Inputs and outputs are stored in the vector in the same order as they are added to the builder.
     virtual std::vector<Tensor> getFeatureOutputs() const { return featureOutputs; }

@@ -14,15 +14,15 @@ class UniformRandom : public Initializer {
 
     UniformRandom(float minValue, float maxValue) : minValue(minValue), maxValue(maxValue) { initialized = true; }
 
-    virtual ~UniformRandom() = default;
+    ~UniformRandom() override = default;
 
     std::shared_ptr<ThorImplementation::Initializer> stamp() override {
         return ThorImplementation::UniformRandom(maxValue, minValue).clone();
     }
 
-    virtual std::shared_ptr<Initializer> clone() const { return std::make_shared<UniformRandom>(*this); }
+    std::shared_ptr<Initializer> clone() const override { return std::make_shared<UniformRandom>(*this); }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);
 
     float getMinValue() const { return minValue; }
@@ -35,9 +35,9 @@ class UniformRandom : public Initializer {
 
 class UniformRandom::Builder : public Initializer::Builder {
    public:
-    virtual ~Builder() = default;
+    ~Builder() override = default;
 
-    virtual std::shared_ptr<Initializer> build() {
+    std::shared_ptr<Initializer> build() override {
         THOR_THROW_IF_FALSE(this->_minValue.isPresent());
         THOR_THROW_IF_FALSE(this->_maxValue.isPresent());
         THOR_THROW_IF_FALSE(_minValue.get() <= _maxValue.get());
@@ -58,7 +58,7 @@ class UniformRandom::Builder : public Initializer::Builder {
         return *this;
     }
 
-    virtual std::shared_ptr<Initializer::Builder> clone() { return std::make_shared<UniformRandom::Builder>(*this); }
+    std::shared_ptr<Initializer::Builder> clone() override { return std::make_shared<UniformRandom::Builder>(*this); }
 
    protected:
     Optional<float> _minValue;
