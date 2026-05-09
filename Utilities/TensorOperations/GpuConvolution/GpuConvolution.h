@@ -12,7 +12,6 @@
 #include <cuda_fp16.h>
 #include <cudnn.h>
 
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <cstdlib>

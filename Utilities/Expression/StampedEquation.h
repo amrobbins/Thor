@@ -1,7 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 #include <algorithm>
-#include <cassert>
 #include <cstdint>
 #include <numeric>
 #include <optional>
@@ -616,34 +616,34 @@ struct StampedExecutionStage {
 
     void runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
         if (kind == Kind::FusedKernel) {
-            assert(kernel != nullptr);
+            THOR_THROW_IF_FALSE(kernel != nullptr);
             if (runtime_scalars.empty())
                 kernel->runOn(run_stream);
             else
                 kernel->runOn(run_stream, runtime_scalars);
         } else if (kind == Kind::Reduction) {
-            assert(reduction != nullptr);
+            THOR_THROW_IF_FALSE(reduction != nullptr);
             reduction->runOn(run_stream);
         } else if (kind == Kind::ArgMinMax) {
-            assert(arg_minmax != nullptr);
+            THOR_THROW_IF_FALSE(arg_minmax != nullptr);
             arg_minmax->runOn(run_stream);
         } else if (kind == Kind::Softmax) {
-            assert(softmax != nullptr);
+            THOR_THROW_IF_FALSE(softmax != nullptr);
             softmax->runOn(run_stream);
         } else if (kind == Kind::Matmul) {
-            assert(matmul != nullptr);
+            THOR_THROW_IF_FALSE(matmul != nullptr);
             if (runtime_scalars.empty())
                 matmul->runOn(run_stream);
             else
                 matmul->runOn(run_stream, runtime_scalars);
         } else if (kind == Kind::Convolution) {
-            assert(convolution != nullptr);
+            THOR_THROW_IF_FALSE(convolution != nullptr);
             convolution->runOn(run_stream);
         } else if (kind == Kind::ConvolutionBackward) {
-            assert(convolution_backward != nullptr);
+            THOR_THROW_IF_FALSE(convolution_backward != nullptr);
             convolution_backward->runOn(run_stream);
         } else if (kind == Kind::ReduceMinMaxBackward) {
-            assert(reduce_minmax_backward != nullptr);
+            THOR_THROW_IF_FALSE(reduce_minmax_backward != nullptr);
             reduce_minmax_backward->runOn(run_stream);
         } else {
             throw std::runtime_error("Unknown StampedExecutionStage kind: " + std::to_string((int)kind));

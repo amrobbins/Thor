@@ -12,6 +12,7 @@
 
 #include <limits>
 #include <stdexcept>
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 using DataType = ThorImplementation::TensorDescriptor::DataType;
@@ -3033,7 +3034,7 @@ std::vector<uint64_t> FusedEquation::getOutputShape(const std::unordered_map<std
     }
 
     std::unordered_map<std::string, std::vector<uint64_t>> output_shapes = getOutputShapes(inputs);
-    assert(output_shapes.size() == 1);
+    THOR_THROW_IF_FALSE(output_shapes.size() == 1);
     return output_shapes.begin()->second;
 }
 

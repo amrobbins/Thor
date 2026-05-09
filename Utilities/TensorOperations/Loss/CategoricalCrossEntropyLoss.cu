@@ -1,4 +1,5 @@
 #include "CategoricalCrossEntropyLoss.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 
@@ -413,15 +414,15 @@ void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels(void *classOf
 
     // Do not use the unsafe variants
     if (is_same<INDEX_TYPE, half>::value) {
-        assert(false);
+        THOR_UNREACHABLE();
         return;
     }
     if (is_same<INDEX_TYPE, float>::value) {
-        assert(false);
+        THOR_UNREACHABLE();
         return;
     }
     if (is_same<INDEX_TYPE, bool>::value) {
-        assert(false);
+        THOR_UNREACHABLE();
         return;
     }
 
@@ -798,7 +799,7 @@ template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint
                                                                                                     uint32_t lossScalingFactor,
                                                                                                     Stream stream);
 
-// The following functions will not be instantiated (they are unsafe as the class in not exact) and are guarded by assertions
+// The following functions will not be instantiated because they are unsafe when the class is not exact.
 
 template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<half, half, half>(void *labels_d,
                                                                                               void *probabilities_d,

@@ -1,5 +1,6 @@
 #include "MachineEvaluator.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 
@@ -23,7 +24,7 @@ MachineEvaluator::MachineEvaluator() {
         cublasStatus_t cublasStatus;
         cublasLtHandle_t cublasLtHandle;
         cublasStatus = cublasLtCreate(&cublasLtHandle);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
         cublasLtHandlePerDevice.push_back(cublasLtHandle);
     }
@@ -34,7 +35,7 @@ MachineEvaluator::~MachineEvaluator() {
         ScopedGpu scopedGpu(gpuNum);
         cublasStatus_t cublasStatus;
         cublasStatus = cublasLtDestroy(cublasLtHandlePerDevice[gpuNum]);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
     }
 }
 
@@ -129,24 +130,24 @@ void MachineEvaluator::getGpuPciBusIds() {
 }
 
 string MachineEvaluator::getGpuType(int gpuNum) {
-    assert((unsigned int)gpuNum < gpuType.size());
+    THOR_THROW_IF_FALSE((unsigned int)gpuNum < gpuType.size());
     return gpuType[gpuNum];
 }
 
 string MachineEvaluator::getGpuType() { return getGpuType(getCurrentGpuNum()); }
 
 int MachineEvaluator::getGpuPciBusId(int gpuNum) {
-    assert((unsigned int)gpuNum < gpuPciBusId.size());
+    THOR_THROW_IF_FALSE((unsigned int)gpuNum < gpuPciBusId.size());
     return gpuPciBusId[gpuNum];
 }
 
 int MachineEvaluator::getGpuNumFromBusId(int gpuBusId) {
-    assert(gpuNumFromBusId.count(gpuBusId) == 1);
+    THOR_THROW_IF_FALSE(gpuNumFromBusId.count(gpuBusId) == 1);
     return gpuNumFromBusId[gpuBusId];
 }
 
 int MachineEvaluator::getAdjacentHigherGpu(int gpuNum) {
-    assert((unsigned int)gpuNum < orderedGpus.size());
+    THOR_THROW_IF_FALSE((unsigned int)gpuNum < orderedGpus.size());
 
     if ((unsigned int)gpuNum == orderedGpus.size() - 1) {
         return NONE;
@@ -156,7 +157,7 @@ int MachineEvaluator::getAdjacentHigherGpu(int gpuNum) {
 }
 
 int MachineEvaluator::getAdjacentLowerGpu(int gpuNum) {
-    assert((unsigned int)gpuNum < orderedGpus.size());
+    THOR_THROW_IF_FALSE((unsigned int)gpuNum < orderedGpus.size());
 
     if (gpuNum == 0) {
         return NONE;
@@ -168,7 +169,7 @@ int MachineEvaluator::getAdjacentLowerGpu(int gpuNum) {
 int MachineEvaluator::swapActiveDevice(int newGpuNum) {
     int deviceCount;
     CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
-    assert(newGpuNum < deviceCount);
+    THOR_THROW_IF_FALSE(newGpuNum < deviceCount);
 
     int previousGpuNum;
     CUDA_CHECK(cudaGetDevice(&previousGpuNum));
@@ -178,7 +179,7 @@ int MachineEvaluator::swapActiveDevice(int newGpuNum) {
 }
 
 unsigned int MachineEvaluator::getNumMultiProcessors(int gpuNum) {
-    assert((unsigned int)gpuNum < numGpus);
+    THOR_THROW_IF_FALSE((unsigned int)gpuNum < numGpus);
 
     return deviceProps[gpuNum].multiProcessorCount;
 }
@@ -186,12 +187,12 @@ unsigned int MachineEvaluator::getNumMultiProcessors(int gpuNum) {
 unsigned int MachineEvaluator::getNumMultiProcessors() { return getNumMultiProcessors(getCurrentGpuNum()); }
 
 unsigned long MachineEvaluator::getTotalGlobalMemBytes(int gpuNum) {
-    assert(gpuNum < (int)deviceProps.size());
+    THOR_THROW_IF_FALSE(gpuNum < (int)deviceProps.size());
     return deviceProps[gpuNum].totalGlobalMem;
 }
 
 unsigned long MachineEvaluator::getFreeMemBytes(int gpuNum) {
-    assert((unsigned int)gpuNum < numGpus);
+    THOR_THROW_IF_FALSE((unsigned int)gpuNum < numGpus);
 
     ScopedGpu scopedGpu(gpuNum);
     size_t freeMemBytes;
@@ -201,6 +202,6 @@ unsigned long MachineEvaluator::getFreeMemBytes(int gpuNum) {
 }
 
 cublasLtHandle_t MachineEvaluator::getCublasLtHandle(int gpuNum) {
-    assert((unsigned int)gpuNum < numGpus);
+    THOR_THROW_IF_FALSE((unsigned int)gpuNum < numGpus);
     return cublasLtHandlePerDevice[gpuNum];
 }

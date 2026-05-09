@@ -1,6 +1,7 @@
 #include "Event.h"
 #include "Stream.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 Event::Event() : ReferenceCounted() {}
 
@@ -27,28 +28,28 @@ Event::~Event() {
 void Event::record(Stream stream) { CUDA_CHECK(cudaEventRecord(getEvent(), stream)); }
 
 Event::operator cudaEvent_t() {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
     return cudaEvent;
 }
 
 cudaEvent_t Event::getEvent() {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
     return cudaEvent;
 }
 
 int32_t Event::getGpuNum() const {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
     return gpuNum;
 }
 
 void Event::synchronize() {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
 
     CUDA_CHECK(cudaEventSynchronize(*this));
 }
 
 float Event::synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent) {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
 
     float milliseconds;
 

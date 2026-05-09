@@ -1,4 +1,5 @@
 #include "ComputeCategoricalAccuracy.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using std::max;
 using std::min;
@@ -157,8 +158,8 @@ void launchComputeCategoricalAccuracy_perClassLabels(float *accuracy_d,
                                                      uint32_t numClasses,
                                                      uint32_t batchSize,
                                                      Stream stream) {
-    assert(numClasses > 1);
-    assert(batchSize > 0);
+    THOR_THROW_IF_FALSE(numClasses > 1);
+    THOR_THROW_IF_FALSE(batchSize > 0);
 
     uint32_t downSteps = 256 / numClasses;
     downSteps = max(1, downSteps);
@@ -183,8 +184,8 @@ void launchComputeCategoricalAccuracy_classIndexLabels(float *accuracy_d,
                                                        uint32_t numClasses,
                                                        uint32_t batchSize,
                                                        Stream stream) {
-    assert(numClasses > 1);
-    assert(batchSize > 0);
+    THOR_THROW_IF_FALSE(numClasses > 1);
+    THOR_THROW_IF_FALSE(batchSize > 0);
 
     uint32_t downSteps = 256 / numClasses;
     downSteps = max(1, downSteps);

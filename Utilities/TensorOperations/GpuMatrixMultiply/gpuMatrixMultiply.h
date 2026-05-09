@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <vector>
 
-#include <assert.h>
 #include <cublasLt.h>
 #include <cuda.h>
 #include <cuda_runtime.h>

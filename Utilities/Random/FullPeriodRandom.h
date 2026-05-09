@@ -1,9 +1,9 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 #include <optional>
 #include "Utilities/WorkQueue/AsyncQueue.h"
 
-#include <assert.h>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -25,7 +25,7 @@
 class FullPeriodRandom {
    public:
     FullPeriodRandom(uint64_t period, bool synchronized = false) : period(period), periodCount(0), synchronized(synchronized) {
-        assert(period != 0);
+        THOR_THROW_IF_FALSE(period != 0);
         if (period == 1) {
             return;
         }
@@ -117,7 +117,7 @@ class FullPeriodRandom {
         };
 
         a = (baseAMinusOne * ((rand64() % maxBaseAMinusOneMultiple) + 1)) + 1;
-        assert(a < implementationPeriod);
+        THOR_THROW_IF_FALSE(a < implementationPeriod);
 
         c = periodNonFactors[rand64() % periodNonFactors.size()];
         for (uint64_t i = 0; i < 3; ++i) {
@@ -130,7 +130,7 @@ class FullPeriodRandom {
             if (c * selectedNonFactor < implementationPeriod)
                 c *= selectedNonFactor;
         }
-        assert(c < implementationPeriod);
+        THOR_THROW_IF_FALSE(c < implementationPeriod);
 
         if (!seedValue.has_value())
             seedValue = rand64();
@@ -194,7 +194,7 @@ class FullPeriodRandom {
                         remainingPeriod /= i;
                     }
                 } else {
-                    assert(i < period);
+                    THOR_THROW_IF_FALSE(i < period);
                     nonFactors.push_back(i);
                 }
 
@@ -206,12 +206,12 @@ class FullPeriodRandom {
     }
 
     inline bool getBit(uint64_t word, uint32_t bit) {
-        assert(bit < 64);
+        THOR_THROW_IF_FALSE(bit < 64);
         return (word >> bit) & 1UL;
     }
 
     inline void setBit(uint64_t &word, uint32_t bit, bool value) {
-        assert(bit < 64);
+        THOR_THROW_IF_FALSE(bit < 64);
         if (value)
             word |= 1UL << bit;
         else
@@ -252,9 +252,9 @@ class FullPeriodRandom {
 
         // Now a = baseAMinusOne + 1 is guaranteed to satisfy all constraints,
         // this is possible because implemenationPeriod is guaranteed to have a repeated prime factor
-        assert(a < implementationPeriod);
-        assert(maxBaseAMinusOneMultiple * a < implementationPeriod);
-        assert(maxBaseAMinusOneMultiple >= MIN_A_MULTIPLE);
+        THOR_THROW_IF_FALSE(a < implementationPeriod);
+        THOR_THROW_IF_FALSE(maxBaseAMinusOneMultiple * a < implementationPeriod);
+        THOR_THROW_IF_FALSE(maxBaseAMinusOneMultiple >= MIN_A_MULTIPLE);
     }
 
     void ensureThereIsRoomToRandomizeC() {
@@ -266,7 +266,7 @@ class FullPeriodRandom {
             else if (implementationPeriod % 2 == 0 && baseAMinusOne % 2 != 0)
                 baseAMinusOne *= 2;
             maxBaseAMinusOneMultiple = implementationPeriod / (baseAMinusOne + 1);
-            assert(maxBaseAMinusOneMultiple >= 1);
+            THOR_THROW_IF_FALSE(maxBaseAMinusOneMultiple >= 1);
         }
     }
 

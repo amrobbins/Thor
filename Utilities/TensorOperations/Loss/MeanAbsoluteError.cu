@@ -6,7 +6,7 @@ using namespace std;
  * MAE(batch_of_predictions, batch_of_labels) = abs(batch_of_labels - batch_of_predictions)
  *
  * When there are multiple predictions, there must be the corresponding number of labels.
- * This is enforced via assertion, the loss layer will not run if the size is not correct.
+ * This is validated by the loss layer; the loss layer will not run if the size is not correct.
  * In that case the computation goes as:
  *
  * MSE(batch_of_predictions[0], batch_of_labels[0]) = (1/batchSize) * abs(batch_of_predictions[0] - batch_of_labels[0])

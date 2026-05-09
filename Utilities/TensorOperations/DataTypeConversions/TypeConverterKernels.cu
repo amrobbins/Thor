@@ -1,6 +1,7 @@
 #include "TypeConverter.h"
 
 #include <stdio.h>
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace ThorImplementation;
 using namespace std;
@@ -101,7 +102,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<__nv_fp8_e4m3>((__nv_fp8_e4m3 *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::FP8_E5M2:
@@ -158,7 +159,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<__nv_fp8_e5m2>((__nv_fp8_e5m2 *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::BF16:
@@ -215,7 +216,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<__nv_bfloat16>((__nv_bfloat16 *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::FP16:
@@ -269,7 +270,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<half>((half *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::FP32:
@@ -323,7 +324,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<float>((float *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::FP64:
@@ -377,7 +378,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<double>((double *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::INT8:
@@ -431,7 +432,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<int8_t>((int8_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::INT16:
@@ -485,7 +486,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<int16_t>((int16_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::INT32:
@@ -539,7 +540,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<int32_t>((int32_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::INT64:
@@ -593,7 +594,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<int64_t>((int64_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::UINT8:
@@ -647,7 +648,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<uint8_t>((uint8_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::UINT16:
@@ -701,7 +702,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<uint16_t>((uint16_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::UINT32:
@@ -755,7 +756,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<uint32_t>((uint32_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::UINT64:
@@ -809,7 +810,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<uint64_t>((uint64_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::BOOLEAN:
@@ -863,7 +864,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeToPackedBooleanImpl<bool>((bool *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::PACKED_BOOLEAN:
@@ -914,13 +915,13 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeFromPackedBooleanImpl<bool>((uint8_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::PACKED_BOOLEAN:
-                    assert(false);
+                    THOR_UNREACHABLE();
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         default:
-            assert(false);
+            THOR_UNREACHABLE();
     }
 }
 
@@ -947,7 +948,7 @@ void launchOutOfPlaceConvertKernelNoOvershoot(FROM_TYPE *source_d, TO_TYPE *dest
 // To Smaller
 template <typename FROM_TYPE, typename TO_TYPE>
 void TypeConverter::convertToSmallerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    assert(numElements > 0);
+    THOR_THROW_IF_FALSE(numElements > 0);
     if (numElements == 0)
         return;
 
@@ -979,7 +980,7 @@ void TypeConverter::convertToSmallerElementsInPlaceOnGpu_toPackedBoolean(FROM_TY
                                                                          uint8_t *dest_d,
                                                                          long numElements,
                                                                          Stream stream) {
-    assert(numElements > 0);
+    THOR_THROW_IF_FALSE(numElements > 0);
     if (numElements == 0)
         return;
 
@@ -1014,7 +1015,7 @@ void TypeConverter::convertToSmallerElementsInPlaceOnGpu_toPackedBoolean(FROM_TY
 // To Bigger
 template <typename FROM_TYPE, typename TO_TYPE>
 void TypeConverter::convertToBiggerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    assert(numElements >= 0);
+    THOR_THROW_IF_FALSE(numElements >= 0);
     if (numElements == 0)
         return;
 
@@ -1047,7 +1048,7 @@ void TypeConverter::convertToBiggerElementsInPlaceOnGpu_fromPackedBoolean(uint8_
                                                                           TO_TYPE *dest_d,
                                                                           long numElements,
                                                                           Stream stream) {
-    assert(numElements >= 0);
+    THOR_THROW_IF_FALSE(numElements >= 0);
     if (numElements == 0)
         return;
 
@@ -1081,10 +1082,8 @@ void TypeConverter::convertToBiggerElementsInPlaceOnGpu_fromPackedBoolean(uint8_
 
 template <typename FROM_TYPE, typename TO_TYPE>
 void TypeConverter::gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    assert(!(is_same<FROM_TYPE, TO_TYPE>::value));
-    // assert((is_convertible<FROM_TYPE, TO_TYPE>::value));
-
-    assert(numElements >= 0);
+    THOR_THROW_IF_FALSE(!(is_same<FROM_TYPE, TO_TYPE>::value));
+    THOR_THROW_IF_FALSE(numElements >= 0);
     if (numElements == 0)
         return;
 
@@ -1098,7 +1097,7 @@ void TypeConverter::gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, lon
         void *sourceEnd = (void *)&(source_d[numElements - 1]);
         void *destStart = dest_d;
         void *destEnd = (void *)&(dest_d[numElements - 1]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
+        THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
     }
 
     // All conversions to and from all element sizes of 1, 2, 4, and 8 bytes are supported.
@@ -1116,9 +1115,7 @@ void TypeConverter::gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, lon
 
 template <typename FROM_TYPE>
 void TypeConverter::gpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream) {
-    // assert((is_convertible<FROM_TYPE, bool>::value));
-
-    assert(numElements >= 0);
+    THOR_THROW_IF_FALSE(numElements >= 0);
     if (numElements == 0)
         return;
 
@@ -1132,7 +1129,7 @@ void TypeConverter::gpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source_d, uint8
         void *sourceEnd = (void *)&(source_d[numElements - 1]);
         void *destStart = dest_d;
         void *destEnd = (void *)&(dest_d[((numElements + 7) / 8) - 1]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
+        THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
     }
 
     // All conversions to and from all element sizes of 1, 2, 4, and 8 bytes are supported.
@@ -1147,9 +1144,7 @@ void TypeConverter::gpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source_d, uint8
 
 template <typename TO_TYPE>
 void TypeConverter::gpuConvertTypeFromPackedBooleanImpl(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    // assert((is_convertible<bool, TO_TYPE>::value));
-
-    assert(numElements >= 0);
+    THOR_THROW_IF_FALSE(numElements >= 0);
     if (numElements == 0)
         return;
 
@@ -1163,7 +1158,7 @@ void TypeConverter::gpuConvertTypeFromPackedBooleanImpl(uint8_t *source_d, TO_TY
         void *sourceEnd = (void *)&(source_d[((numElements + 7) / 8) - 1]);
         void *destStart = dest_d;
         void *destEnd = (void *)&(dest_d[numElements - 1]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
+        THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
     }
 
     // All conversions to and from all element sizes of 1, 2, 4, and 8 bytes are supported.
@@ -1807,7 +1802,7 @@ void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long nu
             convertOutOfPlaceKernelS8D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
         }
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 

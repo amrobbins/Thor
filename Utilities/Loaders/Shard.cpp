@@ -1,5 +1,6 @@
 #include "Utilities/Loaders/Shard.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using std::mutex;
 using std::string;
@@ -99,15 +100,15 @@ void Shard::openShard(string filename) {
     dataType = shardMetadata->dataType;
     allClasses = mappedFile.find<file_string_vector_t>("allClasses").first;
 
-    assert(trainData->size() % exampleSizeInBytes == 0);
-    assert(testData->size() % exampleSizeInBytes == 0);
-    assert(validateData->size() % exampleSizeInBytes == 0);
-    assert(trainLabels->size() == trainData->size() / exampleSizeInBytes);
-    assert(validateLabels->size() == validateData->size() / exampleSizeInBytes);
-    assert(testLabels->size() == testData->size() / exampleSizeInBytes);
-    assert(trainFilenames->size() == trainData->size() / exampleSizeInBytes);
-    assert(validateFilenames->size() == validateData->size() / exampleSizeInBytes);
-    assert(testFilenames->size() == testData->size() / exampleSizeInBytes);
+    THOR_THROW_IF_FALSE(trainData->size() % exampleSizeInBytes == 0);
+    THOR_THROW_IF_FALSE(testData->size() % exampleSizeInBytes == 0);
+    THOR_THROW_IF_FALSE(validateData->size() % exampleSizeInBytes == 0);
+    THOR_THROW_IF_FALSE(trainLabels->size() == trainData->size() / exampleSizeInBytes);
+    THOR_THROW_IF_FALSE(validateLabels->size() == validateData->size() / exampleSizeInBytes);
+    THOR_THROW_IF_FALSE(testLabels->size() == testData->size() / exampleSizeInBytes);
+    THOR_THROW_IF_FALSE(trainFilenames->size() == trainData->size() / exampleSizeInBytes);
+    THOR_THROW_IF_FALSE(validateFilenames->size() == validateData->size() / exampleSizeInBytes);
+    THOR_THROW_IF_FALSE(testFilenames->size() == testData->size() / exampleSizeInBytes);
 
     open = true;
 }
@@ -115,13 +116,13 @@ void Shard::openShard(string filename) {
 bool Shard::isOpen() { return open; }
 
 void Shard::writeExample(uint8_t *buffer, const string &label, const string &filename, ExampleType exampleType) {
-    assert(buffer != nullptr);
+    THOR_THROW_IF_FALSE(buffer != nullptr);
     std::unique_lock<std::mutex> lck(mtx);
 
     if (exampleType == ExampleType::TRAIN) {
-        assert(trainData->capacity() > trainData->size() + exampleSizeInBytes);
+        THOR_THROW_IF_FALSE(trainData->capacity() > trainData->size() + exampleSizeInBytes);
         trainData->insert(trainData->end(), buffer, buffer + exampleSizeInBytes);
-        assert(trainLabels->capacity() > trainLabels->size());
+        THOR_THROW_IF_FALSE(trainLabels->capacity() > trainLabels->size());
         file_string_t diskLabel(*fileStringAllocator);
         diskLabel = label.c_str();
         diskLabel.shrink_to_fit();
@@ -131,9 +132,9 @@ void Shard::writeExample(uint8_t *buffer, const string &label, const string &fil
         diskFilename.shrink_to_fit();
         trainFilenames->push_back(diskFilename);
     } else if (exampleType == ExampleType::VALIDATE) {
-        assert(validateData->capacity() > validateData->size() + exampleSizeInBytes);
+        THOR_THROW_IF_FALSE(validateData->capacity() > validateData->size() + exampleSizeInBytes);
         validateData->insert(validateData->end(), buffer, buffer + exampleSizeInBytes);
-        assert(validateLabels->capacity() > validateLabels->size());
+        THOR_THROW_IF_FALSE(validateLabels->capacity() > validateLabels->size());
         file_string_t diskLabel(*fileStringAllocator);
         diskLabel = label.c_str();
         diskLabel.shrink_to_fit();
@@ -143,9 +144,9 @@ void Shard::writeExample(uint8_t *buffer, const string &label, const string &fil
         diskFilename.shrink_to_fit();
         validateFilenames->push_back(diskFilename);
     } else if (exampleType == ExampleType::TEST) {
-        assert(testData->capacity() > testData->size() + exampleSizeInBytes);
+        THOR_THROW_IF_FALSE(testData->capacity() > testData->size() + exampleSizeInBytes);
         testData->insert(testData->end(), buffer, buffer + exampleSizeInBytes);
-        assert(testLabels->capacity() > testLabels->size());
+        THOR_THROW_IF_FALSE(testLabels->capacity() > testLabels->size());
         file_string_t diskLabel(*fileStringAllocator);
         diskLabel = label.c_str();
         diskLabel.shrink_to_fit();
@@ -155,35 +156,35 @@ void Shard::writeExample(uint8_t *buffer, const string &label, const string &fil
         diskFilename.shrink_to_fit();
         testFilenames->push_back(diskFilename);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
 void Shard::loadExample(uint8_t *buffer, string &label, string &filename, ExampleType exampleType, uint64_t exampleIndex) {
-    assert(isOpen());
-    assert(buffer != nullptr);
+    THOR_THROW_IF_FALSE(isOpen());
+    THOR_THROW_IF_FALSE(buffer != nullptr);
 
     uint8_t *data;
     if (exampleType == ExampleType::TRAIN) {
         uint64_t numExamples = trainData->size() / exampleSizeInBytes;
-        assert(exampleIndex < numExamples);
+        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
         data = trainData->data();
         label = (*trainLabels)[exampleIndex].c_str();
         filename = (*trainFilenames)[exampleIndex].c_str();
     } else if (exampleType == ExampleType::VALIDATE) {
         uint64_t numExamples = validateData->size() / exampleSizeInBytes;
-        assert(exampleIndex < numExamples);
+        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
         data = validateData->data();
         label = (*validateLabels)[exampleIndex].c_str();
         filename = (*validateFilenames)[exampleIndex].c_str();
     } else if (exampleType == ExampleType::TEST) {
         uint64_t numExamples = testData->size() / exampleSizeInBytes;
-        assert(exampleIndex < numExamples);
+        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
         data = testData->data();
         label = (*testLabels)[exampleIndex].c_str();
         filename = (*testFilenames)[exampleIndex].c_str();
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     uint8_t *exampleStart = data + (exampleIndex * exampleSizeInBytes);
@@ -192,31 +193,31 @@ void Shard::loadExample(uint8_t *buffer, string &label, string &filename, Exampl
 
 void Shard::loadExampleAsync(
     uint8_t *buffer, string &label, string &filename, ExampleType exampleType, uint64_t exampleIndex, Stream stream) {
-    assert(isOpen());
-    assert(buffer != nullptr);
+    THOR_THROW_IF_FALSE(isOpen());
+    THOR_THROW_IF_FALSE(buffer != nullptr);
 
     uint8_t *data;
     LabelCallbackParams *labelCallbackParams = new LabelCallbackParams();
     if (exampleType == ExampleType::TRAIN) {
         uint64_t numExamples = trainData->size() / exampleSizeInBytes;
-        assert(exampleIndex < numExamples);
+        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
         data = trainData->data();
         labelCallbackParams->labels = trainLabels;
         labelCallbackParams->filenames = trainFilenames;
     } else if (exampleType == ExampleType::VALIDATE) {
         uint64_t numExamples = validateData->size() / exampleSizeInBytes;
-        assert(exampleIndex < numExamples);
+        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
         data = validateData->data();
         labelCallbackParams->labels = validateLabels;
         labelCallbackParams->filenames = validateFilenames;
     } else if (exampleType == ExampleType::TEST) {
         uint64_t numExamples = testData->size() / exampleSizeInBytes;
-        assert(exampleIndex < numExamples);
+        THOR_THROW_IF_FALSE(exampleIndex < numExamples);
         data = testData->data();
         labelCallbackParams->labels = testLabels;
         labelCallbackParams->filenames = testFilenames;
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     uint8_t *exampleStart = data + (exampleIndex * exampleSizeInBytes);
@@ -238,7 +239,7 @@ void Shard::shrinkToFit() {
     validateFilenames->shrink_to_fit();
     testFilenames->shrink_to_fit();
     bool status = boost::interprocess::managed_mapped_file::shrink_to_fit(filename.c_str());
-    assert(status == true);
+    THOR_THROW_IF_FALSE(status == true);
 }
 
 string Shard::getFilename() { return filename; }
@@ -255,7 +256,7 @@ uint64_t Shard::getNumExamples(ExampleType exampleType) {
     } else if (exampleType == ExampleType::TEST) {
         return testLabels->size();
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 

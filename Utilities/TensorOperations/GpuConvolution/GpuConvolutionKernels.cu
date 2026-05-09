@@ -2,6 +2,7 @@
 
 #include <cuda.h>
 #include <cuda_fp16.h>
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace ThorImplementation;
 using namespace std;
@@ -146,20 +147,20 @@ __global__ void computeOverallBiasesGradient(float *workspace, half *biasesGradi
 }
 
 void GpuConvolution::addConvolutionBias(Tensor dataOutput, Tensor biases, Stream stream) {
-    assert(dataOutput.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(dataOutput.getPlacement() == biases.getPlacement());
+    THOR_THROW_IF_FALSE(dataOutput.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(dataOutput.getPlacement() == biases.getPlacement());
     int gpuNum = stream.getGpuNum();
 
     vector<unsigned long> dataDimensions = dataOutput.getDescriptor().getDimensions();
     vector<unsigned long> biasDimensions = biases.getDescriptor().getDimensions();
-    assert(dataDimensions.size() == 4);
-    assert(biasDimensions.size() == 1);
+    THOR_THROW_IF_FALSE(dataDimensions.size() == 4);
+    THOR_THROW_IF_FALSE(biasDimensions.size() == 1);
 
     unsigned int batchDimension = dataDimensions[0];
     unsigned int channelDimension = dataDimensions[1];
     unsigned int elementDimension = dataDimensions[2] * dataDimensions[3];
 
-    assert(biasDimensions[0] == channelDimension);
+    THOR_THROW_IF_FALSE(biasDimensions[0] == channelDimension);
 
     ScopedGpu scopedGpu(gpuNum);
 
@@ -170,25 +171,25 @@ void GpuConvolution::addConvolutionBias(Tensor dataOutput, Tensor biases, Stream
 }
 
 void GpuConvolution::computeConvolutionBiasesGradient(Tensor errorInput, Tensor biasesGradient, Tensor workspace, Stream stream) {
-    assert(errorInput.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(errorInput.getPlacement() == biasesGradient.getPlacement());
-    assert(errorInput.getPlacement() == workspace.getPlacement());
+    THOR_THROW_IF_FALSE(errorInput.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(errorInput.getPlacement() == biasesGradient.getPlacement());
+    THOR_THROW_IF_FALSE(errorInput.getPlacement() == workspace.getPlacement());
     int gpuNum = stream.getGpuNum();
 
     vector<unsigned long> dataDimensions = errorInput.getDescriptor().getDimensions();
     vector<unsigned long> biasDimensions = biasesGradient.getDescriptor().getDimensions();
     vector<unsigned long> workspaceDimensions = workspace.getDescriptor().getDimensions();
 
-    assert(dataDimensions.size() == 4);
+    THOR_THROW_IF_FALSE(dataDimensions.size() == 4);
     unsigned int batchDimension = dataDimensions[0];
     unsigned int channelDimension = dataDimensions[1];
     unsigned int elementDimension = dataDimensions[2] * dataDimensions[3];
 
-    assert(biasDimensions.size() == 1);
-    assert(biasDimensions[0] == channelDimension);
-    assert(biasesGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(biasDimensions.size() == 1);
+    THOR_THROW_IF_FALSE(biasDimensions[0] == channelDimension);
+    THOR_THROW_IF_FALSE(biasesGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
-    assert(workspace.getDescriptor().getArraySizeInBytes() == batchDimension * channelDimension * sizeof(float));
+    THOR_THROW_IF_FALSE(workspace.getDescriptor().getArraySizeInBytes() == batchDimension * channelDimension * sizeof(float));
 
     ScopedGpu scopedGpu(gpuNum);
 

@@ -1,5 +1,6 @@
 #include "Add1dBias.h"
 #include "Utilities/Common/ScopedGpu.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 template <typename DATA_TYPE>
 __global__ void add1dBias(DATA_TYPE *features, DATA_TYPE *biases, uint32_t batchSize, uint64_t numElementsPerBatch) {
@@ -15,8 +16,8 @@ __global__ void add1dBias(DATA_TYPE *features, DATA_TYPE *biases, uint32_t batch
 
 template <typename DATA_TYPE>
 void launchAdd1dBias(DATA_TYPE *features_d, DATA_TYPE *biases_d, uint32_t batchSize, uint64_t numElementsPerBatch, Stream stream) {
-    assert(numElementsPerBatch > 0);
-    assert(batchSize > 0);
+    THOR_THROW_IF_FALSE(numElementsPerBatch > 0);
+    THOR_THROW_IF_FALSE(batchSize > 0);
     dim3 blockSize(256);
     dim3 gridSize((numElementsPerBatch + 255) / 256);
     ScopedGpu scopedGpu(stream.getGpuNum());

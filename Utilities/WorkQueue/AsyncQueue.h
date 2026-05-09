@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cassert>
+#include "DeepLearning/Implementation/ThorError.h"
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -94,15 +94,15 @@ AsyncQueue<DataType>::~AsyncQueue() {
 template <class DataType>
 void AsyncQueue<DataType>::resize(uint32_t queueSize) {
     std::unique_lock<std::mutex> lck(mtx);
-    assert(queueOpen == false);
+    THOR_THROW_IF_FALSE(queueOpen == false);
     this->queueSize = queueSize;
 }
 
 template <class DataType>
 void AsyncQueue<DataType>::open() {
     std::unique_lock<std::mutex> lck(mtx);
-    assert(queueOpen == false);
-    assert(queueSize > 0);
+    THOR_THROW_IF_FALSE(queueOpen == false);
+    THOR_THROW_IF_FALSE(queueSize > 0);
 
     queueOpen = true;
 }

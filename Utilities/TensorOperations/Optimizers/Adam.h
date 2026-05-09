@@ -5,8 +5,7 @@
 // #include <cuda.h>
 // #include <cuda_fp16.h>
 //
-// #include <assert.h>
-// #include <cstdint>
+// // #include <cstdint>
 // #include <type_traits>
 //
 // template <typename T>

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 namespace ThorImplementation {
 
 struct RunStats {
@@ -41,7 +42,7 @@ struct RunStats {
 
     inline double getAverageRunTimeMilliseconds() {
         // Updates should not be concurrently ongoing when running this function.
-        assert(runCount > 0);
+        THOR_THROW_IF_FALSE(runCount > 0);
         return totalExecutionTimeMilliseconds / runCount;
     }
 

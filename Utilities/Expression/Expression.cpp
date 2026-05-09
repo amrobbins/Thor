@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <sstream>
+#include "DeepLearning/Implementation/ThorError.h"
 
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 using json = nlohmann::json;
@@ -40,7 +41,7 @@ class HelperStreamPool {
 
     Stream& getNextHelperStream(uint32_t gpu_num) {
         ensureInitialized();
-        assert(gpu_num < per_gpu_.size());
+        THOR_THROW_IF_FALSE(gpu_num < per_gpu_.size());
 
         PerGpuHelperStreams& state = *per_gpu_[gpu_num];
         const uint32_t idx = state.next_index.fetch_add(1, std::memory_order_relaxed) & HELPER_STREAM_MASK;

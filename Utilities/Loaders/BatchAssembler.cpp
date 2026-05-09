@@ -1,4 +1,5 @@
 #include "Utilities/Loaders/BatchAssembler.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
@@ -13,8 +14,8 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
                                TensorDescriptor exampleDescriptor,
                                TensorDescriptor labelDescriptor,
                                uint64_t batchSize) {
-    assert(!shards.empty());
-    assert(batchSize > 0);
+    THOR_THROW_IF_FALSE(!shards.empty());
+    THOR_THROW_IF_FALSE(batchSize > 0);
 
     this->shards = shards;
     this->exampleType = exampleType;
@@ -30,8 +31,8 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
 
     numExamples = 0;
     for (uint64_t i = 0; i < shards.size(); ++i) {
-        assert(shards[i]->isOpen());
-        assert(shards[i]->getExampleSizeInBytes() == exampleDescriptor.getArraySizeInBytes());
+        THOR_THROW_IF_FALSE(shards[i]->isOpen());
+        THOR_THROW_IF_FALSE(shards[i]->getExampleSizeInBytes() == exampleDescriptor.getArraySizeInBytes());
 
         numExamples += shards[i]->getNumExamples(exampleType);
         numExamplesPerShard.push_back(shards[i]->getNumExamples(exampleType));
@@ -50,14 +51,14 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
     vector<uint64_t> labelDimensions = labelDescriptor.getDimensions();
     TensorDescriptor::DataType labelsDataType = labelDescriptor.getDataType();
     vector<uint64_t> exampleDimensions = exampleDescriptor.getDimensions();
-    assert(labelDimensions.size() == 1);
+    THOR_THROW_IF_FALSE(labelDimensions.size() == 1);
     perClassLabels = labelDimensions[0] == classIndexes.size() &&
                      (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::FP16 ||
                       labelsDataType == TensorDescriptor::DataType::FP32);
     classIndexLabels = labelDimensions[0] == 1 &&
                        (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
                         labelsDataType == TensorDescriptor::DataType::UINT32);
-    assert(perClassLabels ^ classIndexLabels);
+    THOR_THROW_IF_FALSE(perClassLabels ^ classIndexLabels);
 
     batchLabelTensorDescriptor = ThorImplementation::TensorDescriptor(labelDescriptor.getDataType(), {batchSize, labelDimensions[0]});
 
@@ -69,9 +70,9 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
 BatchAssembler::~BatchAssembler() { close(); }
 
 void BatchAssembler::open() {
-    assert(!batchDataQueue.isOpen());
-    assert(!batchLabelQueue.isOpen());
-    assert(shardQueues.empty());
+    THOR_THROW_IF_FALSE(!batchDataQueue.isOpen());
+    THOR_THROW_IF_FALSE(!batchLabelQueue.isOpen());
+    THOR_THROW_IF_FALSE(shardQueues.empty());
 
     for (uint64_t i = 0; i < shards.size(); ++i) {
         shardQueues.emplace_back(new AsyncQueue<LabeledExample>(32));
@@ -178,7 +179,7 @@ void BatchAssembler::batchAssemblerThread() {
                 break;
             }
         }
-        assert(chosenShard < numExamplesPerShard.size());
+        THOR_THROW_IF_FALSE(chosenShard < numExamplesPerShard.size());
 
         queueOpen = shardQueues[chosenShard]->pop(labeledExample);
         if (!queueOpen) {
@@ -195,7 +196,7 @@ void BatchAssembler::batchAssemblerThread() {
         // There is support for one-hot or soft labels, and also for single number label
         TensorDescriptor::DataType labelsDataType = batchLabelTensorDescriptor.getDataType();
         if (perClassLabels) {
-            assert(labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::FP16 ||
+            THOR_THROW_IF_FALSE(labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::FP16 ||
                    labelsDataType == TensorDescriptor::DataType::FP32);
 
             batchSlotOffset = classIndexes.size() * batchSlot;
@@ -216,10 +217,10 @@ void BatchAssembler::batchAssemblerThread() {
                 // classIndexes.end(); ++it)
                 //    printf("\r%s:%ld\n", it->first.c_str(), it->second);
             } else {
-                assert(false);
+                THOR_UNREACHABLE();
             }
         } else {  // class index labels
-            assert(labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
+            THOR_THROW_IF_FALSE(labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
                    labelsDataType == TensorDescriptor::DataType::UINT32);
             if (labelsDataType == TensorDescriptor::DataType::UINT8) {
                 uint8_t *batchLabels = (uint8_t *)batchLabelsBuffer.getMemPtr() + batchSlot;
@@ -231,7 +232,7 @@ void BatchAssembler::batchAssemblerThread() {
                 uint32_t *batchLabels = (uint32_t *)batchLabelsBuffer.getMemPtr() + batchSlot;
                 batchLabels[batchSlot] = (uint32_t)classIndexes[labeledExample.label];
             } else {
-                assert(false);
+                THOR_UNREACHABLE();
             }
         }
 
@@ -259,26 +260,26 @@ void BatchAssembler::batchAssemblerThread() {
 void BatchAssembler::getBatch(Tensor &batchTensor, Tensor &labelTensor, uint64_t &batchNum) {
     bool queueOpen;
     queueOpen = batchDataQueue.getBufferToUnload(batchTensor);
-    assert(queueOpen);
+    THOR_THROW_IF_FALSE(queueOpen);
     queueOpen = batchLabelQueue.getBufferToUnload(labelTensor);
-    assert(queueOpen);
+    THOR_THROW_IF_FALSE(queueOpen);
     queueOpen = batchNumQueue.pop(batchNum);
-    assert(queueOpen);
+    THOR_THROW_IF_FALSE(queueOpen);
 }
 
 uint64_t BatchAssembler::getNextBatchNum() {
     uint64_t nextBatchNum;
     bool queueOpen = batchNumQueue.peek(nextBatchNum);
-    assert(queueOpen);
+    THOR_THROW_IF_FALSE(queueOpen);
     return nextBatchNum;
 }
 
 void BatchAssembler::returnBuffer(Tensor &batchTensor, Tensor &labelTensor) {
     bool queueOpen;
     queueOpen = batchDataQueue.bufferUnloaded(batchTensor);
-    assert(queueOpen);
+    THOR_THROW_IF_FALSE(queueOpen);
     queueOpen = batchLabelQueue.bufferUnloaded(labelTensor);
-    assert(queueOpen);
+    THOR_THROW_IF_FALSE(queueOpen);
 }
 
 uint64_t BatchAssembler::getNumBatchesPerEpoch() { return batchesPerEpoch; }

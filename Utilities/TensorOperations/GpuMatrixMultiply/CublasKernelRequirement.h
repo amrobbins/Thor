@@ -1,10 +1,10 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 #include <cublasLt.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
 
-#include <assert.h>
 #include <atomic>
 #include <cstddef>
 #include <functional>
@@ -37,12 +37,12 @@ struct KernelRequirement {
           ldC(ldC),
           ldD(ldD),
           allowWorkspace(allowWorkspace) {
-        assert(rowsA > 0);
-        assert(colsA > 0);
-        assert(rowsB > 0);
-        assert(colsB > 0);
-        assert(ldA >= colsA);
-        assert(ldB >= colsB);
+        THOR_THROW_IF_FALSE(rowsA > 0);
+        THOR_THROW_IF_FALSE(colsA > 0);
+        THOR_THROW_IF_FALSE(rowsB > 0);
+        THOR_THROW_IF_FALSE(colsB > 0);
+        THOR_THROW_IF_FALSE(ldA >= colsA);
+        THOR_THROW_IF_FALSE(ldB >= colsB);
 
         int finalRowsA = transposeA == false ? rowsA : colsA;
         int finalColsA = transposeA == false ? colsA : rowsA;
@@ -62,12 +62,12 @@ struct KernelRequirement {
                ldC);
         */
 
-        assert(finalColsA == finalRowsB);
+        THOR_THROW_IF_FALSE(finalColsA == finalRowsB);
         if (transposeC)
-            assert(ldC >= finalRowsA);
+            THOR_THROW_IF_FALSE(ldC >= finalRowsA);
         else
-            assert(ldC >= finalColsB);
-        assert(ldD >= finalColsB);
+            THOR_THROW_IF_FALSE(ldC >= finalColsB);
+        THOR_THROW_IF_FALSE(ldD >= finalColsB);
     }
 
     const std::string gpuType;
@@ -240,7 +240,7 @@ struct OperationType {
           BDataType(BDataType),
           CDataType(CDataType),
           DDataType(DDataType) {
-        assert(isSupportedCublasLtOperationType(computeDataType, scaleDataType, ADataType, BDataType, CDataType, DDataType));
+        THOR_THROW_IF_FALSE(isSupportedCublasLtOperationType(computeDataType, scaleDataType, ADataType, BDataType, CDataType, DDataType));
     }
 
     const cublasComputeType_t computeDataType;

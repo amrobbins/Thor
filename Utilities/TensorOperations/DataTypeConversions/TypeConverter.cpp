@@ -1,5 +1,6 @@
 #include "TypeConverter.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace ThorImplementation;
 using namespace std;
@@ -26,9 +27,9 @@ void TypeConverter::convertType(void *source,
                                 Stream stream,
                                 int deviceNum) {
     // They should not be the same type, if they are then convertType should not have been invoked
-    assert(sourceDataType != destDataType);
+    THOR_THROW_IF_FALSE(sourceDataType != destDataType);
 
-    assert(numElements >= 0);
+    THOR_THROW_IF_FALSE(numElements >= 0);
     if (numElements == 0)
         return;
 
@@ -38,7 +39,7 @@ void TypeConverter::convertType(void *source,
         CUDA_CHECK(cudaLaunchHostFunc(stream.getStream(), cpuConvertType, args));
     } else {
         // GPU
-        assert(stream.getGpuNum() == deviceNum);
+        THOR_THROW_IF_FALSE(stream.getGpuNum() == deviceNum);
         gpuConvertType(source, dest, sourceDataType, destDataType, numElements, stream);
     }
 }
@@ -113,7 +114,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<__nv_fp8_e4m3>((__nv_fp8_e4m3 *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::FP8_E5M2:
@@ -170,7 +171,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<__nv_fp8_e5m2>((__nv_fp8_e5m2 *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::BF16:
@@ -227,7 +228,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<__nv_bfloat16>((__nv_bfloat16 *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::FP16:
@@ -281,7 +282,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<half>((half *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::FP32:
@@ -335,7 +336,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<float>((float *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::FP64:
@@ -389,7 +390,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<double>((double *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::INT8:
@@ -443,7 +444,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<int8_t>((int8_t *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::INT16:
@@ -497,7 +498,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<int16_t>((int16_t *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::INT32:
@@ -551,7 +552,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<int32_t>((int32_t *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::INT64:
@@ -605,7 +606,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<int64_t>((int64_t *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::UINT8:
@@ -659,7 +660,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<uint8_t>((uint8_t *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::UINT16:
@@ -713,7 +714,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<uint16_t>((uint16_t *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::UINT32:
@@ -767,7 +768,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<uint32_t>((uint32_t *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::UINT64:
@@ -821,7 +822,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<uint64_t>((uint64_t *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::BOOLEAN:
@@ -875,7 +876,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeToPackedBooleanImpl<bool>((bool *)args->source, args->dest, numElements);
                     break;
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         case TensorDescriptor::DataType::PACKED_BOOLEAN:
@@ -926,13 +927,13 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
                     cpuConvertTypeFromPackedBooleanImpl<bool>(args->source, (bool *)args->dest, numElements);
                     break;
                 case TensorDescriptor::DataType::PACKED_BOOLEAN:
-                    assert(false);
+                    THOR_UNREACHABLE();
                 default:
-                    assert(false);
+                    THOR_UNREACHABLE();
             }
             break;
         default:
-            assert(false);
+            THOR_UNREACHABLE();
     }
 
     delete args;
@@ -940,10 +941,8 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
 
 template <typename FROM_TYPE, typename TO_TYPE>
 void TypeConverter::cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long numElements) {
-    assert(!(is_same<FROM_TYPE, TO_TYPE>::value));
-    // assert((is_convertible<FROM_TYPE, TO_TYPE>::value));
-
-    assert(numElements >= 0);
+    THOR_THROW_IF_FALSE(!(is_same<FROM_TYPE, TO_TYPE>::value));
+    THOR_THROW_IF_FALSE(numElements >= 0);
     if (numElements == 0)
         return;
 
@@ -955,7 +954,7 @@ void TypeConverter::cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long nu
         void *sourceEnd = (void *)&(source[numElements - 1]);
         void *destStart = dest;
         void *destEnd = (void *)&(dest[numElements - 1]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
+        THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
     }
 
     if (!inPlaceConversion || sizeof(TO_TYPE) == sizeof(FROM_TYPE)) {
@@ -987,8 +986,6 @@ void TypeConverter::cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long nu
 
 template <typename TO_TYPE>
 void TypeConverter::cpuConvertTypeFromPackedBooleanImpl(void *source, TO_TYPE *dest, long numElements) {
-    // assert((is_convertible<bool, TO_TYPE>::value));
-
     if (numElements == 0)
         return;
 
@@ -1000,7 +997,7 @@ void TypeConverter::cpuConvertTypeFromPackedBooleanImpl(void *source, TO_TYPE *d
         void *sourceEnd = (void *)&(((uint8_t *)source)[((numElements - 1) + 7) / 8]);
         void *destStart = dest;
         void *destEnd = (void *)&(dest[numElements - 1]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
+        THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
     }
 
     if (!inPlaceConversion) {
@@ -1027,8 +1024,6 @@ void TypeConverter::cpuConvertTypeFromPackedBooleanImpl(void *source, TO_TYPE *d
 
 template <typename FROM_TYPE>
 void TypeConverter::cpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source, void *dest, long numElements) {
-    // assert((is_convertible<FROM_TYPE, bool>::value));
-
     if (numElements == 0)
         return;
 
@@ -1040,7 +1035,7 @@ void TypeConverter::cpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source, void *d
         void *sourceEnd = (void *)&(source[numElements - 1]);
         void *destStart = dest;
         void *destEnd = (void *)&(((uint8_t *)dest)[((numElements - 1) + 7) / 8]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
+        THOR_THROW_IF_FALSE(sourceEnd < destStart || sourceStart > destEnd);
     }
 
     if (!inPlaceConversion) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelRequirement.h"
 
@@ -14,7 +15,6 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 
-#include <assert.h>
 #include <mma.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -363,7 +363,7 @@ class CublasMatrixMultiply {
                 break;
             }
         }
-        assert(gpuNum >= 0);
+        THOR_THROW_IF_FALSE(gpuNum >= 0);
 
         chooseOptimalGemmKernel(
             gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, ABCDataType, printResults);

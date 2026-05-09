@@ -1,4 +1,5 @@
 #include "Utilities/Loaders/ShardedRawDatasetCreator.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using std::make_pair;
 using std::make_shared;
@@ -21,9 +22,9 @@ ShardedRawDatasetCreator::ShardedRawDatasetCreator(unordered_set<string> sourceD
                                                    string baseDatasetFileName,
                                                    uint32_t maxClasses)
     : maxClasses(maxClasses) {
-    assert(!sourceDirectories.empty());
-    assert(!destDirectories.empty());
-    assert(!baseDatasetFileName.empty());
+    THOR_THROW_IF_FALSE(!sourceDirectories.empty());
+    THOR_THROW_IF_FALSE(!destDirectories.empty());
+    THOR_THROW_IF_FALSE(!baseDatasetFileName.empty());
 
     this->sourceDirectories = sourceDirectories;
     this->destDirectories = destDirectories;
@@ -152,7 +153,7 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples,
         if (maxClasses != 0) {
             path datasetDirectory = datasetDirectoryString;
             datasetDirectory /= "train";
-            assert(is_directory(datasetDirectory));
+            THOR_THROW_IF_FALSE(is_directory(datasetDirectory));
             for (const directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
                 string filename = classDirectory.path().filename();
                 bool filename_is_dot = filename == ".";
@@ -176,7 +177,7 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples,
             else if (type == ExampleType::TEST)
                 exampleType = "test";
             else
-                assert(false);
+                THOR_UNREACHABLE();
 
             uint32_t numProcessors = omp_get_num_procs();
             if (numProcessors > 1)
@@ -187,7 +188,7 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples,
 
             path datasetDirectory = datasetDirectoryString;
             datasetDirectory /= exampleType;
-            assert(is_directory(datasetDirectory));
+            THOR_THROW_IF_FALSE(is_directory(datasetDirectory));
             uint32_t thread = 0;
             for (const directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
                 string filename = classDirectory.path().filename();
@@ -243,7 +244,7 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples,
 }
 
 void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, DataElement>& workQueue) {
-    assert(!sourceDirectories.empty());
+    THOR_THROW_IF_FALSE(!sourceDirectories.empty());
     omp_set_num_threads(sourceDirectories.size());
 
     std::vector<string> sourceDirectoriesVector(sourceDirectories.begin(), sourceDirectories.end());
@@ -264,11 +265,11 @@ void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, Data
             else if (type == ExampleType::TEST)
                 exampleType = "test";
             else
-                assert(false);
+                THOR_UNREACHABLE();
 
             path datasetDirectory = datasetDirectoryString;
             datasetDirectory /= exampleType;
-            assert(is_directory(datasetDirectory));
+            THOR_THROW_IF_FALSE(is_directory(datasetDirectory));
 
             for (const directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
                 path classDirectoryPath = classDirectory.path();
@@ -299,9 +300,9 @@ void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, Data
                                 rawDataElement.fileName = examplePath.filename().native();
 
                                 bool success = workQueue.push(rawDataElement);
-                                assert(success);
+                                THOR_THROW_IF_FALSE(success);
                             } else {
-                                assert(false);
+                                THOR_UNREACHABLE();
                             }
                         }
                     }
