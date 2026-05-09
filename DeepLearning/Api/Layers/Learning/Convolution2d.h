@@ -242,6 +242,31 @@ class Convolution2d::Builder {
         convolution2d.weightsOptimizer = _weightsOptimizer;
         convolution2d.biasesOptimizer = _biasesOptimizer;
 
+        const Tensor::DataType weightsDataType = Tensor::DataType::FP16;
+        const uint64_t inputChannels = convolution2d.featureInputs.front().getDimensions()[0];
+
+        ParameterSpecification::Builder weightsParameterBuilder;
+        weightsParameterBuilder.name("weights")
+            .shape({convolution2d.numOutputChannels, inputChannels, convolution2d.filterHeight, convolution2d.filterWidth})
+            .dtype(weightsDataType)
+            .initializer(convolution2d.weightsInitializer)
+            .trainable(true);
+        if (convolution2d.weightsOptimizer != nullptr)
+            weightsParameterBuilder.optimizer(convolution2d.weightsOptimizer);
+        convolution2d.addParameter(std::make_shared<ParameterSpecification>(weightsParameterBuilder.build()));
+
+        if (convolution2d.hasBias) {
+            ParameterSpecification::Builder biasesParameterBuilder;
+            biasesParameterBuilder.name("biases")
+                .shape({convolution2d.numOutputChannels})
+                .dtype(weightsDataType)
+                .initializer(convolution2d.biasInitializer)
+                .trainable(true);
+            if (convolution2d.biasesOptimizer != nullptr)
+                biasesParameterBuilder.optimizer(convolution2d.biasesOptimizer);
+            convolution2d.addParameter(std::make_shared<ParameterSpecification>(biasesParameterBuilder.build()));
+        }
+
         convolution2d.initialized = true;
 
         if (convolution2d.isMultiLayer()) {

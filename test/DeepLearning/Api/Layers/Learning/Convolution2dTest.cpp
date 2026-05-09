@@ -1,639 +1,626 @@
-// #include "DeepLearning/Api/Layers/Layer.h"
-// #include "DeepLearning/Api/Layers/Learning/Convolution2d.h"
-// #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
-// #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
-// #include "DeepLearning/Api/Network/PlacedNetwork.h"
-// #include "DeepLearning/Api/Optimizers/Sgd.h"
-// #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2d.h"
-// #include "Utilities/Common/Stream.h"
-//
-// #include "gtest/gtest.h"
-//
-// #include <nlohmann/json.hpp>
-//
-// #include <cstdint>
-// #include <memory>
-// #include <string>
-// #include <vector>
-//
-// using json = nlohmann::json;
-//
-// namespace Api = Thor;
-// namespace Impl = ThorImplementation;
-//
-// namespace {
-//
-// using ApiDataType = Api::Tensor::DataType;
-// using ImplDataType = Impl::TensorDescriptor::DataType;
-//
-// Impl::TensorPlacement gpuPlacement(Impl::TensorPlacement::MemDevices::GPU, 0);
-//
-// std::vector<uint64_t> expectedConvOutputDims(uint32_t numOutputChannels,
-//                                              uint32_t inputHeight,
-//                                              uint32_t inputWidth,
-//                                              uint32_t filterHeight,
-//                                              uint32_t filterWidth,
-//                                              uint32_t verticalStride,
-//                                              uint32_t horizontalStride,
-//                                              uint32_t verticalPadding,
-//                                              uint32_t horizontalPadding) {
-//     const uint32_t outputHeight =
-//         Api::Convolution2d::Builder::computeOutputDimension(inputHeight, verticalStride, filterHeight, verticalPadding);
-//     const uint32_t outputWidth =
-//         Api::Convolution2d::Builder::computeOutputDimension(inputWidth, horizontalStride, filterWidth, horizontalPadding);
-//
-//     return {numOutputChannels, outputHeight, outputWidth};
-// }
-//
-// void expectSingleInputOutput(const Api::Convolution2d& convolution,
-//                              const Api::Tensor& featureInput,
-//                              const std::vector<uint64_t>& expectedOutputDims) {
-//     std::optional<Api::Tensor> actualInput = convolution.getFeatureInput();
-//     ASSERT_TRUE(actualInput.has_value());
-//     EXPECT_EQ(actualInput.value(), featureInput);
-//     EXPECT_EQ(actualInput.value().getDataType(), featureInput.getDataType());
-//     EXPECT_EQ(actualInput.value().getDimensions(), featureInput.getDimensions());
-//
-//     std::optional<Api::Tensor> actualOutput = convolution.getFeatureOutput();
-//     ASSERT_TRUE(actualOutput.has_value());
-//     EXPECT_EQ(actualOutput.value().getDataType(), ApiDataType::FP16);
-//     EXPECT_EQ(actualOutput.value().getDimensions(), expectedOutputDims);
-//
-//     EXPECT_EQ(convolution.getFeatureOutput(featureInput), actualOutput.value());
-//     EXPECT_EQ(convolution.getFeatureInput(actualOutput.value()), featureInput);
-// }
-//
-// std::shared_ptr<Api::Convolution2d> findOnlyApiConvolution(Api::Network& network) {
-//     std::shared_ptr<Api::Convolution2d> found;
-//     for (uint32_t i = 0; i < network.getNumTrainableLayers(); ++i) {
-//         std::shared_ptr<Api::Convolution2d> candidate = std::dynamic_pointer_cast<Api::Convolution2d>(network.getTrainableLayer(i));
-//         if (candidate != nullptr) {
-//             EXPECT_EQ(found, nullptr);
-//             found = candidate;
-//         }
-//     }
-//     return found;
-// }
-//
-// std::shared_ptr<Impl::Convolution2d> findOnlyPhysicalConvolution(Impl::StampedNetwork& stampedNetwork) {
-//     std::shared_ptr<Impl::Convolution2d> found;
-//     for (uint64_t i = 0; i < stampedNetwork.getNumTrainableLayers(); ++i) {
-//         std::shared_ptr<Impl::Convolution2d> candidate =
-//             std::dynamic_pointer_cast<Impl::Convolution2d>(stampedNetwork.getTrainableLayer(i));
-//         if (candidate != nullptr) {
-//             EXPECT_EQ(found, nullptr);
-//             found = candidate;
-//         }
-//     }
-//     return found;
-// }
-//
-// void synchronizeEvents(std::vector<Event>& events) {
-//     for (Event& event : events)
-//         event.synchronize();
-//     events.clear();
-// }
-//
-// }  // namespace
-//
-// TEST(Convolution2dApi, SingleFeatureInputNoPaddingBuildsAndClones) {
-//     Api::Network network("testNetwork");
-//
-//     const std::vector<uint64_t> inputDims{3, 8, 9};
-//     Api::Tensor featureInput(ApiDataType::FP16, inputDims);
-//
-//     constexpr uint32_t numOutputChannels = 7;
-//     constexpr uint32_t filterHeight = 3;
-//     constexpr uint32_t filterWidth = 5;
-//     constexpr uint32_t verticalStride = 2;
-//     constexpr uint32_t horizontalStride = 1;
-//     constexpr bool hasBias = true;
-//
-//     Api::Convolution2d convolution = Api::Convolution2d::Builder()
-//                                          .network(network)
-//                                          .featureInput(featureInput)
-//                                          .numOutputChannels(numOutputChannels)
-//                                          .filterHeight(filterHeight)
-//                                          .filterWidth(filterWidth)
-//                                          .verticalStride(verticalStride)
-//                                          .horizontalStride(horizontalStride)
-//                                          .noPadding()
-//                                          .hasBias(hasBias)
-//                                          .noActivation()
-//                                          .build();
-//
-//     ASSERT_TRUE(convolution.isInitialized());
-//
-//     const std::vector<uint64_t> outputDims = expectedConvOutputDims(
-//         numOutputChannels, inputDims[1], inputDims[2], filterHeight, filterWidth, verticalStride, horizontalStride, 0, 0);
-//     expectSingleInputOutput(convolution, featureInput, outputDims);
-//
-//     EXPECT_EQ(convolution.getFilterHeight(), filterHeight);
-//     EXPECT_EQ(convolution.getFilterWidth(), filterWidth);
-//     EXPECT_EQ(convolution.getVerticalStride(), verticalStride);
-//     EXPECT_EQ(convolution.getHorizontalStride(), horizontalStride);
-//     EXPECT_EQ(convolution.getVerticalPadding(), 0u);
-//     EXPECT_EQ(convolution.getHoriztonalPadding(), 0u);
-//
-//     std::shared_ptr<Api::Layer> cloneLayer = convolution.clone();
-//     std::shared_ptr<Api::Convolution2d> clone = std::dynamic_pointer_cast<Api::Convolution2d>(cloneLayer);
-//     ASSERT_NE(clone, nullptr);
-//
-//     ASSERT_TRUE(clone->isInitialized());
-//     expectSingleInputOutput(*clone, featureInput, outputDims);
-//
-//     EXPECT_EQ(clone->getFilterHeight(), filterHeight);
-//     EXPECT_EQ(clone->getFilterWidth(), filterWidth);
-//     EXPECT_EQ(clone->getVerticalStride(), verticalStride);
-//     EXPECT_EQ(clone->getHorizontalStride(), horizontalStride);
-//     EXPECT_EQ(clone->getVerticalPadding(), 0u);
-//     EXPECT_EQ(clone->getHoriztonalPadding(), 0u);
-//
-//     EXPECT_EQ(convolution.getId(), clone->getId());
-//     EXPECT_GT(convolution.getId(), 1u);
-//     EXPECT_TRUE(convolution == *clone);
-//     EXPECT_FALSE(convolution != *clone);
-//     EXPECT_FALSE(convolution > *clone);
-//     EXPECT_FALSE(convolution < *clone);
-// }
-//
-// TEST(Convolution2dApi, SingleFeatureInputSpecifiedPaddingBuilds) {
-//     Api::Network network("testNetwork");
-//
-//     const std::vector<uint64_t> inputDims{4, 10, 11};
-//     Api::Tensor featureInput(ApiDataType::FP16, inputDims);
-//
-//     constexpr uint32_t numOutputChannels = 5;
-//     constexpr uint32_t filterHeight = 4;
-//     constexpr uint32_t filterWidth = 3;
-//     constexpr uint32_t verticalStride = 2;
-//     constexpr uint32_t horizontalStride = 3;
-//     constexpr uint32_t verticalPadding = 1;
-//     constexpr uint32_t horizontalPadding = 2;
-//
-//     Api::Convolution2d convolution = Api::Convolution2d::Builder()
-//                                          .network(network)
-//                                          .featureInput(featureInput)
-//                                          .numOutputChannels(numOutputChannels)
-//                                          .filterHeight(filterHeight)
-//                                          .filterWidth(filterWidth)
-//                                          .verticalStride(verticalStride)
-//                                          .horizontalStride(horizontalStride)
-//                                          .verticalPadding(verticalPadding)
-//                                          .horizontalPadding(horizontalPadding)
-//                                          .hasBias(false)
-//                                          .noActivation()
-//                                          .build();
-//
-//     ASSERT_TRUE(convolution.isInitialized());
-//
-//     const std::vector<uint64_t> outputDims = expectedConvOutputDims(numOutputChannels,
-//                                                                     inputDims[1],
-//                                                                     inputDims[2],
-//                                                                     filterHeight,
-//                                                                     filterWidth,
-//                                                                     verticalStride,
-//                                                                     horizontalStride,
-//                                                                     verticalPadding,
-//                                                                     horizontalPadding);
-//     expectSingleInputOutput(convolution, featureInput, outputDims);
-//
-//     EXPECT_EQ(convolution.getFilterHeight(), filterHeight);
-//     EXPECT_EQ(convolution.getFilterWidth(), filterWidth);
-//     EXPECT_EQ(convolution.getVerticalStride(), verticalStride);
-//     EXPECT_EQ(convolution.getHorizontalStride(), horizontalStride);
-//     EXPECT_EQ(convolution.getVerticalPadding(), verticalPadding);
-//     EXPECT_EQ(convolution.getHoriztonalPadding(), horizontalPadding);
-// }
-//
-// TEST(Convolution2dApi, SamePaddingBuildsWithExpectedPaddingAndOutputShape) {
-//     Api::Network network("testNetwork");
-//
-//     const std::vector<uint64_t> inputDims{3, 8, 10};
-//     Api::Tensor featureInput(ApiDataType::FP16, inputDims);
-//
-//     constexpr uint32_t numOutputChannels = 6;
-//     constexpr uint32_t filterHeight = 3;
-//     constexpr uint32_t filterWidth = 5;
-//     constexpr uint32_t verticalStride = 1;
-//     constexpr uint32_t horizontalStride = 1;
-//
-//     const uint32_t verticalPadding = Api::Convolution2d::Builder::computeSamePadding(inputDims[1], verticalStride, filterHeight);
-//     const uint32_t horizontalPadding = Api::Convolution2d::Builder::computeSamePadding(inputDims[2], horizontalStride, filterWidth);
-//
-//     Api::Convolution2d convolution = Api::Convolution2d::Builder()
-//                                          .network(network)
-//                                          .featureInput(featureInput)
-//                                          .numOutputChannels(numOutputChannels)
-//                                          .filterHeight(filterHeight)
-//                                          .filterWidth(filterWidth)
-//                                          .verticalStride(verticalStride)
-//                                          .horizontalStride(horizontalStride)
-//                                          .samePadding()
-//                                          .hasBias(true)
-//                                          .noActivation()
-//                                          .build();
-//
-//     ASSERT_TRUE(convolution.isInitialized());
-//
-//     EXPECT_EQ(verticalPadding, 1u);
-//     EXPECT_EQ(horizontalPadding, 2u);
-//     EXPECT_EQ(convolution.getVerticalPadding(), verticalPadding);
-//     EXPECT_EQ(convolution.getHoriztonalPadding(), horizontalPadding);
-//
-//     expectSingleInputOutput(convolution, featureInput, {numOutputChannels, inputDims[1], inputDims[2]});
-// }
-//
-// TEST(Convolution2dApi, MultipleFeatureInputsBuildAndMapToDistinctOutputs) {
-//     Api::Network network("testNetwork");
-//
-//     const std::vector<uint64_t> inputDims{2, 9, 7};
-//     Api::Tensor featureInput0(ApiDataType::FP16, inputDims);
-//     Api::Tensor featureInput1(ApiDataType::FP16, inputDims);
-//
-//     constexpr uint32_t numOutputChannels = 4;
-//     constexpr uint32_t filterHeight = 3;
-//     constexpr uint32_t filterWidth = 3;
-//     constexpr uint32_t verticalStride = 1;
-//     constexpr uint32_t horizontalStride = 2;
-//     constexpr uint32_t verticalPadding = 1;
-//     constexpr uint32_t horizontalPadding = 0;
-//
-//     Api::Convolution2d convolution = Api::Convolution2d::Builder()
-//                                          .network(network)
-//                                          .featureInput(featureInput0)
-//                                          .featureInput(featureInput1)
-//                                          .numOutputChannels(numOutputChannels)
-//                                          .filterHeight(filterHeight)
-//                                          .filterWidth(filterWidth)
-//                                          .verticalStride(verticalStride)
-//                                          .horizontalStride(horizontalStride)
-//                                          .verticalPadding(verticalPadding)
-//                                          .horizontalPadding(horizontalPadding)
-//                                          .hasBias(true)
-//                                          .noActivation()
-//                                          .build();
-//
-//     ASSERT_TRUE(convolution.isInitialized());
-//
-//     std::vector<Api::Tensor> featureInputs = convolution.getFeatureInputs();
-//     std::vector<Api::Tensor> featureOutputs = convolution.getFeatureOutputs();
-//
-//     ASSERT_EQ(featureInputs.size(), 2u);
-//     ASSERT_EQ(featureOutputs.size(), 2u);
-//
-//     EXPECT_EQ(featureInputs[0], featureInput0);
-//     EXPECT_EQ(featureInputs[1], featureInput1);
-//
-//     EXPECT_EQ(convolution.getFeatureOutput(featureInput0), featureOutputs[0]);
-//     EXPECT_EQ(convolution.getFeatureOutput(featureInput1), featureOutputs[1]);
-//     EXPECT_NE(featureOutputs[0].getId(), featureOutputs[1].getId());
-//
-//     EXPECT_EQ(convolution.getFeatureInput(featureOutputs[0]), featureInput0);
-//     EXPECT_EQ(convolution.getFeatureInput(featureOutputs[1]), featureInput1);
-//
-//     const std::vector<uint64_t> outputDims = expectedConvOutputDims(numOutputChannels,
-//                                                                     inputDims[1],
-//                                                                     inputDims[2],
-//                                                                     filterHeight,
-//                                                                     filterWidth,
-//                                                                     verticalStride,
-//                                                                     horizontalStride,
-//                                                                     verticalPadding,
-//                                                                     horizontalPadding);
-//
-//     for (const Api::Tensor& output : featureOutputs) {
-//         EXPECT_EQ(output.getDataType(), ApiDataType::FP16);
-//         EXPECT_EQ(output.getDimensions(), outputDims);
-//     }
-//
-//     std::shared_ptr<Api::Convolution2d> clone = std::dynamic_pointer_cast<Api::Convolution2d>(convolution.clone());
-//     ASSERT_NE(clone, nullptr);
-//
-//     std::vector<Api::Tensor> cloneFeatureOutputs = clone->getFeatureOutputs();
-//     ASSERT_EQ(cloneFeatureOutputs.size(), 2u);
-//     EXPECT_EQ(clone->getFeatureOutput(featureInput0), cloneFeatureOutputs[0]);
-//     EXPECT_EQ(clone->getFeatureOutput(featureInput1), cloneFeatureOutputs[1]);
-//     EXPECT_EQ(cloneFeatureOutputs[0].getDimensions(), outputDims);
-//     EXPECT_EQ(cloneFeatureOutputs[1].getDimensions(), outputDims);
-// }
-//
-// TEST(Convolution2dApi, CompoundLayerUsesOriginalInputAndFinalOutput) {
-//     Api::Network network("testNetwork");
-//
-//     const std::vector<uint64_t> inputDims{3, 8, 8};
-//     Api::Tensor fp32FeatureInput(ApiDataType::FP32, inputDims);
-//
-//     constexpr uint32_t numOutputChannels = 5;
-//
-//     Api::Convolution2d convolution = Api::Convolution2d::Builder()
-//                                          .network(network)
-//                                          .featureInput(fp32FeatureInput)
-//                                          .numOutputChannels(numOutputChannels)
-//                                          .filterHeight(3)
-//                                          .filterWidth(3)
-//                                          .verticalStride(1)
-//                                          .horizontalStride(1)
-//                                          .samePadding()
-//                                          .hasBias(true)
-//                                          .build();
-//
-//     ASSERT_TRUE(convolution.isInitialized());
-//
-//     std::optional<Api::Tensor> publicInput = convolution.getFeatureInput();
-//     ASSERT_TRUE(publicInput.has_value());
-//     EXPECT_EQ(publicInput.value(), fp32FeatureInput);
-//     EXPECT_EQ(publicInput.value().getDataType(), ApiDataType::FP32);
-//     EXPECT_EQ(publicInput.value().getDimensions(), inputDims);
-//
-//     std::optional<Api::Tensor> publicOutput = convolution.getFeatureOutput();
-//     ASSERT_TRUE(publicOutput.has_value());
-//     EXPECT_EQ(publicOutput.value().getDataType(), ApiDataType::FP16);
-//     EXPECT_EQ(publicOutput.value().getDimensions(), (std::vector<uint64_t>{numOutputChannels, inputDims[1], inputDims[2]}));
-//
-//     EXPECT_EQ(convolution.getFeatureOutput(fp32FeatureInput), publicOutput.value());
-//     EXPECT_EQ(convolution.getFeatureInput(publicOutput.value()), fp32FeatureInput);
-//
-//     // The public compound layer should have added support layers plus the standalone convolution.
-//     EXPECT_GT(network.getNumLayers(), 1u);
-//     EXPECT_EQ(network.getNumTrainableLayers(), 1u);
-// }
-//
-// TEST(Convolution2dApi, ArchitectureJsonContainsExpectedFieldsAndLayerOptimizer) {
-//     Api::Network network("testNetwork");
-//
-//     const std::vector<uint64_t> inputDims{3, 8, 9};
-//     Api::Tensor featureInput(ApiDataType::FP16, inputDims);
-//
-//     std::shared_ptr<Api::Sgd> sgd =
-//         Api::Sgd::Builder().initialLearningRate(0.125f).decay(0.25f).momentum(0.5f).useNesterovMomentum(true).build();
-//
-//     Api::Convolution2d convolution = Api::Convolution2d::Builder()
-//                                          .network(network)
-//                                          .featureInput(featureInput)
-//                                          .numOutputChannels(7)
-//                                          .filterHeight(3)
-//                                          .filterWidth(5)
-//                                          .verticalStride(2)
-//                                          .horizontalStride(1)
-//                                          .verticalPadding(1)
-//                                          .horizontalPadding(2)
-//                                          .hasBias(true)
-//                                          .weightsOptimizer(sgd)
-//                                          .biasesOptimizer(sgd)
-//                                          .noActivation()
-//                                          .build();
-//
-//     json j = convolution.architectureJson();
-//
-//     ASSERT_EQ(j.at("factory").get<std::string>(), Api::Layer::Factory::Learning.value());
-//     ASSERT_EQ(j.at("version").get<std::string>(), "1.0.0");
-//     ASSERT_EQ(j.at("layer_type").get<std::string>(), "convolution_2d");
-//     ASSERT_EQ(j.at("data_layout").get<std::string>(), "NCHW");
-//
-//     EXPECT_EQ(j.at("filter_height").get<uint32_t>(), 3u);
-//     EXPECT_EQ(j.at("filter_width").get<uint32_t>(), 5u);
-//     EXPECT_EQ(j.at("vertical_stride").get<uint32_t>(), 2u);
-//     EXPECT_EQ(j.at("horizontal_stride").get<uint32_t>(), 1u);
-//     EXPECT_EQ(j.at("vertical_padding").get<uint32_t>(), 1u);
-//     EXPECT_EQ(j.at("horizontal_padding").get<uint32_t>(), 2u);
-//     EXPECT_EQ(j.at("num_output_channels").get<uint32_t>(), 7u);
-//     EXPECT_TRUE(j.at("has_bias").get<bool>());
-//
-//     ASSERT_TRUE(j.contains("inputs"));
-//     ASSERT_TRUE(j.at("inputs").is_array());
-//     ASSERT_EQ(j.at("inputs").size(), 1u);
-//     EXPECT_EQ(j.at("inputs")[0].at("data_type").get<ApiDataType>(), ApiDataType::FP16);
-//     EXPECT_EQ(j.at("inputs")[0].at("dimensions").get<std::vector<uint64_t>>(), inputDims);
-//
-//     ASSERT_TRUE(j.contains("outputs"));
-//     ASSERT_TRUE(j.at("outputs").is_array());
-//     ASSERT_EQ(j.at("outputs").size(), 1u);
-//     EXPECT_EQ(j.at("outputs")[0].at("data_type").get<ApiDataType>(), ApiDataType::FP16);
-//     EXPECT_EQ(j.at("outputs")[0].at("dimensions").get<std::vector<uint64_t>>(), (std::vector<uint64_t>{7, 4, 9}));
-//
-//     ASSERT_TRUE(j.contains("weights_initializer"));
-//     ASSERT_TRUE(j.contains("biases_initializer"));
-//
-//     ASSERT_TRUE(j.contains("optimizer"));
-//     const json& optimizer = j.at("optimizer");
-//     EXPECT_EQ(optimizer.at("optimizer_type").get<std::string>(), "sgd");
-//     EXPECT_FLOAT_EQ(optimizer.at("initial_learning_rate").get<float>(), 0.125f);
-//     EXPECT_FLOAT_EQ(optimizer.at("decay").get<float>(), 0.25f);
-//     EXPECT_FLOAT_EQ(optimizer.at("momentum").get<float>(), 0.5f);
-//     EXPECT_TRUE(optimizer.at("use_nesterov").get<bool>());
-// }
-//
-// TEST(Convolution2dApi, ArchitectureJsonDeserializeRebuildsApiLayerAndOptimizer) {
-//     Api::Network initialNetwork("initialNetwork");
-//
-//     Api::NetworkInput networkInput =
-//         Api::NetworkInput::Builder().network(initialNetwork).name("input").dimensions({3, 8, 9}).dataType(ApiDataType::FP16).build();
-//
-//     std::shared_ptr<Api::Sgd> sgd =
-//         Api::Sgd::Builder().initialLearningRate(0.05f).decay(0.1f).momentum(0.2f).useNesterovMomentum(false).build();
-//
-//     Api::Convolution2d convolution = Api::Convolution2d::Builder()
-//                                          .network(initialNetwork)
-//                                          .featureInput(networkInput.getFeatureOutput())
-//                                          .numOutputChannels(4)
-//                                          .filterHeight(3)
-//                                          .filterWidth(3)
-//                                          .verticalStride(1)
-//                                          .horizontalStride(1)
-//                                          .samePadding()
-//                                          .hasBias(true)
-//                                          .weightsOptimizer(sgd)
-//                                          .biasesOptimizer(sgd)
-//                                          .noActivation()
-//                                          .build();
-//
-//     json networkInputJ = networkInput.architectureJson();
-//     json convolutionJ = convolution.architectureJson();
-//
-//     Api::Network newNetwork("newNetwork");
-//     std::shared_ptr<thor_file::TarReader> archiveReader;
-//
-//     Api::Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
-//     Api::Layer::deserialize(archiveReader, convolutionJ, &newNetwork);
-//
-//     ASSERT_EQ(newNetwork.getNumTrainableLayers(), 1u);
-//
-//     std::shared_ptr<Api::Convolution2d> deserialized = std::dynamic_pointer_cast<Api::Convolution2d>(newNetwork.getTrainableLayer(0));
-//     ASSERT_NE(deserialized, nullptr);
-//
-//     EXPECT_TRUE(deserialized->isInitialized());
-//     EXPECT_EQ(deserialized->getFilterHeight(), 3u);
-//     EXPECT_EQ(deserialized->getFilterWidth(), 3u);
-//     EXPECT_EQ(deserialized->getVerticalStride(), 1u);
-//     EXPECT_EQ(deserialized->getHorizontalStride(), 1u);
-//     EXPECT_EQ(deserialized->getVerticalPadding(), 1u);
-//     EXPECT_EQ(deserialized->getHoriztonalPadding(), 1u);
-//
-//     std::optional<Api::Tensor> output = deserialized->getFeatureOutput();
-//     ASSERT_TRUE(output.has_value());
-//     EXPECT_EQ(output.value().getDataType(), ApiDataType::FP16);
-//     EXPECT_EQ(output.value().getDimensions(), (std::vector<uint64_t>{4, 8, 9}));
-//
-//     ASSERT_TRUE(deserialized->hasOptimizer());
-//     std::shared_ptr<Api::Sgd> deserializedSgd = std::dynamic_pointer_cast<Api::Sgd>(deserialized->getOptimizer());
-//     ASSERT_NE(deserializedSgd, nullptr);
-//     EXPECT_FLOAT_EQ(deserializedSgd->getInitialLearningRate(), 0.05f);
-//     EXPECT_FLOAT_EQ(deserializedSgd->getDecay(), 0.1f);
-//     EXPECT_FLOAT_EQ(deserializedSgd->getMomentum(), 0.2f);
-//     EXPECT_FALSE(deserializedSgd->getUseNesterovMomentum());
-// }
-//
-// TEST(Convolution2dApi, PlaceCompilesPhysicalConvolutionParametersAndOptimizers) {
-//     Api::Network network("placeNetwork");
-//
-//     Api::NetworkInput networkInput =
-//         Api::NetworkInput::Builder().network(network).name("input").dimensions({3, 8, 8}).dataType(ApiDataType::FP16).build();
-//
-//     std::shared_ptr<Api::Sgd> sgd =
-//         Api::Sgd::Builder().initialLearningRate(0.1f).decay(0.0f).momentum(0.0f).useNesterovMomentum(false).build();
-//
-//     Api::Convolution2d convolution = Api::Convolution2d::Builder()
-//                                          .network(network)
-//                                          .featureInput(networkInput.getFeatureOutput())
-//                                          .numOutputChannels(5)
-//                                          .filterHeight(3)
-//                                          .filterWidth(3)
-//                                          .verticalStride(1)
-//                                          .horizontalStride(1)
-//                                          .samePadding()
-//                                          .hasBias(true)
-//                                          .weightsOptimizer(sgd)
-//                                          .biasesOptimizer(sgd)
-//                                          .noActivation()
-//                                          .build();
-//
-//     Api::NetworkOutput networkOutput = Api::NetworkOutput::Builder()
-//                                            .network(network)
-//                                            .name("output")
-//                                            .inputTensor(convolution.getFeatureOutput())
-//                                            .dataType(ApiDataType::FP16)
-//                                            .build();
-//
-//     std::vector<Event> initDoneEvents;
-//     std::shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(/*batchSize=*/2, initDoneEvents, /*inferenceOnly=*/false, {0}, 1);
-//     ASSERT_NE(placedNetwork, nullptr);
-//
-//     synchronizeEvents(initDoneEvents);
-//
-//     ASSERT_EQ(placedNetwork->getNumStamps(), 1u);
-//     Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
-//
-//     std::shared_ptr<Impl::Convolution2d> physicalConvolution = findOnlyPhysicalConvolution(stampedNetwork);
-//     ASSERT_NE(physicalConvolution, nullptr);
-//
-//     Impl::Tensor weights = physicalConvolution->getWeights();
-//     std::optional<Impl::Tensor> biases = physicalConvolution->getBiases();
-//
-//     EXPECT_EQ(weights.getPlacement(), gpuPlacement);
-//     EXPECT_EQ(weights.getDataType(), ImplDataType::FP16);
-//     EXPECT_EQ(weights.getDimensions(), (std::vector<uint64_t>{5, 3, 3, 3}));
-//
-//     ASSERT_TRUE(biases.has_value());
-//     EXPECT_EQ(biases.value().getPlacement(), gpuPlacement);
-//     EXPECT_EQ(biases.value().getDataType(), ImplDataType::FP16);
-//     EXPECT_EQ(biases.value().getDimensions(), (std::vector<uint64_t>{5}));
-//
-//     ASSERT_TRUE(physicalConvolution->getParameter("weights")->hasOptimizer());
-//     ASSERT_TRUE(physicalConvolution->getParameter("biases")->hasOptimizer());
-//
-//     std::shared_ptr<Impl::Sgd> weightsOptimizer =
-//         std::dynamic_pointer_cast<Impl::Sgd>(physicalConvolution->getParameter("weights")->getOptimizer());
-//     std::shared_ptr<Impl::Sgd> biasesOptimizer =
-//         std::dynamic_pointer_cast<Impl::Sgd>(physicalConvolution->getParameter("biases")->getOptimizer());
-//
-//     ASSERT_NE(weightsOptimizer, nullptr);
-//     ASSERT_NE(biasesOptimizer, nullptr);
-//
-//     EXPECT_EQ(weightsOptimizer->getId(), sgd->getId());
-//     EXPECT_EQ(biasesOptimizer->getId(), sgd->getId());
-//     EXPECT_TRUE(weightsOptimizer->isCompiled());
-//     EXPECT_TRUE(biasesOptimizer->isCompiled());
-//
-//     std::optional<Impl::Tensor> weightsGradient = weightsOptimizer->getWeightsGradient();
-//     std::optional<Impl::Tensor> biasesGradient = biasesOptimizer->getWeightsGradient();
-//
-//     ASSERT_TRUE(weightsGradient.has_value());
-//     ASSERT_TRUE(biasesGradient.has_value());
-//
-//     EXPECT_EQ(weightsGradient.value().getDimensions(), weights.getDimensions());
-//     EXPECT_EQ(biasesGradient.value().getDimensions(), biases.value().getDimensions());
-// }
-//
-// TEST(Convolution2dApi, SerializePlacedLayerIncludesStateFilesAndPerParameterOptimizers) {
-//     Api::Network network("serializeNetwork");
-//
-//     Api::NetworkInput networkInput =
-//         Api::NetworkInput::Builder().network(network).name("input").dimensions({3, 8, 8}).dataType(ApiDataType::FP16).build();
-//
-//     std::shared_ptr<Api::Sgd> sgd =
-//         Api::Sgd::Builder().initialLearningRate(0.2f).decay(0.1f).momentum(0.0f).useNesterovMomentum(false).build();
-//
-//     Api::Convolution2d convolution = Api::Convolution2d::Builder()
-//                                          .network(network)
-//                                          .featureInput(networkInput.getFeatureOutput())
-//                                          .numOutputChannels(5)
-//                                          .filterHeight(3)
-//                                          .filterWidth(3)
-//                                          .verticalStride(1)
-//                                          .horizontalStride(1)
-//                                          .samePadding()
-//                                          .hasBias(true)
-//                                          .weightsOptimizer(sgd)
-//                                          .biasesOptimizer(sgd)
-//                                          .noActivation()
-//                                          .build();
-//
-//     Api::NetworkOutput networkOutput = Api::NetworkOutput::Builder()
-//                                            .network(network)
-//                                            .name("output")
-//                                            .inputTensor(convolution.getFeatureOutput())
-//                                            .dataType(ApiDataType::FP16)
-//                                            .build();
-//
-//     std::vector<Event> initDoneEvents;
-//     std::shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(/*batchSize=*/2, initDoneEvents, /*inferenceOnly=*/false, {0}, 1);
-//     ASSERT_NE(placedNetwork, nullptr);
-//
-//     synchronizeEvents(initDoneEvents);
-//
-//     ASSERT_EQ(placedNetwork->getNumStamps(), 1u);
-//     Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
-//
-//     thor_file::TarWriter archiveWriter("convolution2d_api_test");
-//     Stream stream(gpuPlacement);
-//
-//     json j = convolution.serialize(archiveWriter, stream, /*saveOptimizerState=*/true, stampedNetwork);
-//
-//     ASSERT_EQ(j.at("factory").get<std::string>(), Api::Layer::Factory::Learning.value());
-//     ASSERT_EQ(j.at("version").get<std::string>(), "1.0.0");
-//     ASSERT_EQ(j.at("layer_type").get<std::string>(), "convolution_2d");
-//     ASSERT_EQ(j.at("data_layout").get<std::string>(), "NCHW");
-//
-//     const std::string layerName = "layer" + std::to_string(convolution.getId());
-//
-//     ASSERT_TRUE(j.contains("weights_tensor"));
-//     EXPECT_EQ(j.at("weights_tensor").get<std::string>(), layerName + "_weights.gds");
-//
-//     ASSERT_TRUE(j.contains("biases_tensor"));
-//     EXPECT_EQ(j.at("biases_tensor").get<std::string>(), layerName + "_biases.gds");
-//
-//     ASSERT_TRUE(j.contains("optimizer"));
-//     ASSERT_TRUE(j.contains("weights_optimizer"));
-//     ASSERT_TRUE(j.contains("biases_optimizer"));
-//
-//     EXPECT_EQ(j.at("optimizer").at("optimizer_type").get<std::string>(), "sgd");
-//     EXPECT_EQ(j.at("weights_optimizer").at("optimizer_type").get<std::string>(), "sgd");
-//     EXPECT_EQ(j.at("biases_optimizer").at("optimizer_type").get<std::string>(), "sgd");
-//
-//     EXPECT_EQ(j.at("weights_optimizer").at("id").get<uint64_t>(), sgd->getId());
-//     EXPECT_EQ(j.at("biases_optimizer").at("id").get<uint64_t>(), sgd->getId());
-//     EXPECT_FLOAT_EQ(j.at("weights_optimizer").at("initial_learning_rate").get<float>(), 0.2f);
-//     EXPECT_FLOAT_EQ(j.at("biases_optimizer").at("initial_learning_rate").get<float>(), 0.2f);
-// }
+#include "DeepLearning/Api/Layers/Learning/Convolution2d.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Optimizers/Sgd.h"
+#include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
+#include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/Utilities/TensorOperations/GpuConvolution/ConvolutionTestHelper.h"
+
+#include "cuda_fp16.h"
+#include "gtest/gtest.h"
+
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
 #include <optional>
+#include <string>
+#include <vector>
+
+using namespace std;
+namespace Api = Thor;
+namespace Impl = ThorImplementation;
+using DataType = Impl::TensorDescriptor::DataType;
+using json = nlohmann::json;
+
+namespace {
+
+Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
+
+uint64_t tensorNumel(const Impl::Tensor& tensor) {
+    uint64_t numel = 1;
+    for (uint64_t d : tensor.getDimensions())
+        numel *= d;
+    return numel;
+}
+
+void synchronizeEvents(vector<Event>& events) {
+    for (Event& event : events)
+        event.synchronize();
+    events.clear();
+}
+
+void writeCpuTensor(Impl::Tensor& tensor, const vector<float>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensorNumel(tensor), values.size());
+
+    switch (tensor.getDataType()) {
+        case DataType::FP16: {
+            auto* ptr = static_cast<half*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                ptr[i] = __float2half(values[i]);
+            break;
+        }
+        case DataType::FP32: {
+            auto* ptr = static_cast<float*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                ptr[i] = values[i];
+            break;
+        }
+        default:
+            FAIL() << "Unsupported tensor dtype in writeCpuTensor.";
+    }
+}
+
+vector<float> readCpuTensor(const Impl::Tensor& tensor) {
+    EXPECT_EQ(tensor.getPlacement(), cpuPlacement);
+
+    vector<float> values(tensorNumel(tensor));
+    switch (tensor.getDataType()) {
+        case DataType::FP16: {
+            const auto* ptr = static_cast<const half*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                values[i] = __half2float(ptr[i]);
+            break;
+        }
+        case DataType::FP32: {
+            const auto* ptr = static_cast<const float*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                values[i] = ptr[i];
+            break;
+        }
+        default:
+            ADD_FAILURE() << "Unsupported tensor dtype in readCpuTensor.";
+            break;
+    }
+    return values;
+}
+
+Impl::Tensor copyTensorToCpu(const Impl::Tensor& tensor, Stream& stream) {
+    Impl::Tensor cpuTensor = tensor.clone(cpuPlacement);
+    cpuTensor.copyFromAsync(tensor, stream);
+    Event copied = stream.putEvent();
+    copied.synchronize();
+    return cpuTensor;
+}
+
+void expectAllClose(
+    const vector<float>& actual, const vector<float>& expected, float atol = 6e-2f, float rtol = 6e-2f, const string& what = "") {
+    ASSERT_EQ(actual.size(), expected.size());
+    for (uint64_t i = 0; i < actual.size(); ++i) {
+        const float diff = fabs(actual[i] - expected[i]);
+        const float tol = atol + rtol * fabs(expected[i]);
+        EXPECT_LE(diff, tol) << what << " mismatch at index " << i << ": actual=" << actual[i] << ", expected=" << expected[i];
+    }
+}
+
+void setParameterTensor(const shared_ptr<Impl::PhysicalParameter>& parameter, const vector<float>& values, Stream& stream) {
+    ASSERT_NE(parameter, nullptr);
+    ASSERT_TRUE(parameter->getStorage().has_value());
+    Impl::Tensor deviceTensor = parameter->getStorage().value();
+    Impl::Tensor cpuTensor = deviceTensor.clone(cpuPlacement);
+    writeCpuTensor(cpuTensor, values);
+    deviceTensor.copyFromAsync(cpuTensor, stream);
+}
+
+uint32_t convOutputDim(uint32_t input, uint32_t stride, uint32_t filter, uint32_t padding) {
+    return 1 + (((input + 2 * padding) - filter) / stride);
+}
+
+ConvolutionKernelRequirement makeConvolutionKernelRequirement(uint64_t batchSize,
+                                                              uint32_t numInputChannels,
+                                                              uint64_t inputH,
+                                                              uint64_t inputW,
+                                                              uint32_t numOutputChannels,
+                                                              uint32_t filterH,
+                                                              uint32_t filterW,
+                                                              uint32_t strideH,
+                                                              uint32_t strideW,
+                                                              uint32_t padH,
+                                                              uint32_t padW) {
+    return ConvolutionKernelRequirement(MachineEvaluator::instance().getGpuType(0),
+                                        filterW,
+                                        filterH,
+                                        strideW,
+                                        strideH,
+                                        padW,
+                                        padH,
+                                        numInputChannels,
+                                        numOutputChannels,
+                                        batchSize,
+                                        inputW,
+                                        inputH);
+}
+
+Impl::Tensor makeCpuTensor(DataType dataType, const vector<uint64_t>& dims, const vector<float>& values) {
+    Impl::Tensor tensor(cpuPlacement, Impl::TensorDescriptor(dataType, dims));
+    writeCpuTensor(tensor, values);
+    return tensor;
+}
+
+vector<float> conv2dForwardReference(const vector<float>& inputValues,
+                                     const vector<float>& weightValues,
+                                     const vector<float>& biasValues,
+                                     uint64_t batchSize,
+                                     uint32_t numInputChannels,
+                                     uint64_t inputH,
+                                     uint64_t inputW,
+                                     uint32_t numOutputChannels,
+                                     uint32_t filterH,
+                                     uint32_t filterW,
+                                     uint32_t strideH,
+                                     uint32_t strideW,
+                                     uint32_t padH,
+                                     uint32_t padW,
+                                     bool hasBias) {
+    const auto requirement = makeConvolutionKernelRequirement(
+        batchSize, numInputChannels, inputH, inputW, numOutputChannels, filterH, filterW, strideH, strideW, padH, padW);
+
+    Impl::Tensor inputTensor = makeCpuTensor(DataType::FP16, {batchSize, numInputChannels, inputH, inputW}, inputValues);
+    Impl::Tensor weightsTensor = makeCpuTensor(DataType::FP16, {numOutputChannels, numInputChannels, filterH, filterW}, weightValues);
+    Impl::Tensor outputTensor(cpuPlacement,
+                              Impl::TensorDescriptor(DataType::FP16,
+                                                     {batchSize,
+                                                      numOutputChannels,
+                                                      static_cast<uint64_t>(requirement.getNumOutputRows()),
+                                                      static_cast<uint64_t>(requirement.getNumOutputColumns())}));
+
+    std::optional<Impl::Tensor> biasTensor = std::nullopt;
+    if (hasBias)
+        biasTensor = makeCpuTensor(DataType::FP16, {numOutputChannels}, biasValues);
+
+    Impl::ConvolutionTestHelper::cpuConvolutionForward(inputTensor, weightsTensor, biasTensor, outputTensor, requirement);
+    return readCpuTensor(outputTensor);
+}
+
+vector<float> conv2dErrorReference(const vector<float>& errorInputValues,
+                                   const vector<float>& weightValues,
+                                   uint64_t batchSize,
+                                   uint32_t numInputChannels,
+                                   uint64_t inputH,
+                                   uint64_t inputW,
+                                   uint32_t numOutputChannels,
+                                   uint32_t filterH,
+                                   uint32_t filterW,
+                                   uint32_t strideH,
+                                   uint32_t strideW,
+                                   uint32_t padH,
+                                   uint32_t padW) {
+    const auto requirement = makeConvolutionKernelRequirement(
+        batchSize, numInputChannels, inputH, inputW, numOutputChannels, filterH, filterW, strideH, strideW, padH, padW);
+
+    Impl::Tensor errorInputTensor = makeCpuTensor(DataType::FP16,
+                                                  {batchSize,
+                                                   numOutputChannels,
+                                                   static_cast<uint64_t>(requirement.getNumOutputRows()),
+                                                   static_cast<uint64_t>(requirement.getNumOutputColumns())},
+                                                  errorInputValues);
+    Impl::Tensor weightsTensor = makeCpuTensor(DataType::FP16, {numOutputChannels, numInputChannels, filterH, filterW}, weightValues);
+    Impl::Tensor errorOutputTensor(cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {batchSize, numInputChannels, inputH, inputW}));
+
+    Impl::ConvolutionTestHelper::cpuConvolutionBackwardData(errorInputTensor, weightsTensor, errorOutputTensor, requirement);
+    return readCpuTensor(errorOutputTensor);
+}
+
+vector<float> conv2dWeightGradReference(const vector<float>& inputValues,
+                                        const vector<float>& errorInputValues,
+                                        uint64_t batchSize,
+                                        uint32_t numInputChannels,
+                                        uint64_t inputH,
+                                        uint64_t inputW,
+                                        uint32_t numOutputChannels,
+                                        uint32_t filterH,
+                                        uint32_t filterW,
+                                        uint32_t strideH,
+                                        uint32_t strideW,
+                                        uint32_t padH,
+                                        uint32_t padW) {
+    const auto requirement = makeConvolutionKernelRequirement(
+        batchSize, numInputChannels, inputH, inputW, numOutputChannels, filterH, filterW, strideH, strideW, padH, padW);
+
+    Impl::Tensor inputTensor = makeCpuTensor(DataType::FP16, {batchSize, numInputChannels, inputH, inputW}, inputValues);
+    Impl::Tensor errorInputTensor = makeCpuTensor(DataType::FP16,
+                                                  {batchSize,
+                                                   numOutputChannels,
+                                                   static_cast<uint64_t>(requirement.getNumOutputRows()),
+                                                   static_cast<uint64_t>(requirement.getNumOutputColumns())},
+                                                  errorInputValues);
+    Impl::Tensor weightsGradTensor(cpuPlacement,
+                                   Impl::TensorDescriptor(DataType::FP32, {numOutputChannels, numInputChannels, filterH, filterW}));
+
+    Impl::ConvolutionTestHelper::cpuConvolutionBackwardFilter(inputTensor, errorInputTensor, weightsGradTensor, requirement, false);
+    return readCpuTensor(weightsGradTensor);
+}
+
+vector<float> conv2dBiasGradReference(
+    const vector<float>& errorInputValues, uint64_t batchSize, uint32_t numOutputChannels, uint64_t outputH, uint64_t outputW) {
+    Impl::Tensor errorInputTensor = makeCpuTensor(DataType::FP16, {batchSize, numOutputChannels, outputH, outputW}, errorInputValues);
+    Impl::Tensor biasGradTensor(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {numOutputChannels}));
+    Impl::ConvolutionTestHelper::cpuConvolutionBackwardBias(errorInputTensor, biasGradTensor, false);
+    return readCpuTensor(biasGradTensor);
+}
+
+vector<float> sgdUpdatedReference(const vector<float>& initial, const vector<float>& rawGradient, uint64_t batchSize, float lr) {
+    const float step = lr / (static_cast<float>(batchSize) * Impl::Loss::getLossScalingFactor());
+    vector<float> updated(initial.size());
+    for (uint64_t i = 0; i < initial.size(); ++i)
+        updated[i] = initial[i] - step * rawGradient[i];
+    return updated;
+}
+
+struct PlacedConvolution2dFixture {
+    shared_ptr<Api::PlacedNetwork> placedNetwork;
+    Impl::StampedNetwork* stampedNetwork = nullptr;
+    shared_ptr<Impl::NetworkInput> physicalInput;
+    shared_ptr<Impl::NetworkOutput> physicalOutput;
+    shared_ptr<Impl::CustomLayer> physicalConvolution;
+};
+
+PlacedConvolution2dFixture placeSingleConvolution2dNetwork(Api::Network& network,
+                                                           const Api::NetworkInput& apiInput,
+                                                           const Api::NetworkOutput& apiOutput,
+                                                           const Api::Convolution2d& apiConvolution,
+                                                           uint32_t batchSize,
+                                                           bool inferenceOnly) {
+    vector<Event> initDoneEvents;
+    PlacedConvolution2dFixture fixture;
+    fixture.placedNetwork = network.place(batchSize, initDoneEvents, inferenceOnly);
+    synchronizeEvents(initDoneEvents);
+    EXPECT_NE(fixture.placedNetwork, nullptr);
+    fixture.stampedNetwork = &fixture.placedNetwork->getStampedNetwork(0);
+
+    fixture.physicalInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiInput.getId()));
+    fixture.physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiOutput.getId()));
+    fixture.physicalConvolution =
+        dynamic_pointer_cast<Impl::CustomLayer>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiConvolution.getId()));
+
+    EXPECT_NE(fixture.physicalInput, nullptr);
+    EXPECT_NE(fixture.physicalOutput, nullptr);
+    EXPECT_NE(fixture.physicalConvolution, nullptr);
+    return fixture;
+}
+
+vector<float> runForward(Impl::NetworkInput& physicalInput,
+                         Impl::NetworkOutput& physicalOutput,
+                         Impl::Tensor& featureInHost,
+                         uint32_t batchSize) {
+    physicalInput.forward(featureInHost, false, batchSize);
+    Event featureOutReadyEvent = physicalOutput.getOutputReadyEvent();
+    featureOutReadyEvent.synchronize();
+    return readCpuTensor(physicalOutput.getFeatureOutput().value());
+}
+
+std::filesystem::path makeUniqueTestArchiveDir(const std::string& testName) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / (testName + "_" + std::to_string(now));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+template <typename LayerT>
+std::shared_ptr<LayerT> findOnlyLayerOfType(Api::Network& network) {
+    std::shared_ptr<LayerT> found;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < network.getNumLayers(); ++i) {
+        std::shared_ptr<LayerT> candidate = std::dynamic_pointer_cast<LayerT>(network.getLayer(i));
+        if (candidate != nullptr) {
+            found = candidate;
+            ++count;
+        }
+    }
+    EXPECT_EQ(count, 1u);
+    return found;
+}
+
+}  // namespace
+
+TEST(Convolution2dApi, DefaultsToSamePaddingSoftPlusActivationAndCanDisableActivation) {
+    Api::Network defaultNetwork("conv2dDefaults");
+    Api::NetworkInput defaultInput =
+        Api::NetworkInput::Builder().network(defaultNetwork).name("input").dimensions({3, 8, 10}).dataType(DataType::FP16).build();
+    Api::Convolution2d defaultConv = Api::Convolution2d::Builder()
+                                         .network(defaultNetwork)
+                                         .featureInput(defaultInput.getFeatureOutput().value())
+                                         .numOutputChannels(4)
+                                         .filterHeight(3)
+                                         .filterWidth(5)
+                                         .build();
+
+    ASSERT_TRUE(defaultConv.isInitialized());
+    EXPECT_EQ(defaultConv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{4, 8, 10}));
+    const json defaultJson = defaultConv.architectureJson();
+    ASSERT_TRUE(defaultJson.contains("activation"));
+    ASSERT_FALSE(defaultJson.at("activation").is_null());
+    EXPECT_EQ(defaultJson.at("activation").at("layer_type").get<string>(), "soft_plus");
+    EXPECT_EQ(defaultJson.at("vertical_padding").get<uint32_t>(), 1u);
+    EXPECT_EQ(defaultJson.at("horizontal_padding").get<uint32_t>(), 2u);
+
+    Api::Network explicitNetwork("conv2dExplicit");
+    Api::NetworkInput explicitInput =
+        Api::NetworkInput::Builder().network(explicitNetwork).name("input").dimensions({3, 7, 8}).dataType(DataType::FP16).build();
+    Api::Convolution2d explicitConv = Api::Convolution2d::Builder()
+                                          .network(explicitNetwork)
+                                          .featureInput(explicitInput.getFeatureOutput().value())
+                                          .numOutputChannels(5)
+                                          .filterHeight(3)
+                                          .filterWidth(2)
+                                          .verticalStride(2)
+                                          .horizontalStride(2)
+                                          .verticalPadding(1)
+                                          .horizontalPadding(0)
+                                          .hasBias(true)
+                                          .noActivation()
+                                          .build();
+
+    EXPECT_EQ(explicitConv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{5, 4, 4}));
+    const json explicitJson = explicitConv.architectureJson();
+    ASSERT_TRUE(explicitJson.contains("activation"));
+    EXPECT_TRUE(explicitJson.at("activation").is_null());
+    EXPECT_TRUE(explicitJson.at("has_bias").get<bool>());
+}
+
+TEST(Convolution2dApi, StampsAsPhysicalCustomLayerAllocatesParametersAndSerializesOptimizers) {
+    constexpr uint32_t batchSize = 2;
+    Api::Network network("conv2dStamp");
+
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({3, 6, 6}).dataType(DataType::FP16).build();
+    shared_ptr<Api::Sgd> weightsSgd = Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    shared_ptr<Api::Sgd> biasesSgd = Api::Sgd::Builder().initialLearningRate(0.02f).decay(0.0f).momentum(0.0f).build();
+    Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(2)
+                                  .filterHeight(3)
+                                  .filterWidth(3)
+                                  .verticalPadding(0)
+                                  .horizontalPadding(0)
+                                  .hasBias(true)
+                                  .weightsOptimizer(weightsSgd)
+                                  .biasesOptimizer(biasesSgd)
+                                  .noActivation()
+                                  .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(conv.getFeatureOutput().value())
+                                    .dataType(DataType::FP16)
+                                    .build();
+
+    const json j = conv.architectureJson();
+    ASSERT_TRUE(j.contains("parameters"));
+    ASSERT_TRUE(j.at("parameters").contains("weights"));
+    ASSERT_TRUE(j.at("parameters").contains("biases"));
+    ASSERT_TRUE(j.at("parameters").at("weights").contains("optimizer_override"));
+    ASSERT_TRUE(j.at("parameters").at("biases").contains("optimizer_override"));
+
+    PlacedConvolution2dFixture fixture = placeSingleConvolution2dNetwork(network, input, output, conv, batchSize, false);
+    ASSERT_EQ(fixture.stampedNetwork->getNumTrainableLayers(), 1u);
+    EXPECT_EQ(fixture.physicalConvolution->getLayerType(), "CustomLayer<Convolution2d>");
+    EXPECT_EQ(fixture.physicalConvolution->listParameters(), (vector<string>{"weights", "biases"}));
+
+    Impl::Tensor weights = fixture.physicalConvolution->getParameter("weights")->getStorage().value();
+    Impl::Tensor biases = fixture.physicalConvolution->getParameter("biases")->getStorage().value();
+    EXPECT_EQ(weights.getDimensions(), (vector<uint64_t>{2, 3, 3, 3}));
+    EXPECT_EQ(biases.getDimensions(), (vector<uint64_t>{2}));
+    EXPECT_EQ(weights.getDataType(), DataType::FP16);
+    EXPECT_EQ(biases.getDataType(), DataType::FP16);
+    EXPECT_TRUE(fixture.physicalConvolution->getParameter("weights")->hasOptimizer());
+    EXPECT_TRUE(fixture.physicalConvolution->getParameter("biases")->hasOptimizer());
+}
+
+TEST(Convolution2dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t C = 1;
+    constexpr uint32_t H = 3;
+    constexpr uint32_t W = 3;
+    constexpr uint32_t K = 1;
+    constexpr uint32_t R = 2;
+    constexpr uint32_t S = 2;
+    constexpr uint32_t strideH = 1;
+    constexpr uint32_t strideW = 1;
+    constexpr uint32_t padH = 0;
+    constexpr uint32_t padW = 0;
+    constexpr uint32_t OH = 2;
+    constexpr uint32_t OW = 2;
+    constexpr float learningRate = 0.1f;
+    const DataType dataType = DataType::FP16;
+
+    vector<float> currentWeights = {0.25f, -0.50f, 0.75f, 0.50f};
+    vector<float> currentBiases = {0.125f};
+
+    const vector<vector<float>> inputsByPass = {
+        {1.0f, 0.5f, -0.5f, 0.25f, -1.0f, 0.75f, 1.5f, -0.25f, 0.0f, -0.5f, 1.0f, 0.25f, -1.25f, 0.5f, 1.25f, 0.75f, -0.75f, 1.5f},
+        {0.5f, -1.5f, 1.0f, 1.25f, 0.0f, -0.25f, -1.0f, 0.75f, 0.5f, 1.5f, -0.5f, 0.25f, 0.0f, 1.0f, -1.25f, 0.5f, 0.25f, -0.75f},
+        {-1.0f, 0.25f, 1.25f, 0.75f, -0.5f, 0.5f, 1.0f, -1.5f, 0.0f, 0.25f, 1.5f, -0.75f, -0.5f, 0.75f, 1.0f, -1.25f, 0.5f, 0.0f},
+    };
+    const vector<vector<float>> errorsByPass = {
+        {0.5f, -1.0f, 1.5f, -0.25f, 0.75f, -1.25f, 1.0f, 0.25f},
+        {-1.5f, 0.5f, 0.25f, 1.25f, -0.75f, 1.0f, 0.5f, 1.5f},
+        {0.75f, 1.25f, -0.25f, -1.0f, 0.5f, 1.75f, 1.5f, -1.25f},
+    };
+
+    shared_ptr<Api::Sgd> weightsSgd = Api::Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+    shared_ptr<Api::Sgd> biasesSgd = Api::Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+
+    Api::Network network("conv2dThreePasses");
+    Api::NetworkInput input = Api::NetworkInput::Builder().network(network).name("input").dimensions({C, H, W}).dataType(dataType).build();
+    Api::GradientRivet inputRivet = Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                  .network(network)
+                                  .featureInput(inputRivet.getFeatureOutput().value())
+                                  .numOutputChannels(K)
+                                  .filterHeight(R)
+                                  .filterWidth(S)
+                                  .verticalStride(strideH)
+                                  .horizontalStride(strideW)
+                                  .verticalPadding(padH)
+                                  .horizontalPadding(padW)
+                                  .hasBias(true)
+                                  .weightsOptimizer(weightsSgd)
+                                  .biasesOptimizer(biasesSgd)
+                                  .noActivation()
+                                  .build();
+    Api::GradientRivet outputRivet = Api::GradientRivet::Builder().network(network).tensor(conv.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    PlacedConvolution2dFixture fixture = placeSingleConvolution2dNetwork(network, input, output, conv, batchSize, false);
+    ASSERT_TRUE(fixture.physicalConvolution->getGradientUpdateStream().has_value());
+    Stream stream = fixture.physicalConvolution->getStreams()[0];
+    Stream gradientStream = fixture.physicalConvolution->getGradientUpdateStream().value();
+
+    setParameterTensor(fixture.physicalConvolution->getParameter("weights"), currentWeights, stream);
+    setParameterTensor(fixture.physicalConvolution->getParameter("biases"), currentBiases, stream);
+    stream.synchronize();
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, C, H, W}));
+
+    for (uint32_t pass = 0; pass < inputsByPass.size(); ++pass) {
+        writeCpuTensor(featureInHost, inputsByPass[pass]);
+        const vector<float> actualForward = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+        const vector<float> expectedForward = conv2dForwardReference(
+            inputsByPass[pass], currentWeights, currentBiases, batchSize, C, H, W, K, R, S, strideH, strideW, padH, padW, true);
+        expectAllClose(actualForward, expectedForward, 7e-2f, 7e-2f, "pass " + to_string(pass) + " feature out");
+
+        ASSERT_GT(fixture.physicalConvolution->getErrorInputs().size(), 0u);
+        ASSERT_TRUE(fixture.physicalConvolution->getErrorInputs()[0].has_value());
+        ASSERT_GT(fixture.physicalConvolution->getErrorOutputs().size(), 0u);
+        ASSERT_TRUE(fixture.physicalConvolution->getErrorOutputs()[0].has_value());
+
+        Impl::Tensor errorInput = fixture.physicalConvolution->getErrorInputs()[0].value();
+        Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+        writeCpuTensor(errorInputHost, errorsByPass[pass]);
+        errorInput.copyFromAsync(errorInputHost, stream);
+        fixture.physicalConvolution->backward(errorInput, batchSize);
+
+        Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalConvolution->getErrorOutputs()[0].value(), stream);
+        Impl::Tensor weightsGradHost = copyTensorToCpu(
+            fixture.physicalConvolution->getParameter("weights")->getOptimizer()->getWeightsGradient().value(), gradientStream);
+        Impl::Tensor biasesGradHost = copyTensorToCpu(
+            fixture.physicalConvolution->getParameter("biases")->getOptimizer()->getWeightsGradient().value(), gradientStream);
+        Impl::Tensor weightsAfterHost =
+            copyTensorToCpu(fixture.physicalConvolution->getParameter("weights")->getStorage().value(), gradientStream);
+        Impl::Tensor biasesAfterHost =
+            copyTensorToCpu(fixture.physicalConvolution->getParameter("biases")->getStorage().value(), gradientStream);
+        stream.synchronize();
+        gradientStream.synchronize();
+
+        const vector<float> expectedErrorOut =
+            conv2dErrorReference(errorsByPass[pass], currentWeights, batchSize, C, H, W, K, R, S, strideH, strideW, padH, padW);
+        const vector<float> expectedWeightsGrad =
+            conv2dWeightGradReference(inputsByPass[pass], errorsByPass[pass], batchSize, C, H, W, K, R, S, strideH, strideW, padH, padW);
+        const vector<float> expectedBiasesGrad = conv2dBiasGradReference(errorsByPass[pass], batchSize, K, OH, OW);
+        currentWeights = sgdUpdatedReference(currentWeights, expectedWeightsGrad, batchSize, learningRate);
+        currentBiases = sgdUpdatedReference(currentBiases, expectedBiasesGrad, batchSize, learningRate);
+
+        expectAllClose(readCpuTensor(errorOutputHost), expectedErrorOut, 8e-2f, 8e-2f, "pass " + to_string(pass) + " error out");
+        expectAllClose(readCpuTensor(weightsGradHost), expectedWeightsGrad, 8e-2f, 8e-2f, "pass " + to_string(pass) + " weights grad");
+        expectAllClose(readCpuTensor(biasesGradHost), expectedBiasesGrad, 8e-2f, 8e-2f, "pass " + to_string(pass) + " biases grad");
+        expectAllClose(readCpuTensor(weightsAfterHost), currentWeights, 8e-2f, 8e-2f, "pass " + to_string(pass) + " weights after");
+        expectAllClose(readCpuTensor(biasesAfterHost), currentBiases, 8e-2f, 8e-2f, "pass " + to_string(pass) + " biases after");
+    }
+}
+
+TEST(Convolution2dApi, ArchitectureSaveLoadRoundTripPreservesConfigurationAndDeserializedLayerRunsForward) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t C = 1;
+    constexpr uint32_t H = 3;
+    constexpr uint32_t W = 3;
+    constexpr uint32_t K = 1;
+    constexpr uint32_t R = 2;
+    constexpr uint32_t S = 2;
+    const DataType dataType = DataType::FP16;
+
+    const vector<float> inputValues = {
+        1.0f, 0.5f, -0.5f, 0.25f, -1.0f, 0.75f, 1.5f, -0.25f, 0.0f, -0.5f, 1.0f, 0.25f, -1.25f, 0.5f, 1.25f, 0.75f, -0.75f, 1.5f};
+    const vector<float> weightValues = {0.25f, -0.50f, 0.75f, 0.50f};
+    const vector<float> biasValues = {0.125f};
+
+    const string networkName = "conv2d_arch_round_trip";
+    filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input =
+            Api::NetworkInput::Builder().network(network).name("input").dimensions({C, H, W}).dataType(dataType).build();
+        Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                      .network(network)
+                                      .featureInput(input.getFeatureOutput().value())
+                                      .numOutputChannels(K)
+                                      .filterHeight(R)
+                                      .filterWidth(S)
+                                      .verticalPadding(0)
+                                      .horizontalPadding(0)
+                                      .hasBias(true)
+                                      .noActivation()
+                                      .build();
+        Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("output")
+                                        .inputTensor(conv.getFeatureOutput().value())
+                                        .dataType(dataType)
+                                        .build();
+
+        network.save(archiveDir.string(), true);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+
+        shared_ptr<Api::NetworkInput> loadedInput = findOnlyLayerOfType<Api::NetworkInput>(loadedNetwork);
+        shared_ptr<Api::Convolution2d> loadedConv = findOnlyLayerOfType<Api::Convolution2d>(loadedNetwork);
+        shared_ptr<Api::NetworkOutput> loadedOutput = findOnlyLayerOfType<Api::NetworkOutput>(loadedNetwork);
+        ASSERT_NE(loadedInput, nullptr);
+        ASSERT_NE(loadedConv, nullptr);
+        ASSERT_NE(loadedOutput, nullptr);
+
+        const json j = loadedConv->architectureJson();
+        EXPECT_EQ(j.at("layer_type").get<string>(), "convolution_2d");
+        EXPECT_EQ(j.at("filter_height").get<uint32_t>(), R);
+        EXPECT_EQ(j.at("filter_width").get<uint32_t>(), S);
+        EXPECT_EQ(j.at("num_output_channels").get<uint32_t>(), K);
+        EXPECT_TRUE(j.at("has_bias").get<bool>());
+        EXPECT_TRUE(j.at("activation").is_null());
+
+        PlacedConvolution2dFixture fixture =
+            placeSingleConvolution2dNetwork(loadedNetwork, *loadedInput, *loadedOutput, *loadedConv, batchSize, true);
+        Stream stream = fixture.physicalConvolution->getStreams()[0];
+        setParameterTensor(fixture.physicalConvolution->getParameter("weights"), weightValues, stream);
+        setParameterTensor(fixture.physicalConvolution->getParameter("biases"), biasValues, stream);
+        stream.synchronize();
+
+        Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, C, H, W}));
+        writeCpuTensor(featureInHost, inputValues);
+
+        const vector<float> actual = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+        const vector<float> expected =
+            conv2dForwardReference(inputValues, weightValues, biasValues, batchSize, C, H, W, K, R, S, 1, 1, 0, 0, true);
+        expectAllClose(actual, expected, 7e-2f, 7e-2f, "loaded conv2d output");
+    } catch (...) {
+        filesystem::remove_all(archiveDir);
+        throw;
+    }
+    filesystem::remove_all(archiveDir);
+}
