@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2d.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
@@ -184,7 +185,7 @@ vector<float> conv2dForwardReference(const vector<float>& inputValues,
                                           static_cast<uint64_t>(requirement.getNumOutputRows()),
                                           static_cast<uint64_t>(requirement.getNumOutputColumns())}));
 
-    Optional<Tensor> biasTensor = Optional<Tensor>::empty();
+    std::optional<Tensor> biasTensor = std::nullopt;
     if (hasBias) {
         biasTensor = makeCpuTensor(DataType::FP16, {numOutputChannels}, biasValues);
     }
@@ -261,8 +262,8 @@ vector<float> conv2dBiasGradReference(
 
 void setParameterTensor(shared_ptr<PhysicalParameter> parameter, const vector<float>& values, Stream& stream) {
     ASSERT_NE(parameter, nullptr);
-    ASSERT_TRUE(parameter->getStorage().isPresent());
-    Tensor deviceTensor = parameter->getStorage();
+    ASSERT_TRUE(parameter->getStorage().has_value());
+    Tensor deviceTensor = parameter->getStorage().value();
     Tensor cpuTensor = deviceTensor.clone(cpuPlacement);
     writeCpuTensor(cpuTensor, values);
     deviceTensor.copyFromAsync(cpuTensor, stream);
@@ -549,7 +550,7 @@ TEST(Convolution2d, ParameterNamesAndShapesWithBias) {
 
     TensorDescriptor featureInDescriptor(dataType, {batchSize, numInputChannels, inputH, inputW});
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    Convolution2d conv(filterW, filterH, 1, 1, 0, 0, numOutputChannels, true, Optional<DataType>::empty(), gpuPlacement, false);
+    Convolution2d conv(filterW, filterH, 1, 1, 0, 0, numOutputChannels, true, std::nullopt, gpuPlacement, false);
     NetworkOutput no(cpuPlacement);
 
     attachAdam(conv, true);
@@ -558,11 +559,11 @@ TEST(Convolution2d, ParameterNamesAndShapesWithBias) {
     compileAndInitialize(ni, conv, no);
 
     ASSERT_EQ(conv.listParameters(), (vector<string>{"weights", "biases"}));
-    ASSERT_TRUE(conv.getParameter("weights")->getStorage().isPresent());
-    ASSERT_TRUE(conv.getParameter("biases")->getStorage().isPresent());
+    ASSERT_TRUE(conv.getParameter("weights")->getStorage().has_value());
+    ASSERT_TRUE(conv.getParameter("biases")->getStorage().has_value());
 
-    Tensor weights = conv.getParameter("weights")->getStorage();
-    Tensor biases = conv.getParameter("biases")->getStorage();
+    Tensor weights = conv.getParameter("weights")->getStorage().value();
+    Tensor biases = conv.getParameter("biases")->getStorage().value();
     EXPECT_EQ(weights.getDimensions(), (vector<uint64_t>{numOutputChannels, numInputChannels, filterH, filterW}));
     EXPECT_EQ(biases.getDimensions(), (vector<uint64_t>{numOutputChannels}));
     EXPECT_EQ(weights.getDataType(), dataType);
@@ -593,8 +594,7 @@ TEST(Convolution2d, DirectForwardConnectionNumericalWithBias) {
     writeCpuTensor(featureIn_h, inputValues);
 
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    Convolution2d conv(
-        filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, true, Optional<DataType>::empty(), gpuPlacement, false);
+    Convolution2d conv(filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, true, std::nullopt, gpuPlacement, false);
     NetworkOutput no(cpuPlacement);
 
     attachAdam(conv, true);
@@ -610,7 +610,7 @@ TEST(Convolution2d, DirectForwardConnectionNumericalWithBias) {
 
     Event featureOutReadyEvent = no.getOutputReadyEvent();
     featureOutReadyEvent.synchronize();
-    Tensor featureOut_h = no.getFeatureOutput();
+    Tensor featureOut_h = no.getFeatureOutput().value();
     const vector<float> actual = readCpuTensor(featureOut_h);
     const vector<float> expected = conv2dForwardReference(inputValues,
                                                           weightValues,
@@ -653,8 +653,7 @@ TEST(Convolution2d, DirectForwardConnectionNumericalWithoutBiasStrideAndPadding)
     writeCpuTensor(featureIn_h, inputValues);
 
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    Convolution2d conv(
-        filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, false, Optional<DataType>::empty(), gpuPlacement, false);
+    Convolution2d conv(filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, false, std::nullopt, gpuPlacement, false);
     NetworkOutput no(cpuPlacement);
 
     attachAdam(conv, false);
@@ -671,7 +670,7 @@ TEST(Convolution2d, DirectForwardConnectionNumericalWithoutBiasStrideAndPadding)
 
     Event featureOutReadyEvent = no.getOutputReadyEvent();
     featureOutReadyEvent.synchronize();
-    Tensor featureOut_h = no.getFeatureOutput();
+    Tensor featureOut_h = no.getFeatureOutput().value();
     const vector<float> actual = readCpuTensor(featureOut_h);
     const vector<float> expected = conv2dForwardReference(inputValues,
                                                           weightValues,
@@ -722,8 +721,7 @@ TEST(Convolution2d, DirectBackwardConnectionNumerical) {
 
         NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
         GradientRivet gr1, gr2;
-        Convolution2d conv(
-            filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, hasBias, Optional<DataType>::empty(), gpuPlacement, false);
+        Convolution2d conv(filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, hasBias, std::nullopt, gpuPlacement, false);
         NetworkOutput no(cpuPlacement);
 
         shared_ptr<Adam> adamWeights = make_shared<Adam>(3000, 0.001f, 0.9f, 0.999f, 1e-7f);
@@ -762,17 +760,17 @@ TEST(Convolution2d, DirectBackwardConnectionNumerical) {
 
         Event featureOutReadyEvent = no.getOutputReadyEvent();
         featureOutReadyEvent.synchronize();
-        Tensor featureOut_h = no.getFeatureOutput();
+        Tensor featureOut_h = no.getFeatureOutput().value();
         const vector<float> actualFeatureOut = readCpuTensor(featureOut_h);
 
         ASSERT_GT(conv.getErrorInputs().size(), 0);
-        ASSERT_TRUE(conv.getErrorInputs()[0].isPresent());
-        Tensor convErrorInput = conv.getErrorInputs()[0];
+        ASSERT_TRUE(conv.getErrorInputs()[0].has_value());
+        Tensor convErrorInput = conv.getErrorInputs()[0].value();
         ASSERT_GT(conv.getErrorOutputs().size(), 0);
-        ASSERT_TRUE(conv.getErrorOutputs()[0].isPresent());
-        Tensor convErrorOutput = conv.getErrorOutputs()[0];
-        ASSERT_TRUE(conv.getGradientUpdateStream().isPresent());
-        Stream gradientUpdateStream = conv.getGradientUpdateStream();
+        ASSERT_TRUE(conv.getErrorOutputs()[0].has_value());
+        Tensor convErrorOutput = conv.getErrorOutputs()[0].value();
+        ASSERT_TRUE(conv.getGradientUpdateStream().has_value());
+        Stream gradientUpdateStream = conv.getGradientUpdateStream().value();
 
         Tensor convErrorInput_h = convErrorInput.clone(cpuPlacement);
         writeCpuTensor(convErrorInput_h, errorInputValues);
@@ -782,21 +780,21 @@ TEST(Convolution2d, DirectBackwardConnectionNumerical) {
         Tensor convErrorOutput_h = convErrorOutput.clone(cpuPlacement);
         convErrorOutput_h.copyFromAsync(convErrorOutput, stream);
 
-        ASSERT_TRUE(adamWeights->getWeightsGradient().isPresent());
-        Tensor weightsGrad_h = copyTensorToCpu(adamWeights->getWeightsGradient().get(), gradientUpdateStream);
-        Tensor weightsAfter_h = copyTensorToCpu(conv.getParameter("weights")->getStorage(), gradientUpdateStream);
+        ASSERT_TRUE(adamWeights->getWeightsGradient().has_value());
+        Tensor weightsGrad_h = copyTensorToCpu(adamWeights->getWeightsGradient().value(), gradientUpdateStream);
+        Tensor weightsAfter_h = copyTensorToCpu(conv.getParameter("weights")->getStorage().value(), gradientUpdateStream);
         Tensor weightsM_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("m"), gradientUpdateStream);
         Tensor weightsV_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("v"), gradientUpdateStream);
 
-        Optional<Tensor> biasesGrad_h;
-        Optional<Tensor> biasesAfter_h;
-        Optional<Tensor> biasesM_h;
-        Optional<Tensor> biasesV_h;
+        std::optional<Tensor> biasesGrad_h;
+        std::optional<Tensor> biasesAfter_h;
+        std::optional<Tensor> biasesM_h;
+        std::optional<Tensor> biasesV_h;
         if (hasBias) {
             ASSERT_TRUE(adamBiases != nullptr);
-            ASSERT_TRUE(adamBiases->getWeightsGradient().isPresent());
-            biasesGrad_h = copyTensorToCpu(adamBiases->getWeightsGradient().get(), gradientUpdateStream);
-            biasesAfter_h = copyTensorToCpu(conv.getParameter("biases")->getStorage(), gradientUpdateStream);
+            ASSERT_TRUE(adamBiases->getWeightsGradient().has_value());
+            biasesGrad_h = copyTensorToCpu(adamBiases->getWeightsGradient().value(), gradientUpdateStream);
+            biasesAfter_h = copyTensorToCpu(conv.getParameter("biases")->getStorage().value(), gradientUpdateStream);
             biasesM_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("m"), gradientUpdateStream);
             biasesV_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("v"), gradientUpdateStream);
         }
@@ -841,10 +839,10 @@ TEST(Convolution2d, DirectBackwardConnectionNumerical) {
         expectAllClose(actualWeightsAfter, reference.weightsAfter, 1e-1f, 1e-1f, "weightsAfter");
 
         if (hasBias) {
-            const vector<float> actualBiasesGrad = readCpuTensor(biasesGrad_h.get());
-            const vector<float> actualBiasesAfter = readCpuTensor(biasesAfter_h.get());
-            const vector<float> actualBiasesM = readCpuTensor(biasesM_h.get());
-            const vector<float> actualBiasesV = readCpuTensor(biasesV_h.get());
+            const vector<float> actualBiasesGrad = readCpuTensor(biasesGrad_h.value());
+            const vector<float> actualBiasesAfter = readCpuTensor(biasesAfter_h.value());
+            const vector<float> actualBiasesM = readCpuTensor(biasesM_h.value());
+            const vector<float> actualBiasesV = readCpuTensor(biasesV_h.value());
 
             expectAllClose(actualBiasesGrad, reference.biasesGrad, 1e-1f, 1e-1f, "biasesGrad");
             expectAllClose(actualBiasesM, reference.biasesM, 1e-1f, 1e-1f, "biasesM");
@@ -915,8 +913,7 @@ TEST(Convolution2d, DirectBackwardConnectionNumericalThreePasses) {
 
         NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
         GradientRivet gr1, gr2;
-        Convolution2d conv(
-            filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, hasBias, Optional<DataType>::empty(), gpuPlacement, false);
+        Convolution2d conv(filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, hasBias, std::nullopt, gpuPlacement, false);
         NetworkOutput no(cpuPlacement);
 
         shared_ptr<Adam> adamWeights = make_shared<Adam>(3000, 0.001f, 0.9f, 0.999f, 1e-7f);
@@ -947,13 +944,13 @@ TEST(Convolution2d, DirectBackwardConnectionNumericalThreePasses) {
             setParameterTensor(conv.getParameter("biases"), initialBiasValues, stream);
 
         ASSERT_GT(conv.getErrorInputs().size(), 0);
-        ASSERT_TRUE(conv.getErrorInputs()[0].isPresent());
-        Tensor convErrorInput = conv.getErrorInputs()[0];
+        ASSERT_TRUE(conv.getErrorInputs()[0].has_value());
+        Tensor convErrorInput = conv.getErrorInputs()[0].value();
         ASSERT_GT(conv.getErrorOutputs().size(), 0);
-        ASSERT_TRUE(conv.getErrorOutputs()[0].isPresent());
-        Tensor convErrorOutput = conv.getErrorOutputs()[0];
-        ASSERT_TRUE(conv.getGradientUpdateStream().isPresent());
-        Stream gradientUpdateStream = conv.getGradientUpdateStream();
+        ASSERT_TRUE(conv.getErrorOutputs()[0].has_value());
+        Tensor convErrorOutput = conv.getErrorOutputs()[0].value();
+        ASSERT_TRUE(conv.getGradientUpdateStream().has_value());
+        Stream gradientUpdateStream = conv.getGradientUpdateStream().value();
         Tensor convErrorInput_h = convErrorInput.clone(cpuPlacement);
 
         for (uint64_t pass = 0; pass < numPasses; ++pass) {
@@ -964,7 +961,7 @@ TEST(Convolution2d, DirectBackwardConnectionNumericalThreePasses) {
 
             Event featureOutReadyEvent = no.getOutputReadyEvent();
             featureOutReadyEvent.synchronize();
-            Tensor featureOut_h = no.getFeatureOutput();
+            Tensor featureOut_h = no.getFeatureOutput().value();
             const vector<float> actualFeatureOut = readCpuTensor(featureOut_h);
 
             writeCpuTensor(convErrorInput_h, errorInputValuesByPass[pass]);
@@ -974,21 +971,21 @@ TEST(Convolution2d, DirectBackwardConnectionNumericalThreePasses) {
             Tensor convErrorOutput_h = convErrorOutput.clone(cpuPlacement);
             convErrorOutput_h.copyFromAsync(convErrorOutput, stream);
 
-            ASSERT_TRUE(adamWeights->getWeightsGradient().isPresent());
-            Tensor weightsGrad_h = copyTensorToCpu(adamWeights->getWeightsGradient().get(), gradientUpdateStream);
-            Tensor weightsAfter_h = copyTensorToCpu(conv.getParameter("weights")->getStorage(), gradientUpdateStream);
+            ASSERT_TRUE(adamWeights->getWeightsGradient().has_value());
+            Tensor weightsGrad_h = copyTensorToCpu(adamWeights->getWeightsGradient().value(), gradientUpdateStream);
+            Tensor weightsAfter_h = copyTensorToCpu(conv.getParameter("weights")->getStorage().value(), gradientUpdateStream);
             Tensor weightsM_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("m"), gradientUpdateStream);
             Tensor weightsV_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("v"), gradientUpdateStream);
 
-            Optional<Tensor> biasesGrad_h;
-            Optional<Tensor> biasesAfter_h;
-            Optional<Tensor> biasesM_h;
-            Optional<Tensor> biasesV_h;
+            std::optional<Tensor> biasesGrad_h;
+            std::optional<Tensor> biasesAfter_h;
+            std::optional<Tensor> biasesM_h;
+            std::optional<Tensor> biasesV_h;
             if (hasBias) {
                 ASSERT_TRUE(adamBiases != nullptr);
-                ASSERT_TRUE(adamBiases->getWeightsGradient().isPresent());
-                biasesGrad_h = copyTensorToCpu(adamBiases->getWeightsGradient().get(), gradientUpdateStream);
-                biasesAfter_h = copyTensorToCpu(conv.getParameter("biases")->getStorage(), gradientUpdateStream);
+                ASSERT_TRUE(adamBiases->getWeightsGradient().has_value());
+                biasesGrad_h = copyTensorToCpu(adamBiases->getWeightsGradient().value(), gradientUpdateStream);
+                biasesAfter_h = copyTensorToCpu(conv.getParameter("biases")->getStorage().value(), gradientUpdateStream);
                 biasesM_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("m"), gradientUpdateStream);
                 biasesV_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("v"), gradientUpdateStream);
             }
@@ -1011,10 +1008,10 @@ TEST(Convolution2d, DirectBackwardConnectionNumericalThreePasses) {
             expectAllClose(actualWeightsAfter, reference.weightsAfter, 1.25e-1f, 1.25e-1f, "weightsAfter");
 
             if (hasBias) {
-                const vector<float> actualBiasesGrad = readCpuTensor(biasesGrad_h.get());
-                const vector<float> actualBiasesAfter = readCpuTensor(biasesAfter_h.get());
-                const vector<float> actualBiasesM = readCpuTensor(biasesM_h.get());
-                const vector<float> actualBiasesV = readCpuTensor(biasesV_h.get());
+                const vector<float> actualBiasesGrad = readCpuTensor(biasesGrad_h.value());
+                const vector<float> actualBiasesAfter = readCpuTensor(biasesAfter_h.value());
+                const vector<float> actualBiasesM = readCpuTensor(biasesM_h.value());
+                const vector<float> actualBiasesV = readCpuTensor(biasesV_h.value());
 
                 expectAllClose(actualBiasesGrad, reference.biasesGrad, 1.25e-1f, 1.25e-1f, "biasesGrad");
                 expectAllClose(actualBiasesM, reference.biasesM, 1.25e-1f, 1.25e-1f, "biasesM");

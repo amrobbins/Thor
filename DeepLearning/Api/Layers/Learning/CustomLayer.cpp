@@ -8,6 +8,7 @@
 
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include <optional>
 
 using namespace std;
 using json = nlohmann::json;
@@ -22,7 +23,7 @@ using CompiledStageOutput = ThorImplementation::CompiledStageOutput;
 
 namespace {
 
-Optional<DataType> stageOutputDType(const CompiledExecutionStage& stage, size_t outputIdx) {
+std::optional<DataType> stageOutputDType(const CompiledExecutionStage& stage, size_t outputIdx) {
     switch (stage.kind) {
         case CompiledExecutionStage::Kind::FusedKernel:
             return stage.flat->output_dtypes.at(outputIdx);
@@ -49,7 +50,7 @@ Optional<DataType> stageOutputDType(const CompiledExecutionStage& stage, size_t 
             return stage.reduce_minmax_backward->output_dtype;
     }
 
-    return Optional<DataType>::empty();
+    return std::nullopt;
 }
 
 PhysicalTensor makeFakePlacedTensor(const Thor::Tensor& apiTensor) {
@@ -307,11 +308,11 @@ CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const
     for (const auto& apiParameter : parameters) {
         std::shared_ptr<ThorImplementation::PhysicalParameter> physicalParameter = apiParameter->stamp();
         physicalParameter->compileStorage(fakeStorageContext);
-        Optional<PhysicalTensor> storage = physicalParameter->getStorage();
-        if (!storage.isPresent()) {
+        std::optional<PhysicalTensor> storage = physicalParameter->getStorage();
+        if (!storage.has_value()) {
             throw std::runtime_error("CustomLayer failed to infer parameter storage for '" + apiParameter->getName() + "'.");
         }
-        fakeParameterTensors.emplace(apiParameter->getName(), storage.get());
+        fakeParameterTensors.emplace(apiParameter->getName(), storage.value());
     }
 
     PhysicalTensorMap fakeAllInputs = fakeFeatureInputs;
@@ -331,7 +332,7 @@ CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const
     std::unordered_map<uint32_t, DataType> outputDTypeByValueId;
     for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
         for (size_t outputIdx = 0; outputIdx < stage.outputs.size(); ++outputIdx) {
-            outputDTypeByValueId.emplace(stage.outputs[outputIdx].value_id, stageOutputDType(stage, outputIdx).get());
+            outputDTypeByValueId.emplace(stage.outputs[outputIdx].value_id, stageOutputDType(stage, outputIdx).value());
         }
     }
 

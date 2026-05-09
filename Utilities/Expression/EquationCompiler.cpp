@@ -220,7 +220,7 @@ static uint64_t scalarBits(double x) {
     return bits;
 }
 
-static int32_t optionalDTypeTag(const Optional<DataType>& dtype) { return dtype.isPresent() ? static_cast<int32_t>(dtype.get()) : -1; }
+static int32_t optionalDTypeTag(const std::optional<DataType>& dtype) { return dtype.has_value() ? static_cast<int32_t>(dtype.value()) : -1; }
 
 static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     StageNodeKey key;
@@ -632,11 +632,11 @@ static const char* fusedOpTag(ExprOp op) {
     }
 }
 
-static std::string optionalDTypeSignature(const Optional<DataType>& dtype) {
-    if (!dtype.isPresent()) {
+static std::string optionalDTypeSignature(const std::optional<DataType>& dtype) {
+    if (!dtype.has_value()) {
         return "none";
     }
-    return TensorDescriptor::getElementTypeName(dtype.get());
+    return TensorDescriptor::getElementTypeName(dtype.value());
 }
 
 static void appendNodeDTypeSignature(std::string& s, const ExprNode& node) {
@@ -861,14 +861,14 @@ static std::vector<DataType> collectCompiledInputDTypes(const PhysicalExpression
         if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR && node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
             continue;
         }
-        if (!node.input_tensor_dtype.isPresent()) {
+        if (!node.input_tensor_dtype.has_value()) {
             throw runtime_error("Fused stage input node is missing resolved input_tensor_dtype.");
         }
         if (node.input_slot >= input_dtypes.size()) {
             throw runtime_error("Input slot out of range while collecting compiled input dtypes.");
         }
 
-        const DataType dtype = node.input_tensor_dtype.get();
+        const DataType dtype = node.input_tensor_dtype.value();
         if (seen[node.input_slot]) {
             if (input_dtypes[node.input_slot] != dtype) {
                 throw runtime_error("Inconsistent fused stage input dtype for local input slot.");
@@ -897,10 +897,10 @@ static std::vector<DataType> collectCompiledOutputDTypes(const PhysicalExecution
             throw runtime_error("Stage output local_node_idx out of range while collecting output dtypes.");
         }
         const ExprNode& node = stage.expr.nodes[output.local_node_idx];
-        if (!node.output_dtype.isPresent()) {
+        if (!node.output_dtype.has_value()) {
             throw runtime_error("Fused stage output node is missing resolved output_dtype.");
         }
-        output_dtypes.push_back(node.output_dtype.get());
+        output_dtypes.push_back(node.output_dtype.value());
     }
 
     return output_dtypes;
@@ -913,40 +913,40 @@ static bool stageHasTransposedMaterializedOutput(const std::vector<CompiledStage
 }
 
 static DataType resolveHomogeneousFusedStageDType(const PhysicalExpression& expr) {
-    Optional<DataType> stage_output_dtype = Optional<DataType>::empty();
+    std::optional<DataType> stage_output_dtype = std::nullopt;
 
     for (const ExprNode& node : expr.nodes) {
         if (node.op == ExprOp::SCALAR_FP) {
             continue;
         }
 
-        if (!node.output_dtype.isPresent()) {
+        if (!node.output_dtype.has_value()) {
             throw runtime_error("Fused stage node is missing resolved output_dtype.");
         }
-        if (!node.compute_dtype.isPresent()) {
+        if (!node.compute_dtype.has_value()) {
             throw runtime_error("Fused stage node is missing resolved compute_dtype.");
         }
 
-        const DataType node_output_dtype = node.output_dtype.get();
+        const DataType node_output_dtype = node.output_dtype.value();
         const DataType expected_compute_dtype = defaultComputeDType(node_output_dtype);
 
-        if (!stage_output_dtype.isPresent()) {
+        if (!stage_output_dtype.has_value()) {
             stage_output_dtype = node_output_dtype;
-        } else if (stage_output_dtype.get() != node_output_dtype) {
+        } else if (stage_output_dtype.value() != node_output_dtype) {
             throw runtime_error("Current fused kernel codegen still requires a single resolved output_dtype per fused stage.");
         }
-        if (node.compute_dtype.get() != expected_compute_dtype) {
+        if (node.compute_dtype.value() != expected_compute_dtype) {
             throw runtime_error(
                 "Current fused kernel codegen still requires compute_dtype to follow the default policy for the "
                 "resolved stage dtype. Per-node compute dtypes are the next patch.");
         }
     }
 
-    if (!stage_output_dtype.isPresent()) {
+    if (!stage_output_dtype.has_value()) {
         return DataType::FP32;
     }
 
-    return stage_output_dtype.get();
+    return stage_output_dtype.value();
 }
 
 vector<char> EquationCompiler::linkToCubin(const vector<char>& ltoir, const EquationSignature& sig) {
@@ -1074,17 +1074,17 @@ shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalE
         throw std::runtime_error("Reduction stage input must be a local INPUT node.");
     }
 
-    if (!input_node.input_tensor_dtype.isPresent()) {
+    if (!input_node.input_tensor_dtype.has_value()) {
         throw std::runtime_error("Reduction input node missing resolved input_tensor_dtype.");
     }
-    if (!node.output_dtype.isPresent()) {
+    if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Reduction node missing resolved output_dtype.");
     }
 
-    const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.get());
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
 
     return make_shared<CompiledReduction>(
-        node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.get(), node.compute_dtype);
+        node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.value(), node.compute_dtype);
 }
 
 shared_ptr<CompiledArgMinMax> EquationCompiler::compileArgMinMax(const PhysicalExpression& expr) {
@@ -1114,17 +1114,17 @@ shared_ptr<CompiledArgMinMax> EquationCompiler::compileArgMinMax(const PhysicalE
         throw std::runtime_error("ArgMinMax stage input must be a local INPUT node.");
     }
 
-    if (!input_node.input_tensor_dtype.isPresent()) {
+    if (!input_node.input_tensor_dtype.has_value()) {
         throw std::runtime_error("ArgMinMax input node missing resolved input_tensor_dtype.");
     }
-    if (!node.output_dtype.isPresent()) {
+    if (!node.output_dtype.has_value()) {
         throw std::runtime_error("ArgMinMax node missing resolved output_dtype.");
     }
 
-    const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.get());
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
 
     return make_shared<CompiledArgMinMax>(
-        node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.get(), node.compute_dtype);
+        node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.value(), node.compute_dtype);
 }
 
 shared_ptr<CompiledSoftmax> EquationCompiler::compileSoftmax(const PhysicalExpression& expr) {
@@ -1150,15 +1150,15 @@ shared_ptr<CompiledSoftmax> EquationCompiler::compileSoftmax(const PhysicalExpre
         throw std::runtime_error("Softmax stage input must be a local INPUT node.");
     }
 
-    if (!input_node.input_tensor_dtype.isPresent()) {
+    if (!input_node.input_tensor_dtype.has_value()) {
         throw std::runtime_error("Softmax input node missing resolved input_tensor_dtype.");
     }
-    if (!node.output_dtype.isPresent()) {
+    if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Softmax node missing resolved output_dtype.");
     }
 
-    const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.get());
-    return make_shared<CompiledSoftmax>(node.softmax_algorithm, node.softmax_mode, supported_input_dtype, node.output_dtype.get());
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
+    return make_shared<CompiledSoftmax>(node.softmax_algorithm, node.softmax_mode, supported_input_dtype, node.output_dtype.value());
 }
 
 shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpression& expr) {
@@ -1184,7 +1184,7 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
         if (input_node.op != ExprOp::INPUT) {
             throw std::runtime_error(std::string("Matmul stage ") + label + " input must be a local INPUT node.");
         }
-        if (!input_node.input_tensor_dtype.isPresent()) {
+        if (!input_node.input_tensor_dtype.has_value()) {
             throw std::runtime_error(std::string("Matmul stage ") + label + " input missing resolved input_tensor_dtype.");
         }
         return input_node;
@@ -1223,23 +1223,23 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
         aux_input = &validate_local_input(node.aux, "aux");
     }
 
-    if (!node.output_dtype.isPresent()) {
+    if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Matmul/gemm node missing resolved output_dtype.");
     }
 
     std::vector<DataType> input_dtypes;
-    input_dtypes.push_back(lhs_input.input_tensor_dtype.get());
-    input_dtypes.push_back(rhs_input.input_tensor_dtype.get());
+    input_dtypes.push_back(lhs_input.input_tensor_dtype.value());
+    input_dtypes.push_back(rhs_input.input_tensor_dtype.value());
     if (aux_input != nullptr) {
-        input_dtypes.push_back(aux_input->input_tensor_dtype.get());
+        input_dtypes.push_back(aux_input->input_tensor_dtype.value());
     }
 
     const DataType logical_input_dtype = promoteTensorValueDTypes(input_dtypes);
     const DataType supported_input_dtype = toSupportedInputDType(node.op, logical_input_dtype);
-    const DataType supported_lhs_dtype = toSupportedInputDType(node.op, lhs_input.input_tensor_dtype.get());
-    const DataType supported_rhs_dtype = toSupportedInputDType(node.op, rhs_input.input_tensor_dtype.get());
+    const DataType supported_lhs_dtype = toSupportedInputDType(node.op, lhs_input.input_tensor_dtype.value());
+    const DataType supported_rhs_dtype = toSupportedInputDType(node.op, rhs_input.input_tensor_dtype.value());
     const DataType raw_supported_aux_dtype =
-        aux_input != nullptr ? toSupportedInputDType(node.op, aux_input->input_tensor_dtype.get()) : node.output_dtype.get();
+        aux_input != nullptr ? toSupportedInputDType(node.op, aux_input->input_tensor_dtype.value()) : node.output_dtype.value();
 
     auto is_fp8_dtype = [](DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2; };
     auto supports_fp8_matmul_plan = [&](DataType lhs_dtype, DataType rhs_dtype, DataType aux_dtype, DataType output_dtype) {
@@ -1277,16 +1277,16 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
 
     DataType compiled_lhs_dtype = supported_lhs_dtype;
     DataType compiled_rhs_dtype = supported_rhs_dtype;
-    DataType compiled_aux_dtype = node.output_dtype.get();
+    DataType compiled_aux_dtype = node.output_dtype.value();
 
-    if (supports_fp8_matmul_plan(supported_lhs_dtype, supported_rhs_dtype, raw_supported_aux_dtype, node.output_dtype.get())) {
+    if (supports_fp8_matmul_plan(supported_lhs_dtype, supported_rhs_dtype, raw_supported_aux_dtype, node.output_dtype.value())) {
         compiled_aux_dtype = raw_supported_aux_dtype;
-    } else if (!supports_regular_matmul_plan(supported_lhs_dtype, supported_rhs_dtype, node.output_dtype.get())) {
+    } else if (!supports_regular_matmul_plan(supported_lhs_dtype, supported_rhs_dtype, node.output_dtype.value())) {
         // Preserve the old safe behavior for combinations cublasLt does not directly expose as mixed A/B types:
         // cast both matrix inputs and the optional addend to the resolved output dtype so A/B/C/D form a regular plan.
-        compiled_lhs_dtype = node.output_dtype.get();
-        compiled_rhs_dtype = node.output_dtype.get();
-        compiled_aux_dtype = node.output_dtype.get();
+        compiled_lhs_dtype = node.output_dtype.value();
+        compiled_rhs_dtype = node.output_dtype.value();
+        compiled_aux_dtype = node.output_dtype.value();
     }
 
     double alpha_scale = node.alpha_fp;
@@ -1306,7 +1306,7 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
                                        compiled_lhs_dtype,
                                        compiled_rhs_dtype,
                                        compiled_aux_dtype,
-                                       node.output_dtype.get(),
+                                       node.output_dtype.value(),
                                        node.compute_dtype);
 }
 
@@ -1334,7 +1334,7 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
         if (input_node.op != ExprOp::INPUT) {
             throw std::runtime_error(std::string("Convolution stage ") + label + " input must be a local INPUT node.");
         }
-        if (!input_node.input_tensor_dtype.isPresent()) {
+        if (!input_node.input_tensor_dtype.has_value()) {
             throw std::runtime_error(std::string("Convolution stage ") + label + " input missing resolved input_tensor_dtype.");
         }
         return input_node;
@@ -1343,15 +1343,15 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
     const ExprNode& input_node = validate_local_input(node.lhs, "lhs");
     const ExprNode& filter_node = validate_local_input(node.rhs, "rhs");
 
-    if (!node.output_dtype.isPresent()) {
+    if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Convolution forward node missing resolved output_dtype.");
     }
 
     const DataType logical_input_dtype =
-        promoteTensorValueDTypes(std::vector<DataType>{input_node.input_tensor_dtype.get(), filter_node.input_tensor_dtype.get()});
+        promoteTensorValueDTypes(std::vector<DataType>{input_node.input_tensor_dtype.value(), filter_node.input_tensor_dtype.value()});
     const DataType supported_input_dtype = toSupportedInputDType(node.op, logical_input_dtype);
 
-    if (supported_input_dtype != DataType::FP16 || node.output_dtype.get() != DataType::FP16) {
+    if (supported_input_dtype != DataType::FP16 || node.output_dtype.value() != DataType::FP16) {
         throw std::runtime_error("Convolution staged path currently supports FP16 input/filter/output tensors only.");
     }
 
@@ -1363,7 +1363,7 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
                                             node.conv_pad_h,
                                             node.conv_pad_w,
                                             supported_input_dtype,
-                                            node.output_dtype.get(),
+                                            node.output_dtype.value(),
                                             node.compute_dtype);
 }
 
@@ -1391,7 +1391,7 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
         if (input_node.op != ExprOp::INPUT) {
             throw std::runtime_error(std::string("Convolution backward stage ") + label + " input must be a local INPUT node.");
         }
-        if (!input_node.input_tensor_dtype.isPresent()) {
+        if (!input_node.input_tensor_dtype.has_value()) {
             throw std::runtime_error(std::string("Convolution backward stage ") + label + " input missing resolved input_tensor_dtype.");
         }
         return input_node;
@@ -1400,15 +1400,15 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
     const ExprNode& input_node = validate_local_input(node.lhs, "lhs");
     const ExprNode& grad_node = validate_local_input(node.rhs, "rhs");
 
-    if (!node.output_dtype.isPresent()) {
+    if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Convolution backward node missing resolved output_dtype.");
     }
 
     const DataType logical_input_dtype =
-        promoteTensorValueDTypes(std::vector<DataType>{input_node.input_tensor_dtype.get(), grad_node.input_tensor_dtype.get()});
+        promoteTensorValueDTypes(std::vector<DataType>{input_node.input_tensor_dtype.value(), grad_node.input_tensor_dtype.value()});
     const DataType supported_input_dtype = toSupportedInputDType(node.op, logical_input_dtype);
 
-    if (supported_input_dtype != DataType::FP16 || node.output_dtype.get() != DataType::FP16) {
+    if (supported_input_dtype != DataType::FP16 || node.output_dtype.value() != DataType::FP16) {
         throw std::runtime_error("Convolution backward staged path currently supports FP16 input/grad/output tensors only.");
     }
 
@@ -1420,8 +1420,8 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
                                                     node.conv_pad_h,
                                                     node.conv_pad_w,
                                                     supported_input_dtype,
-                                                    grad_node.input_tensor_dtype.get(),
-                                                    node.output_dtype.get(),
+                                                    grad_node.input_tensor_dtype.value(),
+                                                    node.output_dtype.value(),
                                                     node.compute_dtype,
                                                     node.fill_dims);
 }
@@ -1453,25 +1453,25 @@ shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBa
         throw std::runtime_error("ReduceMinMaxBackward stage inputs must be local INPUT nodes.");
     }
 
-    if (!input_node.input_tensor_dtype.isPresent()) {
+    if (!input_node.input_tensor_dtype.has_value()) {
         throw std::runtime_error("ReduceMinMaxBackward input node missing resolved input_tensor_dtype.");
     }
-    if (!grad_node.input_tensor_dtype.isPresent()) {
+    if (!grad_node.input_tensor_dtype.has_value()) {
         throw std::runtime_error("ReduceMinMaxBackward grad input node missing resolved input_tensor_dtype.");
     }
-    if (!node.output_dtype.isPresent()) {
+    if (!node.output_dtype.has_value()) {
         throw std::runtime_error("ReduceMinMaxBackward node missing resolved output_dtype.");
     }
 
     const ExprOp reduce_op = node.op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX;
-    const DataType supported_input_dtype = toSupportedInputDType(reduce_op, input_node.input_tensor_dtype.get());
+    const DataType supported_input_dtype = toSupportedInputDType(reduce_op, input_node.input_tensor_dtype.value());
 
     return make_shared<CompiledReduceMinMaxBackward>(node.op,
                                                      node.reduction_axes,
                                                      node.squeeze_axes,
                                                      supported_input_dtype,
-                                                     grad_node.input_tensor_dtype.get(),
-                                                     node.output_dtype.get(),
+                                                     grad_node.input_tensor_dtype.value(),
+                                                     node.output_dtype.value(),
                                                      node.compute_dtype);
 }
 
@@ -1479,10 +1479,10 @@ static bool inputRequiresMaterialization(const ExprNode& node) {
     if (node.op != ExprOp::INPUT) {
         return false;
     }
-    if (!node.input_tensor_dtype.isPresent() || !node.output_dtype.isPresent()) {
+    if (!node.input_tensor_dtype.has_value() || !node.output_dtype.has_value()) {
         return false;
     }
-    return node.input_tensor_dtype.get() != node.output_dtype.get();
+    return node.input_tensor_dtype.value() != node.output_dtype.value();
 }
 
 static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_idx, std::unordered_set<uint32_t>& region_nodes) {
@@ -1731,7 +1731,7 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     ExprNode reduction = node;
     std::vector<uint32_t> input_value_ids;
     input_value_ids.reserve(1);
-    Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+    std::optional<DataType> actual_input_dtype = std::nullopt;
 
     uint32_t parent_idx = reduction.lhs;
     if (parent_idx >= expr.nodes.size()) {
@@ -1750,14 +1750,14 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
         throw std::runtime_error("Missing value id for reduction input.");
     }
 
-    if (!parent.output_dtype.isPresent()) {
+    if (!parent.output_dtype.has_value()) {
         throw std::runtime_error("Reduction parent node is missing resolved output_dtype.");
     }
-    if (!actual_input_dtype.isPresent()) {
+    if (!actual_input_dtype.has_value()) {
         throw std::runtime_error("Reduction parent node is missing resolved actual input dtype.");
     }
 
-    const DataType supported_input_dtype = toSupportedInputDType(node.op, actual_input_dtype.get());
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, actual_input_dtype.value());
 
     ExprNode input_node;
     input_node.op = ExprOp::INPUT;
@@ -1820,7 +1820,7 @@ static PhysicalExecutionStage buildSoftmaxStage(const PhysicalExpression& expr,
     ExprNode softmax = node;
     std::vector<uint32_t> input_value_ids;
     input_value_ids.reserve(1);
-    Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+    std::optional<DataType> actual_input_dtype = std::nullopt;
 
     const uint32_t parent_idx = softmax.lhs;
     const ExprNode& parent = expr.nodes[parent_idx];
@@ -1835,14 +1835,14 @@ static PhysicalExecutionStage buildSoftmaxStage(const PhysicalExpression& expr,
         throw std::runtime_error("Missing value id for softmax input.");
     }
 
-    if (!parent.output_dtype.isPresent()) {
+    if (!parent.output_dtype.has_value()) {
         throw std::runtime_error("Softmax parent node is missing resolved output_dtype.");
     }
-    if (!actual_input_dtype.isPresent()) {
+    if (!actual_input_dtype.has_value()) {
         throw std::runtime_error("Softmax parent node is missing resolved actual input dtype.");
     }
 
-    const DataType supported_input_dtype = toSupportedInputDType(node.op, actual_input_dtype.get());
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, actual_input_dtype.value());
 
     ExprNode input_node;
     input_node.op = ExprOp::INPUT;
@@ -1887,11 +1887,11 @@ static PhysicalExecutionStage buildInputTransposedMaterializationStage(const Phy
     const ExprNode& parent = expr.nodes[parent_idx];
 
     uint32_t input_value_id = UINT32_MAX;
-    Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
-    Optional<DataType> output_dtype = Optional<DataType>::empty();
-    Optional<DataType> compute_dtype = Optional<DataType>::empty();
-    Optional<DataType> backward_output_dtype = Optional<DataType>::empty();
-    Optional<DataType> backward_compute_dtype = Optional<DataType>::empty();
+    std::optional<DataType> actual_input_dtype = std::nullopt;
+    std::optional<DataType> output_dtype = std::nullopt;
+    std::optional<DataType> compute_dtype = std::nullopt;
+    std::optional<DataType> backward_output_dtype = std::nullopt;
+    std::optional<DataType> backward_compute_dtype = std::nullopt;
 
     auto out_it = node_output_value_id.find(parent_idx);
     if (out_it != node_output_value_id.end()) {
@@ -1912,7 +1912,7 @@ static PhysicalExecutionStage buildInputTransposedMaterializationStage(const Phy
         throw std::runtime_error("Missing materialized value id for transposed input materialization parent.");
     }
 
-    if (!actual_input_dtype.isPresent() || !output_dtype.isPresent()) {
+    if (!actual_input_dtype.has_value() || !output_dtype.has_value()) {
         throw std::runtime_error("Transposed input materialization parent is missing resolved dtype metadata.");
     }
 
@@ -1922,7 +1922,7 @@ static PhysicalExecutionStage buildInputTransposedMaterializationStage(const Phy
     ExprNode input_node;
     input_node.op = ExprOp::INPUT;
     input_node.input_slot = 0;
-    input_node.input_tensor_dtype = actual_input_dtype.get();
+    input_node.input_tensor_dtype = actual_input_dtype.value();
     input_node.output_dtype = output_dtype;
     input_node.compute_dtype = compute_dtype;
     input_node.backward_output_dtype = backward_output_dtype;
@@ -1971,7 +1971,7 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
         }
 
         const ExprNode& parent = expr.nodes[parent_idx];
-        Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+        std::optional<DataType> actual_input_dtype = std::nullopt;
 
         auto out_it = node_output_value_id.find(parent_idx);
         if (out_it != node_output_value_id.end()) {
@@ -1984,10 +1984,10 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
             throw std::runtime_error("Missing value id for matmul/gemm input.");
         }
 
-        if (!parent.output_dtype.isPresent()) {
+        if (!parent.output_dtype.has_value()) {
             throw std::runtime_error("Matmul/gemm parent node missing resolved output_dtype.");
         }
-        if (!actual_input_dtype.isPresent()) {
+        if (!actual_input_dtype.has_value()) {
             throw std::runtime_error("Matmul/gemm parent node missing resolved actual input dtype.");
         }
 
@@ -1996,7 +1996,7 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
         ExprNode input_node;
         input_node.op = ExprOp::INPUT;
         input_node.input_slot = local_slot;
-        input_node.input_tensor_dtype = actual_input_dtype.get();
+        input_node.input_tensor_dtype = actual_input_dtype.value();
         input_node.output_dtype = parent.output_dtype;
         input_node.compute_dtype = parent.compute_dtype;
         input_node.backward_output_dtype = parent.backward_output_dtype;
@@ -2034,7 +2034,7 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
             input_node.op = parent.op;
             input_node.input_slot = local_slot;
             input_node.input_tensor_dtype = DataType::FP32;
-            input_node.output_dtype = parent.output_dtype.isPresent() ? parent.output_dtype.get() : DataType::FP32;
+            input_node.output_dtype = parent.output_dtype.has_value() ? parent.output_dtype.value() : DataType::FP32;
             input_node.compute_dtype = parent.compute_dtype;
             input_node.backward_output_dtype = parent.backward_output_dtype;
             input_node.backward_compute_dtype = parent.backward_compute_dtype;
@@ -2124,7 +2124,7 @@ static PhysicalExecutionStage buildConvolutionStage(const PhysicalExpression& ex
         }
 
         const ExprNode& parent = expr.nodes[parent_idx];
-        Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+        std::optional<DataType> actual_input_dtype = std::nullopt;
 
         auto out_it = node_output_value_id.find(parent_idx);
         if (out_it != node_output_value_id.end()) {
@@ -2137,10 +2137,10 @@ static PhysicalExecutionStage buildConvolutionStage(const PhysicalExpression& ex
             throw std::runtime_error("Missing value id for convolution input.");
         }
 
-        if (!parent.output_dtype.isPresent()) {
+        if (!parent.output_dtype.has_value()) {
             throw std::runtime_error("Convolution parent node missing resolved output_dtype.");
         }
-        if (!actual_input_dtype.isPresent()) {
+        if (!actual_input_dtype.has_value()) {
             throw std::runtime_error("Convolution parent node missing resolved actual input dtype.");
         }
 
@@ -2149,7 +2149,7 @@ static PhysicalExecutionStage buildConvolutionStage(const PhysicalExpression& ex
         ExprNode input_node;
         input_node.op = ExprOp::INPUT;
         input_node.input_slot = local_slot;
-        input_node.input_tensor_dtype = actual_input_dtype.get();
+        input_node.input_tensor_dtype = actual_input_dtype.value();
         input_node.output_dtype = parent.output_dtype;
         input_node.compute_dtype = parent.compute_dtype;
         input_node.backward_output_dtype = parent.backward_output_dtype;
@@ -2207,7 +2207,7 @@ static PhysicalExecutionStage buildConvolutionBackwardStage(const PhysicalExpres
         }
 
         const ExprNode& parent = expr.nodes[parent_idx];
-        Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+        std::optional<DataType> actual_input_dtype = std::nullopt;
 
         auto out_it = node_output_value_id.find(parent_idx);
         if (out_it != node_output_value_id.end()) {
@@ -2220,17 +2220,17 @@ static PhysicalExecutionStage buildConvolutionBackwardStage(const PhysicalExpres
             throw std::runtime_error("Missing value id for ConvolutionBackward input.");
         }
 
-        if (!parent.output_dtype.isPresent()) {
+        if (!parent.output_dtype.has_value()) {
             throw std::runtime_error("ConvolutionBackward parent node missing resolved output_dtype.");
         }
-        if (!actual_input_dtype.isPresent()) {
+        if (!actual_input_dtype.has_value()) {
             throw std::runtime_error("ConvolutionBackward parent node missing resolved actual input dtype.");
         }
 
         ExprNode input_node;
         input_node.op = ExprOp::INPUT;
         input_node.input_slot = local_slot;
-        input_node.input_tensor_dtype = actual_input_dtype.get();
+        input_node.input_tensor_dtype = actual_input_dtype.value();
         input_node.output_dtype = parent.output_dtype;
         input_node.compute_dtype = parent.compute_dtype;
         input_node.backward_output_dtype = parent.backward_output_dtype;
@@ -2288,7 +2288,7 @@ static PhysicalExecutionStage buildReduceMinMaxBackwardStage(const PhysicalExpre
         }
 
         const ExprNode& parent = expr.nodes[parent_idx];
-        Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+        std::optional<DataType> actual_input_dtype = std::nullopt;
 
         auto out_it = node_output_value_id.find(parent_idx);
         if (out_it != node_output_value_id.end()) {
@@ -2301,17 +2301,17 @@ static PhysicalExecutionStage buildReduceMinMaxBackwardStage(const PhysicalExpre
             throw std::runtime_error("Missing value id for ReduceMinMaxBackward input.");
         }
 
-        if (!parent.output_dtype.isPresent()) {
+        if (!parent.output_dtype.has_value()) {
             throw std::runtime_error("ReduceMinMaxBackward parent node missing resolved output_dtype.");
         }
-        if (!actual_input_dtype.isPresent()) {
+        if (!actual_input_dtype.has_value()) {
             throw std::runtime_error("ReduceMinMaxBackward parent node missing resolved actual input dtype.");
         }
 
         ExprNode input_node;
         input_node.op = ExprOp::INPUT;
         input_node.input_slot = local_slot;
-        input_node.input_tensor_dtype = actual_input_dtype.get();
+        input_node.input_tensor_dtype = actual_input_dtype.value();
         input_node.output_dtype = parent.output_dtype;
         input_node.compute_dtype = parent.compute_dtype;
         input_node.backward_output_dtype = parent.backward_output_dtype;
@@ -2389,11 +2389,11 @@ static void forceReductionProducerOutputDTypeIfNeeded(PhysicalExpression& expr, 
     }
 
     ExprNode& producer = expr.nodes[producer_idx];
-    if (!producer.output_dtype.isPresent()) {
+    if (!producer.output_dtype.has_value()) {
         throw std::runtime_error("Reduction producer missing resolved output_dtype.");
     }
 
-    const DataType output_dtype = producer.output_dtype.get();
+    const DataType output_dtype = producer.output_dtype.value();
     if (output_dtype == DataType::FP16 || output_dtype == DataType::FP32) {
         return;
     }
@@ -2976,10 +2976,10 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
             throw std::runtime_error("Stage output local_node_idx out of range.");
         }
         const ExprNode& node = stage.expr.nodes[output.local_node_idx];
-        if (!node.output_dtype.isPresent()) {
+        if (!node.output_dtype.has_value()) {
             throw std::runtime_error("Specialized broadcast output node missing resolved output_dtype.");
         }
-        output_dtypes.push_back(node.output_dtype.get());
+        output_dtypes.push_back(node.output_dtype.value());
     }
 
     std::vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
@@ -3001,8 +3001,8 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
         compiled->tiled_transpose_pack_scalars = CudaSourceEmitter::tiledTransposePackScalars(stage);
         compiled->uses_uint32_tiled_transpose_index_math = CudaSourceEmitter::specializedBroadcastUsesUInt32IndexMath(groups);
     } else {
-        const Optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
-        compiled->elements_per_thread = vectorized_dtype.isPresent() ? 2u : 1u;
+        const std::optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
+        compiled->elements_per_thread = vectorized_dtype.has_value() ? 2u : 1u;
 
         if (groups.size() > 1) {
             compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;

@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
@@ -766,9 +767,9 @@ void performWrite(void *params) {
     }
 }
 
-void Tensor::loadFromFile(Stream stream, Optional<uint32_t> crc) {
+void Tensor::loadFromFile(Stream stream, std::optional<uint32_t> crc) {
     THOR_THROW_IF_FALSE(
-        crc.isEmpty());  // Need to solve for this. Not using GDS now so not solving it. ArchiveReader checks crc internally now.
+        !crc.has_value());  // Need to solve for this. Not using GDS now so not solving it. ArchiveReader checks crc internally now.
 
     THOR_THROW_IF_FALSE(!uninitialized());
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||

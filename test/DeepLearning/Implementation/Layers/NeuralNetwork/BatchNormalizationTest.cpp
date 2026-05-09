@@ -125,8 +125,8 @@ vector<float> randomFloatVector(mt19937& rng, uint64_t size, float low, float hi
 
 void setParameterTensor(shared_ptr<PhysicalParameter> parameter, const vector<float>& values, Stream& stream) {
     ASSERT_NE(parameter, nullptr);
-    ASSERT_TRUE(parameter->getStorage().isPresent());
-    Tensor deviceTensor = parameter->getStorage();
+    ASSERT_TRUE(parameter->getStorage().has_value());
+    Tensor deviceTensor = parameter->getStorage().value();
     Tensor cpuTensor = deviceTensor.clone(cpuPlacement);
     writeCpuTensor(cpuTensor, values);
     deviceTensor.copyFromAsync(cpuTensor, stream);
@@ -472,15 +472,15 @@ TEST(BatchNormalization, ParameterNamesAndShapes) {
     compileAndInitialize(ni, bn, no);
 
     ASSERT_EQ(bn.listParameters(), (vector<string>{"weights", "biases", "running_mean", "running_variance"}));
-    ASSERT_TRUE(bn.getParameter("weights")->getStorage().isPresent());
-    ASSERT_TRUE(bn.getParameter("biases")->getStorage().isPresent());
-    ASSERT_TRUE(bn.getParameter("running_mean")->getStorage().isPresent());
-    ASSERT_TRUE(bn.getParameter("running_variance")->getStorage().isPresent());
+    ASSERT_TRUE(bn.getParameter("weights")->getStorage().has_value());
+    ASSERT_TRUE(bn.getParameter("biases")->getStorage().has_value());
+    ASSERT_TRUE(bn.getParameter("running_mean")->getStorage().has_value());
+    ASSERT_TRUE(bn.getParameter("running_variance")->getStorage().has_value());
 
-    Tensor weights = bn.getParameter("weights")->getStorage();
-    Tensor biases = bn.getParameter("biases")->getStorage();
-    Tensor runningMean = bn.getParameter("running_mean")->getStorage();
-    Tensor runningVariance = bn.getParameter("running_variance")->getStorage();
+    Tensor weights = bn.getParameter("weights")->getStorage().value();
+    Tensor biases = bn.getParameter("biases")->getStorage().value();
+    Tensor runningMean = bn.getParameter("running_mean")->getStorage().value();
+    Tensor runningVariance = bn.getParameter("running_variance")->getStorage().value();
 
     EXPECT_EQ(weights.getDimensions(), (vector<uint64_t>{numChannels}));
     EXPECT_EQ(biases.getDimensions(), (vector<uint64_t>{numChannels}));
@@ -544,9 +544,10 @@ TEST(BatchNormalization, DirectForwardTrainingPerActivation2DNumerical) {
     Event featureOutReadyEvent = no.getOutputReadyEvent();
     featureOutReadyEvent.synchronize();
 
-    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput());
-    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
-    const vector<float> actualRunningVariance = readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput().value());
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
+    const vector<float> actualRunningVariance =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
 
     const double epsilon = bn.getEpsilon();
     const BatchNormForwardReference reference = batchNormForwardTrainingReference(inputValues,
@@ -612,10 +613,11 @@ TEST(BatchNormalization, DirectForwardTrainingSpatialTwoPassesRunningStats) {
     ni.forward(featureIn_h, false, batchSize);
     no.getOutputReadyEvent().synchronize();
 
-    const vector<float> actualFeatureOutPass1 = readCpuTensor(no.getFeatureOutput());
-    const vector<float> actualRunningMeanPass1 = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
+    const vector<float> actualFeatureOutPass1 = readCpuTensor(no.getFeatureOutput().value());
+    const vector<float> actualRunningMeanPass1 =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
     const vector<float> actualRunningVariancePass1 =
-        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
 
     const BatchNormForwardReference refPass1 = batchNormForwardTrainingReference(inputValuesPass1,
                                                                                  weightValues,
@@ -637,10 +639,11 @@ TEST(BatchNormalization, DirectForwardTrainingSpatialTwoPassesRunningStats) {
     ni.forward(featureIn_h, false, batchSize);
     no.getOutputReadyEvent().synchronize();
 
-    const vector<float> actualFeatureOutPass2 = readCpuTensor(no.getFeatureOutput());
-    const vector<float> actualRunningMeanPass2 = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
+    const vector<float> actualFeatureOutPass2 = readCpuTensor(no.getFeatureOutput().value());
+    const vector<float> actualRunningMeanPass2 =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
     const vector<float> actualRunningVariancePass2 =
-        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
 
     const BatchNormForwardReference refPass2 = batchNormForwardTrainingReference(inputValuesPass2,
                                                                                  weightValues,
@@ -699,9 +702,10 @@ TEST(BatchNormalization, DirectForwardInferenceSpatialNumerical) {
     ni.forward(featureIn_h, true, batchSize);
     no.getOutputReadyEvent().synchronize();
 
-    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput());
-    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
-    const vector<float> actualRunningVariance = readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput().value());
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
+    const vector<float> actualRunningVariance =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
 
     const vector<float> expectedFeatureOut = batchNormForwardInferenceReference(
         inputValues, weightValues, biasValues, runningMean, runningVariance, batchSize, numChannels, height, width, bn.getEpsilon());
@@ -765,19 +769,20 @@ TEST(BatchNormalization, DirectBackwardSpatialNumerical) {
     ni.forward(featureIn_h, false, batchSize);
     no.getOutputReadyEvent().synchronize();
 
-    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput());
-    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
-    const vector<float> actualRunningVariance = readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput().value());
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
+    const vector<float> actualRunningVariance =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
 
     ASSERT_GT(bn.getErrorInputs().size(), 0);
-    ASSERT_TRUE(bn.getErrorInputs()[0].isPresent());
+    ASSERT_TRUE(bn.getErrorInputs()[0].has_value());
     ASSERT_GT(bn.getErrorOutputs().size(), 0);
-    ASSERT_TRUE(bn.getErrorOutputs()[0].isPresent());
-    ASSERT_TRUE(bn.getGradientUpdateStream().isPresent());
+    ASSERT_TRUE(bn.getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(bn.getGradientUpdateStream().has_value());
 
-    Tensor bnErrorInput = bn.getErrorInputs()[0];
-    Tensor bnErrorOutput = bn.getErrorOutputs()[0];
-    Stream gradientUpdateStream = bn.getGradientUpdateStream();
+    Tensor bnErrorInput = bn.getErrorInputs()[0].value();
+    Tensor bnErrorOutput = bn.getErrorOutputs()[0].value();
+    Stream gradientUpdateStream = bn.getGradientUpdateStream().value();
 
     Tensor bnErrorInput_h = bnErrorInput.clone(cpuPlacement);
     writeCpuTensor(bnErrorInput_h, errorInputValues);
@@ -785,12 +790,12 @@ TEST(BatchNormalization, DirectBackwardSpatialNumerical) {
     bn.backward(bnErrorInput, batchSize);
 
     Tensor bnErrorOutput_h = copyTensorToCpu(bnErrorOutput, gradientUpdateStream);
-    ASSERT_TRUE(adamWeights->getWeightsGradient().isPresent());
-    ASSERT_TRUE(adamBiases->getWeightsGradient().isPresent());
-    Tensor weightsGrad_h = copyTensorToCpu(adamWeights->getWeightsGradient().get(), gradientUpdateStream);
-    Tensor biasesGrad_h = copyTensorToCpu(adamBiases->getWeightsGradient().get(), gradientUpdateStream);
-    Tensor weightsAfter_h = copyTensorToCpu(bn.getParameter("weights")->getStorage(), gradientUpdateStream);
-    Tensor biasesAfter_h = copyTensorToCpu(bn.getParameter("biases")->getStorage(), gradientUpdateStream);
+    ASSERT_TRUE(adamWeights->getWeightsGradient().has_value());
+    ASSERT_TRUE(adamBiases->getWeightsGradient().has_value());
+    Tensor weightsGrad_h = copyTensorToCpu(adamWeights->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor biasesGrad_h = copyTensorToCpu(adamBiases->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor weightsAfter_h = copyTensorToCpu(bn.getParameter("weights")->getStorage().value(), gradientUpdateStream);
+    Tensor biasesAfter_h = copyTensorToCpu(bn.getParameter("biases")->getStorage().value(), gradientUpdateStream);
     Tensor weightsM_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("m"), gradientUpdateStream);
     Tensor weightsV_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("v"), gradientUpdateStream);
     Tensor biasesM_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("m"), gradientUpdateStream);
@@ -888,9 +893,10 @@ TEST(BatchNormalization, DirectForwardTrainingSpatialRunningAverageWarmupAndClam
         ni.forward(featureIn_h, false, batchSize);
         no.getOutputReadyEvent().synchronize();
 
-        const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
+        const vector<float> actualRunningMean =
+            readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
         const vector<float> actualRunningVariance =
-            readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+            readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
 
         const BatchNormForwardReference ref = batchNormForwardTrainingReference(inputValues,
                                                                                 weightValues,
@@ -923,9 +929,10 @@ TEST(BatchNormalization, DirectForwardTrainingSpatialRunningAverageWarmupAndClam
     ni.forward(featureIn_h, false, batchSize);
     no.getOutputReadyEvent().synchronize();
 
-    const vector<float> actualRunningMeanPass5 = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
+    const vector<float> actualRunningMeanPass5 =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
     const vector<float> actualRunningVariancePass5 =
-        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
 
     const BatchNormForwardReference refPass5 = batchNormForwardTrainingReference(inputValuesPass5,
                                                                                  weightValues,
@@ -1086,19 +1093,20 @@ TEST(BatchNormalization, DirectBackwardSpatialNumericalWithSgd) {
     ni.forward(featureIn_h, false, batchSize);
     no.getOutputReadyEvent().synchronize();
 
-    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput());
-    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
-    const vector<float> actualRunningVariance = readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput().value());
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
+    const vector<float> actualRunningVariance =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
 
     ASSERT_GT(bn.getErrorInputs().size(), 0);
-    ASSERT_TRUE(bn.getErrorInputs()[0].isPresent());
+    ASSERT_TRUE(bn.getErrorInputs()[0].has_value());
     ASSERT_GT(bn.getErrorOutputs().size(), 0);
-    ASSERT_TRUE(bn.getErrorOutputs()[0].isPresent());
-    ASSERT_TRUE(bn.getGradientUpdateStream().isPresent());
+    ASSERT_TRUE(bn.getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(bn.getGradientUpdateStream().has_value());
 
-    Tensor bnErrorInput = bn.getErrorInputs()[0];
-    Tensor bnErrorOutput = bn.getErrorOutputs()[0];
-    Stream gradientUpdateStream = bn.getGradientUpdateStream();
+    Tensor bnErrorInput = bn.getErrorInputs()[0].value();
+    Tensor bnErrorOutput = bn.getErrorOutputs()[0].value();
+    Stream gradientUpdateStream = bn.getGradientUpdateStream().value();
 
     Tensor bnErrorInput_h = bnErrorInput.clone(cpuPlacement);
     writeCpuTensor(bnErrorInput_h, errorInputValues);
@@ -1106,12 +1114,12 @@ TEST(BatchNormalization, DirectBackwardSpatialNumericalWithSgd) {
     bn.backward(bnErrorInput, batchSize);
 
     Tensor bnErrorOutput_h = copyTensorToCpu(bnErrorOutput, gradientUpdateStream);
-    ASSERT_TRUE(sgdWeights->getWeightsGradient().isPresent());
-    ASSERT_TRUE(sgdBiases->getWeightsGradient().isPresent());
-    Tensor weightsGrad_h = copyTensorToCpu(sgdWeights->getWeightsGradient().get(), gradientUpdateStream);
-    Tensor biasesGrad_h = copyTensorToCpu(sgdBiases->getWeightsGradient().get(), gradientUpdateStream);
-    Tensor weightsAfter_h = copyTensorToCpu(bn.getParameter("weights")->getStorage(), gradientUpdateStream);
-    Tensor biasesAfter_h = copyTensorToCpu(bn.getParameter("biases")->getStorage(), gradientUpdateStream);
+    ASSERT_TRUE(sgdWeights->getWeightsGradient().has_value());
+    ASSERT_TRUE(sgdBiases->getWeightsGradient().has_value());
+    Tensor weightsGrad_h = copyTensorToCpu(sgdWeights->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor biasesGrad_h = copyTensorToCpu(sgdBiases->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor weightsAfter_h = copyTensorToCpu(bn.getParameter("weights")->getStorage().value(), gradientUpdateStream);
+    Tensor biasesAfter_h = copyTensorToCpu(bn.getParameter("biases")->getStorage().value(), gradientUpdateStream);
 
     const vector<float> actualErrorOut = readCpuTensor(bnErrorOutput_h);
     const vector<float> actualWeightsGrad = readCpuTensor(weightsGrad_h);
@@ -1163,15 +1171,15 @@ void runBatchNormalizationParametersStayFp32ForInputType(DataType dataType) {
 
     ASSERT_EQ(bn.listParameters(), (vector<string>{"weights", "biases", "running_mean", "running_variance"}));
 
-    ASSERT_TRUE(bn.getParameter("weights")->getStorage().isPresent());
-    ASSERT_TRUE(bn.getParameter("biases")->getStorage().isPresent());
-    ASSERT_TRUE(bn.getParameter("running_mean")->getStorage().isPresent());
-    ASSERT_TRUE(bn.getParameter("running_variance")->getStorage().isPresent());
+    ASSERT_TRUE(bn.getParameter("weights")->getStorage().has_value());
+    ASSERT_TRUE(bn.getParameter("biases")->getStorage().has_value());
+    ASSERT_TRUE(bn.getParameter("running_mean")->getStorage().has_value());
+    ASSERT_TRUE(bn.getParameter("running_variance")->getStorage().has_value());
 
-    Tensor weights = bn.getParameter("weights")->getStorage();
-    Tensor biases = bn.getParameter("biases")->getStorage();
-    Tensor runningMean = bn.getParameter("running_mean")->getStorage();
-    Tensor runningVariance = bn.getParameter("running_variance")->getStorage();
+    Tensor weights = bn.getParameter("weights")->getStorage().value();
+    Tensor biases = bn.getParameter("biases")->getStorage().value();
+    Tensor runningMean = bn.getParameter("running_mean")->getStorage().value();
+    Tensor runningVariance = bn.getParameter("running_variance")->getStorage().value();
 
     EXPECT_EQ(weights.getDimensions(), (vector<uint64_t>{numChannels}));
     EXPECT_EQ(biases.getDimensions(), (vector<uint64_t>{numChannels}));
@@ -1229,9 +1237,10 @@ void runBatchNormalizationDirectForwardTrainingSpatialNumericalForInputType(Data
     ni.forward(featureIn_h, false, batchSize);
     no.getOutputReadyEvent().synchronize();
 
-    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput());
-    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
-    const vector<float> actualRunningVariance = readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput().value());
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
+    const vector<float> actualRunningVariance =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
 
     const BatchNormForwardReference reference = batchNormForwardTrainingReference(referenceInputValues,
                                                                                   weightValues,
@@ -1302,9 +1311,10 @@ void runBatchNormalizationDirectForwardInferenceSpatialNumericalForInputType(Dat
     ni.forward(featureIn_h, true, batchSize);
     no.getOutputReadyEvent().synchronize();
 
-    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput());
-    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
-    const vector<float> actualRunningVariance = readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput().value());
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
+    const vector<float> actualRunningVariance =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
 
     const vector<float> expectedFeatureOut = batchNormForwardInferenceReference(referenceInputValues,
                                                                                 weightValues,
@@ -1388,19 +1398,20 @@ void runBatchNormalizationDirectBackwardSpatialNumericalWithSgdForInputType(Data
     ni.forward(featureIn_h, false, batchSize);
     no.getOutputReadyEvent().synchronize();
 
-    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput());
-    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage(), stream));
-    const vector<float> actualRunningVariance = readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage(), stream));
+    const vector<float> actualFeatureOut = readCpuTensor(no.getFeatureOutput().value());
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
+    const vector<float> actualRunningVariance =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
 
     ASSERT_GT(bn.getErrorInputs().size(), 0);
-    ASSERT_TRUE(bn.getErrorInputs()[0].isPresent());
+    ASSERT_TRUE(bn.getErrorInputs()[0].has_value());
     ASSERT_GT(bn.getErrorOutputs().size(), 0);
-    ASSERT_TRUE(bn.getErrorOutputs()[0].isPresent());
-    ASSERT_TRUE(bn.getGradientUpdateStream().isPresent());
+    ASSERT_TRUE(bn.getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(bn.getGradientUpdateStream().has_value());
 
-    Tensor bnErrorInput = bn.getErrorInputs()[0];
-    Tensor bnErrorOutput = bn.getErrorOutputs()[0];
-    Stream gradientUpdateStream = bn.getGradientUpdateStream();
+    Tensor bnErrorInput = bn.getErrorInputs()[0].value();
+    Tensor bnErrorOutput = bn.getErrorOutputs()[0].value();
+    Stream gradientUpdateStream = bn.getGradientUpdateStream().value();
 
     Tensor bnErrorInput_h = bnErrorInput.clone(cpuPlacement);
     writeCpuTensor(bnErrorInput_h, errorInputValues);
@@ -1412,13 +1423,13 @@ void runBatchNormalizationDirectBackwardSpatialNumericalWithSgdForInputType(Data
 
     Tensor bnErrorOutput_h = copyTensorToCpu(bnErrorOutput, gradientUpdateStream);
 
-    ASSERT_TRUE(sgdWeights->getWeightsGradient().isPresent());
-    ASSERT_TRUE(sgdBiases->getWeightsGradient().isPresent());
+    ASSERT_TRUE(sgdWeights->getWeightsGradient().has_value());
+    ASSERT_TRUE(sgdBiases->getWeightsGradient().has_value());
 
-    Tensor weightsGrad_h = copyTensorToCpu(sgdWeights->getWeightsGradient().get(), gradientUpdateStream);
-    Tensor biasesGrad_h = copyTensorToCpu(sgdBiases->getWeightsGradient().get(), gradientUpdateStream);
-    Tensor weightsAfter_h = copyTensorToCpu(bn.getParameter("weights")->getStorage(), gradientUpdateStream);
-    Tensor biasesAfter_h = copyTensorToCpu(bn.getParameter("biases")->getStorage(), gradientUpdateStream);
+    Tensor weightsGrad_h = copyTensorToCpu(sgdWeights->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor biasesGrad_h = copyTensorToCpu(sgdBiases->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor weightsAfter_h = copyTensorToCpu(bn.getParameter("weights")->getStorage().value(), gradientUpdateStream);
+    Tensor biasesAfter_h = copyTensorToCpu(bn.getParameter("biases")->getStorage().value(), gradientUpdateStream);
 
     const vector<float> actualErrorOut = readCpuTensor(bnErrorOutput_h);
     const vector<float> actualWeightsGrad = readCpuTensor(weightsGrad_h);

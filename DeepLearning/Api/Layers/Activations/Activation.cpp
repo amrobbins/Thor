@@ -15,6 +15,7 @@
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
 
 #include <stdexcept>
+#include <optional>
 
 using namespace std;
 using json = nlohmann::json;
@@ -38,11 +39,11 @@ json Activation::architectureJson() const {
 
     // Template activations embedded in expression-backed layers intentionally do not own API graph tensors.
     // Standalone activation layers still record their graph input/output tensors.
-    if (featureInput.isPresent()) {
-        j["feature_input"] = featureInput.get().architectureJson();
+    if (featureInput.has_value()) {
+        j["feature_input"] = featureInput.value().architectureJson();
     }
-    if (featureOutput.isPresent()) {
-        j["feature_output"] = featureOutput.get().architectureJson();
+    if (featureOutput.has_value()) {
+        j["feature_output"] = featureOutput.value().architectureJson();
     }
 
     return j;
@@ -123,11 +124,11 @@ Tensor Activation::addToNetwork(Tensor inputTensor, Network* network) {
     //  So when a layer calls this version of addToNetwork, what happens if someone used an activation
     //  as both a standalone layer and also as a template for other layers? ... I want it to just work anyway.
 
-    Optional<Tensor> maybeExistingFeatureInput = featureInput;
-    Optional<Tensor> maybeExistingFeatureOutput = featureOutput;
+    std::optional<Tensor> maybeExistingFeatureInput = featureInput;
+    std::optional<Tensor> maybeExistingFeatureOutput = featureOutput;
 
     featureInput = inputTensor;
-    Tensor activationOutput = featureInput.get().clone();
+    Tensor activationOutput = featureInput.value().clone();
     featureOutput = activationOutput;
     Layer::addToNetwork(network);
 

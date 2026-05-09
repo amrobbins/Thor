@@ -187,7 +187,7 @@ struct BuiltMatmul {
 };
 
 struct BuiltConvolution {
-    Optional<ConvolutionKernelRequirement> requirement = Optional<ConvolutionKernelRequirement>::empty();
+    std::optional<ConvolutionKernelRequirement> requirement = std::nullopt;
     bool use_cudnn_nd = false;
     cudnnTensorDescriptor_t x_desc = nullptr;
     cudnnFilterDescriptor_t w_desc = nullptr;
@@ -273,7 +273,7 @@ class StampedEquation {
     static std::shared_ptr<BuiltMatmul> buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
                                                     const Tensor& lhs,
                                                     const Tensor& rhs,
-                                                    const Optional<Tensor>& addend,
+                                                    const std::optional<Tensor>& addend,
                                                     const Tensor& output,
                                                     int device_num);
 
@@ -311,13 +311,13 @@ class StampedReduction {
     Tensor getOutputTensor() const { return output; }
 
     StampedReduction(
-        std::shared_ptr<BuiltReduction> built, const Tensor& input, const Tensor& output, const Stream& stream, Optional<Tensor> workspace);
+        std::shared_ptr<BuiltReduction> built, const Tensor& input, const Tensor& output, const Stream& stream, std::optional<Tensor> workspace);
 
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
     const Tensor input;
     Tensor output;
-    const Optional<Tensor> workspace;
+    const std::optional<Tensor> workspace;
     Stream stream;
 
     const float alpha_1 = 1.0f;
@@ -340,14 +340,14 @@ class StampedArgMinMax {
                      const Tensor& output,
                      const Tensor& reduction_value_output,
                      const Stream& stream,
-                     Optional<Tensor> workspace);
+                     std::optional<Tensor> workspace);
 
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
     const Tensor input;
     Tensor output;
     const Tensor reduction_value_output;
-    const Optional<Tensor> workspace;
+    const std::optional<Tensor> workspace;
     Stream stream;
 
     const float alpha_1 = 1.0f;
@@ -398,18 +398,18 @@ class StampedMatmul {
                   std::shared_ptr<BuiltMatmul> built,
                   const Tensor& lhs,
                   const Tensor& rhs,
-                  const Optional<Tensor>& addend,
+                  const std::optional<Tensor>& addend,
                   const Tensor& output,
                   const Stream& stream,
-                  Optional<Tensor> workspace,
-                  Optional<RuntimeInputValue> alpha_input,
-                  Optional<RuntimeInputValue> beta_input,
+                  std::optional<Tensor> workspace,
+                  std::optional<RuntimeInputValue> alpha_input,
+                  std::optional<RuntimeInputValue> beta_input,
                   std::optional<std::string> alpha_runtime_name,
                   std::optional<std::string> beta_runtime_name,
-                  Optional<Tensor> alpha_device_scratch,
-                  Optional<Tensor> beta_device_scratch,
-                  Optional<Tensor> alpha_host_scratch,
-                  Optional<Tensor> beta_host_scratch);
+                  std::optional<Tensor> alpha_device_scratch,
+                  std::optional<Tensor> beta_device_scratch,
+                  std::optional<Tensor> alpha_host_scratch,
+                  std::optional<Tensor> beta_host_scratch);
 
     [[nodiscard]] std::optional<std::string> alphaRuntimeName() const { return alpha_runtime_name; }
     [[nodiscard]] std::optional<std::string> betaRuntimeName() const { return beta_runtime_name; }
@@ -419,18 +419,18 @@ class StampedMatmul {
     const std::shared_ptr<BuiltMatmul> built_matmul;
     const Tensor lhs;
     const Tensor rhs;
-    const Optional<Tensor> addend;
+    const std::optional<Tensor> addend;
     Tensor output;
     Stream stream;
-    const Optional<Tensor> workspace;
-    const Optional<RuntimeInputValue> alpha_input;
-    const Optional<RuntimeInputValue> beta_input;
+    const std::optional<Tensor> workspace;
+    const std::optional<RuntimeInputValue> alpha_input;
+    const std::optional<RuntimeInputValue> beta_input;
     const std::optional<std::string> alpha_runtime_name;
     const std::optional<std::string> beta_runtime_name;
-    const Optional<Tensor> alpha_device_scratch;
-    const Optional<Tensor> beta_device_scratch;
-    const Optional<Tensor> alpha_host_scratch;
-    const Optional<Tensor> beta_host_scratch;
+    const std::optional<Tensor> alpha_device_scratch;
+    const std::optional<Tensor> beta_device_scratch;
+    const std::optional<Tensor> alpha_host_scratch;
+    const std::optional<Tensor> beta_host_scratch;
 };
 
 class StampedConvolution {
@@ -448,7 +448,7 @@ class StampedConvolution {
                        const Tensor& filter,
                        const Tensor& output,
                        const Stream& stream,
-                       Optional<Tensor> workspace);
+                       std::optional<Tensor> workspace);
 
    private:
     const std::shared_ptr<CompiledConvolution> compiled_convolution;
@@ -457,7 +457,7 @@ class StampedConvolution {
     const Tensor filter;
     Tensor output;
     Stream stream;
-    const Optional<Tensor> workspace;
+    const std::optional<Tensor> workspace;
 };
 
 class StampedConvolutionBackward {
@@ -475,7 +475,7 @@ class StampedConvolutionBackward {
                                const Tensor& grad_output,
                                const Tensor& output,
                                const Stream& stream,
-                               Optional<Tensor> workspace);
+                               std::optional<Tensor> workspace);
 
    private:
     const std::shared_ptr<CompiledConvolutionBackward> compiled_convolution_backward;
@@ -484,7 +484,7 @@ class StampedConvolutionBackward {
     const Tensor grad_output;
     Tensor output;
     Stream stream;
-    const Optional<Tensor> workspace;
+    const std::optional<Tensor> workspace;
 };
 
 class StampedReduceMinMaxBackward {
@@ -503,7 +503,7 @@ class StampedReduceMinMaxBackward {
                                 const Tensor& indices,
                                 const Tensor& reduction_value_output,
                                 const Stream& stream,
-                                Optional<Tensor> workspace);
+                                std::optional<Tensor> workspace);
 
    private:
     const std::shared_ptr<BuiltReduction> built_reduction;
@@ -512,7 +512,7 @@ class StampedReduceMinMaxBackward {
     Tensor output;
     const Tensor indices;
     const Tensor reduction_value_output;
-    const Optional<Tensor> workspace;
+    const std::optional<Tensor> workspace;
     Stream stream;
 
     const float alpha_1 = 1.0f;

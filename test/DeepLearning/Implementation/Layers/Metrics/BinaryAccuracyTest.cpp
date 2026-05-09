@@ -77,11 +77,11 @@ TEST(BinaryAccuracy, ComputesCorrectElementWiseResult) {
         }
         LayerTestHelper::initializeNetwork(layers);
 
-        ASSERT_TRUE(binaryAccuracy->getErrorOutput().isEmpty());
-        ASSERT_TRUE(binaryAccuracy->getErrorInput().isEmpty());
+        ASSERT_TRUE(!binaryAccuracy->getErrorOutput().has_value());
+        ASSERT_TRUE(!binaryAccuracy->getErrorInput().has_value());
 
         if (inferenceOnly) {
-            assert(binaryAccuracy->getFeatureOutput().isEmpty());
+            assert(!binaryAccuracy->getFeatureOutput().has_value());
             continue;
         }
 
@@ -89,8 +89,8 @@ TEST(BinaryAccuracy, ComputesCorrectElementWiseResult) {
         predictionsInput->forward(predictionsCpu, false);
         labelsInput->forward(labelsCpu, false);
 
-        Tensor accuracyGpu_h = accuracyOutput->getFeatureOutput().get().clone(cpuPlacement);
-        accuracyGpu_h.copyFromAsync(accuracyOutput->getFeatureOutput(), stream);
+        Tensor accuracyGpu_h = accuracyOutput->getFeatureOutput().value().clone(cpuPlacement);
+        accuracyGpu_h.copyFromAsync(accuracyOutput->getFeatureOutput().value(), stream);
 
         stream.synchronize();
 

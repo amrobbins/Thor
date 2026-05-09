@@ -52,7 +52,7 @@ class SoftSign : public Activation {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
         std::shared_ptr<ThorImplementation::SoftSign> softSign = std::make_shared<ThorImplementation::SoftSign>();
         return softSign;
@@ -60,7 +60,7 @@ class SoftSign : public Activation {
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
-        return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
+        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
     }
 };
 
@@ -68,13 +68,13 @@ class SoftSign::Builder : public Activation::Builder {
    public:
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<SoftSign> softSign = std::make_shared<SoftSign>();
-        if (_featureInput.isPresent()) {
+        if (_featureInput.has_value()) {
             // Standalone layer support.
-            THOR_THROW_IF_FALSE(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.has_value());
             softSign->featureInput = _featureInput;
-            softSign->featureOutput = _featureInput.get().clone();
+            softSign->featureOutput = _featureInput.value().clone();
             softSign->initialized = true;
-            softSign->addToNetwork(_network.get());
+            softSign->addToNetwork(_network.value());
         } else {
             // Template activation support
             softSign->initialized = true;

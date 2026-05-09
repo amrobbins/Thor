@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/Utility/Reshape.h"
+#include <optional>
 
 namespace Thor {
 
@@ -28,7 +29,7 @@ class Reshape : public Layer {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput());
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value());
 
         // Implementation has 1 extra dimension due to having the batchSize dimension, this is handled by the builder
         std::shared_ptr<ThorImplementation::Reshape> Reshape = std::make_shared<ThorImplementation::Reshape>(newDimensions);
@@ -46,48 +47,48 @@ class Reshape : public Layer {
 class Reshape::Builder {
    public:
     virtual Reshape build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(_featureInput.isPresent());
-        THOR_THROW_IF_FALSE(_newDimensions.isPresent());
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.has_value());
+        THOR_THROW_IF_FALSE(_newDimensions.has_value());
 
         Reshape reshape;
         reshape.featureInput = _featureInput;
-        reshape.featureOutput = Tensor(_featureInput.get().getDataType(), _newDimensions.get());
-        THOR_THROW_IF_FALSE(reshape.featureInput.get().getTotalNumElements() == reshape.featureOutput.get().getTotalNumElements());
+        reshape.featureOutput = Tensor(_featureInput.value().getDataType(), _newDimensions.value());
+        THOR_THROW_IF_FALSE(reshape.featureInput.value().getTotalNumElements() == reshape.featureOutput.value().getTotalNumElements());
 
         // Implementation layer has one extra (batch) dimension, set to 0 to tell implementation layer to get it from featureIn
         reshape.newDimensions.push_back(0);
-        for (uint32_t i = 0; i < _newDimensions.get().size(); ++i)
-            reshape.newDimensions.push_back(_newDimensions.get()[i]);
+        for (uint32_t i = 0; i < _newDimensions.value().size(); ++i)
+            reshape.newDimensions.push_back(_newDimensions.value()[i]);
 
         reshape.initialized = true;
-        reshape.addToNetwork(_network.get());
+        reshape.addToNetwork(_network.value());
         return reshape;
     }
 
     virtual Reshape::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual Reshape::Builder &featureInput(Tensor _featureInput) {
-        THOR_THROW_IF_FALSE(!this->_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
         this->_featureInput = _featureInput;
         return *this;
     }
 
     virtual Reshape::Builder &newDimensions(std::vector<uint64_t> _newDimensions) {
-        THOR_THROW_IF_FALSE(!this->_newDimensions.isPresent());
+        THOR_THROW_IF_FALSE(!this->_newDimensions.has_value());
         THOR_THROW_IF_FALSE(_newDimensions.size() > 0);
         this->_newDimensions = _newDimensions;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _featureInput;
-    Optional<std::vector<uint64_t>> _newDimensions;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _featureInput;
+    std::optional<std::vector<uint64_t>> _newDimensions;
 };
 
 }  // namespace Thor

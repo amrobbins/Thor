@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "DeepLearning/Implementation/Initializers/Initializer.h"
 
@@ -22,17 +23,17 @@ void PhysicalParameter::compileStorage(const StorageContext& context) {
 
 void PhysicalParameter::compileStorage(const Tensor& inputTensor) { compileStorage(StorageContext({{"feature_input", inputTensor}})); }
 
-void PhysicalParameter::compileOptimizer(const Optional<Stream>& gradientUpdateStream, bool inferenceOnly) {
+void PhysicalParameter::compileOptimizer(const std::optional<Stream>& gradientUpdateStream, bool inferenceOnly) {
     THOR_THROW_IF_FALSE(trainable == true);
     this->inferenceOnly = inferenceOnly;
     this->gradientUpdateStream = gradientUpdateStream;
 
     if (isTrainingEnabled()) {
         THOR_THROW_IF_FALSE(hasOptimizer());
-        THOR_THROW_IF_FALSE(this->gradientUpdateStream.isPresent());
-        THOR_THROW_IF_FALSE(storage.isPresent());
+        THOR_THROW_IF_FALSE(this->gradientUpdateStream.has_value());
+        THOR_THROW_IF_FALSE(storage.has_value());
         if (!optimizer->isCompiled()) {
-            optimizer->compile(storage, this->gradientUpdateStream.get());
+            optimizer->compile(storage.value(), this->gradientUpdateStream.value());
         }
     }
 }
@@ -42,12 +43,12 @@ void PhysicalParameter::compileInitializer(uint64_t fanIn, uint64_t fanOut) {
         return;
     }
 
-    initializer->compile(storage, fanIn, fanOut);
+    initializer->compile(storage.value(), fanIn, fanOut);
 }
 
 void PhysicalParameter::compileInitializer() { compileInitializer(1, 1); }
 
-void PhysicalParameter::clearStorage() { storage.clear(); }
+void PhysicalParameter::clearStorage() { storage.reset(); }
 
 void PhysicalParameter::initialize(Stream initStream) {
     THOR_THROW_IF_FALSE(hasInitializer());
@@ -64,10 +65,10 @@ bool PhysicalParameter::applyGradient(uint32_t batchSize) {
 }
 
 bool PhysicalParameter::hasOptimizer() { return optimizer != nullptr; }
-void PhysicalParameter::setOptimizer(Optional<shared_ptr<Optimizer>> newOptimizer) { this->optimizer = newOptimizer; }
-// void PhysicalParameter::setOptimizer(const Optional<shared_ptr<Optimizer>>& newOptimizer) {
-//     if (newOptimizer.isPresent() && newOptimizer.get() != nullptr) {
-//         this->optimizer = newOptimizer.get()->clone();
+void PhysicalParameter::setOptimizer(std::optional<shared_ptr<Optimizer>> newOptimizer) { this->optimizer = newOptimizer.value_or(nullptr); }
+// void PhysicalParameter::setOptimizer(const std::optional<shared_ptr<Optimizer>>& newOptimizer) {
+//     if (newOptimizer.has_value() && newOptimizer.value() != nullptr) {
+//         this->optimizer = newOptimizer.value()->clone();
 //     } else {
 //         this->optimizer = nullptr;
 //     }
@@ -76,10 +77,10 @@ shared_ptr<Optimizer> PhysicalParameter::getOptimizer() { return optimizer; }
 void PhysicalParameter::clearOptimizer() { optimizer = nullptr; }
 
 bool PhysicalParameter::hasInitializer() { return initializer != nullptr; }
-void PhysicalParameter::setInitializer(Optional<shared_ptr<Initializer>> newInitializer) { this->initializer = newInitializer; }
-// void PhysicalParameter::setInitializer(const Optional<shared_ptr<Initializer>>& newInitializer) {
-//     if (newInitializer.isPresent() && newInitializer.get() != nullptr) {
-//         this->initializer = newInitializer.get()->clone();
+void PhysicalParameter::setInitializer(std::optional<shared_ptr<Initializer>> newInitializer) { this->initializer = newInitializer.value_or(nullptr); }
+// void PhysicalParameter::setInitializer(const std::optional<shared_ptr<Initializer>>& newInitializer) {
+//     if (newInitializer.has_value() && newInitializer.value() != nullptr) {
+//         this->initializer = newInitializer.value()->clone();
 //     } else {
 //         this->initializer = nullptr;
 //     }
@@ -88,7 +89,7 @@ shared_ptr<Initializer> PhysicalParameter::getInitializer() { return initializer
 void PhysicalParameter::clearInitializer() { initializer = nullptr; }
 
 string PhysicalParameter::getName() const { return name; }
-Optional<Tensor> PhysicalParameter::getStorage() { return storage; }
+std::optional<Tensor> PhysicalParameter::getStorage() { return storage; }
 
 bool PhysicalParameter::isTrainable() const { return trainable; }
 bool PhysicalParameter::isTrainingEnabled() const { return isTrainable() && trainingEnabled && !inferenceOnly; }
@@ -108,13 +109,13 @@ void PhysicalParameter::setTrainingEnabled(bool enabled) {
 bool PhysicalParameter::isStorageInitialized() const { return storageInitialized; }
 
 void PhysicalParameter::createStorage(const StorageContext& context) {
-    THOR_THROW_IF_FALSE(shape.isPresent());
-    THOR_THROW_IF_FALSE(dtype.isPresent());
+    THOR_THROW_IF_FALSE(shape.has_value());
+    THOR_THROW_IF_FALSE(dtype.has_value());
     std::vector<std::string> inputNames = context.getInputNames();
     THOR_THROW_IF_FALSE(!inputNames.empty());
     Tensor anInput = context.getInput(inputNames[0]);
 
-    storage = allocateStorage(anInput.getPlacement(), shape, dtype);
+    storage = allocateStorage(anInput.getPlacement(), shape.value(), dtype.value());
 }
 
 Tensor PhysicalParameter::allocateStorage(const TensorPlacement placement,

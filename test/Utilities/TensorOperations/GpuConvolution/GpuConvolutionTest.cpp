@@ -1,3 +1,4 @@
+#include <optional>
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
 #include "test/Utilities/TensorOperations/GpuConvolution/ConvolutionTestHelper.h"
@@ -162,7 +163,7 @@ TEST(GpuConvolution, ConvolutionForwardProducesCorrectResult) {
         GpuConvolution::instance().chooseOptimalKernelForward(convolutionKernelRequirement, stream);
 
         uint64_t workspaceSizeInBytes = GpuConvolution::instance().getForwardWorkspaceSizeInBytes(convolutionKernelRequirement);
-        Optional<Tensor> workspace;
+        std::optional<Tensor> workspace;
         if (workspaceSizeInBytes != 0)
             workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 
@@ -305,7 +306,7 @@ void backwardFilterTest(bool accumulate) {
         GpuConvolution::instance().chooseOptimalKernelBackward(convolutionKernelRequirement, stream);
 
         uint64_t workspaceSizeInBytes = GpuConvolution::instance().getBackwardFilterWorkspaceSizeInBytes(convolutionKernelRequirement);
-        Optional<Tensor> workspace;
+        std::optional<Tensor> workspace;
         if (workspaceSizeInBytes != 0)
             workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 
@@ -424,7 +425,7 @@ TEST(GpuConvolution, ConvolutionBackwardDataProducesCorrectResult) {
         GpuConvolution::instance().chooseOptimalKernelBackward(convolutionKernelRequirement, stream);
 
         uint64_t workspaceSizeInBytes = GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
-        Optional<Tensor> workspace;
+        std::optional<Tensor> workspace;
         if (workspaceSizeInBytes != 0)
             workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 

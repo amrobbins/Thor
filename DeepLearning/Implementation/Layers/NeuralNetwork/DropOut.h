@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -63,21 +64,21 @@ class DropOut : public Layer {
 
         // The random state may not change between calls of cudnnDropoutForward(...) and cudnnDropoutBackward(...),
         // so this dropout layer can only be used for 1 input/output pair.
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.has_value());
 
-        ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
+        ScopedGpu scopedGpu(featureInput.value().getPlacement().getDeviceNum());
 
         randomStateBytes = getRandomStateSizeInBytes(stream.getCudnnHandle());
-        randomState = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {randomStateBytes}));
+        randomState = Tensor(featureInput.value().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {randomStateBytes}));
 
         cudnnStatus = cudnnCreateDropoutDescriptor(&dropoutDescriptor);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        cudnnTensorDescriptor = createCudnnTensorDescriptor(featureInput.get().getDescriptor().getDimensions(),
-                                                            featureInput.get().getDescriptor().getDataType());
-        reserveSpaceBytes = getReservedSpaceSizeInBytes(featureInput.get().getDescriptor().getDimensions(),
-                                                        featureInput.get().getDescriptor().getDataType());
-        reserveSpace = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {reserveSpaceBytes}));
+        cudnnTensorDescriptor = createCudnnTensorDescriptor(featureInput.value().getDescriptor().getDimensions(),
+                                                            featureInput.value().getDescriptor().getDataType());
+        reserveSpaceBytes = getReservedSpaceSizeInBytes(featureInput.value().getDescriptor().getDimensions(),
+                                                        featureInput.value().getDescriptor().getDataType());
+        reserveSpace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {reserveSpaceBytes}));
 
         mtx.lock();
         cudnnStatus = cudnnSetDropoutDescriptor(
@@ -99,45 +100,45 @@ class DropOut : public Layer {
         compiled = false;
     }
 
-    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
-        THOR_THROW_IF_FALSE(inputTensor.isPresent());
-        THOR_THROW_IF_FALSE(outputTensor.isPresent());
+    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(inputTensor.has_value());
+        THOR_THROW_IF_FALSE(outputTensor.has_value());
 
         if (training) {
-            THOR_THROW_IF_FALSE(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-            ScopedGpu scopedGpu(inputTensor.get().getPlacement().getDeviceNum());
+            THOR_THROW_IF_FALSE(inputTensor.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            ScopedGpu scopedGpu(inputTensor.value().getPlacement().getDeviceNum());
 
             cudnnStatus_t cudnnStatus;
             cudnnStatus = cudnnDropoutForward(stream.getCudnnHandle(),
                                               dropoutDescriptor,
                                               cudnnTensorDescriptor,
-                                              inputTensor.get().getMemPtr(),
+                                              inputTensor.value().getMemPtr(),
                                               cudnnTensorDescriptor,
-                                              outputTensor.get().getMemPtr(),
+                                              outputTensor.value().getMemPtr(),
                                               reserveSpace.getMemPtr(),
                                               reserveSpaceBytes);
             THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         } else {
-            outputTensor.get().copyFromAsync(inputTensor, stream);
+            outputTensor.value().copyFromAsync(inputTensor.value(), stream);
         }
     }
 
-    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
-        if (errorOut.isEmpty())
+    void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override {
+        if (!errorOut.has_value())
             return;
-        THOR_THROW_IF_FALSE(errorIn.isPresent());
+        THOR_THROW_IF_FALSE(errorIn.has_value());
         THOR_THROW_IF_FALSE(training);
 
-        THOR_THROW_IF_FALSE(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        ScopedGpu scopedGpu(errorIn.get().getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(errorIn.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        ScopedGpu scopedGpu(errorIn.value().getPlacement().getDeviceNum());
 
         cudnnStatus_t cudnnStatus;
         cudnnStatus = cudnnDropoutBackward(stream.getCudnnHandle(),
                                            dropoutDescriptor,
                                            cudnnTensorDescriptor,
-                                           errorIn.get().getMemPtr(),
+                                           errorIn.value().getMemPtr(),
                                            cudnnTensorDescriptor,
-                                           errorOut.get().getMemPtr(),
+                                           errorOut.value().getMemPtr(),
                                            reserveSpace.getMemPtr(),
                                            reserveSpaceBytes);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);

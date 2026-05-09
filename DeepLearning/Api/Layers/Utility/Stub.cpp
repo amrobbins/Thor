@@ -12,15 +12,15 @@ Stub::~Stub() = default;
 
 json Stub::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(featureInput.isPresent());
-    THOR_THROW_IF_FALSE(featureOutput.isEmpty());
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(!featureOutput.has_value());
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
-    j["input_tensor"] = featureInput.get().architectureJson();
+    j["input_tensor"] = featureInput.value().architectureJson();
 
     return j;
 }

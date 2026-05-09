@@ -54,16 +54,16 @@ void applyPythonActivation(Convolution3d::Builder &builder, const nb::object &ac
     }
 }
 
-Optional<DataType> optionalDataTypeFromPython(const nb::object &obj) {
+std::optional<DataType> optionalDataTypeFromPython(const nb::object &obj) {
     if (obj.is_none()) {
-        return Optional<DataType>::empty();
+        return std::nullopt;
     }
     return nb::cast<DataType>(obj);
 }
 
 ThorImplementation::Expression makePythonEpilogueInput(const nb::object &outputDTypeObj, const nb::object &computeDTypeObj) {
-    Optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
-    Optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
     return Convolution3d::epilogueInput(computeDType, outputDType);
 }
 
@@ -194,8 +194,8 @@ void bind_convolution_3d(nb::module_ &m) {
     convolution_3d.def(
         "get_feature_output",
         [](Convolution3d &self) -> Tensor {
-            Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            return maybeFeatureOutput.get();
+            std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+            return maybeFeatureOutput.value();
         },
         R"nbdoc(
             Return the output tensor produced by this layer.

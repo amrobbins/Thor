@@ -1,3 +1,4 @@
+#include <optional>
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 
 #include <stdexcept>
@@ -157,7 +158,7 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
     }
 
     if (node.op == ExprOp::SCALAR_FP || node.op == ExprOp::FILL) {
-        return node.output_dtype.isPresent() ? node.output_dtype.get() : DataType::FP32;
+        return node.output_dtype.has_value() ? node.output_dtype.value() : DataType::FP32;
     }
 
     std::vector<DataType> tensor_parent_dtypes;
@@ -197,11 +198,11 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         }
 
         const DataType default_output = root_input_dtypes[node.input_slot];
-        return node.output_dtype.isPresent() ? node.output_dtype.get() : default_output;
+        return node.output_dtype.has_value() ? node.output_dtype.value() : default_output;
     }
 
     if (node.op == ExprOp::SCALAR_FP || node.op == ExprOp::FILL) {
-        return node.output_dtype.isPresent() ? node.output_dtype.get() : DataType::FP32;
+        return node.output_dtype.has_value() ? node.output_dtype.value() : DataType::FP32;
     }
 
     if (isCudnnReduceOp(node.op)) {
@@ -235,30 +236,30 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
     }
 
     if (node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX) {
-        return node.output_dtype.isPresent() ? node.output_dtype.get() : DataType::UINT32;
+        return node.output_dtype.has_value() ? node.output_dtype.value() : DataType::UINT32;
     }
 
     const DataType default_output = tensor_parent_dtypes.empty() ? DataType::FP32 : promoteTensorValueDTypes(tensor_parent_dtypes);
 
-    return node.output_dtype.isPresent() ? node.output_dtype.get() : default_output;
+    return node.output_dtype.has_value() ? node.output_dtype.value() : default_output;
 }
 
-static void seedRequiredComputeDType(Optional<DataType>& slot, DataType dtype) {
+static void seedRequiredComputeDType(std::optional<DataType>& slot, DataType dtype) {
     if (!isSupportedFusionFloatingType(dtype)) {
         return;
     }
 
-    if (!slot.isPresent()) {
+    if (!slot.has_value()) {
         slot = dtype;
     } else {
-        slot = promoteTensorValueDTypes(slot.get(), dtype);
+        slot = promoteTensorValueDTypes(slot.value(), dtype);
     }
 }
 
 static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
                                                      const std::vector<uint32_t>& materialized_output_nodes,
                                                      const std::vector<uint8_t>& explicit_compute_dtype) {
-    std::vector<Optional<DataType>> required_compute_dtype(expr.nodes.size(), Optional<DataType>::empty());
+    std::vector<std::optional<DataType>> required_compute_dtype(expr.nodes.size(), std::nullopt);
 
     for (uint32_t output_node_idx : materialized_output_nodes) {
         if (output_node_idx >= expr.nodes.size()) {
@@ -266,28 +267,28 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
         }
 
         const ExprNode& output_node = expr.nodes[output_node_idx];
-        if (output_node.compute_dtype.isPresent()) {
-            seedRequiredComputeDType(required_compute_dtype[output_node_idx], output_node.compute_dtype.get());
-        } else if (output_node.output_dtype.isPresent()) {
-            seedRequiredComputeDType(required_compute_dtype[output_node_idx], output_node.output_dtype.get());
+        if (output_node.compute_dtype.has_value()) {
+            seedRequiredComputeDType(required_compute_dtype[output_node_idx], output_node.compute_dtype.value());
+        } else if (output_node.output_dtype.has_value()) {
+            seedRequiredComputeDType(required_compute_dtype[output_node_idx], output_node.output_dtype.value());
         }
     }
 
     for (int64_t node_idx_signed = static_cast<int64_t>(expr.nodes.size()) - 1; node_idx_signed >= 0; --node_idx_signed) {
         const uint32_t node_idx = static_cast<uint32_t>(node_idx_signed);
-        if (!required_compute_dtype[node_idx].isPresent()) {
+        if (!required_compute_dtype[node_idx].has_value()) {
             continue;
         }
 
         ExprNode& node = expr.nodes[node_idx];
-        DataType propagated_dtype = required_compute_dtype[node_idx].get();
+        DataType propagated_dtype = required_compute_dtype[node_idx].value();
 
-        if (!Expression::isLeafOp(node.op) && node.compute_dtype.isPresent()) {
+        if (!Expression::isLeafOp(node.op) && node.compute_dtype.has_value()) {
             if (!explicit_compute_dtype[node_idx]) {
-                const DataType promoted_requested_dtype = promoteTensorValueDTypes(node.compute_dtype.get(), propagated_dtype);
+                const DataType promoted_requested_dtype = promoteTensorValueDTypes(node.compute_dtype.value(), propagated_dtype);
                 node.compute_dtype = toSupportedComputeDType(node.op, promoted_requested_dtype);
             }
-            propagated_dtype = node.compute_dtype.get();
+            propagated_dtype = node.compute_dtype.value();
         }
 
         auto propagate_to_parent = [&](uint32_t parent_idx) {
@@ -316,7 +317,7 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
     std::vector<uint8_t> explicit_compute_dtype(expr.nodes.size(), 0);
 
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
-        explicit_compute_dtype[node_idx] = expr.nodes[node_idx].compute_dtype.isPresent() ? 1 : 0;
+        explicit_compute_dtype[node_idx] = expr.nodes[node_idx].compute_dtype.has_value() ? 1 : 0;
     }
 
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
@@ -329,13 +330,13 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
 
             const DataType actual_input_dtype = root_input_dtypes[node.input_slot];
             node.input_tensor_dtype = actual_input_dtype;
-            const DataType output_dtype = node.output_dtype.isPresent() ? node.output_dtype.get() : actual_input_dtype;
+            const DataType output_dtype = node.output_dtype.has_value() ? node.output_dtype.value() : actual_input_dtype;
             const DataType requested_compute_dtype =
-                node.compute_dtype.isPresent() ? node.compute_dtype.get() : defaultComputeDType(actual_input_dtype, output_dtype);
+                node.compute_dtype.has_value() ? node.compute_dtype.value() : defaultComputeDType(actual_input_dtype, output_dtype);
             const DataType compute_dtype = toSupportedComputeDType(node.op, requested_compute_dtype);
-            const DataType backward_output_dtype = node.backward_output_dtype.isPresent() ? node.backward_output_dtype.get() : output_dtype;
-            const DataType backward_compute_dtype = node.backward_compute_dtype.isPresent()
-                                                        ? toSupportedComputeDType(node.op, node.backward_compute_dtype.get())
+            const DataType backward_output_dtype = node.backward_output_dtype.has_value() ? node.backward_output_dtype.value() : output_dtype;
+            const DataType backward_compute_dtype = node.backward_compute_dtype.has_value()
+                                                        ? toSupportedComputeDType(node.op, node.backward_compute_dtype.value())
                                                         : compute_dtype;
 
             node.output_dtype = output_dtype;
@@ -351,13 +352,13 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
         const DataType logical_input_dtype = resolveNodeLogicalInputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
         const DataType requested_compute_dtype =
-            node.compute_dtype.isPresent() ? node.compute_dtype.get() : defaultComputeDType(logical_input_dtype, output_dtype);
+            node.compute_dtype.has_value() ? node.compute_dtype.value() : defaultComputeDType(logical_input_dtype, output_dtype);
         const DataType compute_dtype = toSupportedComputeDType(node.op, requested_compute_dtype);
 
-        const DataType backward_output_dtype = node.backward_output_dtype.isPresent() ? node.backward_output_dtype.get() : output_dtype;
+        const DataType backward_output_dtype = node.backward_output_dtype.has_value() ? node.backward_output_dtype.value() : output_dtype;
 
         const DataType backward_compute_dtype =
-            node.backward_compute_dtype.isPresent() ? toSupportedComputeDType(node.op, node.backward_compute_dtype.get()) : compute_dtype;
+            node.backward_compute_dtype.has_value() ? toSupportedComputeDType(node.op, node.backward_compute_dtype.value()) : compute_dtype;
 
         node.output_dtype = output_dtype;
         node.compute_dtype = compute_dtype;

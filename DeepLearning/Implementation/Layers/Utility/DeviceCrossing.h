@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -20,81 +21,81 @@ class DeviceCrossing : public Layer {
         this->outputPlacement = outputPlacement;
     }
 
-    Optional<Tensor> createFeatureOutputTensor() override {
+    std::optional<Tensor> createFeatureOutputTensor() override {
         THOR_THROW_IF_FALSE(!uninitialized);
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        outputBuffer = featureInput.get().clone();
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        outputBuffer = featureInput.value().clone();
         finishedCopyEvent = stream.putEvent();
-        return Tensor(outputPlacement, featureInput.get().getDescriptor());
+        return Tensor(outputPlacement, featureInput.value().getDescriptor());
     }
 
     // Crosses from source device to dest device
     // Output is buffered so the stream on the source device is not blocked during copy
-    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {
         THOR_THROW_IF_FALSE(!uninitialized);
-        THOR_THROW_IF_FALSE(inputTensor.isPresent());
-        THOR_THROW_IF_FALSE(outputTensor.isPresent());
-        THOR_THROW_IF_FALSE(outputPlacement != featureInput.get().getPlacement());
+        THOR_THROW_IF_FALSE(inputTensor.has_value());
+        THOR_THROW_IF_FALSE(outputTensor.has_value());
+        THOR_THROW_IF_FALSE(outputPlacement != featureInput.value().getPlacement());
         THOR_THROW_IF_FALSE(stream.getGpuNum() == inputPlacement.getDeviceNum());
-        THOR_THROW_IF_FALSE(inputTensor.get().getPlacement() == inputPlacement);
-        THOR_THROW_IF_FALSE(outputTensor.get().getPlacement() == outputPlacement);
+        THOR_THROW_IF_FALSE(inputTensor.value().getPlacement() == inputPlacement);
+        THOR_THROW_IF_FALSE(outputTensor.value().getPlacement() == outputPlacement);
 
         // Ensure the previous data transfer has finished, so the buffer is available
         stream.waitEvent(finishedCopyEvent);
 
         // Copy to the on device buffer, then stream is unblocked
-        outputBuffer.copyFromAsync(inputTensor, stream);
+        outputBuffer.copyFromAsync(inputTensor.value(), stream);
 
         // output stream waits for copy to buffer to complete
         // output buffer is offloaded to the other device
         // an event is placed on the output stream to indicate when the offload copy is complete
         otherDeviceStream.waitEvent(stream.putEvent());
-        outputTensor.get().copyFromAsync(outputBuffer, otherDeviceStream);
+        outputTensor.value().copyFromAsync(outputBuffer, otherDeviceStream);
         finishedCopyEvent = otherDeviceStream.putEvent();
     }
 
     // Crosses from dest device to source device
-    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
+    void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override {
         THOR_THROW_IF_FALSE(!uninitialized);
-        if (errorOut.isPresent()) {
+        if (errorOut.has_value()) {
             stream.waitEvent(otherDeviceStream.putEvent());
-            errorOut.get().copyFromAsync(errorIn, stream);
+            errorOut.value().copyFromAsync(errorIn.value(), stream);
         }
     }
 
     void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
         THOR_THROW_IF_FALSE(!compiled);
 
-        THOR_THROW_IF_FALSE(this->nextLayer.isEmpty());
+        THOR_THROW_IF_FALSE(!this->nextLayer.has_value());
         this->nextLayer = nextLayer;
         if (nextLayer->hasFeatureInput())
             featureOutput = createFeatureOutputTensor();
         else
-            featureOutput = Optional<Tensor>::empty();
+            featureOutput = std::nullopt;
 
         errorInput = nextLayer->connectToPreviousLayer(
             this, featureOutput, otherDeviceStream, shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType);
 
         // When the next layer says that there is no error back propagation path here, then this layer removes that path
         // from itself and informs the adjacent layer in the back propagation path to do the same.
-        if (errorInput.isEmpty() && errorOutput.isPresent() && previousLayer.isPresent()) {
-            previousLayer.get()->replaceErrorInput(errorOutput, errorInput);
-            errorOutput.clear();
+        if (!errorInput.has_value() && errorOutput.has_value() && previousLayer.has_value()) {
+            previousLayer.value()->replaceErrorInput(errorOutput, errorInput);
+            errorOutput.reset();
         }
 
-        if (errorInput.isPresent() && featureOutput.isPresent()) {
-            THOR_THROW_IF_FALSE(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
-            THOR_THROW_IF_FALSE(errorInput.get().getPlacement() == featureOutput.get().getPlacement());
+        if (errorInput.has_value() && featureOutput.has_value()) {
+            THOR_THROW_IF_FALSE(errorInput.value().getDescriptor() == featureOutput.value().getDescriptor());
+            THOR_THROW_IF_FALSE(errorInput.value().getPlacement() == featureOutput.value().getPlacement());
         }
 
         ensureNoDeviceCrossing();
     }
 
-    Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override {
+    std::optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, std::optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override {
         THOR_THROW_IF_FALSE(!uninitialized);
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        THOR_THROW_IF_FALSE(featureInput.get().getPlacement() == inputPlacement);
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == inputPlacement);
 
         if (outputPlacement.getMemDevice() == TensorPlacement::MemDevices::CPU)
             otherDeviceStream = stream;

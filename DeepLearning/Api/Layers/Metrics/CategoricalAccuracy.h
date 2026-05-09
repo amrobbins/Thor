@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
 #include "DeepLearning/Implementation/Layers/Metrics/CategoricalAccuracy.h"
+#include <optional>
 
 namespace Thor {
 
@@ -30,7 +31,7 @@ class CategoricalAccuracy : public Metric {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput() || connectingApiTensor == labelsTensor);
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value() || connectingApiTensor == labelsTensor);
 
         std::shared_ptr<ThorImplementation::CategoricalAccuracy> categoricalAccuracy =
             std::make_shared<ThorImplementation::CategoricalAccuracy>();
@@ -51,54 +52,54 @@ class CategoricalAccuracy : public Metric {
 class CategoricalAccuracy::Builder {
    public:
     virtual CategoricalAccuracy build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(_predictions.isPresent());
-        THOR_THROW_IF_FALSE(_labels.isPresent());
-        THOR_THROW_IF_FALSE(_predictions.get() != _labels.get());
-        THOR_THROW_IF_FALSE(_labelType.isPresent());
-        THOR_THROW_IF_FALSE(_labelType == LabelType::INDEX || _labelType == LabelType::ONE_HOT);
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_predictions.has_value());
+        THOR_THROW_IF_FALSE(_labels.has_value());
+        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+        THOR_THROW_IF_FALSE(_labelType.has_value());
+        THOR_THROW_IF_FALSE(_labelType.value() == LabelType::INDEX || _labelType.value() == LabelType::ONE_HOT);
         CategoricalAccuracy categoricalAccuracy;
-        if (_labelType == LabelType::ONE_HOT) {
-            std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
+        if (_labelType.value() == LabelType::ONE_HOT) {
+            std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
             THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] > 1);
-            THOR_THROW_IF_FALSE(_predictions.get().getDimensions() == _labels.get().getDimensions());
-            categoricalAccuracy.numClasses = _predictions.get().getDimensions()[0];
+            THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+            categoricalAccuracy.numClasses = _predictions.value().getDimensions()[0];
         } else {
-            std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
-            std::vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
+            std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
+            std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
             THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
-            Tensor::DataType labelsDataType = _labels.get().getDataType();
+            Tensor::DataType labelsDataType = _labels.value().getDataType();
             THOR_THROW_IF_FALSE(labelsDataType == Tensor::DataType::UINT8 || labelsDataType == Tensor::DataType::UINT16 ||
                    labelsDataType == Tensor::DataType::UINT32);
-            THOR_THROW_IF_FALSE(_numClasses.isPresent());
-            THOR_THROW_IF_FALSE(predictionDimensions.size() == 1 && predictionDimensions[0] == _numClasses);
-            categoricalAccuracy.numClasses = _numClasses;
+            THOR_THROW_IF_FALSE(_numClasses.has_value());
+            THOR_THROW_IF_FALSE(predictionDimensions.size() == 1 && predictionDimensions[0] == _numClasses.value());
+            categoricalAccuracy.numClasses = _numClasses.value();
         }
 
-        categoricalAccuracy.featureInput = _predictions;
-        categoricalAccuracy.labelsTensor = _labels;
+        categoricalAccuracy.featureInput = _predictions.value();
+        categoricalAccuracy.labelsTensor = _labels.value();
         categoricalAccuracy.metricTensor = Tensor(Tensor::DataType::FP32, {1});
-        categoricalAccuracy.labelType = _labelType;
+        categoricalAccuracy.labelType = _labelType.value();
         categoricalAccuracy.initialized = true;
-        categoricalAccuracy.addToNetwork(_network.get());
+        categoricalAccuracy.addToNetwork(_network.value());
         return categoricalAccuracy;
     }
 
     virtual CategoricalAccuracy::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual CategoricalAccuracy::Builder &predictions(Tensor _predictions) {
-        THOR_THROW_IF_FALSE(!this->_predictions.isPresent());
+        THOR_THROW_IF_FALSE(!this->_predictions.has_value());
         THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
         this->_predictions = _predictions;
         return *this;
     }
 
     virtual CategoricalAccuracy::Builder &labels(Tensor _labels) {
-        THOR_THROW_IF_FALSE(!this->_labels.isPresent());
+        THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
         return *this;
@@ -110,7 +111,7 @@ class CategoricalAccuracy::Builder {
      * Soft labels are not supported in this case.
      */
     virtual CategoricalAccuracy::Builder &receivesClassIndexLabels(uint32_t numClasses) {
-        THOR_THROW_IF_FALSE(!_labelType.isPresent());
+        THOR_THROW_IF_FALSE(!_labelType.has_value());
         THOR_THROW_IF_FALSE(numClasses > 1);
         _labelType = LabelType::INDEX;
         this->_numClasses = numClasses;
@@ -123,17 +124,17 @@ class CategoricalAccuracy::Builder {
      * so for example two classes may both have a label of 0.5.
      */
     virtual CategoricalAccuracy::Builder &receivesOneHotLabels() {
-        THOR_THROW_IF_FALSE(!_labelType.isPresent());
+        THOR_THROW_IF_FALSE(!_labelType.has_value());
         _labelType = LabelType::ONE_HOT;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _predictions;
-    Optional<Tensor> _labels;
-    Optional<LabelType> _labelType;
-    Optional<uint32_t> _numClasses;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _predictions;
+    std::optional<Tensor> _labels;
+    std::optional<LabelType> _labelType;
+    std::optional<uint32_t> _numClasses;
 };
 
 NLOHMANN_JSON_SERIALIZE_ENUM(CategoricalAccuracy::LabelType,

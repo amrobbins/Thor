@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -25,10 +26,10 @@ TEST(UtilityApiLayers, StubBuilds) {
 
     ASSERT_TRUE(stub.isInitialized());
 
-    Optional<Tensor> actualInput = stub.getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualInput = stub.getFeatureInput();
+    ASSERT_TRUE(actualInput.has_value());
+    ASSERT_EQ(actualInput.value().getDataType(), dataType);
+    ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
     shared_ptr<Layer> cloneLayer = stub.clone();
     Stub *clone = dynamic_cast<Stub *>(cloneLayer.get());
@@ -36,10 +37,10 @@ TEST(UtilityApiLayers, StubBuilds) {
 
     ASSERT_TRUE(clone->isInitialized());
 
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.has_value());
+    ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
     ASSERT_EQ(stub.getId(), clone->getId());
     ASSERT_GT(stub.getId(), 1u);
@@ -69,7 +70,7 @@ TEST(UtilityApiLayers, StubSerializeDeserialize) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(dimensions).dataType(dataType).build();
 
-    Stub stub = Stub::Builder().network(initialNetwork).inputTensor(networkInput.getFeatureOutput().get()).build();
+    Stub stub = Stub::Builder().network(initialNetwork).inputTensor(networkInput.getFeatureOutput().value()).build();
     ASSERT_TRUE(stub.isInitialized());
 
     thor_file::TarWriter archiveWriter("testModel");
@@ -138,5 +139,5 @@ TEST(UtilityApiLayers, StubSerializeDeserialize) {
 
     shared_ptr<ThorImplementation::NetworkInput> stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(inputLayers[0]);
     ASSERT_NE(stampedInput, nullptr);
-    ASSERT_TRUE(stampedInput->getFeatureOutput().isEmpty());
+    ASSERT_TRUE(!stampedInput->getFeatureOutput().has_value());
 }

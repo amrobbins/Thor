@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "Utilities/TensorOperations/Loss/CrossEntropyLoss.h"
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
@@ -25,9 +26,9 @@ class CrossEntropy : public Loss {
 
     void cleanup() override {}
 
-    void infer(Optional<Tensor> predictions, Optional<Tensor> loss, Stream stream) override;
+    void infer(std::optional<Tensor> predictions, std::optional<Tensor> loss, Stream stream) override;
 
-    void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream) override;
+    void backProp(std::optional<Tensor> labels, std::optional<Tensor> normalizedPredictions, std::optional<Tensor> lossGradient, Stream stream) override;
 
     std::string getType() override;
 

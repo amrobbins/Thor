@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Utilities/Common/Optional.h"
+#include <optional>
 #include "Utilities/WorkQueue/AsyncQueue.h"
 
 #include <assert.h>
@@ -67,8 +67,8 @@ class FullPeriodRandom {
 
     // The actual period of the LCG can be bigger than the period. When a number larger than period is returned by the LCG,
     // then it is not returned, instead the LCG is asked for a new number until the number given is within the period.
-    void reseed(Optional<uint64_t> seedValue = Optional<uint64_t>::empty()) {
-        if (seedValue.isPresent())
+    void reseed(std::optional<uint64_t> seedValue = std::nullopt) {
+        if (seedValue.has_value())
             deterministic = true;
         else
             deterministic = false;
@@ -85,7 +85,7 @@ class FullPeriodRandom {
             maxOvershoot = 50000;
 
         if (deterministic) {
-            deterministicGen = std::mt19937_64(seedValue.get());
+            deterministicGen = std::mt19937_64(seedValue.value());
             implementationPeriod = period + (deterministicGen() % maxOvershoot);
 
             getFactors(implementationPeriod, periodFactors, periodNonFactors);
@@ -104,7 +104,7 @@ class FullPeriodRandom {
         }
     }
 
-    void seedParameters(Optional<uint64_t> seedValue = Optional<uint64_t>::empty(), std::mt19937_64 *deterministicGen = nullptr) {
+    void seedParameters(std::optional<uint64_t> seedValue = std::nullopt, std::mt19937_64 *deterministicGen = nullptr) {
         periodCount = 0;
 
         if (period == 1)
@@ -132,11 +132,11 @@ class FullPeriodRandom {
         }
         assert(c < implementationPeriod);
 
-        if (seedValue.isEmpty())
+        if (!seedValue.has_value())
             seedValue = rand64();
 
-        X = seedValue;
-        currentSeed = seedValue;
+        X = seedValue.value();
+        currentSeed = seedValue.value();
     }
 
     uint64_t getSeed() const { return currentSeed; }

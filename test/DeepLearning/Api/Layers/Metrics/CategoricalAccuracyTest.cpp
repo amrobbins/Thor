@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Metrics/CategoricalAccuracy.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -44,20 +45,20 @@ TEST(CategoricalAccuracy, ClassIndexLabelBuilds) {
 
         ASSERT_TRUE(categoricalAccuracy.isInitialized());
 
-        Optional<Tensor> actualInput = categoricalAccuracy.getFeatureInput();
-        ASSERT_TRUE(actualInput.isPresent());
-        ASSERT_EQ(actualInput.get().getDataType(), predictionsDataType);
-        ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+        std::optional<Tensor> actualInput = categoricalAccuracy.getFeatureInput();
+        ASSERT_TRUE(actualInput.has_value());
+        ASSERT_EQ(actualInput.value().getDataType(), predictionsDataType);
+        ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
-        Optional<Tensor> actualLabels = categoricalAccuracy.getLabels();
-        ASSERT_TRUE(actualLabels.isPresent());
-        ASSERT_EQ(actualLabels.get().getDataType(), labelsDataType);
-        ASSERT_EQ(actualLabels.get().getDimensions(), labelDimensions);
+        std::optional<Tensor> actualLabels = categoricalAccuracy.getLabels();
+        ASSERT_TRUE(actualLabels.has_value());
+        ASSERT_EQ(actualLabels.value().getDataType(), labelsDataType);
+        ASSERT_EQ(actualLabels.value().getDimensions(), labelDimensions);
 
-        Optional<Tensor> actualAccuracy = categoricalAccuracy.getFeatureOutput();
-        ASSERT_TRUE(actualAccuracy.isPresent());
-        ASSERT_EQ(actualAccuracy.get().getDataType(), accuracyDataType);
-        ASSERT_EQ(actualAccuracy.get().getDimensions(), vector<uint64_t>({1}));
+        std::optional<Tensor> actualAccuracy = categoricalAccuracy.getFeatureOutput();
+        ASSERT_TRUE(actualAccuracy.has_value());
+        ASSERT_EQ(actualAccuracy.value().getDataType(), accuracyDataType);
+        ASSERT_EQ(actualAccuracy.value().getDimensions(), vector<uint64_t>({1}));
 
         shared_ptr<Layer> cloneLayer = categoricalAccuracy.clone();
         CategoricalAccuracy *clone = dynamic_cast<CategoricalAccuracy *>(cloneLayer.get());
@@ -65,20 +66,20 @@ TEST(CategoricalAccuracy, ClassIndexLabelBuilds) {
 
         ASSERT_TRUE(clone->isInitialized());
 
-        Optional<Tensor> cloneInput = clone->getFeatureInput();
-        ASSERT_TRUE(cloneInput.isPresent());
-        ASSERT_EQ(cloneInput.get().getDataType(), predictionsDataType);
-        ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+        std::optional<Tensor> cloneInput = clone->getFeatureInput();
+        ASSERT_TRUE(cloneInput.has_value());
+        ASSERT_EQ(cloneInput.value().getDataType(), predictionsDataType);
+        ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
-        Optional<Tensor> cloneLabels = clone->getLabels();
-        ASSERT_TRUE(cloneLabels.isPresent());
-        ASSERT_EQ(cloneLabels.get().getDataType(), labelsDataType);
-        ASSERT_EQ(cloneLabels.get().getDimensions(), labelDimensions);
+        std::optional<Tensor> cloneLabels = clone->getLabels();
+        ASSERT_TRUE(cloneLabels.has_value());
+        ASSERT_EQ(cloneLabels.value().getDataType(), labelsDataType);
+        ASSERT_EQ(cloneLabels.value().getDimensions(), labelDimensions);
 
-        Optional<Tensor> cloneAccuracy = clone->getFeatureOutput();
-        ASSERT_TRUE(cloneAccuracy.isPresent());
-        ASSERT_EQ(cloneAccuracy.get().getDataType(), accuracyDataType);
-        ASSERT_EQ(cloneAccuracy.get().getDimensions(), vector<uint64_t>({1}));
+        std::optional<Tensor> cloneAccuracy = clone->getFeatureOutput();
+        ASSERT_TRUE(cloneAccuracy.has_value());
+        ASSERT_EQ(cloneAccuracy.value().getDataType(), accuracyDataType);
+        ASSERT_EQ(cloneAccuracy.value().getDimensions(), vector<uint64_t>({1}));
 
         ASSERT_EQ(categoricalAccuracy.getId(), clone->getId());
         ASSERT_GT(categoricalAccuracy.getId(), 1u);
@@ -117,8 +118,8 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
 
     CategoricalAccuracy::Builder builder = CategoricalAccuracy::Builder()
                                                .network(initialNetwork)
-                                               .predictions(predictionsNetworkInput.getFeatureOutput())
-                                               .labels(labelsNetworkInput.getFeatureOutput());
+                                               .predictions(predictionsNetworkInput.getFeatureOutput().value())
+                                               .labels(labelsNetworkInput.getFeatureOutput().value());
 
     if (oneHotLabels)
         builder.receivesOneHotLabels();
@@ -139,8 +140,8 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     Tensor predictionsInput = categoricalAccuracy.getPredictions();
     Tensor labelsInput = categoricalAccuracy.getLabels();
     Tensor metricTensor = categoricalAccuracy.getMetric();
-    assert(predictionsInput == predictionsNetworkInput.getFeatureOutput());
-    assert(labelsInput == labelsNetworkInput.getFeatureOutput());
+    assert(predictionsInput == predictionsNetworkInput.getFeatureOutput().value());
+    assert(labelsInput == labelsNetworkInput.getFeatureOutput().value());
     assert(metricTensor == networkOutput.getFeatureInput());
 
     // Now stamp the network and test serialization
@@ -264,17 +265,17 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
 
-    ASSERT_TRUE(stampedInput0->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedInput1->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedOutput->getFeatureInput().isPresent());
+    ASSERT_TRUE(stampedInput0->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedInput1->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureInput().has_value());
 
-    if (stampedInput0->getFeatureOutput().get() == stampedCategoricalAccuracy->getFeatureInput().get()) {
-        ASSERT_EQ(stampedInput1->getFeatureOutput().get(), stampedCategoricalAccuracy->getLabelsInput().get());
+    if (stampedInput0->getFeatureOutput().value() == stampedCategoricalAccuracy->getFeatureInput().value()) {
+        ASSERT_EQ(stampedInput1->getFeatureOutput().value(), stampedCategoricalAccuracy->getLabelsInput().value());
     } else {
-        ASSERT_EQ(stampedInput0->getFeatureOutput().get(), stampedCategoricalAccuracy->getLabelsInput().get());
-        ASSERT_EQ(stampedInput1->getFeatureOutput().get(), stampedCategoricalAccuracy->getFeatureInput().get());
+        ASSERT_EQ(stampedInput0->getFeatureOutput().value(), stampedCategoricalAccuracy->getLabelsInput().value());
+        ASSERT_EQ(stampedInput1->getFeatureOutput().value(), stampedCategoricalAccuracy->getFeatureInput().value());
     }
-    ASSERT_EQ(stampedCategoricalAccuracy->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+    ASSERT_EQ(stampedCategoricalAccuracy->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
     filesystem::remove("/tmp/testModel.thor.tar");
 }

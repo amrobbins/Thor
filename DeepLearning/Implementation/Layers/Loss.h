@@ -1,9 +1,9 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
-#include "Utilities/Common/Optional.h"
 
 namespace ThorImplementation {
 
@@ -39,23 +39,23 @@ class Loss : public Layer {
     }
 
     // Note: featureInput is guaranteed to be connected before createFeatureOutputTensor() is called.
-    Optional<Tensor> createFeatureOutputTensor() override {
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        return featureInput.get().clone(lossDataType);
+    std::optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        return featureInput.value().clone(lossDataType);
     }
 
     void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
         THOR_THROW_IF_FALSE(!compiled);
 
-        THOR_THROW_IF_FALSE(this->nextLayer.isEmpty());
+        THOR_THROW_IF_FALSE(!this->nextLayer.has_value());
         this->nextLayer = nextLayer;
         if (nextLayer->hasFeatureInput())
             featureOutput = createFeatureOutputTensor();
         else
-            featureOutput = Optional<Tensor>::empty();
+            featureOutput = std::nullopt;
 
         // Losses are the origin of the back prop path and will fill the errorOutput directly.
-        errorInput = Optional<Tensor>::empty();
+        errorInput = std::nullopt;
         nextLayer->connectToPreviousLayer(
             this, featureOutput, stream, shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType);
 
@@ -63,8 +63,8 @@ class Loss : public Layer {
     }
 
     // The feature input to this layer is the likelihood predictions per batch item per classification class
-    Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) override {
+    std::optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, std::optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) override {
         if (connectionType == (int)ConnectionType::FORWARD_BACKWARD) {
             return connectToPredictionsInputLayer(previousLayer, featureInput, stream, backPropagateError);
         } else if (connectionType == (int)ConnectionType::LABELS) {
@@ -74,17 +74,17 @@ class Loss : public Layer {
         }
     }
 
-    virtual Optional<Tensor> connectToPredictionsInputLayer(Layer *predictionsInputLayer,
-                                                            Optional<Tensor> featureInput,
+    virtual std::optional<Tensor> connectToPredictionsInputLayer(Layer *predictionsInputLayer,
+                                                            std::optional<Tensor> featureInput,
                                                             Stream stream,
                                                             bool backPropagateError) {
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions().size() >= 1);
-        THOR_THROW_IF_FALSE(this->featureInput.isEmpty());
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() >= 1);
+        THOR_THROW_IF_FALSE(!this->featureInput.has_value());
 
-        if (labelsInput.isPresent()) {
-            THOR_THROW_IF_FALSE(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-            THOR_THROW_IF_FALSE(featureInput.get().getPlacement() == labelsInput.get().getPlacement());
+        if (labelsInput.has_value()) {
+            THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == labelsInput.value().getPlacement());
         }
 
         // Allocates this->featureInput and this->errorOutput
@@ -93,21 +93,21 @@ class Loss : public Layer {
         return errorOutput;
     }
 
-    virtual Optional<Tensor> connectToLabelsInputLayer(Layer *labelsLayer, Optional<Tensor> labels, Stream labelsStream) {
-        THOR_THROW_IF_FALSE(this->labelsInput.isEmpty());
+    virtual std::optional<Tensor> connectToLabelsInputLayer(Layer *labelsLayer, std::optional<Tensor> labels, Stream labelsStream) {
+        THOR_THROW_IF_FALSE(!this->labelsInput.has_value());
 
-        THOR_THROW_IF_FALSE(labels.isPresent());
+        THOR_THROW_IF_FALSE(labels.has_value());
 
-        if (this->featureInput.isPresent()) {
-            THOR_THROW_IF_FALSE(this->featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-            THOR_THROW_IF_FALSE(this->featureInput.get().getPlacement() == labels.get().getPlacement());
+        if (this->featureInput.has_value()) {
+            THOR_THROW_IF_FALSE(this->featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            THOR_THROW_IF_FALSE(this->featureInput.value().getPlacement() == labels.value().getPlacement());
         }
 
         this->labelsInput = labels;
         this->labelsStream = labelsStream;
 
         // Labels do not cause back propagation
-        return Optional<Tensor>::empty();
+        return std::nullopt;
     }
 
     ~Loss() override {}
@@ -118,32 +118,32 @@ class Loss : public Layer {
         labelsReceived = false;
     }
 
-    void forward(Optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override {
+    void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override {
         THOR_THROW_IF_FALSE(running);
         if (!isInferenceOnly()) {
             THOR_THROW_IF_FALSE(labelsStream.isInitialized());
-            THOR_THROW_IF_FALSE(labelsInput.isPresent());
-            THOR_THROW_IF_FALSE(errorOutput.isPresent());
-            THOR_THROW_IF_FALSE(errorOutput.get().isInitialized());
+            THOR_THROW_IF_FALSE(labelsInput.has_value());
+            THOR_THROW_IF_FALSE(errorOutput.has_value());
+            THOR_THROW_IF_FALSE(errorOutput.value().isInitialized());
         }
         if (labelsStream.isInitialized()) {
-            THOR_THROW_IF_FALSE(labelsInput.isPresent());
-            THOR_THROW_IF_FALSE(labelsInput.get().isInitialized());
+            THOR_THROW_IF_FALSE(labelsInput.has_value());
+            THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
         }
-        THOR_THROW_IF_FALSE(featureOutput.isPresent());
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        THOR_THROW_IF_FALSE(featureInput.has_value());
 
         // After all inputs have been received an empty input tensor is sent to indicate
         // that the layer is ready to perform the forward pass.
-        if (inputTensor.isPresent()) {
-            if (inputTensor.get() == featureInput.get())
-                forwardFeatures(inputTensor, validationPass);
-            else if (inputTensor.get() == labelsInput.get())
-                forwardLabels(inputTensor, validationPass);
+        if (inputTensor.has_value()) {
+            if (inputTensor.value() == featureInput.value())
+                forwardFeatures(inputTensor.value(), validationPass);
+            else if (inputTensor.value() == labelsInput.value())
+                forwardLabels(inputTensor.value(), validationPass);
             else
                 THOR_UNREACHABLE();
         } else {
-            THOR_THROW_IF_FALSE(inputTensor.isEmpty());
+            THOR_THROW_IF_FALSE(!inputTensor.has_value());
             THOR_THROW_IF_FALSE(featureInputReceived);
             THOR_THROW_IF_FALSE(labelsReceived);
             featureInputReceived = false;
@@ -157,7 +157,7 @@ class Loss : public Layer {
     }
 
     virtual void forwardFeatures(Tensor featureInput, bool validationPass) {
-        THOR_THROW_IF_FALSE(this->featureInput.get() == featureInput);
+        THOR_THROW_IF_FALSE(this->featureInput.value() == featureInput);
 
         THOR_THROW_IF_FALSE(featureInputReceived == false);
         featureInputReceived = true;
@@ -166,7 +166,7 @@ class Loss : public Layer {
     }
 
     virtual void forwardLabels(Tensor labelsInput, bool validationPass) {
-        THOR_THROW_IF_FALSE(this->labelsInput.get() == labelsInput);
+        THOR_THROW_IF_FALSE(this->labelsInput.value() == labelsInput);
 
         THOR_THROW_IF_FALSE(labelsReceived == false);
         labelsReceived = true;
@@ -174,45 +174,45 @@ class Loss : public Layer {
         advanceDataIfReady(validationPass);
     }
 
-    void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {
+    void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {
         THOR_THROW_IF_FALSE(running);
-        THOR_THROW_IF_FALSE(labelsInput.isPresent());
-        THOR_THROW_IF_FALSE(labelsInput.get().isInitialized());
-        THOR_THROW_IF_FALSE(errorOutput.isPresent());
-        THOR_THROW_IF_FALSE(errorOutput.get().isInitialized());
+        THOR_THROW_IF_FALSE(labelsInput.has_value());
+        THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
+        THOR_THROW_IF_FALSE(errorOutput.has_value());
+        THOR_THROW_IF_FALSE(errorOutput.value().isInitialized());
         THOR_THROW_IF_FALSE(labelsStream.isInitialized());
-        THOR_THROW_IF_FALSE(errorInput.isEmpty());
+        THOR_THROW_IF_FALSE(!errorInput.has_value());
 
-        if (errorOutput.isPresent()) {
+        if (errorOutput.has_value()) {
             backProp(labelsInput, featureInput, errorOutput, stream);
             // Labels stream waits for backProp to finish
             labelsStream.waitEvent(stream.putEvent());
         }
 
-        if (previousLayer.isEmpty())
+        if (!previousLayer.has_value())
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        previousLayer.get()->backward(errorOutput);
+        previousLayer.value()->backward(errorOutput);
     }
 
     void ensureNoDeviceCrossing() override {
-        if (featureInput.isPresent()) {
-            if (labelsInput.isPresent())
-                THOR_THROW_IF_FALSE(labelsInput.get().getPlacement() == featureInput.get().getPlacement());
-            if (featureOutput.isPresent())
-                THOR_THROW_IF_FALSE(featureOutput.get().getPlacement() == featureInput.get().getPlacement());
-            if (errorOutput.isPresent())
-                THOR_THROW_IF_FALSE(errorOutput.get().getPlacement() == featureInput.get().getPlacement());
+        if (featureInput.has_value()) {
+            if (labelsInput.has_value())
+                THOR_THROW_IF_FALSE(labelsInput.value().getPlacement() == featureInput.value().getPlacement());
+            if (featureOutput.has_value())
+                THOR_THROW_IF_FALSE(featureOutput.value().getPlacement() == featureInput.value().getPlacement());
+            if (errorOutput.has_value())
+                THOR_THROW_IF_FALSE(errorOutput.value().getPlacement() == featureInput.value().getPlacement());
         }
     }
 
-    void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) override {}
+    void replaceErrorInput(std::optional<Tensor> oldErrorInput, std::optional<Tensor> newErrorInput) override {}
 
-    virtual Optional<Tensor> getLabelsInput() { return labelsInput; }
-    virtual Optional<Tensor> getPredictionsInput() { return getFeatureInput(); }
+    virtual std::optional<Tensor> getLabelsInput() { return labelsInput; }
+    virtual std::optional<Tensor> getPredictionsInput() { return getFeatureInput(); }
     // When a loss shaper is present, that will provide batch loss etc. Loss::getLossOutput() provides raw loss
-    virtual Optional<Tensor> getLossOutput() { return featureOutput; }
+    virtual std::optional<Tensor> getLossOutput() { return featureOutput; }
 
     enum class ConnectionType { FORWARD_BACKWARD = 4289, LABELS };
 
@@ -221,7 +221,7 @@ class Loss : public Layer {
     static float getLossScalingFactor() { return lossScalingFactor; }
 
    protected:
-    Optional<Tensor> labelsInput;
+    std::optional<Tensor> labelsInput;
     TensorDescriptor::DataType lossDataType;
 
     // FIXME: only const for now for convenience
@@ -235,20 +235,20 @@ class Loss : public Layer {
         if (featureInputReceived && labelsReceived) {
             // DataStream waits for labels to arrive
             stream.waitEvent(labelsStream.putEvent());
-            forward(Optional<Tensor>::empty(), stream);
+            forward(std::nullopt, validationPass);
         } else {
             return;
         }
 
-        if (nextLayer.isPresent())
-            nextLayer.get()->forward(featureOutput, validationPass);
+        if (nextLayer.has_value())
+            nextLayer.value()->forward(featureOutput, validationPass);
 
         if (isInferenceOnly() || validationPass)
             return;
 
         // Initiate back propagation
-        THOR_THROW_IF_FALSE(previousLayer.isPresent());
-        backward(Optional<Tensor>().empty());
+        THOR_THROW_IF_FALSE(previousLayer.has_value());
+        backward(std::nullopt);
     }
 };
 

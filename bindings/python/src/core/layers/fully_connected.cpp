@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <exception>
+#include <optional>
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
@@ -53,16 +54,16 @@ void applyPythonActivation(FullyConnected::Builder &builder, const nb::object &a
     }
 }
 
-Optional<DataType> optionalDataTypeFromPython(const nb::object &obj) {
+std::optional<DataType> optionalDataTypeFromPython(const nb::object &obj) {
     if (obj.is_none()) {
-        return Optional<DataType>::empty();
+        return std::nullopt;
     }
     return nb::cast<DataType>(obj);
 }
 
 ThorImplementation::Expression makePythonEpilogueInput(const nb::object &outputDTypeObj, const nb::object &computeDTypeObj) {
-    Optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
-    Optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
     return FullyConnected::epilogueInput(computeDType, outputDType);
 }
 
@@ -138,8 +139,8 @@ void bind_fully_connected(nb::module_ &m) {
     fully_connected.def(
         "get_feature_output",
         [](FullyConnected &self) -> Tensor {
-            Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            return maybeFeatureOutput.get();
+            std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+            return maybeFeatureOutput.value();
         },
         R"nbdoc(
             Return the output tensor produced by this layer.

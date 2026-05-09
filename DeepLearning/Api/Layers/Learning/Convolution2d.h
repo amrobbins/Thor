@@ -16,6 +16,7 @@
 #include "Utilities/Exceptions.h"
 #include "Utilities/TensorOperations/GpuConvolution/ConvolutionKernelRequirement.h"
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
+#include <optional>
 
 namespace Thor {
 
@@ -24,7 +25,7 @@ class Convolution2d : public TrainableLayer {
     class Builder;
 
     Convolution2d() {}
-    explicit Convolution2d(const Optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
+    explicit Convolution2d(const std::optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
     ~Convolution2d() override = default;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Convolution2d>(*this); }
@@ -49,10 +50,10 @@ class Convolution2d : public TrainableLayer {
     static const char *epilogueOutputName() { return "__convolution_2d_epilogue_output"; }
 
     [[nodiscard]] static ThorImplementation::Expression epilogueInput(
-        Optional<ThorImplementation::TensorDescriptor::DataType> computeDType =
-            Optional<ThorImplementation::TensorDescriptor::DataType>::empty(),
-        Optional<ThorImplementation::TensorDescriptor::DataType> outputDType =
-            Optional<ThorImplementation::TensorDescriptor::DataType>::empty()) {
+        std::optional<ThorImplementation::TensorDescriptor::DataType> computeDType =
+            std::nullopt,
+        std::optional<ThorImplementation::TensorDescriptor::DataType> outputDType =
+            std::nullopt) {
         return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
     }
 
@@ -118,7 +119,7 @@ class Convolution2d : public TrainableLayer {
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                   bool isFirstStamp,
                                   std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
-                                  Optional<Event> sisterLayerLoadedEvent);
+                                  std::optional<Event> sisterLayerLoadedEvent);
 
     std::vector<Tensor> standaloneLayerFeatureInputs;
     std::vector<Tensor> standaloneLayerFeatureOutputs;
@@ -141,11 +142,11 @@ class Convolution2d : public TrainableLayer {
     float dropProportion;
 
     bool useBatchNormalization;
-    Optional<double> batchNormExponentialRunningAverageFactor;
-    Optional<double> batchNormEpsilon;
+    std::optional<double> batchNormExponentialRunningAverageFactor;
+    std::optional<double> batchNormEpsilon;
 
-    const Optional<ThorImplementation::Expression> epilogue;
-    mutable Optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
+    const std::optional<ThorImplementation::Expression> epilogue;
+    mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
 };
 
 // featureInput, numOutputChannels, filterHeight and filterWidth are required, all other parameters are optional.
@@ -156,25 +157,25 @@ class Convolution2d::Builder {
     Builder() { _activationExplicitlyRemoved = false; }
 
     virtual Convolution2d build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(!_featureInputs.empty());
-        THOR_THROW_IF_FALSE(_numOutputChannels.isPresent());
-        THOR_THROW_IF_FALSE(_filterHeight.isPresent());
-        THOR_THROW_IF_FALSE(_filterWidth.isPresent());
+        THOR_THROW_IF_FALSE(_numOutputChannels.has_value());
+        THOR_THROW_IF_FALSE(_filterHeight.has_value());
+        THOR_THROW_IF_FALSE(_filterWidth.has_value());
 
-        if (_verticalStride.isEmpty())
+        if (!_verticalStride.has_value())
             _verticalStride = 1;
-        if (_horizontalStride.isEmpty())
+        if (!_horizontalStride.has_value())
             _horizontalStride = 1;
-        if (_verticalPadding.isEmpty())
+        if (!_verticalPadding.has_value())
             _computeVerticalSamePadding = true;
-        else if (_computeVerticalSamePadding.isEmpty())
+        else if (!_computeVerticalSamePadding.has_value())
             _computeVerticalSamePadding = false;
-        if (_horizontalPadding.isEmpty())
+        if (!_horizontalPadding.has_value())
             _computeHorizontalSamePadding = true;
-        else if (_computeHorizontalSamePadding.isEmpty())
+        else if (!_computeHorizontalSamePadding.has_value())
             _computeHorizontalSamePadding = false;
-        if (_hasBias.isEmpty())
+        if (!_hasBias.has_value())
             _hasBias = false;
         if (_weightsInitializer == nullptr)
             _weightsInitializer = Glorot::Builder().build();
@@ -182,37 +183,37 @@ class Convolution2d::Builder {
             _biasesInitializer = Glorot::Builder().build();
         if (!_activation && !_activationExplicitlyRemoved)
             _activation = SoftPlus::Builder().build();
-        if (_dropProportion.isEmpty())
+        if (!_dropProportion.has_value())
             _dropProportion = 0.0f;
-        if (_useBatchNormalization.isEmpty()) {
+        if (!_useBatchNormalization.has_value()) {
             _useBatchNormalization = false;
         }
 
-        if (_epilogue.isPresent()) {
-            Convolution2d::validateEpilogueExpression(_epilogue.get());
+        if (_epilogue.has_value()) {
+            Convolution2d::validateEpilogueExpression(_epilogue.value());
         }
 
         Convolution2d convolution2d(_epilogue);
 
         convolution2d.featureInputs = _featureInputs;
-        convolution2d.numOutputChannels = _numOutputChannels;
-        convolution2d.filterHeight = _filterHeight;
-        convolution2d.filterWidth = _filterWidth;
-        convolution2d.verticalStride = _verticalStride;
-        convolution2d.horizontalStride = _horizontalStride;
-        if (_computeVerticalSamePadding) {
+        convolution2d.numOutputChannels = _numOutputChannels.value();
+        convolution2d.filterHeight = _filterHeight.value();
+        convolution2d.filterWidth = _filterWidth.value();
+        convolution2d.verticalStride = _verticalStride.value();
+        convolution2d.horizontalStride = _horizontalStride.value();
+        if (_computeVerticalSamePadding.value()) {
             THOR_THROW_IF_FALSE(convolution2d.verticalStride == 1);
             convolution2d.verticalPadding = computeSamePadding(
                 convolution2d.featureInputs[0].getDimensions()[1], convolution2d.verticalStride, convolution2d.filterHeight);
         } else {
-            convolution2d.verticalPadding = _verticalPadding;
+            convolution2d.verticalPadding = _verticalPadding.value();
         }
-        if (_computeHorizontalSamePadding) {
+        if (_computeHorizontalSamePadding.value()) {
             THOR_THROW_IF_FALSE(convolution2d.horizontalStride == 1);
             convolution2d.horizontalPadding = computeSamePadding(
                 convolution2d.featureInputs[0].getDimensions()[2], convolution2d.horizontalStride, convolution2d.filterWidth);
         } else {
-            convolution2d.horizontalPadding = _horizontalPadding;
+            convolution2d.horizontalPadding = _horizontalPadding.value();
         }
 
         THOR_THROW_IF_FALSE(convolution2d.verticalPadding < convolution2d.filterHeight);
@@ -227,13 +228,13 @@ class Convolution2d::Builder {
                                                       convolution2d.filterWidth,
                                                       convolution2d.horizontalPadding);
 
-        convolution2d.hasBias = _hasBias;
+        convolution2d.hasBias = _hasBias.value();
         convolution2d.weightsInitializer = _weightsInitializer->clone();
         convolution2d.biasInitializer = _biasesInitializer->clone();
         if (_activation != nullptr)
             convolution2d.activation = _activation;
-        convolution2d.dropProportion = _dropProportion;
-        convolution2d.useBatchNormalization = _useBatchNormalization;
+        convolution2d.dropProportion = _dropProportion.value();
+        convolution2d.useBatchNormalization = _useBatchNormalization.value();
         convolution2d.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
         convolution2d.batchNormEpsilon = _batchNormEpsilon;
 
@@ -244,10 +245,10 @@ class Convolution2d::Builder {
         convolution2d.initialized = true;
 
         if (convolution2d.isMultiLayer()) {
-            convolution2d.buildSupportLayersAndAddToNetwork(_network);
+            convolution2d.buildSupportLayersAndAddToNetwork(_network.value());
         } else {
             for (uint32_t i = 0; i < convolution2d.featureInputs.size(); ++i) {
-                convolution2d.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {_numOutputChannels, outputHeight, outputWidth}));
+                convolution2d.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {_numOutputChannels.value(), outputHeight, outputWidth}));
                 convolution2d.outputTensorFromInputTensor[convolution2d.featureInputs[i]] = convolution2d.featureOutputs[i];
                 convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs[i]] = convolution2d.featureInputs[i];
             }
@@ -255,14 +256,14 @@ class Convolution2d::Builder {
             convolution2d.standaloneLayerFeatureInputs = convolution2d.getFeatureInputs();
             convolution2d.standaloneLayerFeatureOutputs = convolution2d.getFeatureOutputs();
 
-            convolution2d.addToNetwork(_network.get());
+            convolution2d.addToNetwork(_network.value());
         }
 
         return convolution2d;
     }
 
     virtual Convolution2d::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
@@ -278,56 +279,56 @@ class Convolution2d::Builder {
     }
 
     virtual Convolution2d::Builder &numOutputChannels(uint32_t _numOutputChannels) {
-        THOR_THROW_IF_FALSE(!this->_numOutputChannels.isPresent());
+        THOR_THROW_IF_FALSE(!this->_numOutputChannels.has_value());
         this->_numOutputChannels = _numOutputChannels;
         return *this;
     }
 
     virtual Convolution2d::Builder &filterHeight(uint32_t _filterHeight) {
-        THOR_THROW_IF_FALSE(!this->_filterHeight.isPresent());
+        THOR_THROW_IF_FALSE(!this->_filterHeight.has_value());
         this->_filterHeight = _filterHeight;
         return *this;
     }
 
     virtual Convolution2d::Builder &filterWidth(uint32_t _filterWidth) {
-        THOR_THROW_IF_FALSE(!this->_filterWidth.isPresent());
+        THOR_THROW_IF_FALSE(!this->_filterWidth.has_value());
         this->_filterWidth = _filterWidth;
         return *this;
     }
 
     virtual Convolution2d::Builder &verticalStride(uint32_t _verticalStride) {
         THOR_THROW_IF_FALSE(_verticalStride != 0);
-        THOR_THROW_IF_FALSE(!this->_verticalStride.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalStride.has_value());
         this->_verticalStride = _verticalStride;
         return *this;
     }
 
     virtual Convolution2d::Builder &horizontalStride(uint32_t _horizontalStride) {
         THOR_THROW_IF_FALSE(_horizontalStride != 0);
-        THOR_THROW_IF_FALSE(!this->_horizontalStride.isPresent());
+        THOR_THROW_IF_FALSE(!this->_horizontalStride.has_value());
         this->_horizontalStride = _horizontalStride;
         return *this;
     }
 
     virtual Convolution2d::Builder &verticalPadding(uint32_t _verticalPadding) {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
         this->_verticalPadding = _verticalPadding;
         return *this;
     }
 
     virtual Convolution2d::Builder &horizontalPadding(uint32_t _horizontalPadding) {
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
         this->_horizontalPadding = _horizontalPadding;
         return *this;
     }
 
     virtual Convolution2d::Builder &samePadding() {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
         this->_verticalPadding = 0;
         this->_horizontalPadding = 0;
         this->_computeHorizontalSamePadding = true;
@@ -336,33 +337,33 @@ class Convolution2d::Builder {
     }
 
     virtual Convolution2d::Builder &verticalSamePadding() {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
         this->_verticalPadding = 0;
         this->_computeVerticalSamePadding = true;
         return *this;
     }
 
     virtual Convolution2d::Builder &horizontalSamePadding() {
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
         this->_horizontalPadding = 0;
         this->_computeHorizontalSamePadding = true;
         return *this;
     }
 
     virtual Convolution2d::Builder &noPadding() {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
         this->_verticalPadding = 0;
         this->_horizontalPadding = 0;
         return *this;
     }
 
     virtual Convolution2d::Builder &hasBias(bool _hasBias) {
-        THOR_THROW_IF_FALSE(!this->_hasBias.isPresent());
+        THOR_THROW_IF_FALSE(!this->_hasBias.has_value());
         this->_hasBias = _hasBias;
         return *this;
     }
@@ -414,7 +415,7 @@ class Convolution2d::Builder {
     }
 
     virtual Convolution2d::Builder &epilogue(const ThorImplementation::Expression &expression) {
-        THOR_THROW_IF_FALSE(this->_epilogue.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_epilogue.has_value());
         Convolution2d::validateEpilogueExpression(expression);
         _epilogue = expression;
         return *this;
@@ -434,9 +435,10 @@ class Convolution2d::Builder {
 
     // Adds a BatchNormalization layer before this Convolution2d layer and before the DropOut layer when that is also present
     // exponentialRunningAverageFactor and epsilon will be set to good default values when not specified.
-    virtual Convolution2d::Builder &batchNormalization(Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
-                                                       Optional<double> epsilon = Optional<double>::empty()) {
-        THOR_THROW_IF_FALSE(!_useBatchNormalization.isPresent());
+    virtual Convolution2d::Builder &batchNormalization(
+        std::optional<double> exponentialRunningAverageFactor = std::nullopt,
+        std::optional<double> epsilon = std::nullopt) {
+        THOR_THROW_IF_FALSE(!_useBatchNormalization.has_value());
         this->_useBatchNormalization = true;
         this->_batchNormExponentialRunningAverageFactor = exponentialRunningAverageFactor;
         this->_batchNormEpsilon = epsilon;
@@ -445,7 +447,7 @@ class Convolution2d::Builder {
 
     // Adds a DropOut layer before this Convolution2d layer, but after the BatchNormalization layer when that is also present.
     virtual Convolution2d::Builder &dropOut(float _dropProportion) {
-        THOR_THROW_IF_FALSE(!this->_dropProportion.isPresent());
+        THOR_THROW_IF_FALSE(!this->_dropProportion.has_value());
         this->_dropProportion = _dropProportion;
         return *this;
     }
@@ -470,18 +472,18 @@ class Convolution2d::Builder {
     }
 
    private:
-    Optional<Network *> _network;
+    std::optional<Network *> _network;
     std::vector<Tensor> _featureInputs;
-    Optional<uint32_t> _numOutputChannels;
-    Optional<uint32_t> _filterHeight;
-    Optional<uint32_t> _filterWidth;
-    Optional<uint32_t> _verticalStride;
-    Optional<uint32_t> _horizontalStride;
-    Optional<bool> _computeVerticalSamePadding;
-    Optional<bool> _computeHorizontalSamePadding;
-    Optional<uint32_t> _verticalPadding;
-    Optional<uint32_t> _horizontalPadding;
-    Optional<bool> _hasBias;
+    std::optional<uint32_t> _numOutputChannels;
+    std::optional<uint32_t> _filterHeight;
+    std::optional<uint32_t> _filterWidth;
+    std::optional<uint32_t> _verticalStride;
+    std::optional<uint32_t> _horizontalStride;
+    std::optional<bool> _computeVerticalSamePadding;
+    std::optional<bool> _computeHorizontalSamePadding;
+    std::optional<uint32_t> _verticalPadding;
+    std::optional<uint32_t> _horizontalPadding;
+    std::optional<bool> _hasBias;
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasesInitializer;
     std::shared_ptr<Activation> _activation;
@@ -489,12 +491,12 @@ class Convolution2d::Builder {
     std::shared_ptr<Optimizer> _weightsOptimizer;
     std::shared_ptr<Optimizer> _biasesOptimizer;
 
-    Optional<float> _dropProportion;
+    std::optional<float> _dropProportion;
 
-    Optional<bool> _useBatchNormalization;
-    Optional<double> _batchNormExponentialRunningAverageFactor;
-    Optional<double> _batchNormEpsilon;
-    Optional<ThorImplementation::Expression> _epilogue;
+    std::optional<bool> _useBatchNormalization;
+    std::optional<double> _batchNormExponentialRunningAverageFactor;
+    std::optional<double> _batchNormEpsilon;
+    std::optional<ThorImplementation::Expression> _epilogue;
 };
 
 }  // namespace Thor

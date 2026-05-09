@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution3d.h"
 
 #include <stdexcept>
@@ -9,7 +10,7 @@ namespace {
 class Conv3dWeightsParameter : public PhysicalParameter {
    public:
     Conv3dWeightsParameter(std::string name,
-                           Optional<TensorDescriptor::DataType> storageDataType,
+                           std::optional<TensorDescriptor::DataType> storageDataType,
                            bool trainable,
                            bool trainingEnabled,
                            uint32_t numOutputChannels,
@@ -25,7 +26,7 @@ class Conv3dWeightsParameter : public PhysicalParameter {
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
-        TensorDescriptor::DataType resolvedDataType = storageDataType.isPresent() ? storageDataType.get() : inputTensor.getDataType();
+        TensorDescriptor::DataType resolvedDataType = storageDataType.has_value() ? storageDataType.value() : inputTensor.getDataType();
 
         const auto& inputDims = inputTensor.getDimensions();
         if (inputDims.size() != 5) {
@@ -41,13 +42,13 @@ class Conv3dWeightsParameter : public PhysicalParameter {
     const uint32_t filterWidth;
     const uint32_t filterHeight;
     const uint32_t filterDepth;
-    const Optional<TensorDescriptor::DataType> storageDataType;
+    const std::optional<TensorDescriptor::DataType> storageDataType;
 };
 
 class Conv3dBiasesParameter : public PhysicalParameter {
    public:
     Conv3dBiasesParameter(std::string name,
-                          Optional<TensorDescriptor::DataType> storageDataType,
+                          std::optional<TensorDescriptor::DataType> storageDataType,
                           bool trainable,
                           bool trainingEnabled,
                           uint32_t numOutputChannels)
@@ -55,13 +56,13 @@ class Conv3dBiasesParameter : public PhysicalParameter {
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
-        TensorDescriptor::DataType resolvedDataType = storageDataType.isPresent() ? storageDataType.get() : inputTensor.getDataType();
+        TensorDescriptor::DataType resolvedDataType = storageDataType.has_value() ? storageDataType.value() : inputTensor.getDataType();
         storage = Tensor(inputTensor.getPlacement(), TensorDescriptor(resolvedDataType, {numOutputChannels}));
     }
 
    private:
     const uint32_t numOutputChannels;
-    const Optional<TensorDescriptor::DataType> storageDataType;
+    const std::optional<TensorDescriptor::DataType> storageDataType;
 };
 }  // namespace
 
@@ -78,7 +79,7 @@ Convolution3d::Convolution3d(uint32_t filterWidth,
                              uint32_t frontAndBackPadDepth,
                              uint32_t numOutputChannels,
                              bool hasBias,
-                             Optional<DataType> weightsDataType,
+                             std::optional<DataType> weightsDataType,
                              const TensorPlacement& placement,
                              bool inferenceOnly,
                              int64_t stampedId)
@@ -184,7 +185,7 @@ std::vector<std::shared_ptr<PhysicalParameter>> Convolution3d::defineParameters(
                                                                                 uint32_t filterWidth,
                                                                                 uint32_t filterHeight,
                                                                                 uint32_t filterDepth,
-                                                                                Optional<TensorDescriptor::DataType> weightsDataType) {
+                                                                                std::optional<TensorDescriptor::DataType> weightsDataType) {
     std::vector<std::shared_ptr<PhysicalParameter>> parameters;
     parameters.push_back(std::make_shared<Conv3dWeightsParameter>(
         "weights", weightsDataType, true, true, numOutputChannels, filterWidth, filterHeight, filterDepth));

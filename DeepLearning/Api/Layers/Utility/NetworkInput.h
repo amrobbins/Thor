@@ -6,6 +6,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 
 #include <string>
+#include <optional>
 
 namespace Thor {
 
@@ -23,7 +24,10 @@ class NetworkInput : public Layer {
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<NetworkInput>(*this); }
 
-    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override { return {featureOutput}; }
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override {
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        return {featureOutput.value()};
+    }
 
     std::string getLayerType() const override { return "NetworkInput"; }
 
@@ -58,7 +62,7 @@ class NetworkInput : public Layer {
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // Input has a prefetch buffer in addition to storing the output tensor
-        return 2 * featureOutput.get().getTotalSizeInBytes();
+        return 2 * featureOutput.value().getTotalSizeInBytes();
     }
 
    private:
@@ -72,33 +76,33 @@ class NetworkInput : public Layer {
 class NetworkInput::Builder {
    public:
     virtual NetworkInput build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(_dimensions.isPresent());
-        THOR_THROW_IF_FALSE(_dataType.isPresent());
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_dimensions.has_value());
+        THOR_THROW_IF_FALSE(_dataType.has_value());
 
         NetworkInput networkInput;
-        if (_name.isPresent())
-            networkInput.name = _name;
+        if (_name.has_value())
+            networkInput.name = _name.value();
         else
             networkInput.name = std::string("NetworkInput") + std::to_string(networkInput.getId());
-        networkInput.dimensions = _dimensions;
-        networkInput.dataType = _dataType;
-        networkInput.featureInput = Tensor(_dataType, _dimensions);
-        networkInput.featureOutput = Tensor(_dataType, _dimensions);
+        networkInput.dimensions = _dimensions.value();
+        networkInput.dataType = _dataType.value();
+        networkInput.featureInput = Tensor(_dataType.value(), _dimensions.value());
+        networkInput.featureOutput = Tensor(_dataType.value(), _dimensions.value());
         networkInput.initialized = true;
-        networkInput.addToNetwork(_network.get());
+        networkInput.addToNetwork(_network.value());
         return networkInput;
     }
 
     virtual NetworkInput::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual NetworkInput::Builder &name(const std::string &_name) {
         THOR_THROW_IF_FALSE(!_name.empty());
-        THOR_THROW_IF_FALSE(this->_name.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_name.has_value());
         this->_name = _name;
         return *this;
     }
@@ -117,10 +121,10 @@ class NetworkInput::Builder {
     }
 
    private:
-    Optional<std::string> _name;
-    Optional<Network *> _network;
-    Optional<std::vector<uint64_t>> _dimensions;
-    Optional<Tensor::DataType> _dataType;
+    std::optional<std::string> _name;
+    std::optional<Network *> _network;
+    std::optional<std::vector<uint64_t>> _dimensions;
+    std::optional<Tensor::DataType> _dataType;
 };
 
 }  // namespace Thor

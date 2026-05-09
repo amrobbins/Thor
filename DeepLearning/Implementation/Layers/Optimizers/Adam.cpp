@@ -43,8 +43,8 @@ void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
         vParameter->compileStorage(weights);
         vParameter->compileInitializer();
 
-        THOR_THROW_IF_FALSE(mParameter->getStorage().isPresent());
-        THOR_THROW_IF_FALSE(vParameter->getStorage().isPresent());
+        THOR_THROW_IF_FALSE(mParameter->getStorage().has_value());
+        THOR_THROW_IF_FALSE(vParameter->getStorage().has_value());
         mParameter->initialize(gradientUpdateStream);
         vParameter->initialize(gradientUpdateStream);
     }
@@ -62,13 +62,14 @@ void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
     unordered_map<string, Tensor> stampInputs;
     unordered_map<string, Tensor> stampOutputs;
     stampInputs["weights_in"] = weights;
-    stampInputs["gradient"] = weightsGradient;
+    THOR_THROW_IF_FALSE(weightsGradient.has_value());
+    stampInputs["gradient"] = weightsGradient.value();
     stampOutputs["weights"] = weights;
 
-    stampInputs["m_in"] = mParameter->getStorage().get();
-    stampInputs["v_in"] = vParameter->getStorage().get();
-    stampOutputs["m"] = mParameter->getStorage().get();
-    stampOutputs["v"] = vParameter->getStorage().get();
+    stampInputs["m_in"] = mParameter->getStorage().value();
+    stampInputs["v_in"] = vParameter->getStorage().value();
+    stampOutputs["m"] = mParameter->getStorage().value();
+    stampOutputs["v"] = vParameter->getStorage().value();
 
     // Regular Adam:
     // m_{t+1} = beta1 * m_t + (1 - beta1) * g_t
@@ -102,9 +103,9 @@ void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
 
 void Adam::updateWeights(uint32_t batchSize) {
     THOR_THROW_IF_FALSE(compiled);
-    THOR_THROW_IF_FALSE(weightsGradient.isPresent());
-    THOR_THROW_IF_FALSE(weightsGradient.get().isInitialized());
-    THOR_THROW_IF_FALSE(weightsGradient.get().getPlacement() == weights.getPlacement());
+    THOR_THROW_IF_FALSE(weightsGradient.has_value());
+    THOR_THROW_IF_FALSE(weightsGradient.value().isInitialized());
+    THOR_THROW_IF_FALSE(weightsGradient.value().getPlacement() == weights.getPlacement());
     THOR_THROW_IF_FALSE(updateEquationStamped != nullptr);
 
     THOR_THROW_IF_FALSE(batchSize > 0);

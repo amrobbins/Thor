@@ -55,7 +55,7 @@
 //
 // Tensor verifyBatchNormApiLevel(
 //     shared_ptr<BatchNormalization> layer, Tensor inputTensor, double epsilon, double exponentialRunningAverageFactor, shared_ptr<Sgd>
-//     sgd) { EXPECT_EQ(layer->getFeatureInput().get(), inputTensor); float layerEpsilon = layer->getEpsilon(); EXPECT_EQ(layerEpsilon,
+//     sgd) { EXPECT_EQ(layer->getFeatureInput().value(), inputTensor); float layerEpsilon = layer->getEpsilon(); EXPECT_EQ(layerEpsilon,
 //     epsilon); float layerExponentialRunningAverageFactor = layer->getExponentialRunningAverageFactor();
 //     EXPECT_EQ(layerExponentialRunningAverageFactor, exponentialRunningAverageFactor);
 //     verifySgdApiLevel(sgd, dynamic_pointer_cast<Sgd>(layer->getOptimizer()));
@@ -69,20 +69,20 @@
 // }
 //
 // Tensor verifyDropOutApiLevel(shared_ptr<DropOut> layer, Tensor inputTensor, float dropProportion) {
-//     EXPECT_EQ(layer->getFeatureInput().get(), inputTensor);
+//     EXPECT_EQ(layer->getFeatureInput().value(), inputTensor);
 //     EXPECT_EQ(layer->getDropProportion(), dropProportion);
 //     return layer->getFeatureOutput();
 // }
 //
 // Tensor verifyFullyConnectedApiLevel(shared_ptr<FullyConnected> layer, Tensor inputTensor, uint64_t numOutputFeatures) {
-//     EXPECT_EQ(layer->getFeatureInput().get(), inputTensor);
+//     EXPECT_EQ(layer->getFeatureInput().value(), inputTensor);
 //     vector<uint64_t> outputDimensions = {numOutputFeatures};
-//     EXPECT_EQ(layer->getFeatureOutput().get().getDimensions(), outputDimensions);
+//     EXPECT_EQ(layer->getFeatureOutput().value().getDimensions(), outputDimensions);
 //     return layer->getFeatureOutput();
 // }
 //
 // Tensor verifyReluApiLevel(shared_ptr<Relu> layer, Tensor inputTensor) {
-//     EXPECT_EQ(layer->getFeatureInput().get(), inputTensor);
+//     EXPECT_EQ(layer->getFeatureInput().value(), inputTensor);
 //     return layer->getFeatureOutput();
 // }
 //
@@ -93,7 +93,7 @@
 // }
 //
 // void verifyNetworkOutputApiLevel(shared_ptr<NetworkOutput> layer, Tensor inputTensor) {
-//     EXPECT_EQ(layer->getFeatureInput().get(), inputTensor);
+//     EXPECT_EQ(layer->getFeatureInput().value(), inputTensor);
 // }
 //
 // TEST(Network, SaveLoadRoundTripUnstamped) {
@@ -346,7 +346,7 @@
 //             ASSERT_GE(float(biasesMem[i]), -3.01);
 //         }
 //     } else {
-//         ASSERT_TRUE(physicalFullyConnected->getBiases().isEmpty());
+//         ASSERT_TRUE(physicalFullyConnected->!getBiases().has_value());
 //     }
 // }
 //
@@ -513,7 +513,7 @@
 //             ASSERT_GE(float(biasesMem[i]), -3.01);
 //         }
 //     } else {
-//         ASSERT_TRUE(physicalFullyConnected->getBiases().isEmpty());
+//         ASSERT_TRUE(physicalFullyConnected->!getBiases().has_value());
 //     }
 //
 //     // Now let's write some values into the state to ensure that they survive a save/load cycle
@@ -746,6 +746,6 @@
 //             ASSERT_EQ(float(newBiasesMem[i]), float(expectedBiasesMem[i]));
 //         }
 //     } else {
-//         ASSERT_TRUE(newPhysicalFullyConnected->getBiases().isEmpty());
+//         ASSERT_TRUE(newPhysicalFullyConnected->!getBiases().has_value());
 //     }
 // }

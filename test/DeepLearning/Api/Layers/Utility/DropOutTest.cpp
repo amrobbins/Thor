@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -27,15 +28,15 @@ TEST(UtilityApiLayers, DropOutBuilds) {
 
     ASSERT_TRUE(dropOut.isInitialized());
 
-    Optional<Tensor> actualInput = dropOut.getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualInput = dropOut.getFeatureInput();
+    ASSERT_TRUE(actualInput.has_value());
+    ASSERT_EQ(actualInput.value().getDataType(), dataType);
+    ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> actualOutput = dropOut.getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualOutput = dropOut.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.has_value());
+    ASSERT_EQ(actualOutput.value().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.value().getDimensions(), dimensions);
 
     float actualDropProportion = dropOut.getDropProportion();
     ASSERT_EQ(actualDropProportion, dropProportion);
@@ -46,15 +47,15 @@ TEST(UtilityApiLayers, DropOutBuilds) {
 
     ASSERT_TRUE(clone->isInitialized());
 
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.has_value());
+    ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
-    ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.has_value());
+    ASSERT_EQ(cloneOutput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.value().getDimensions(), dimensions);
 
     float cloneDropProportion = clone->getDropProportion();
     ASSERT_EQ(cloneDropProportion, dropProportion);
@@ -91,14 +92,14 @@ TEST(UtilityApiLayers, DropOutSerializeDeserialize) {
     DropOut dropOut = DropOut::Builder()
                           .network(initialNetwork)
                           .dropProportion(dropProportion)
-                          .featureInput(networkInput.getFeatureOutput().get())
+                          .featureInput(networkInput.getFeatureOutput().value())
                           .build();
     ASSERT_TRUE(dropOut.isInitialized());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(dropOut.getFeatureOutput().get())
+                                      .inputTensor(dropOut.getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 
@@ -173,22 +174,22 @@ TEST(UtilityApiLayers, DropOutSerializeDeserialize) {
     ASSERT_EQ(inputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkInput> stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(inputLayers[0]);
     ASSERT_NE(stampedInput, nullptr);
-    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-    ASSERT_EQ(stampedInput->getFeatureOutput().get().getDimensions(), stampedDimensions);
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+    ASSERT_EQ(stampedInput->getFeatureOutput().value().getDimensions(), stampedDimensions);
 
     vector<shared_ptr<ThorImplementation::NetworkOutput>> outputLayers = stampedNetwork.getOutputs();
     ASSERT_EQ(outputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
-    ASSERT_TRUE(stampedOutput->getFeatureInput().isPresent());
-    ASSERT_EQ(stampedOutput->getFeatureOutput().get().getDimensions(), stampedDimensions);
+    ASSERT_TRUE(stampedOutput->getFeatureInput().has_value());
+    ASSERT_EQ(stampedOutput->getFeatureOutput().value().getDimensions(), stampedDimensions);
 
     // Ensure that they are all connected
-    EXPECT_EQ(stampedInput->getFeatureOutput().get(), stampedDropOut->getFeatureInput().get());
-    ASSERT_EQ(stampedDropOut->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+    EXPECT_EQ(stampedInput->getFeatureOutput().value(), stampedDropOut->getFeatureInput().value());
+    ASSERT_EQ(stampedDropOut->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
-    ASSERT_EQ(stampedDropOut->getFeatureInput().get().getDataType(), dataType);
-    ASSERT_EQ(stampedDropOut->getFeatureOutput().get().getDataType(), dataType);
+    ASSERT_EQ(stampedDropOut->getFeatureInput().value().getDataType(), dataType);
+    ASSERT_EQ(stampedDropOut->getFeatureOutput().value().getDataType(), dataType);
 
     ASSERT_EQ(stampedDropOut->getDropOutRate(), dropProportion);
 }

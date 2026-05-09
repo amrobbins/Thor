@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "test/DeepLearning/Implementation/Layers/Helpers/GradientRivet.h"
@@ -42,19 +43,19 @@ class GradientRivet : public Layer {
 class GradientRivet::Builder {
    public:
     virtual GradientRivet build() {
-        assert(_network.isPresent());
-        assert(!_tensor.isEmpty());
+        assert(_network.has_value());
+        assert(_tensor.has_value());
 
         GradientRivet gradientRivet;
         gradientRivet.featureInput = _tensor;
-        gradientRivet.featureOutput = _tensor.get().clone();
+        gradientRivet.featureOutput = _tensor.value().clone();
         gradientRivet.initialized = true;
-        gradientRivet.addToNetwork(_network.get());
+        gradientRivet.addToNetwork(_network.value());
         return gradientRivet;
     }
 
     virtual GradientRivet::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        assert(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
@@ -66,8 +67,8 @@ class GradientRivet::Builder {
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _tensor;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _tensor;
 };
 
 }  // namespace Thor

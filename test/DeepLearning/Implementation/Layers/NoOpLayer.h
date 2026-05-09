@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -9,42 +10,44 @@
  */
 class NoOpLayer : public ThorImplementation::Layer {
    public:
-    NoOpLayer() {}
+    NoOpLayer() = default;
 
-    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
+    void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
         assert(!compiled);
 
-        assert(this->nextLayer.isEmpty());
+        assert(!this->nextLayer.has_value());
         this->nextLayer = nextLayer;
         if (nextLayer->hasFeatureInput())
             featureOutput = createFeatureOutputTensor();
         else
-            featureOutput = Optional<ThorImplementation::Tensor>::empty();
+            featureOutput = std::nullopt;
 
         errorInput = nextLayer->connectToPreviousLayer(this, featureOutput, stream, shouldConnectToBackPropErrorIn(), loaderConnectionType);
 
-        if (errorInput.isPresent() && featureOutput.isPresent()) {
-            assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
-            assert(errorInput.get().getPlacement() == featureOutput.get().getPlacement());
+        if (errorInput.has_value() && featureOutput.has_value()) {
+            assert(errorInput.value().getDescriptor() == featureOutput.value().getDescriptor());
+            assert(errorInput.value().getPlacement() == featureOutput.value().getPlacement());
         }
 
         ensureNoDeviceCrossing();
     }
 
-    virtual void infer(Optional<ThorImplementation::Tensor> inputTensor, Optional<ThorImplementation::Tensor> outputTensor, Stream stream) {
-        if (outputTensor.isPresent()) {
-            assert(inputTensor.isPresent());
-            outputTensor.get().copyFromAsync(inputTensor, stream);
+    void infer(std::optional<ThorImplementation::Tensor> inputTensor,
+               std::optional<ThorImplementation::Tensor> outputTensor,
+               Stream stream) override {
+        if (outputTensor.has_value()) {
+            assert(inputTensor.has_value());
+            outputTensor.value().copyFromAsync(inputTensor.value(), stream);
         }
     }
 
-    virtual void backProp(Optional<ThorImplementation::Tensor> dataIn,
-                          Optional<ThorImplementation::Tensor> errorIn,
-                          Optional<ThorImplementation::Tensor> errorOut,
-                          Stream stream) {
-        if (errorOut.isPresent()) {
-            assert(errorIn.isPresent());
-            errorOut.get().copyFromAsync(errorIn, stream);
+    void backProp(std::optional<ThorImplementation::Tensor> dataIn,
+                  std::optional<ThorImplementation::Tensor> errorIn,
+                  std::optional<ThorImplementation::Tensor> errorOut,
+                  Stream stream) override {
+        if (errorOut.has_value()) {
+            assert(errorIn.has_value());
+            errorOut.value().copyFromAsync(errorIn.value(), stream);
         }
     }
 };

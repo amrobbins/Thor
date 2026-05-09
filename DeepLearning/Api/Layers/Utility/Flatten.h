@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/Utility/Flatten.h"
+#include <optional>
 
 namespace Thor {
 
@@ -29,11 +30,11 @@ class Flatten : public Layer {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput());
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value());
 
         // Implemenattion has 1 extra dimension due to having the batchSize dimension
         std::shared_ptr<ThorImplementation::Flatten> flatten =
-            std::make_shared<ThorImplementation::Flatten>(getFeatureOutput().get().getDimensions().size() + 1);
+            std::make_shared<ThorImplementation::Flatten>(getFeatureOutput().value().getDimensions().size() + 1);
         return flatten;
     }
 
@@ -46,17 +47,17 @@ class Flatten : public Layer {
 class Flatten::Builder {
    public:
     virtual Flatten build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(_featureInput.isPresent());
-        THOR_THROW_IF_FALSE(_numOutputDimensions.isPresent());
-        THOR_THROW_IF_FALSE(_numOutputDimensions.get() < _featureInput.get().getDimensions().size());
-        THOR_THROW_IF_FALSE(_numOutputDimensions.get() > 0);
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.has_value());
+        THOR_THROW_IF_FALSE(_numOutputDimensions.has_value());
+        THOR_THROW_IF_FALSE(_numOutputDimensions.value() < _featureInput.value().getDimensions().size());
+        THOR_THROW_IF_FALSE(_numOutputDimensions.value() > 0);
 
-        std::vector<uint64_t> inputDimensions = _featureInput.get().getDimensions();
+        std::vector<uint64_t> inputDimensions = _featureInput.value().getDimensions();
         THOR_THROW_IF_FALSE(inputDimensions.size() > 0);
         std::vector<uint64_t> outputDimensions;
         for (uint32_t i = 0; i < inputDimensions.size(); ++i) {
-            if (i < _numOutputDimensions)
+            if (i < _numOutputDimensions.value())
                 outputDimensions.push_back(inputDimensions[i]);
             else
                 outputDimensions.back() *= inputDimensions[i];
@@ -64,35 +65,35 @@ class Flatten::Builder {
 
         Flatten flatten;
         flatten.featureInput = _featureInput;
-        flatten.featureOutput = Tensor(_featureInput.get().getDataType(), outputDimensions);
+        flatten.featureOutput = Tensor(_featureInput.value().getDataType(), outputDimensions);
         flatten.initialized = true;
-        flatten.addToNetwork(_network.get());
+        flatten.addToNetwork(_network.value());
         return flatten;
     }
 
     virtual Flatten::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual Flatten::Builder &featureInput(Tensor _featureInput) {
-        THOR_THROW_IF_FALSE(!this->_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
         this->_featureInput = _featureInput;
         return *this;
     }
 
-    virtual Flatten::Builder &numOutputDimensions(float _numOutputDimensions) {
-        THOR_THROW_IF_FALSE(!this->_numOutputDimensions.isPresent());
+    virtual Flatten::Builder &numOutputDimensions(uint32_t _numOutputDimensions) {
+        THOR_THROW_IF_FALSE(!this->_numOutputDimensions.has_value());
         THOR_THROW_IF_FALSE(_numOutputDimensions > 0);
         this->_numOutputDimensions = _numOutputDimensions;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _featureInput;
-    Optional<uint32_t> _numOutputDimensions;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _featureInput;
+    std::optional<uint32_t> _numOutputDimensions;
 };
 
 }  // namespace Thor

@@ -12,16 +12,16 @@ Reshape::~Reshape() = default;
 
 json Reshape::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(featureInput.isPresent());
-    THOR_THROW_IF_FALSE(featureOutput.isPresent());
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
-    j["feature_input"] = featureInput.get().architectureJson();
-    j["feature_output"] = featureOutput.get().architectureJson();
+    j["feature_input"] = featureInput.value().architectureJson();
+    j["feature_output"] = featureOutput.value().architectureJson();
 
     return j;
 }
@@ -44,9 +44,9 @@ void Reshape::deserialize(const json &j, Network *network) {
     reshape.newDimensions = {0U};
     for (uint32_t i = 0; i < featureOutput.getDimensions().size(); ++i)
         reshape.newDimensions.push_back(featureOutput.getDimensions()[i]);
-    if (reshape.featureInput.get().getTotalNumElements() != reshape.featureOutput.get().getTotalNumElements())
-        throw runtime_error("In Reshape::deserialize, input num elements " + to_string(reshape.featureInput.get().getTotalNumElements()) +
-                            ", output num elements " + to_string(reshape.featureOutput.get().getTotalNumElements()) +
+    if (reshape.featureInput.value().getTotalNumElements() != reshape.featureOutput.value().getTotalNumElements())
+        throw runtime_error("In Reshape::deserialize, input num elements " + to_string(reshape.featureInput.value().getTotalNumElements()) +
+                            ", output num elements " + to_string(reshape.featureOutput.value().getTotalNumElements()) +
                             ". These must match.");
     reshape.initialized = true;
     reshape.addToNetwork(network);

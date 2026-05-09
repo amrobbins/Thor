@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Utility/Flatten.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -26,15 +27,15 @@ TEST(UtilityApiLayers, FlattenBuilds) {
 
     ASSERT_TRUE(flatten.isInitialized());
 
-    Optional<Tensor> actualInput = flatten.getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), inputDimensions);
+    std::optional<Tensor> actualInput = flatten.getFeatureInput();
+    ASSERT_TRUE(actualInput.has_value());
+    ASSERT_EQ(actualInput.value().getDataType(), dataType);
+    ASSERT_EQ(actualInput.value().getDimensions(), inputDimensions);
 
-    Optional<Tensor> actualOutput = flatten.getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    vector<uint64_t> outputDimensions = actualOutput.get().getDimensions();
+    std::optional<Tensor> actualOutput = flatten.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.has_value());
+    ASSERT_EQ(actualOutput.value().getDataType(), dataType);
+    vector<uint64_t> outputDimensions = actualOutput.value().getDimensions();
     ASSERT_EQ(outputDimensions.size(), numOutputDimensions);
     uint64_t totalInputElements = 1;
     for (uint32_t i = 0; i < inputDimensions.size(); ++i)
@@ -50,18 +51,18 @@ TEST(UtilityApiLayers, FlattenBuilds) {
 
     ASSERT_TRUE(clone->isInitialized());
 
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), inputDimensions);
+    std::optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.has_value());
+    ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.value().getDimensions(), inputDimensions);
 
     ASSERT_EQ(flatten.getId(), clone->getId());
     ASSERT_GT(flatten.getId(), 1u);
 
     actualOutput = clone->getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    outputDimensions = actualOutput.get().getDimensions();
+    ASSERT_TRUE(actualOutput.has_value());
+    ASSERT_EQ(actualOutput.value().getDataType(), dataType);
+    outputDimensions = actualOutput.value().getDimensions();
     ASSERT_EQ(outputDimensions.size(), numOutputDimensions);
     totalInputElements = 1;
     for (uint32_t i = 0; i < inputDimensions.size(); ++i)
@@ -106,7 +107,7 @@ TEST(UtilityApiLayers, FlattenSerializeDeserialize) {
 
     Flatten flatten = Flatten::Builder()
                           .network(initialNetwork)
-                          .featureInput(networkInput.getFeatureOutput().get())
+                          .featureInput(networkInput.getFeatureOutput().value())
                           .numOutputDimensions(numFlattenedDimensions)
                           .build();
     ASSERT_TRUE(flatten.isInitialized());
@@ -114,7 +115,7 @@ TEST(UtilityApiLayers, FlattenSerializeDeserialize) {
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(flatten.getFeatureOutput().get())
+                                      .inputTensor(flatten.getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 
@@ -192,19 +193,19 @@ TEST(UtilityApiLayers, FlattenSerializeDeserialize) {
 
     shared_ptr<ThorImplementation::NetworkInput> stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(inputLayers[0]);
     ASSERT_NE(stampedInput, nullptr);
-    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-    ASSERT_EQ(stampedInput->getFeatureOutput().get().getDimensions(), stampedDimensions);
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+    ASSERT_EQ(stampedInput->getFeatureOutput().value().getDimensions(), stampedDimensions);
 
     vector<shared_ptr<ThorImplementation::NetworkOutput>> outputLayers = stampedNetwork.getOutputs();
     ASSERT_EQ(outputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
-    ASSERT_EQ(stampedOutput->getFeatureOutput().get().getDimensions(), flattenedStampedDimensions);
+    ASSERT_EQ(stampedOutput->getFeatureOutput().value().getDimensions(), flattenedStampedDimensions);
 
     // Ensure that they are all connected
-    EXPECT_EQ(stampedInput->getFeatureOutput().get(), stampedFlatten->getFeatureInput().get());
-    ASSERT_EQ(stampedFlatten->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+    EXPECT_EQ(stampedInput->getFeatureOutput().value(), stampedFlatten->getFeatureInput().value());
+    ASSERT_EQ(stampedFlatten->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
-    ASSERT_EQ(stampedFlatten->getFeatureInput().get().getDataType(), dataType);
-    ASSERT_EQ(stampedFlatten->getFeatureOutput().get().getDataType(), dataType);
+    ASSERT_EQ(stampedFlatten->getFeatureInput().value().getDataType(), dataType);
+    ASSERT_EQ(stampedFlatten->getFeatureOutput().value().getDataType(), dataType);
 }

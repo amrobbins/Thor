@@ -13,6 +13,7 @@
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 
 #include <stdexcept>
+#include <optional>
 
 using namespace std;
 using json = nlohmann::json;
@@ -129,11 +130,11 @@ json BoundParameter::serialize(json parameterJson,
     }
 
     // Serialize the parameter values
-    Optional<ThorImplementation::Tensor> physicalStorage = physicalParameter->getStorage();
-    THOR_THROW_IF_FALSE(physicalStorage.isPresent());
+    std::optional<ThorImplementation::Tensor> physicalStorage = physicalParameter->getStorage();
+    THOR_THROW_IF_FALSE(physicalStorage.has_value());
     string parameterStorageFile = (filenamePrefix + "_parameter_" + parameterSpecification->getName() + ".gds");
     parameterJson["storage_file"] = parameterStorageFile;
-    archiveWriter.addArchiveFile(parameterStorageFile, physicalStorage.get());
+    archiveWriter.addArchiveFile(parameterStorageFile, physicalStorage.value());
 
     return parameterJson;
 }

@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/Loss/MeanSquaredError.h"
+#include <optional>
 
 namespace Thor {
 
@@ -63,95 +64,95 @@ class MeanSquaredError : public Loss {
 class MeanSquaredError::Builder {
    public:
     virtual MeanSquaredError build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(_predictions.isPresent());
-        THOR_THROW_IF_FALSE(_labels.isPresent());
-        THOR_THROW_IF_FALSE(_predictions.get() != _labels.get());
-        THOR_THROW_IF_FALSE(_predictions.get().getDimensions().size() == 1);
-        THOR_THROW_IF_FALSE(_predictions.get().getDimensions() == _labels.get().getDimensions());
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_predictions.has_value());
+        THOR_THROW_IF_FALSE(_labels.has_value());
+        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+        THOR_THROW_IF_FALSE(_predictions.value().getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
 
-        if (_lossShape.isEmpty())
+        if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
-        if (_lossDataType.isEmpty())
-            _lossDataType = _predictions.get().getDataType();
-        uint32_t batchSize = _predictions.get().getDimensions()[0];
+        if (!_lossDataType.has_value())
+            _lossDataType = _predictions.value().getDataType();
+        uint32_t batchSize = _predictions.value().getDimensions()[0];
 
         MeanSquaredError meanSquaredError;
-        meanSquaredError.predictionsTensor = _predictions;
-        meanSquaredError.labelsTensor = _labels;
-        meanSquaredError.lossDataType = _lossDataType;
-        meanSquaredError.lossShape = _lossShape;
-        meanSquaredError.network = _network;
+        meanSquaredError.predictionsTensor = _predictions.value();
+        meanSquaredError.labelsTensor = _labels.value();
+        meanSquaredError.lossDataType = _lossDataType.value();
+        meanSquaredError.lossShape = _lossShape.value();
+        meanSquaredError.network = _network.value();
         meanSquaredError.initialized = true;
 
         if (meanSquaredError.isMultiLayer()) {
             meanSquaredError.buildSupportLayersAndAddToNetwork();
         } else {
             // lossTensor is the one that comes directly out of MeanSquaredError, that may be replaced by a loss shaper.
-            meanSquaredError.lossTensor = Tensor(_lossDataType, {batchSize});
+            meanSquaredError.lossTensor = Tensor(_lossDataType.value(), {batchSize});
             meanSquaredError.lossShaperInput = meanSquaredError.lossTensor;
-            meanSquaredError.addToNetwork(_network.get());
+            meanSquaredError.addToNetwork(_network.value());
         }
 
         return meanSquaredError;
     }
 
     virtual MeanSquaredError::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &predictions(Tensor _predictions) {
-        THOR_THROW_IF_FALSE(!this->_predictions.isPresent());
+        THOR_THROW_IF_FALSE(!this->_predictions.has_value());
         THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
         this->_predictions = _predictions;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &labels(Tensor _labels) {
-        THOR_THROW_IF_FALSE(!this->_labels.isPresent());
+        THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsBatchLoss() {
-        THOR_THROW_IF_FALSE(this->_lossShape.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::BATCH;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsElementwiseLoss() {
-        THOR_THROW_IF_FALSE(this->_lossShape.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsPerOutputLoss() {
-        THOR_THROW_IF_FALSE(this->_lossShape.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::CLASSWISE;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsRawLoss() {
-        THOR_THROW_IF_FALSE(this->_lossShape.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::RAW;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &lossDataType(Tensor::DataType _lossDataType) {
-        THOR_THROW_IF_FALSE(this->_lossDataType.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         this->_lossDataType = _lossDataType;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _predictions;
-    Optional<Tensor> _labels;
-    Optional<LossShape> _lossShape;
-    Optional<Tensor::DataType> _lossDataType;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _predictions;
+    std::optional<Tensor> _labels;
+    std::optional<LossShape> _lossShape;
+    std::optional<Tensor::DataType> _lossDataType;
 };
 
 }  // namespace Thor

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
@@ -27,11 +28,11 @@ class LossShaper : public Layer {
     LossShaper(OutputLossType outputLossType);
     ~LossShaper() override;
 
-    Optional<Tensor> createFeatureOutputTensor() override;
+    std::optional<Tensor> createFeatureOutputTensor() override;
     void compileImpl() override;
-    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override;
-    virtual void backward(Optional<Tensor> errorInput);
-    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override;
+    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override;
+    virtual void backward(std::optional<Tensor> errorInput);
+    void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override;
 
     std::string getType() override;
 

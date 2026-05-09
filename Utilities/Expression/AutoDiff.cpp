@@ -140,14 +140,14 @@ bool resolveBroadcastedDims(const std::vector<std::vector<uint64_t>>& inputs, st
 
 std::vector<uint64_t> applySqueezeDims(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& squeeze_axes);
 
-Optional<TensorDescriptor::DataType> preferredGradValueDType(const ExprNode& forward_node) {
-    if (forward_node.backward_output_dtype.isPresent()) {
+std::optional<TensorDescriptor::DataType> preferredGradValueDType(const ExprNode& forward_node) {
+    if (forward_node.backward_output_dtype.has_value()) {
         return forward_node.backward_output_dtype;
     }
-    if (forward_node.output_dtype.isPresent()) {
+    if (forward_node.output_dtype.has_value()) {
         return forward_node.output_dtype;
     }
-    return Optional<TensorDescriptor::DataType>::empty();
+    return std::nullopt;
 }
 
 std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& expr, const std::vector<std::string>& wrt_names) {
@@ -249,12 +249,12 @@ class BackwardGraphBuilder {
         grad_expr.inputs = forward_expr.inputs;
     }
 
-    uint32_t input(const std::string& name, Optional<TensorDescriptor::DataType> as_type = Optional<TensorDescriptor::DataType>::empty()) {
+    uint32_t input(const std::string& name, std::optional<TensorDescriptor::DataType> as_type = std::nullopt) {
         ExprNode node{};
         node.op = ExprOp::INPUT;
         node.input_slot = grad_expr.getOrCreateInputSlot(name);
-        if (as_type.isPresent()) {
-            node.output_dtype = as_type.get();
+        if (as_type.has_value()) {
+            node.output_dtype = as_type.value();
         }
         return push(std::move(node));
     }
@@ -268,7 +268,7 @@ class BackwardGraphBuilder {
 
     uint32_t fill(double value,
                   const std::vector<uint64_t>& dims,
-                  Optional<TensorDescriptor::DataType> as_type = Optional<TensorDescriptor::DataType>::empty()) {
+                  std::optional<TensorDescriptor::DataType> as_type = std::nullopt) {
         if (dims.empty()) {
             return scalar(value);
         }
@@ -277,15 +277,15 @@ class BackwardGraphBuilder {
         node.op = ExprOp::FILL;
         node.scalar_fp = value;
         node.fill_dims = dims;
-        if (as_type.isPresent()) {
-            node.output_dtype = as_type.get();
+        if (as_type.has_value()) {
+            node.output_dtype = as_type.value();
         }
         return push(std::move(node));
     }
 
     uint32_t constantLike(double value,
                           const std::vector<uint64_t>& dims,
-                          Optional<TensorDescriptor::DataType> as_type = Optional<TensorDescriptor::DataType>::empty()) {
+                          std::optional<TensorDescriptor::DataType> as_type = std::nullopt) {
         return dims.empty() ? scalar(value) : fill(value, dims, as_type);
     }
 
@@ -569,19 +569,19 @@ class BackwardGraphBuilder {
                     uint32_t rhs,
                     bool transpose_lhs = false,
                     bool transpose_rhs = false,
-                    Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                    Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+                    std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
+                    std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
         ExprNode node{};
         node.op = ExprOp::MATMUL;
         node.lhs = lhs;
         node.rhs = rhs;
         node.transpose_lhs = transpose_lhs;
         node.transpose_rhs = transpose_rhs;
-        if (output_dtype.isPresent()) {
-            node.output_dtype = output_dtype.get();
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
         }
-        if (compute_dtype.isPresent()) {
-            node.compute_dtype = compute_dtype.get();
+        if (compute_dtype.has_value()) {
+            node.compute_dtype = compute_dtype.value();
         }
         return push(std::move(node));
     }
@@ -594,8 +594,8 @@ class BackwardGraphBuilder {
                   bool transpose_lhs = false,
                   bool transpose_rhs = false,
                   bool transpose_addend = false,
-                  Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                  Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+                  std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
+                  std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
         ExprNode node{};
         node.op = ExprOp::GEMM;
         node.lhs = lhs;
@@ -606,11 +606,11 @@ class BackwardGraphBuilder {
         node.transpose_lhs = transpose_lhs;
         node.transpose_rhs = transpose_rhs;
         node.transpose_aux = transpose_addend;
-        if (output_dtype.isPresent()) {
-            node.output_dtype = output_dtype.get();
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
         }
-        if (compute_dtype.isPresent()) {
-            node.compute_dtype = compute_dtype.get();
+        if (compute_dtype.has_value()) {
+            node.compute_dtype = compute_dtype.value();
         }
         return push(std::move(node));
     }
@@ -622,8 +622,8 @@ class BackwardGraphBuilder {
                                 int32_t pad_h,
                                 int32_t pad_w,
                                 const std::vector<uint64_t>& target_output_dims = {},
-                                Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                                Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+                                std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
+                                std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
         ExprNode node{};
         node.op = ExprOp::CONV2D_BACKWARD_DATA;
         node.lhs = filter;
@@ -633,11 +633,11 @@ class BackwardGraphBuilder {
         node.conv_pad_h = pad_h;
         node.conv_pad_w = pad_w;
         node.fill_dims = target_output_dims;
-        if (output_dtype.isPresent()) {
-            node.output_dtype = output_dtype.get();
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
         }
-        if (compute_dtype.isPresent()) {
-            node.compute_dtype = compute_dtype.get();
+        if (compute_dtype.has_value()) {
+            node.compute_dtype = compute_dtype.value();
         }
         return push(std::move(node));
     }
@@ -649,8 +649,8 @@ class BackwardGraphBuilder {
                                   int32_t pad_h,
                                   int32_t pad_w,
                                   const std::vector<uint64_t>& target_output_dims = {},
-                                  Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                                  Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+                                  std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
+                                  std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
         ExprNode node{};
         node.op = ExprOp::CONV2D_BACKWARD_FILTER;
         node.lhs = input;
@@ -660,11 +660,11 @@ class BackwardGraphBuilder {
         node.conv_pad_h = pad_h;
         node.conv_pad_w = pad_w;
         node.fill_dims = target_output_dims;
-        if (output_dtype.isPresent()) {
-            node.output_dtype = output_dtype.get();
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
         }
-        if (compute_dtype.isPresent()) {
-            node.compute_dtype = compute_dtype.get();
+        if (compute_dtype.has_value()) {
+            node.compute_dtype = compute_dtype.value();
         }
         return push(std::move(node));
     }
@@ -678,8 +678,8 @@ class BackwardGraphBuilder {
                                 int32_t pad_h,
                                 int32_t pad_w,
                                 const std::vector<uint64_t>& target_output_dims = {},
-                                Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                                Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+                                std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
+                                std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
         ExprNode node{};
         node.op = ExprOp::CONV3D_BACKWARD_DATA;
         node.lhs = filter;
@@ -691,11 +691,11 @@ class BackwardGraphBuilder {
         node.conv_pad_h = pad_h;
         node.conv_pad_w = pad_w;
         node.fill_dims = target_output_dims;
-        if (output_dtype.isPresent()) {
-            node.output_dtype = output_dtype.get();
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
         }
-        if (compute_dtype.isPresent()) {
-            node.compute_dtype = compute_dtype.get();
+        if (compute_dtype.has_value()) {
+            node.compute_dtype = compute_dtype.value();
         }
         return push(std::move(node));
     }
@@ -709,8 +709,8 @@ class BackwardGraphBuilder {
                                   int32_t pad_h,
                                   int32_t pad_w,
                                   const std::vector<uint64_t>& target_output_dims = {},
-                                  Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                                  Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+                                  std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
+                                  std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
         ExprNode node{};
         node.op = ExprOp::CONV3D_BACKWARD_FILTER;
         node.lhs = input;
@@ -722,11 +722,11 @@ class BackwardGraphBuilder {
         node.conv_pad_h = pad_h;
         node.conv_pad_w = pad_w;
         node.fill_dims = target_output_dims;
-        if (output_dtype.isPresent()) {
-            node.output_dtype = output_dtype.get();
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
         }
-        if (compute_dtype.isPresent()) {
-            node.compute_dtype = compute_dtype.get();
+        if (compute_dtype.has_value()) {
+            node.compute_dtype = compute_dtype.value();
         }
         return push(std::move(node));
     }
@@ -735,7 +735,7 @@ class BackwardGraphBuilder {
                        uint32_t lhs,
                        const std::vector<uint64_t>& reduction_axes,
                        const std::vector<uint64_t>& squeeze_axes,
-                       Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+                       std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
         ExprNode node{};
         node.op = op;
         node.lhs = lhs;
@@ -759,8 +759,8 @@ class BackwardGraphBuilder {
                                   uint32_t grad,
                                   const std::vector<uint64_t>& reduction_axes,
                                   const std::vector<uint64_t>& squeeze_axes,
-                                  Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                                  Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+                                  std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
+                                  std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
         if (op != ExprOp::REDUCE_MIN_BACKWARD && op != ExprOp::REDUCE_MAX_BACKWARD) {
             throw std::runtime_error("reduceMinMaxBackward requires REDUCE_MIN_BACKWARD or REDUCE_MAX_BACKWARD.");
         }
@@ -785,17 +785,17 @@ class BackwardGraphBuilder {
 
     uint32_t addNoFold(uint32_t lhs,
                        uint32_t rhs,
-                       Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                       Optional<TensorDescriptor::DataType> backward_output_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+                       std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
+                       std::optional<TensorDescriptor::DataType> backward_output_dtype = std::nullopt) {
         ExprNode node{};
         node.op = ExprOp::ADD;
         node.lhs = lhs;
         node.rhs = rhs;
-        if (output_dtype.isPresent()) {
-            node.output_dtype = output_dtype.get();
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
         }
-        if (backward_output_dtype.isPresent()) {
-            node.backward_output_dtype = backward_output_dtype.get();
+        if (backward_output_dtype.has_value()) {
+            node.backward_output_dtype = backward_output_dtype.value();
         }
         return push(std::move(node));
     }
@@ -1633,8 +1633,8 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
     auto broadcastGradToDims = [&](uint32_t grad_value,
                                    const std::vector<uint64_t>& target_dims,
-                                   Optional<TensorDescriptor::DataType> as_type =
-                                       Optional<TensorDescriptor::DataType>::empty()) -> uint32_t {
+                                   std::optional<TensorDescriptor::DataType> as_type =
+                                       std::nullopt) -> uint32_t {
         if (!has_forward_dims || target_dims.empty()) {
             return grad_value;
         }
@@ -2311,7 +2311,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                                                          rhs,
                                                          node.transpose_lhs,
                                                          node.transpose_rhs,
-                                                         Optional<TensorDescriptor::DataType>::empty(),
+                                                         std::nullopt,
                                                          node.compute_dtype);
 
                     uint32_t alpha_grad = builder.mul(grad_like_output, alpha_term);
@@ -2363,7 +2363,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
     struct PendingBackwardOutput {
         std::string name;
         uint32_t node_idx;
-        Optional<TensorDescriptor::DataType> target_output_dtype;
+        std::optional<TensorDescriptor::DataType> target_output_dtype;
     };
 
     std::vector<PendingBackwardOutput> pending_outputs;
@@ -2387,7 +2387,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         }
 
         const ExprNode& forward_input_node = forward_expr.nodes.at(first_it->second);
-        const Optional<TensorDescriptor::DataType> grad_dtype = preferredGradValueDType(forward_input_node);
+        const std::optional<TensorDescriptor::DataType> grad_dtype = preferredGradValueDType(forward_input_node);
         const std::string grad_output_name = wrt_name + "_grad";
 
         std::optional<uint32_t> total_grad;
@@ -2422,7 +2422,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         // Create a dedicated terminal output node so we can force only the final
         // written grad dtype, while leaving internal promoted compute untouched.
         uint32_t terminal_grad = total_grad.value();
-        if (grad_dtype.isPresent()) {
+        if (grad_dtype.has_value()) {
             uint32_t zero_like;
             if (has_forward_dims) {
                 zero_like = builder.fill(0.0, forward_node_dims.at(first_it->second), grad_dtype);

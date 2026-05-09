@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -37,64 +38,64 @@ class Map : public Layer {
         backwardPassMappingOfNTo1Device = backwardPassMappingDevice;
     }
 
-    Optional<Tensor> createFeatureOutputTensor() override {
+    std::optional<Tensor> createFeatureOutputTensor() override {
         THOR_THROW_IF_FALSE(!uninitialized);
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.has_value());
 
-        TensorDescriptor newDescriptor = TensorDescriptor(featureInput.get().getDescriptor().getDataType(),
+        TensorDescriptor newDescriptor = TensorDescriptor(featureInput.value().getDescriptor().getDataType(),
                                                           mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
-        return Tensor(featureInput.get().getPlacement(), newDescriptor);
+        return Tensor(featureInput.value().getPlacement(), newDescriptor);
     }
 
     void compileImpl() override {
         Layer::compileImpl();
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions() == sourceDimensions);
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions() == sourceDimensions);
 
-        THOR_THROW_IF_FALSE(mappingOfSourceTensorIntoDestTensor.getPlacement() == featureInput.get().getPlacement());
-        THOR_THROW_IF_FALSE(featureOutput.get().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
-        if (errorInput.isPresent())
-            THOR_THROW_IF_FALSE(errorInput.get().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
-        if (errorOutput.isPresent() && backwardPassMappingOfNTo1Device.empty()) {
+        THOR_THROW_IF_FALSE(mappingOfSourceTensorIntoDestTensor.getPlacement() == featureInput.value().getPlacement());
+        THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
+        if (errorInput.has_value())
+            THOR_THROW_IF_FALSE(errorInput.value().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
+        if (errorOutput.has_value() && backwardPassMappingOfNTo1Device.empty()) {
             THOR_THROW_IF_FALSE(!backwardPassMappingOfNTo1Host.empty());
             for (auto it = backwardPassMappingOfNTo1Host.begin(); it != backwardPassMappingOfNTo1Host.end(); ++it) {
                 uint64_t N = it->first;
                 Tensor mappingTensorHost = it->second;
-                backwardPassMappingOfNTo1Device[N] = mappingTensorHost.clone(featureInput.get().getPlacement());
-                backwardPassMappingOfNTo1Device[N].copyFromAsync(featureInput, stream);
+                backwardPassMappingOfNTo1Device[N] = mappingTensorHost.clone(featureInput.value().getPlacement());
+                backwardPassMappingOfNTo1Device[N].copyFromAsync(featureInput.value(), stream);
             }
             stream.synchronize();
         }
     }
 
-    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {
         THOR_THROW_IF_FALSE(!uninitialized);
-        THOR_THROW_IF_FALSE(inputTensor.isPresent());
-        THOR_THROW_IF_FALSE(outputTensor.isPresent());
+        THOR_THROW_IF_FALSE(inputTensor.has_value());
+        THOR_THROW_IF_FALSE(outputTensor.has_value());
 
-        ScopedGpu scopedGpu(inputTensor.get().getPlacement().getDeviceNum());
-        launchMap<INDEX_TYPE>((half *)outputTensor.get().getMemPtr(),
-                              (half *)inputTensor.get().getMemPtr(),
+        ScopedGpu scopedGpu(inputTensor.value().getPlacement().getDeviceNum());
+        launchMap<INDEX_TYPE>((half *)outputTensor.value().getMemPtr(),
+                              (half *)inputTensor.value().getMemPtr(),
                               (INDEX_TYPE *)mappingOfSourceTensorIntoDestTensor.getMemPtr(),
                               (INDEX_TYPE)mappingOfSourceTensorIntoDestTensor.getDescriptor().getTotalNumElements(),
                               stream);
     }
 
-    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
+    void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override {
         THOR_THROW_IF_FALSE(!uninitialized);
-        if (errorOut.isEmpty())
+        if (!errorOut.has_value())
             return;
-        THOR_THROW_IF_FALSE(errorIn.isPresent());
+        THOR_THROW_IF_FALSE(errorIn.has_value());
 
-        ScopedGpu scopedGpu(errorIn.get().getPlacement().getDeviceNum());
+        ScopedGpu scopedGpu(errorIn.value().getPlacement().getDeviceNum());
 
         for (auto it = backwardPassMappingOfNTo1Device.begin(); it != backwardPassMappingOfNTo1Device.end(); ++it) {
             int N = it->first;
             Tensor nMappingTensor = it->second;
             THOR_THROW_IF_FALSE(nMappingTensor.getDescriptor().getTotalNumElements() % (N + 1) == 0);
             launchMapNInto1<INDEX_TYPE>(N,
-                                        (half *)errorOut.get().getMemPtr(),
-                                        (half *)errorIn.get().getMemPtr(),
+                                        (half *)errorOut.value().getMemPtr(),
+                                        (half *)errorIn.value().getMemPtr(),
                                         (INDEX_TYPE *)nMappingTensor.getMemPtr(),
                                         (INDEX_TYPE)nMappingTensor.getDescriptor().getTotalNumElements() / (N + 1),
                                         stream);

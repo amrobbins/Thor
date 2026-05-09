@@ -1,3 +1,4 @@
+#include <optional>
 // #pragma once
 //
 // #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
@@ -89,21 +90,21 @@
 //           attentionDropOutProbability(attentionDropOutProbability),
 //           postAttentionDropOutProbability(postAttentionDropOutProbability) {}
 //
-//     virtual Optional<Tensor> createFeatureOutputTensor() {
+//     virtual std::optional<Tensor> createFeatureOutputTensor() {
 //         THOR_THROW_IF_FALSE(!featureInputs.empty());
-//         THOR_THROW_IF_FALSE(featureInputs.back().isPresent());
+//         THOR_THROW_IF_FALSE(featureInputs.back().has_value());
 //
-//         return Tensor(featureInputs.back().get().getPlacement(),
+//         return Tensor(featureInputs.back().value().getPlacement(),
 //                       TensorDescriptor(TensorDescriptor::DataType::FP16,
-//                                        {featureInputs[0].get().getDescriptor().getDimensions()[0], numOutputFeatures}));
+//                                        {featureInputs[0].value().getDescriptor().getDimensions()[0], numOutputFeatures}));
 //     }
 //
 //     virtual void createWeightsIfNecessary() {
 //         if (!usingSharedWeights && !weights.isInitialized()) {
 //             std::vector<unsigned long> weightsDimensions;
-//             Optional<Tensor> maybeAFeatureInput = getFirstPresentTensor(featureInputs);
-//             THOR_THROW_IF_FALSE(maybeAFeatureInput.isPresent());
-//             Tensor aFeatureInput = maybeAFeatureInput.get();
+//             std::optional<Tensor> maybeAFeatureInput = getFirstPresentTensor(featureInputs);
+//             THOR_THROW_IF_FALSE(maybeAFeatureInput.has_value());
+//             Tensor aFeatureInput = maybeAFeatureInput.value();
 //             THOR_THROW_IF_FALSE(aFeatureInput.getDimensions().size() == 2);
 //             weightsDimensions.push_back(aFeatureInput.getDescriptor().getDimensions()[1]);
 //             weightsDimensions.push_back(numOutputFeatures);
@@ -118,15 +119,15 @@
 //     virtual void compile() {
 //         int gpuNum;
 //         THOR_THROW_IF_FALSE(!featureInputs.empty());
-//         THOR_THROW_IF_FALSE(featureInputs[0].isPresent());
-//         THOR_THROW_IF_FALSE(featureInputs[0].get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+//         THOR_THROW_IF_FALSE(featureInputs[0].has_value());
+//         THOR_THROW_IF_FALSE(featureInputs[0].value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 //         THOR_THROW_IF_FALSE(!streams.empty());
-//         gpuNum = featureInputs[0].get().getPlacement().getDeviceNum();
+//         gpuNum = featureInputs[0].value().getPlacement().getDeviceNum();
 //         ScopedGpu scopedGpu(gpuNum);
 //
 //         cudnnStatus_t cudnnStatus;
-//         batchSize = featureInputs[0].get().getDescriptor().getDimensions()[0];
-//         numInputFeatures = featureInputs[0].get().getDescriptor().getDimensions()[1];
+//         batchSize = featureInputs[0].value().getDescriptor().getDimensions()[0];
+//         numInputFeatures = featureInputs[0].value().getDescriptor().getDimensions()[1];
 //
 //         attentionDescriptor = AttentionDescriptor(
 //             numHeads,
@@ -145,7 +146,7 @@
 //             queryMapping,
 //             attentionDropOutProbability,
 //             postAttentionDropOutProbability,
-//             featureInputs[0].get().getPlacement(),
+//             featureInputs[0].value().getPlacement(),
 //             streams[0].getCudnnHandle());
 //
 //
@@ -157,34 +158,34 @@
 //         }
 //     }
 //
-//     virtual void setOptimizer(Optional<std::shared_ptr<Optimizer>> optimizer) {
+//     virtual void setOptimizer(std::optional<std::shared_ptr<Optimizer>> optimizer) {
 //         TrainableWeightsBiasesLayer::setOptimizer(optimizer);
 //
 //         if (!isInferenceOnly()) {
-//             THOR_THROW_IF_FALSE(optimizer.isPresent());
-//             Optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
-//             THOR_THROW_IF_FALSE(anErrorInput.isPresent());
+//             THOR_THROW_IF_FALSE(optimizer.has_value());
+//             std::optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
+//             THOR_THROW_IF_FALSE(anErrorInput.has_value());
 //             biasBatchReduce = std::unique_ptr<BatchReduce>(new BatchReduce(batchSize,
 //                                                                            batchSize,
-//                                                                            anErrorInput.get().getDimensions()[1],
+//                                                                            anErrorInput.value().getDimensions()[1],
 //                                                                            true,
 //                                                                            false,
 //                                                                            ThorImplementation::TensorDescriptor::DataType::FP16,
 //                                                                            ThorImplementation::TensorDescriptor::DataType::FP16,
-//                                                                            optimizer.get()->getGradientUpdateStream(),
+//                                                                            optimizer.value()->getGradientUpdateStream(),
 //                                                                            false));
 //         }
 //     }
 //
-//     virtual void infer(Optional<Tensor> inputTensor,
-//                        Optional<Tensor> outputTensor,
+//     virtual void infer(std::optional<Tensor> inputTensor,
+//                        std::optional<Tensor> outputTensor,
 //                        Stream stream,
 //                        unsigned int connectionNumber,
 //                        Tensor weights,
-//                        Optional<Tensor> biases) {
-//         THOR_THROW_IF_FALSE(inputTensor.isPresent());
-//         THOR_THROW_IF_FALSE(outputTensor.isPresent());
-//         THOR_THROW_IF_FALSE(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+//                        std::optional<Tensor> biases) {
+//         THOR_THROW_IF_FALSE(inputTensor.has_value());
+//         THOR_THROW_IF_FALSE(outputTensor.has_value());
+//         THOR_THROW_IF_FALSE(inputTensor.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 //
 //         CublasMatrixMultiply::instance().multiply(inputTensor,
 //                                                   weights,
@@ -202,31 +203,31 @@
 //                                                   stream);
 //
 //         if (hasBias) {
-//             THOR_THROW_IF_FALSE(biases.isPresent());
-//             THOR_THROW_IF_FALSE(cudnnBiasDescriptor.isPresent());
-//             THOR_THROW_IF_FALSE(cudnnFeatureOutputDescriptor.isPresent());
+//             THOR_THROW_IF_FALSE(biases.has_value());
+//             THOR_THROW_IF_FALSE(cudnnBiasDescriptor.has_value());
+//             THOR_THROW_IF_FALSE(cudnnFeatureOutputDescriptor.has_value());
 //
 //             cudnnAddTensor(stream.getCudnnHandle(),
 //                            &ALPHA_NO_SCALE,
-//                            cudnnBiasDescriptor.get(),
-//                            biases.get().getMemPtr(),
+//                            cudnnBiasDescriptor.value(),
+//                            biases.value().getMemPtr(),
 //                            &BETA_ACCUMULATE,
-//                            cudnnFeatureOutputDescriptor.get(),
-//                            outputTensor.get().getMemPtr());
+//                            cudnnFeatureOutputDescriptor.value(),
+//                            outputTensor.value().getMemPtr());
 //         }
 //     }
 //
 //     // Note: backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient
-//     stream virtual void backProp(Optional<Tensor> dataIn,
-//                           Optional<Tensor> errorIn,
-//                           Optional<Tensor> errorOut,
+//     stream virtual void backProp(std::optional<Tensor> dataIn,
+//                           std::optional<Tensor> errorIn,
+//                           std::optional<Tensor> errorOut,
 //                           Stream dataStream,
 //                           unsigned int connectionNumber,
 //                           bool accumulateGradient) {
-//         THOR_THROW_IF_FALSE(errorIn.isPresent());
-//         THOR_THROW_IF_FALSE(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+//         THOR_THROW_IF_FALSE(errorIn.has_value());
+//         THOR_THROW_IF_FALSE(errorIn.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 //
-//         if (errorOut.isPresent()) {
+//         if (errorOut.has_value()) {
 //             THOR_THROW_IF_FALSE(dataStream.isInitialized());
 //
 //             CublasMatrixMultiply::instance().multiply(errorIn,
@@ -246,20 +247,20 @@
 //         }
 //
 //         if (!isInferenceOnly()) {
-//             THOR_THROW_IF_FALSE(optimizer.isPresent());
+//             THOR_THROW_IF_FALSE(optimizer.has_value());
 //
 //             // backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient
-//             stream optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
+//             stream optimizer.value()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
 //
 //             // weights update cannot be applied to weights until errorOut has been computed since weights are part of that computation
 //             // so to enforce this gradientUpdateStream says that gradient is not ready to be applied until both errorOut and gradient are
 //             // computed
-//             optimizer.get()->getGradientUpdateStream().waitEvent(dataStream.putEvent());
+//             optimizer.value()->getGradientUpdateStream().waitEvent(dataStream.putEvent());
 //             // Now at the end of gradientUpdateStream errorOut and gradients are ready from the updates for this connection.
 //
 //             // Upon processing the last connection, schedule the upate to the weights memory.
 //             if (stillWaitingForErrorInputTensors.empty()) {
-//                 optimizer.get()->updateWeights(weights, biases, batchSize);
+//                 optimizer.value()->updateWeights(weights, biases, batchSize);
 //             }
 //
 //             // weights will be updated at the current end of the gradientUpdateStream
@@ -270,30 +271,30 @@
 //
 //     // Compute the weights gradient for the specified connection number, accumulate as necessary.
 //     // This computation runs on optimizer.gradientUpdateStream.
-//     virtual void computeWeightsGradient(Optional<Tensor> weightsGradient,
-//                                         Optional<Tensor> biasesGradient,
-//                                         Optional<Tensor> featureIn,
-//                                         Optional<Tensor> errorIn,
+//     virtual void computeWeightsGradient(std::optional<Tensor> weightsGradient,
+//                                         std::optional<Tensor> biasesGradient,
+//                                         std::optional<Tensor> featureIn,
+//                                         std::optional<Tensor> errorIn,
 //                                         Stream gradientUpdateStream,
 //                                         bool accumulateGradient) {
 //         // Ensure all memory properly allocated
-//         THOR_THROW_IF_FALSE(weightsGradient.isPresent());
-//         THOR_THROW_IF_FALSE(weightsGradient.get().getDescriptor() == weights.getDescriptor());
-//         THOR_THROW_IF_FALSE(weightsGradient.get().getPlacement() == weights.getPlacement());
-//         THOR_THROW_IF_FALSE(weightsGradient.get().getMemPtr() != weights.getMemPtr());
+//         THOR_THROW_IF_FALSE(weightsGradient.has_value());
+//         THOR_THROW_IF_FALSE(weightsGradient.value().getDescriptor() == weights.getDescriptor());
+//         THOR_THROW_IF_FALSE(weightsGradient.value().getPlacement() == weights.getPlacement());
+//         THOR_THROW_IF_FALSE(weightsGradient.value().getMemPtr() != weights.getMemPtr());
 //         if (hasBias) {
-//             THOR_THROW_IF_FALSE(biasesGradient.isPresent());
-//             THOR_THROW_IF_FALSE(biases.isPresent());
-//             THOR_THROW_IF_FALSE(biasesGradient.get().getDescriptor() == biasesGradient.get().getDescriptor());
-//             THOR_THROW_IF_FALSE(biasesGradient.get().getMemPtr() != biases.get().getMemPtr());
-//             THOR_THROW_IF_FALSE(biasesGradient.get().getPlacement() == biases.get().getPlacement());
+//             THOR_THROW_IF_FALSE(biasesGradient.has_value());
+//             THOR_THROW_IF_FALSE(biases.has_value());
+//             THOR_THROW_IF_FALSE(biasesGradient.value().getDescriptor() == biasesGradient.value().getDescriptor());
+//             THOR_THROW_IF_FALSE(biasesGradient.value().getMemPtr() != biases.value().getMemPtr());
+//             THOR_THROW_IF_FALSE(biasesGradient.value().getPlacement() == biases.value().getPlacement());
 //         } else {
-//             THOR_THROW_IF_FALSE(biasesGradient.isEmpty());
+//             THOR_THROW_IF_FALSE(!biasesGradient.has_value());
 //         }
 //
-//         if (errorIn.isEmpty())
+//         if (!errorIn.has_value())
 //             return;
-//         THOR_THROW_IF_FALSE(featureIn.isPresent());
+//         THOR_THROW_IF_FALSE(featureIn.has_value());
 //
 //         CublasMatrixMultiply::instance().multiply(featureIn,
 //                                                   errorIn,
@@ -316,10 +317,10 @@
 //     }
 //
 //     uint64_t flopsPerConnectionPerExample() {
-//         Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
-//         Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-//         THOR_THROW_IF_FALSE(anyFeatureInput.isPresent());
-//         THOR_THROW_IF_FALSE(anyFeatureOutput.isPresent());
+//         std::optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
+//         std::optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+//         THOR_THROW_IF_FALSE(anyFeatureInput.has_value());
+//         THOR_THROW_IF_FALSE(anyFeatureOutput.has_value());
 //         uint64_t flops = 2 * numInputFeatures * numOutputFeatures - numOutputFeatures;
 //         if (hasBias)
 //             flops += numOutputFeatures;
@@ -327,10 +328,10 @@
 //     }
 //
 //     uint64_t flopsPerGradientUpdatePerExample() {
-//         Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
-//         Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-//         THOR_THROW_IF_FALSE(anyFeatureInput.isPresent());
-//         THOR_THROW_IF_FALSE(anyFeatureOutput.isPresent());
+//         std::optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
+//         std::optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+//         THOR_THROW_IF_FALSE(anyFeatureInput.has_value());
+//         THOR_THROW_IF_FALSE(anyFeatureOutput.has_value());
 //         uint64_t flops = numInputFeatures * numOutputFeatures;
 //         if (hasBias)
 //             flops += numOutputFeatures;
@@ -340,7 +341,7 @@
 //     virtual uint64_t floatingPointOperationsPerExampleForward() {
 //         uint32_t connectionMultiplier = 0;
 //         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-//             if (featureInputs[i].isPresent())
+//             if (featureInputs[i].has_value())
 //                 connectionMultiplier += 1;
 //         }
 //
@@ -354,7 +355,7 @@
 //         uint32_t connectionMultiplier = 0;
 //         uint32_t sums = 0;
 //         for (uint32_t i = 0; i < errorInputs.size(); ++i) {
-//             if (errorInputs[i].isPresent()) {
+//             if (errorInputs[i].has_value()) {
 //                 if (connectionMultiplier == 0)
 //                     connectionMultiplier += 1;
 //                 else
@@ -362,15 +363,15 @@
 //             }
 //         }
 //         for (uint32_t i = 0; i < errorOutputs.size(); ++i) {
-//             if (errorOutputs[i].isPresent())
+//             if (errorOutputs[i].has_value())
 //                 connectionMultiplier += 1;
 //         }
 //
-//         Optional<Tensor> anyErrorInput = getFirstPresentTensor(errorInputs);
-//         THOR_THROW_IF_FALSE(anyErrorInput.isPresent());
+//         std::optional<Tensor> anyErrorInput = getFirstPresentTensor(errorInputs);
+//         THOR_THROW_IF_FALSE(anyErrorInput.has_value());
 //
 //         return connectionMultiplier * flopsPerConnectionPerExample() +
-//                (sums * anyErrorInput.get().getDescriptor().getTotalNumElements()) / batchSize + flopsPerGradientUpdatePerExample();
+//                (sums * anyErrorInput.value().getDescriptor().getTotalNumElements()) / batchSize + flopsPerGradientUpdatePerExample();
 //     }
 //
 //    private:
@@ -395,7 +396,7 @@
 //     const float attentionDropOutProbability;
 //     const float postAttentionDropOutProbability;
 //
-//     Optional<AttentionDescriptor> attentionDescriptor;
+//     std::optional<AttentionDescriptor> attentionDescriptor;
 //
 //     void createBiasesCudnnTensorDescriptor() {
 //         cudnnStatus_t cudnnStatus;
@@ -403,9 +404,9 @@
 //
 //         cudnnStatus = cudnnCreateTensorDescriptor(&descriptor);
 //         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-//         Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-//         THOR_THROW_IF_FALSE(anyFeatureOutput.isPresent());
-//         uint32_t numOutputFeatures = anyFeatureOutput.get().getDescriptor().getDimensions()[1];
+//         std::optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+//         THOR_THROW_IF_FALSE(anyFeatureOutput.has_value());
+//         uint32_t numOutputFeatures = anyFeatureOutput.value().getDescriptor().getDimensions()[1];
 //         cudnnStatus = cudnnSetTensor4dDescriptor(descriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, 1, numOutputFeatures, 1, 1);
 //         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 //
@@ -418,9 +419,9 @@
 //
 //         cudnnStatus = cudnnCreateTensorDescriptor(&descriptor);
 //         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-//         Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-//         THOR_THROW_IF_FALSE(anyFeatureOutput.isPresent());
-//         std::vector<uint64_t> dimensions = anyFeatureOutput.get().getDescriptor().getDimensions();
+//         std::optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+//         THOR_THROW_IF_FALSE(anyFeatureOutput.has_value());
+//         std::vector<uint64_t> dimensions = anyFeatureOutput.value().getDescriptor().getDimensions();
 //         cudnnStatus = cudnnSetTensor4dDescriptor(descriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, dimensions[0], dimensions[1], 1, 1);
 //         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 //
@@ -432,12 +433,12 @@
 //     uint32_t batchSize;
 //
 //
-//     Optional<cudnnTensorDescriptor_t> cudnnBiasDescriptor;
-//     Optional<cudnnTensorDescriptor_t> cudnnFeatureOutputDescriptor;
+//     std::optional<cudnnTensorDescriptor_t> cudnnBiasDescriptor;
+//     std::optional<cudnnTensorDescriptor_t> cudnnFeatureOutputDescriptor;
 //
-//     Optional<Tensor> workspaceForward;
-//     Optional<Tensor> workspaceBackwardData;
-//     Optional<Tensor> workspaceBackwardWeights;
+//     std::optional<Tensor> workspaceForward;
+//     std::optional<Tensor> workspaceBackwardData;
+//     std::optional<Tensor> workspaceBackwardWeights;
 //
 //     std::unique_ptr<BatchReduce> biasBatchReduce;
 // };

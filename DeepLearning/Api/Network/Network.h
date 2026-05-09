@@ -48,6 +48,7 @@
 //        1 input tensor yields 1 output tensor. Usually (always?) they will need to be the same size.
 
 #include "DeepLearning/Api/Network/StampedNetwork.h"
+#include <optional>
 
 namespace Thor {
 
@@ -116,7 +117,7 @@ class Network {
     std::vector<std::shared_ptr<Layer>> allLayersInNetworkList;
     std::vector<std::shared_ptr<TrainableLayer>> allTrainableLayersInNetwork;
     std::vector<std::shared_ptr<Layer>> network;
-    std::vector<std::pair<Optional<Tensor>, std::shared_ptr<Layer>>> orderedNetwork;
+    std::vector<std::pair<std::optional<Tensor>, std::shared_ptr<Layer>>> orderedNetwork;
 
     std::set<Tensor> allTensors;
     std::map<uint64_t, Tensor> apiTensorByOriginalId;

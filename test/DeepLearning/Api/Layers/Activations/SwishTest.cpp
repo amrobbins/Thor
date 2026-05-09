@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Activations/Swish.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
@@ -33,15 +34,15 @@ TEST(Activations, SwishBuilds) {
 
     ASSERT_TRUE(swish->isInitialized());
 
-    Optional<Tensor> actualInput = swish->getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualInput = swish->getFeatureInput();
+    ASSERT_TRUE(actualInput.has_value());
+    ASSERT_EQ(actualInput.value().getDataType(), dataType);
+    ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> actualOutput = swish->getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualOutput = swish->getFeatureOutput();
+    ASSERT_TRUE(actualOutput.has_value());
+    ASSERT_EQ(actualOutput.value().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.value().getDimensions(), dimensions);
 
     shared_ptr<Layer> cloneLayer = swish->clone();
     Swish *clone = dynamic_cast<Swish *>(cloneLayer.get());
@@ -49,15 +50,15 @@ TEST(Activations, SwishBuilds) {
 
     ASSERT_TRUE(clone->isInitialized());
 
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.has_value());
+    ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
-    ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.has_value());
+    ASSERT_EQ(cloneOutput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.value().getDimensions(), dimensions);
 
     ASSERT_NE(swish->getId(), clone->getId());
     ASSERT_GT(swish->getId(), 1u);
@@ -76,27 +77,27 @@ TEST(Activations, SwishSerializeDeserialize) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    Swish::Builder swishBuilder = Swish::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    Swish::Builder swishBuilder = Swish::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<Swish> swish = dynamic_pointer_cast<Swish>(swishBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(swish->getFeatureOutput())
+                                      .inputTensor(swish->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 
     ASSERT_TRUE(swish->isInitialized());
 
-    Tensor featureInput = swish->getFeatureInput();
-    Tensor featureOutput = swish->getFeatureOutput();
+    Tensor featureInput = swish->getFeatureInput().value();
+    Tensor featureOutput = swish->getFeatureOutput().value();
     assert(featureInput == networkInput.getFeatureOutput());
 
-    ASSERT_TRUE(swish->getFeatureOutput().isPresent());
-    ASSERT_EQ(swish->getFeatureOutput().get(), featureOutput);
+    ASSERT_TRUE(swish->getFeatureOutput().has_value());
+    ASSERT_EQ(swish->getFeatureOutput().value(), featureOutput);
 
-    ASSERT_TRUE(swish->getFeatureInput().isPresent());
-    assert(swish->getFeatureInput().get() == featureInput);
+    ASSERT_TRUE(swish->getFeatureInput().has_value());
+    assert(swish->getFeatureInput().value() == featureInput);
 
     ASSERT_EQ(featureInput.getDataType(), dataType);
     ASSERT_EQ(featureInput.getDimensions(), inputDimensions);
@@ -194,11 +195,11 @@ TEST(Activations, SwishSerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
 
-    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedSwish->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
-    ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSwish->getFeatureInput().get());
-    ASSERT_EQ(stampedSwish->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedSwish->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().has_value());
+    ASSERT_EQ(stampedInput->getFeatureOutput().value(), stampedSwish->getFeatureInput().value());
+    ASSERT_EQ(stampedSwish->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
     filesystem::remove("/tmp/testModel.thor.tar");
 }
@@ -216,13 +217,13 @@ TEST(Activations, SwishRegistered) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    Swish::Builder swishBuilder = Swish::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    Swish::Builder swishBuilder = Swish::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<Swish> swish = dynamic_pointer_cast<Swish>(swishBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(swish->getFeatureOutput())
+                                      .inputTensor(swish->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 

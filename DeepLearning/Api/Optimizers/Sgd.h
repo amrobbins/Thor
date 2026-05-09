@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <optional>
 
 namespace Thor {
 
@@ -63,72 +64,72 @@ class Sgd : public Optimizer {
 class Sgd::Builder {
    public:
     virtual std::shared_ptr<Sgd> build() {
-        if (_initialLearningRate.isEmpty())
+        if (!_initialLearningRate.has_value())
             _initialLearningRate = 0.01f;
-        if (_decay.isEmpty())
+        if (!_decay.has_value())
             _decay = 0.0f;
-        if (_momentum.isEmpty())
+        if (!_momentum.has_value())
             _momentum = 0.0f;
-        if (_useNesterovMomentum.isEmpty())
+        if (!_useNesterovMomentum.has_value())
             _useNesterovMomentum = false;
 
-        THOR_THROW_IF_FALSE(_initialLearningRate > 0.0f);
-        THOR_THROW_IF_FALSE(_decay < 1.0f);
-        THOR_THROW_IF_FALSE(_decay >= 0.0f);
-        THOR_THROW_IF_FALSE(_momentum >= 0.0f);
+        THOR_THROW_IF_FALSE(_initialLearningRate.value() > 0.0f);
+        THOR_THROW_IF_FALSE(_decay.value() < 1.0f);
+        THOR_THROW_IF_FALSE(_decay.value() >= 0.0f);
+        THOR_THROW_IF_FALSE(_momentum.value() >= 0.0f);
 
         Sgd sgd;
-        sgd.initialLearningRate = _initialLearningRate;
-        sgd.decay = _decay;
-        sgd.momentum = _momentum;
-        sgd.useNesterovMomentum = _useNesterovMomentum;
+        sgd.initialLearningRate = _initialLearningRate.value();
+        sgd.decay = _decay.value();
+        sgd.momentum = _momentum.value();
+        sgd.useNesterovMomentum = _useNesterovMomentum.value();
 
         // When network is passed to the builder, this optimizer becomes the network default optimizer:
-        if (_network.isPresent() && _network.get() != nullptr) {
-            sgd.addToNetwork(_network);
-            THOR_THROW_IF_FALSE(std::dynamic_pointer_cast<Sgd>(_network.get()->getDefaultOptimizer()) != nullptr);
-            return std::dynamic_pointer_cast<Sgd>(_network.get()->getDefaultOptimizer());
+        if (_network.has_value() && _network.value() != nullptr) {
+            sgd.addToNetwork(_network.value());
+            THOR_THROW_IF_FALSE(std::dynamic_pointer_cast<Sgd>(_network.value()->getDefaultOptimizer()) != nullptr);
+            return std::dynamic_pointer_cast<Sgd>(_network.value()->getDefaultOptimizer());
         } else {
             return std::dynamic_pointer_cast<Sgd>(sgd.clone());
         }
     }
 
     virtual Sgd::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual Sgd::Builder initialLearningRate(float _initialLearningRate) {
-        THOR_THROW_IF_FALSE(!this->_initialLearningRate.isPresent());
+        THOR_THROW_IF_FALSE(!this->_initialLearningRate.has_value());
         this->_initialLearningRate = _initialLearningRate;
         return *this;
     }
 
     virtual Sgd::Builder decay(float _decay) {
-        THOR_THROW_IF_FALSE(!this->_decay.isPresent());
+        THOR_THROW_IF_FALSE(!this->_decay.has_value());
         this->_decay = _decay;
         return *this;
     }
 
     virtual Sgd::Builder momentum(float _momentum) {
-        THOR_THROW_IF_FALSE(!this->_momentum.isPresent());
+        THOR_THROW_IF_FALSE(!this->_momentum.has_value());
         this->_momentum = _momentum;
         return *this;
     }
 
     virtual Sgd::Builder useNesterovMomentum(bool _useNesterovMomentum) {
-        THOR_THROW_IF_FALSE(!this->_useNesterovMomentum.isPresent());
+        THOR_THROW_IF_FALSE(!this->_useNesterovMomentum.has_value());
         this->_useNesterovMomentum = _useNesterovMomentum;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<float> _initialLearningRate;
-    Optional<float> _decay;
-    Optional<float> _momentum;
-    Optional<bool> _useNesterovMomentum;
+    std::optional<Network *> _network;
+    std::optional<float> _initialLearningRate;
+    std::optional<float> _decay;
+    std::optional<float> _momentum;
+    std::optional<bool> _useNesterovMomentum;
 };
 
 }  // namespace Thor

@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
 #include "DeepLearning/Implementation/Layers/Metrics/BinaryAccuracy.h"
+#include <optional>
 
 namespace Thor {
 
@@ -27,7 +28,7 @@ class BinaryAccuracy : public Metric {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput() || connectingApiTensor == labelsTensor);
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value() || connectingApiTensor == labelsTensor);
 
         std::shared_ptr<ThorImplementation::BinaryAccuracy> BinaryAccuracy = std::make_shared<ThorImplementation::BinaryAccuracy>();
         return BinaryAccuracy;
@@ -46,48 +47,48 @@ class BinaryAccuracy : public Metric {
 class BinaryAccuracy::Builder {
    public:
     virtual BinaryAccuracy build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(_predictions.isPresent());
-        THOR_THROW_IF_FALSE(_labels.isPresent());
-        THOR_THROW_IF_FALSE(_predictions.get() != _labels.get());
-        std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
-        std::vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_predictions.has_value());
+        THOR_THROW_IF_FALSE(_labels.has_value());
+        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+        std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
+        std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
         THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
         THOR_THROW_IF_FALSE(predictionDimensions.size() == 1 && predictionDimensions[0] == 1);
 
         BinaryAccuracy binaryAccuracy;
-        binaryAccuracy.featureInput = _predictions;
-        binaryAccuracy.labelsTensor = _labels;
+        binaryAccuracy.featureInput = _predictions.value();
+        binaryAccuracy.labelsTensor = _labels.value();
         binaryAccuracy.metricTensor = Tensor(Tensor::DataType::FP32, {1});
         binaryAccuracy.initialized = true;
-        binaryAccuracy.addToNetwork(_network.get());
+        binaryAccuracy.addToNetwork(_network.value());
         return binaryAccuracy;
     }
 
     virtual BinaryAccuracy::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual BinaryAccuracy::Builder &predictions(Tensor _predictions) {
-        THOR_THROW_IF_FALSE(!this->_predictions.isPresent());
+        THOR_THROW_IF_FALSE(!this->_predictions.has_value());
         THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
         this->_predictions = _predictions;
         return *this;
     }
 
     virtual BinaryAccuracy::Builder &labels(Tensor _labels) {
-        THOR_THROW_IF_FALSE(!this->_labels.isPresent());
+        THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _predictions;
-    Optional<Tensor> _labels;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _predictions;
+    std::optional<Tensor> _labels;
 };
 
 }  // namespace Thor

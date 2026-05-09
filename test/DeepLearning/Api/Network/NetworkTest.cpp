@@ -86,40 +86,40 @@
 //         dynamic_pointer_cast<ThorImplementation::MeanSquaredError>(stampedNetwork.getApiLayerToPhysicalLayer()[meanSquaredError.getId()]);
 //     ASSERT_NE(mse, nullptr);
 //     ASSERT_EQ(stampedNetwork.getInputs().size(), 2u);
-//     if (stampedNetwork.getInputs()[0]->getFeatureOutput().get() ==
-//         stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().get()) {
-//         ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(),
-//                   stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().get());
+//     if (stampedNetwork.getInputs()[0]->getFeatureOutput().value() ==
+//         stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().value()) {
+//         ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().value(),
+//                   stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().value());
 //         ASSERT_EQ(stampedNetwork.getInputs()[0]->getName(), "input");
-//         ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
+//         ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().value(), fc->getFeatureInputs()[0].value());
 //
-//         ASSERT_EQ(stampedNetwork.getInputs()[1]->getFeatureOutput().get(),
-//                   stampedNetwork.getApiLayerToPhysicalLayer()[label.getId()]->getFeatureOutput().get());
+//         ASSERT_EQ(stampedNetwork.getInputs()[1]->getFeatureOutput().value(),
+//                   stampedNetwork.getApiLayerToPhysicalLayer()[label.getId()]->getFeatureOutput().value());
 //         ASSERT_EQ(stampedNetwork.getInputs()[1]->getName(), "label");
-//         ASSERT_EQ(stampedNetwork.getInputs()[1]->getFeatureOutput().get(), mse->getLabelsInput().get());
+//         ASSERT_EQ(stampedNetwork.getInputs()[1]->getFeatureOutput().value(), mse->getLabelsInput().value());
 //     } else {
-//         ASSERT_EQ(stampedNetwork.getInputs()[1]->getFeatureOutput().get(),
-//                   stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().get());
+//         ASSERT_EQ(stampedNetwork.getInputs()[1]->getFeatureOutput().value(),
+//                   stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().value());
 //         ASSERT_EQ(stampedNetwork.getInputs()[1]->getName(), "input");
-//         ASSERT_EQ(stampedNetwork.getInputs()[1]->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
+//         ASSERT_EQ(stampedNetwork.getInputs()[1]->getFeatureOutput().value(), fc->getFeatureInputs()[0].value());
 //
-//         ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(),
-//                   stampedNetwork.getApiLayerToPhysicalLayer()[label.getId()]->getFeatureOutput().get());
+//         ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().value(),
+//                   stampedNetwork.getApiLayerToPhysicalLayer()[label.getId()]->getFeatureOutput().value());
 //         ASSERT_EQ(stampedNetwork.getInputs()[0]->getName(), "label");
-//         ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(), mse->getLabelsInput().get());
+//         ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().value(), mse->getLabelsInput().value());
 //     }
 //     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs().size(), 1u);
-//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs()[0].get(), fc->getFeatureInputs()[0].get());
+//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs()[0].value(), fc->getFeatureInputs()[0].value());
 //     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs().size(), 1u);
-//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
-//     ASSERT_EQ(mse->getPredictionsInput().isPresent(), true);
-//     ASSERT_EQ(mse->getPredictionsInput().get(), fc->getFeatureOutputs()[0].get());
+//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs()[0].value(), fc->getFeatureOutputs()[0].value());
+//     ASSERT_EQ(mse->getPredictionsInput().has_value(), true);
+//     ASSERT_EQ(mse->getPredictionsInput().value(), fc->getFeatureOutputs()[0].value());
 //     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
-//     ASSERT_EQ(mse->getLossOutput().isPresent(), true);
-//     ASSERT_EQ(mse->getLossOutput().get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
+//     ASSERT_EQ(mse->getLossOutput().has_value(), true);
+//     ASSERT_EQ(mse->getLossOutput().value(), stampedNetwork.getOutputs()[0]->getFeatureInput().value());
 //     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getName(), "output");
-//     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getFeatureInput().get(),
-//               stampedNetwork.getApiLayerToPhysicalLayer()[networkOutput.getId()]->getFeatureInput().get());
+//     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getFeatureInput().value(),
+//               stampedNetwork.getApiLayerToPhysicalLayer()[networkOutput.getId()]->getFeatureInput().value());
 //
 //     // Check weights initialization
 //     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
@@ -130,7 +130,7 @@
 //     for (uint32_t i = 0; i < 1024; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
+//     ThorImplementation::Tensor fcBiases = fc->getBiases().value().clone(cpuPlacement);
 //     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
 //     fc->getStreams()[0].synchronize();
 //     half *biasesMem = (half *)fcBiases.getMemPtr();
@@ -184,8 +184,8 @@
 //
 //     // Check network structure
 //     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
-//     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(),
-//               stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().get());
+//     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().value(),
+//               stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().value());
 //     ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1u);
 //     shared_ptr<ThorImplementation::FullyConnected> fc =
 //         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getApiLayerToPhysicalLayer()[fullyConnected.getId()]);
@@ -194,17 +194,17 @@
 //     ASSERT_NE(fc, nullptr);
 //     ASSERT_NE(rivet, nullptr);
 //     ASSERT_EQ(stampedNetwork.getInputs()[0]->getName(), "input");
-//     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
+//     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().value(), fc->getFeatureInputs()[0].value());
 //     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs().size(), 1u);
-//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs()[0].get(), fc->getFeatureInputs()[0].get());
+//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs()[0].value(), fc->getFeatureInputs()[0].value());
 //     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs().size(), 1u);
-//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
+//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs()[0].value(), fc->getFeatureOutputs()[0].value());
 //     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
-//     ASSERT_EQ(fc->getFeatureOutputs()[0].get(), rivet->getFeatureInput().get());
-//     ASSERT_EQ(rivet->getFeatureOutput().get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
+//     ASSERT_EQ(fc->getFeatureOutputs()[0].value(), rivet->getFeatureInput().value());
+//     ASSERT_EQ(rivet->getFeatureOutput().value(), stampedNetwork.getOutputs()[0]->getFeatureInput().value());
 //     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getName(), "output");
-//     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getFeatureInput().get(),
-//               stampedNetwork.getApiLayerToPhysicalLayer()[networkOutput.getId()]->getFeatureInput().get());
+//     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getFeatureInput().value(),
+//               stampedNetwork.getApiLayerToPhysicalLayer()[networkOutput.getId()]->getFeatureInput().value());
 //     ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 1u);
 //
 //     // Check weights initialization
@@ -231,7 +231,7 @@
 //             ++numNonZero;
 //     }
 //     ASSERT_LT(numZero, numNonZero * 0.1);
-//     ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
+//     ThorImplementation::Tensor fcBiases = fc->getBiases().value().clone(cpuPlacement);
 //     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
 //     fc->getStreams()[0].synchronize();
 //     half *biasesMem = (half *)fcBiases.getMemPtr();
@@ -292,8 +292,8 @@
 //
 //     // Check network structure
 //     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
-//     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(),
-//               stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().get());
+//     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().value(),
+//               stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().value());
 //     ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1u);
 //     shared_ptr<ThorImplementation::FullyConnected> fc =
 //         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getApiLayerToPhysicalLayer()[fullyConnected.getId()]);
@@ -302,17 +302,17 @@
 //     ASSERT_NE(fc, nullptr);
 //     ASSERT_NE(rivet, nullptr);
 //     ASSERT_EQ(stampedNetwork.getInputs()[0]->getName(), "input");
-//     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
+//     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().value(), fc->getFeatureInputs()[0].value());
 //     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs().size(), 1u);
-//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs()[0].get(), fc->getFeatureInputs()[0].get());
+//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs()[0].value(), fc->getFeatureInputs()[0].value());
 //     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs().size(), 1u);
-//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
+//     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs()[0].value(), fc->getFeatureOutputs()[0].value());
 //     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
-//     ASSERT_EQ(fc->getFeatureOutputs()[0].get(), rivet->getFeatureInput().get());
-//     ASSERT_EQ(rivet->getFeatureOutput().get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
+//     ASSERT_EQ(fc->getFeatureOutputs()[0].value(), rivet->getFeatureInput().value());
+//     ASSERT_EQ(rivet->getFeatureOutput().value(), stampedNetwork.getOutputs()[0]->getFeatureInput().value());
 //     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getName(), "output");
-//     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getFeatureInput().get(),
-//               stampedNetwork.getApiLayerToPhysicalLayer()[networkOutput.getId()]->getFeatureInput().get());
+//     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getFeatureInput().value(),
+//               stampedNetwork.getApiLayerToPhysicalLayer()[networkOutput.getId()]->getFeatureInput().value());
 //     ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 1u);
 //
 //     // Check weights initialization
@@ -354,7 +354,7 @@
 //     ASSERT_LT(abs(mean - expectedMean), 5e-4);
 //     ASSERT_LT(abs(stdDev - expectedStdDev), 0.10);
 //
-//     ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
+//     ThorImplementation::Tensor fcBiases = fc->getBiases().value().clone(cpuPlacement);
 //     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
 //     fc->getStreams()[0].synchronize();
 //     half *biasesMem = (half *)fcBiases.getMemPtr();
@@ -475,15 +475,15 @@
 //         dynamic_pointer_cast<ThorImplementation::TypeConversion>(stampedNetwork.getOtherLayers()[5]);
 //     ASSERT_NE(tc16_32, nullptr);
 //
-//     ASSERT_EQ(input->getFeatureOutput().get(), tc8_16->getFeatureInput().get());
-//     ASSERT_EQ(tc8_16->getFeatureOutput().get(), bn->getFeatureInputs()[0].get());
-//     ASSERT_EQ(bn->getFeatureOutputs()[0].get(), dropout->getFeatureInput().get());
-//     ASSERT_EQ(dropout->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fc->getFeatureOutputs()[0].get(), relu->getFeatureInput().get());
-//     ASSERT_EQ(relu->getFeatureOutput().get(), dropout2->getFeatureInput().get());
-//     ASSERT_EQ(dropout2->getFeatureOutput().get(), rivet->getFeatureInput().get());
-//     ASSERT_EQ(rivet->getFeatureOutput().get(), tc16_32->getFeatureInput().get());
-//     ASSERT_EQ(tc16_32->getFeatureOutput().get(), output->getFeatureInput().get());
+//     ASSERT_EQ(input->getFeatureOutput().value(), tc8_16->getFeatureInput().value());
+//     ASSERT_EQ(tc8_16->getFeatureOutput().value(), bn->getFeatureInputs()[0].value());
+//     ASSERT_EQ(bn->getFeatureOutputs()[0].value(), dropout->getFeatureInput().value());
+//     ASSERT_EQ(dropout->getFeatureOutput().value(), fc->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fc->getFeatureOutputs()[0].value(), relu->getFeatureInput().value());
+//     ASSERT_EQ(relu->getFeatureOutput().value(), dropout2->getFeatureInput().value());
+//     ASSERT_EQ(dropout2->getFeatureOutput().value(), rivet->getFeatureInput().value());
+//     ASSERT_EQ(rivet->getFeatureOutput().value(), tc16_32->getFeatureInput().value());
+//     ASSERT_EQ(tc16_32->getFeatureOutput().value(), output->getFeatureInput().value());
 //
 //     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
 //     ThorImplementation::Tensor fcWeights = fc->getWeights().clone(cpuPlacement);
@@ -610,56 +610,56 @@
 //     ASSERT_EQ(fcv.size(), 3u);
 //     ASSERT_TRUE(rivet != nullptr);
 //
-//     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(), f[0]->getFeatureInputs()[0].get());
+//     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().value(), f[0]->getFeatureInputs()[0].value());
 //
-//     ASSERT_EQ(f[0]->getFeatureOutputs()[0].get(), bn[0]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(bn[0]->getFeatureOutputs()[0].get(), d[0]->getFeatureInput().get());
-//     ASSERT_EQ(d[0]->getFeatureOutput().get(), fcv[0]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fcv[0]->getFeatureOutputs()[0].get(), r[0]->getFeatureInput().get());
-//     ASSERT_EQ(r[0]->getFeatureOutput().get(), bn[2]->getFeatureInputs()[0].get());
+//     ASSERT_EQ(f[0]->getFeatureOutputs()[0].value(), bn[0]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(bn[0]->getFeatureOutputs()[0].value(), d[0]->getFeatureInput().value());
+//     ASSERT_EQ(d[0]->getFeatureOutput().value(), fcv[0]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fcv[0]->getFeatureOutputs()[0].value(), r[0]->getFeatureInput().value());
+//     ASSERT_EQ(r[0]->getFeatureOutput().value(), bn[2]->getFeatureInputs()[0].value());
 //
-//     ASSERT_EQ(bn[1]->getFeatureOutputs()[0].get(), d[1]->getFeatureInput().get());
-//     ASSERT_EQ(d[1]->getFeatureOutput().get(), fcv[1]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fcv[1]->getFeatureOutputs()[0].get(), r[1]->getFeatureInput().get());
+//     ASSERT_EQ(bn[1]->getFeatureOutputs()[0].value(), d[1]->getFeatureInput().value());
+//     ASSERT_EQ(d[1]->getFeatureOutput().value(), fcv[1]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fcv[1]->getFeatureOutputs()[0].value(), r[1]->getFeatureInput().value());
 //
 //     //    for (uint32_t i = 0; i < 4; ++i) {
 //     //        for (uint32_t j = 0; j < 3; ++j) {
 //     //            for (uint32_t k = 0; k < fcv[j]->getFeatureInputs().size(); ++k) {
-//     //                if (d[i]->getFeatureOutput().isEmpty() || fcv[j]->getFeatureInputs()[k].isEmpty())
+//     //                if (d[i]->!getFeatureOutput().has_value() || fcv[j]->!getFeatureInputs()[k].has_value())
 //     //                    continue;
-//     //                if (d[i]->getFeatureOutput().get() == fcv[j]->getFeatureInputs()[k].get()) {
+//     //                if (d[i]->getFeatureOutput().value() == fcv[j]->getFeatureInputs()[k].value()) {
 //     //                    printf("ZZZZZZZZZZZZZ  %d == %d[%d]\n", i, j, k);
 //     //                }
 //     //            }
 //     //        }
 //     //    }
 //
-//     ASSERT_EQ(bn[2]->getFeatureOutputs()[0].get(), d[2]->getFeatureInput().get());
-//     ASSERT_EQ(d[2]->getFeatureOutput().get(), fcv[2]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fcv[2]->getFeatureOutputs()[0].get(), r[2]->getFeatureInput().get());
+//     ASSERT_EQ(bn[2]->getFeatureOutputs()[0].value(), d[2]->getFeatureInput().value());
+//     ASSERT_EQ(d[2]->getFeatureOutput().value(), fcv[2]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fcv[2]->getFeatureOutputs()[0].value(), r[2]->getFeatureInput().value());
 //
-//     ASSERT_EQ(r[1]->getFeatureOutput().get(), bn[2]->getFeatureInputs()[1].get());
-//     ASSERT_EQ(bn[2]->getFeatureOutputs()[1].get(), d[3]->getFeatureInput().get());
-//     ASSERT_EQ(d[3]->getFeatureOutput().get(), fcv[2]->getFeatureInputs()[1].get());
-//     ASSERT_EQ(fcv[2]->getFeatureOutputs()[1].get(), r[3]->getFeatureInput().get());
+//     ASSERT_EQ(r[1]->getFeatureOutput().value(), bn[2]->getFeatureInputs()[1].value());
+//     ASSERT_EQ(bn[2]->getFeatureOutputs()[1].value(), d[3]->getFeatureInput().value());
+//     ASSERT_EQ(d[3]->getFeatureOutput().value(), fcv[2]->getFeatureInputs()[1].value());
+//     ASSERT_EQ(fcv[2]->getFeatureOutputs()[1].value(), r[3]->getFeatureInput().value());
 //
 //     //    for (uint32_t i = 0; i < 4; ++i) {
-//     //        if (r[i]->getFeatureOutput().isEmpty()) {
+//     //        if (r[i]->!getFeatureOutput().has_value()) {
 //     //            printf("ZZZZZZZZZZZZZ  %d isEmpty\n", i);
 //     //            continue;
 //     //        }
-//     //        if (r[i]->getFeatureOutput().get() == stampedNetwork.getOutputs()[0]->getFeatureInput().get()) {
+//     //        if (r[i]->getFeatureOutput().value() == stampedNetwork.getOutputs()[0]->getFeatureInput().value()) {
 //     //            printf("ZZZZZZZZZZZZZ  %d == 0\n", i);
 //     //        }
 //     //    }
 //
-//     if (r[3]->getFeatureOutput().isEmpty()) {
-//         EXPECT_EQ(r[2]->getFeatureOutput().get(), rivet->getFeatureInput().get());
-//         EXPECT_EQ(rivet->getFeatureOutput().get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
+//     if (r[3]->!getFeatureOutput().has_value()) {
+//         EXPECT_EQ(r[2]->getFeatureOutput().value(), rivet->getFeatureInput().value());
+//         EXPECT_EQ(rivet->getFeatureOutput().value(), stampedNetwork.getOutputs()[0]->getFeatureInput().value());
 //     } else {
-//         EXPECT_TRUE(r[2]->getFeatureOutput().isEmpty());
-//         EXPECT_EQ(r[3]->getFeatureOutput().get(), rivet->getFeatureInput().get());
-//         EXPECT_EQ(rivet->getFeatureOutput().get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
+//         EXPECT_TRUE(r[2]->!getFeatureOutput().has_value());
+//         EXPECT_EQ(r[3]->getFeatureOutput().value(), rivet->getFeatureInput().value());
+//         EXPECT_EQ(rivet->getFeatureOutput().value(), stampedNetwork.getOutputs()[0]->getFeatureInput().value());
 //     }
 //
 //     // Check weights initialization
@@ -672,7 +672,7 @@
 //     for (uint32_t i = 0; i < 1024 * 800; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
+//     ThorImplementation::Tensor fcBiases = fc->getBiases().value().clone(cpuPlacement);
 //     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
 //     fc->getStreams()[0].synchronize();
 //     half *biasesMem = (half *)fcBiases.getMemPtr();
@@ -688,7 +688,7 @@
 //     for (uint32_t i = 0; i < 800 * 200; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     fcBiases = fc->getBiases().get().clone(cpuPlacement);
+//     fcBiases = fc->getBiases().value().clone(cpuPlacement);
 //     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
 //     fc->getStreams()[0].synchronize();
 //     biasesMem = (half *)fcBiases.getMemPtr();
@@ -704,7 +704,7 @@
 //     for (uint32_t i = 0; i < 1024 * 800; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     fcBiases = fc->getBiases().get().clone(cpuPlacement);
+//     fcBiases = fc->getBiases().value().clone(cpuPlacement);
 //     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
 //     fc->getStreams()[0].synchronize();
 //     biasesMem = (half *)fcBiases.getMemPtr();
@@ -713,10 +713,10 @@
 //     }
 // }
 //
-// unsigned int numPresentTensors(std::vector<Optional<ThorImplementation::Tensor>> tensors) {
+// unsigned int numPresentTensors(std::vector<std::optional<ThorImplementation::Tensor>> tensors) {
 //     unsigned int numPresent = 0;
 //     for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
-//         if (it->isPresent())
+//         if (it->has_value())
 //             numPresent += 1;
 //     }
 //     return numPresent;
@@ -866,8 +866,8 @@
 //     shared_ptr<ThorImplementation::TensorFanout> imagesFO = nullptr;
 //     for (uint64_t i = 0; i < stampedNetwork.getOtherLayers().size(); ++i) {
 //         if (dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i]) != nullptr) {
-//             if (images->getFeatureOutput().get() ==
-//                 dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i])->getFeatureInputs()[0].get())
+//             if (images->getFeatureOutput().value() ==
+//                 dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i])->getFeatureInputs()[0].value())
 //                 { imagesFO = dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i]);
 //             }
 //         }
@@ -891,18 +891,18 @@
 //     shared_ptr<ThorImplementation::TensorFanout> fo0;
 //     shared_ptr<ThorImplementation::TensorFanout> fo1;
 //     shared_ptr<ThorImplementation::TensorFanout> fo2;
-//     if (labels->getFeatureOutput().get() == fo[0]->getFeatureInputs()[0].get()) {
+//     if (labels->getFeatureOutput().value() == fo[0]->getFeatureInputs()[0].value()) {
 //         fo0 = fo[0];
-//         if (images->getFeatureOutput().get() == fo[1]->getFeatureInputs()[0].get()) {
+//         if (images->getFeatureOutput().value() == fo[1]->getFeatureInputs()[0].value()) {
 //             fo1 = fo[1];
 //             fo2 = fo[2];
 //         } else {
 //             fo1 = fo[2];
 //             fo2 = fo[1];
 //         }
-//     } else if (labels->getFeatureOutput().get() == fo[1]->getFeatureInputs()[0].get()) {
+//     } else if (labels->getFeatureOutput().value() == fo[1]->getFeatureInputs()[0].value()) {
 //         fo0 = fo[1];
-//         if (images->getFeatureOutput().get() == fo[0]->getFeatureInputs()[0].get()) {
+//         if (images->getFeatureOutput().value() == fo[0]->getFeatureInputs()[0].value()) {
 //             fo1 = fo[0];
 //             fo2 = fo[2];
 //         } else {
@@ -912,7 +912,7 @@
 //         fo1 = fo[0];
 //     } else {
 //         fo0 = fo[2];
-//         if (images->getFeatureOutput().get() == fo[0]->getFeatureInputs()[0].get()) {
+//         if (images->getFeatureOutput().value() == fo[0]->getFeatureInputs()[0].value()) {
 //             fo1 = fo[0];
 //             fo2 = fo[1];
 //         } else {
@@ -925,271 +925,271 @@
 //     // Fanouts
 //     // Note: All tensor fanouts must be optimized away since they each have 0 or 1 populated error inputs
 //     //       Optimization applies by forwarding the errorInput from the previous layer rather than instatiating one.
-//     if (labels->getFeatureOutput().get() != fo0->getFeatureInputs()[0].get()) {
+//     if (labels->getFeatureOutput().value() != fo0->getFeatureInputs()[0].value()) {
 //         printf("labels = fo0 ? %i fo1 %i fo2 %i fo[0] %i fo[1] %i fo[2] %i\n",
-//                labels->getFeatureOutput().get() == fo0->getFeatureInputs()[0].get(),
-//                labels->getFeatureOutput().get() == fo1->getFeatureInputs()[0].get(),
-//                labels->getFeatureOutput().get() == fo2->getFeatureInputs()[0].get(),
-//                labels->getFeatureOutput().get() == fo[0]->getFeatureInputs()[0].get(),
-//                labels->getFeatureOutput().get() == fo[1]->getFeatureInputs()[0].get(),
-//                labels->getFeatureOutput().get() == fo[2]->getFeatureInputs()[0].get());
+//                labels->getFeatureOutput().value() == fo0->getFeatureInputs()[0].value(),
+//                labels->getFeatureOutput().value() == fo1->getFeatureInputs()[0].value(),
+//                labels->getFeatureOutput().value() == fo2->getFeatureInputs()[0].value(),
+//                labels->getFeatureOutput().value() == fo[0]->getFeatureInputs()[0].value(),
+//                labels->getFeatureOutput().value() == fo[1]->getFeatureInputs()[0].value(),
+//                labels->getFeatureOutput().value() == fo[2]->getFeatureInputs()[0].value());
 //         fflush(stdout);
 //     }
-//     ASSERT_EQ(labels->getFeatureOutput().get(), fo0->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fo0->getFeatureOutputs()[0].get(), fo0->getFeatureInputs()[0].get());
+//     ASSERT_EQ(labels->getFeatureOutput().value(), fo0->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fo0->getFeatureOutputs()[0].value(), fo0->getFeatureInputs()[0].value());
 //     ASSERT_EQ(fo0->getStreams().size(), 2U);
 //     ASSERT_EQ(fo0->getFeatureOutputs().size(), 1U);
-//     ASSERT_EQ(images->getFeatureOutput().get(), fo1->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fo1->getFeatureOutputs()[0].get(), fo1->getFeatureInputs()[0].get());
+//     ASSERT_EQ(images->getFeatureOutput().value(), fo1->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fo1->getFeatureOutputs()[0].value(), fo1->getFeatureInputs()[0].value());
 //     ASSERT_EQ(fo1->getStreams().size(), 2U);
 //     ASSERT_EQ(fo1->getFeatureOutputs().size(), 1U);
-//     ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo2->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fo2->getFeatureOutputs()[0].get(), fo2->getFeatureInputs()[0].get());
+//     ASSERT_EQ(sm[0]->getFeatureOutput().value(), fo2->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fo2->getFeatureOutputs()[0].value(), fo2->getFeatureInputs()[0].value());
 //     ASSERT_EQ(fo2->getStreams().size(), 3U);
 //     ASSERT_EQ(fo2->getFeatureOutputs().size(), 1U);
 //
 //     // Conv top
-//     ASSERT_EQ(images->getFeatureOutput().get(), fo1->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fo1->getFeatureOutputs()[0].get(), cv[0]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(cv[0]->getFeatureOutputs()[0].get(), r[0]->getFeatureInput().get());
-//     ASSERT_EQ(r[0]->getFeatureOutput().get(), cv[1]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(cv[1]->getFeatureOutputs()[0].get(), r[1]->getFeatureInput().get());
-//     ASSERT_EQ(r[1]->getFeatureOutput().get(), p[0]->getFeatureInput().get());
-//     ASSERT_EQ(p[0]->getFeatureOutput().get(), cv[2]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(cv[2]->getFeatureOutputs()[0].get(), r[2]->getFeatureInput().get());
-//     ASSERT_EQ(r[2]->getFeatureOutput().get(), p[1]->getFeatureInput().get());
-//     ASSERT_EQ(p[1]->getFeatureOutput().get(), cv[3]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(cv[3]->getFeatureOutputs()[0].get(), r[3]->getFeatureInput().get());
-//     ASSERT_EQ(r[3]->getFeatureOutput().get(), cv[4]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(cv[4]->getFeatureOutputs()[0].get(), r[4]->getFeatureInput().get());
-//     ASSERT_EQ(r[4]->getFeatureOutput().get(), p[2]->getFeatureInput().get());
+//     ASSERT_EQ(images->getFeatureOutput().value(), fo1->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fo1->getFeatureOutputs()[0].value(), cv[0]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(cv[0]->getFeatureOutputs()[0].value(), r[0]->getFeatureInput().value());
+//     ASSERT_EQ(r[0]->getFeatureOutput().value(), cv[1]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(cv[1]->getFeatureOutputs()[0].value(), r[1]->getFeatureInput().value());
+//     ASSERT_EQ(r[1]->getFeatureOutput().value(), p[0]->getFeatureInput().value());
+//     ASSERT_EQ(p[0]->getFeatureOutput().value(), cv[2]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(cv[2]->getFeatureOutputs()[0].value(), r[2]->getFeatureInput().value());
+//     ASSERT_EQ(r[2]->getFeatureOutput().value(), p[1]->getFeatureInput().value());
+//     ASSERT_EQ(p[1]->getFeatureOutput().value(), cv[3]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(cv[3]->getFeatureOutputs()[0].value(), r[3]->getFeatureInput().value());
+//     ASSERT_EQ(r[3]->getFeatureOutput().value(), cv[4]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(cv[4]->getFeatureOutputs()[0].value(), r[4]->getFeatureInput().value());
+//     ASSERT_EQ(r[4]->getFeatureOutput().value(), p[2]->getFeatureInput().value());
 //
 //     // Conv bottom
-//     ASSERT_EQ(images->getFeatureOutput().get(), fo1->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fo1->getFeatureOutputs()[0].get(), cv[5]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(cv[5]->getFeatureOutputs()[0].get(), r[5]->getFeatureInput().get());
-//     ASSERT_EQ(r[5]->getFeatureOutput().get(), cv[6]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(cv[6]->getFeatureOutputs()[0].get(), r[6]->getFeatureInput().get());
-//     ASSERT_EQ(r[6]->getFeatureOutput().get(), p[3]->getFeatureInput().get());
-//     ASSERT_EQ(p[3]->getFeatureOutput().get(), cv[7]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(cv[7]->getFeatureOutputs()[0].get(), r[7]->getFeatureInput().get());
-//     ASSERT_EQ(r[7]->getFeatureOutput().get(), p[4]->getFeatureInput().get());
-//     ASSERT_EQ(p[4]->getFeatureOutput().get(), cv[8]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(cv[8]->getFeatureOutputs()[0].get(), r[8]->getFeatureInput().get());
-//     ASSERT_EQ(r[8]->getFeatureOutput().get(), cv[9]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(cv[9]->getFeatureOutputs()[0].get(), r[9]->getFeatureInput().get());
-//     ASSERT_EQ(r[9]->getFeatureOutput().get(), p[5]->getFeatureInput().get());
+//     ASSERT_EQ(images->getFeatureOutput().value(), fo1->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fo1->getFeatureOutputs()[0].value(), cv[5]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(cv[5]->getFeatureOutputs()[0].value(), r[5]->getFeatureInput().value());
+//     ASSERT_EQ(r[5]->getFeatureOutput().value(), cv[6]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(cv[6]->getFeatureOutputs()[0].value(), r[6]->getFeatureInput().value());
+//     ASSERT_EQ(r[6]->getFeatureOutput().value(), p[3]->getFeatureInput().value());
+//     ASSERT_EQ(p[3]->getFeatureOutput().value(), cv[7]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(cv[7]->getFeatureOutputs()[0].value(), r[7]->getFeatureInput().value());
+//     ASSERT_EQ(r[7]->getFeatureOutput().value(), p[4]->getFeatureInput().value());
+//     ASSERT_EQ(p[4]->getFeatureOutput().value(), cv[8]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(cv[8]->getFeatureOutputs()[0].value(), r[8]->getFeatureInput().value());
+//     ASSERT_EQ(r[8]->getFeatureOutput().value(), cv[9]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(cv[9]->getFeatureOutputs()[0].value(), r[9]->getFeatureInput().value());
+//     ASSERT_EQ(r[9]->getFeatureOutput().value(), p[5]->getFeatureInput().value());
 //
 //     // Concatenate
-//     ASSERT_EQ(p[2]->getFeatureOutput().get(), cat[0]->getFeatureInputs()[0].get());
-//     ASSERT_EQ(p[5]->getFeatureOutput().get(), cat[0]->getFeatureInputs()[1].get());
+//     ASSERT_EQ(p[2]->getFeatureOutput().value(), cat[0]->getFeatureInputs()[0].value());
+//     ASSERT_EQ(p[5]->getFeatureOutput().value(), cat[0]->getFeatureInputs()[1].value());
 //
 //     // Fully Connected
-//     ASSERT_EQ(cat[0]->getFeatureOutputs()[0].get(), d[0]->getFeatureInput().get());
-//     ASSERT_EQ(d[0]->getFeatureOutput().get(), fc0->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fc0->getFeatureOutputs()[0].get(), r[10]->getFeatureInput().get());
-//     ASSERT_EQ(r[10]->getFeatureOutput().get(), d[1]->getFeatureInput().get());
-//     ASSERT_EQ(d[1]->getFeatureOutput().get(), fc1->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fc1->getFeatureOutputs()[0].get(), r[11]->getFeatureInput().get());
-//     ASSERT_EQ(r[11]->getFeatureOutput().get(), fc2->getFeatureInputs()[0].get());
+//     ASSERT_EQ(cat[0]->getFeatureOutputs()[0].value(), d[0]->getFeatureInput().value());
+//     ASSERT_EQ(d[0]->getFeatureOutput().value(), fc0->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fc0->getFeatureOutputs()[0].value(), r[10]->getFeatureInput().value());
+//     ASSERT_EQ(r[10]->getFeatureOutput().value(), d[1]->getFeatureInput().value());
+//     ASSERT_EQ(d[1]->getFeatureOutput().value(), fc1->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fc1->getFeatureOutputs()[0].value(), r[11]->getFeatureInput().value());
+//     ASSERT_EQ(r[11]->getFeatureOutput().value(), fc2->getFeatureInputs()[0].value());
 //
 //     // Categorical Cross Entropy
-//     ASSERT_EQ(fc2->getFeatureOutputs()[0].get(), sm[0]->getFeatureInput().get());
-//     ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo2->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fo2->getFeatureOutputs()[0].get(), ccl[0]->getFeatureInput().get());
-//     ASSERT_EQ(ccl[0]->getFeatureOutput().get(), ls[0]->getFeatureInput().get());
-//     ASSERT_EQ(labels->getFeatureOutput().get(), fo0->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fo0->getFeatureOutputs()[0].get(), ccl[0]->getLabelsInput().get());
+//     ASSERT_EQ(fc2->getFeatureOutputs()[0].value(), sm[0]->getFeatureInput().value());
+//     ASSERT_EQ(sm[0]->getFeatureOutput().value(), fo2->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fo2->getFeatureOutputs()[0].value(), ccl[0]->getFeatureInput().value());
+//     ASSERT_EQ(ccl[0]->getFeatureOutput().value(), ls[0]->getFeatureInput().value());
+//     ASSERT_EQ(labels->getFeatureOutput().value(), fo0->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fo0->getFeatureOutputs()[0].value(), ccl[0]->getLabelsInput().value());
 //
 //     // Categorical accuracy
-//     ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo2->getFeatureInputs()[0].get());
-//     ASSERT_EQ(fo2->getFeatureInputs()[0].get(), acc[0]->getFeatureInput().get());
-//     ASSERT_EQ(labels->getFeatureOutput().get(), fo0->getFeatureOutputs()[0].get());
-//     ASSERT_EQ(fo0->getFeatureOutputs()[0].get(), ccl[0]->getLabelsInput().get());
+//     ASSERT_EQ(sm[0]->getFeatureOutput().value(), fo2->getFeatureInputs()[0].value());
+//     ASSERT_EQ(fo2->getFeatureInputs()[0].value(), acc[0]->getFeatureInput().value());
+//     ASSERT_EQ(labels->getFeatureOutput().value(), fo0->getFeatureOutputs()[0].value());
+//     ASSERT_EQ(fo0->getFeatureOutputs()[0].value(), ccl[0]->getLabelsInput().value());
 //
 //     // Loss Output
-//     ASSERT_EQ(ls[0]->getFeatureOutput().get(), loss->getFeatureInput().get());
+//     ASSERT_EQ(ls[0]->getFeatureOutput().value(), loss->getFeatureInput().value());
 //
 //     // Predictions output
-//     ASSERT_EQ(fo2->getFeatureOutputs()[0].get(), tc[0]->getFeatureInput().get());
-//     ASSERT_EQ(tc[0]->getFeatureOutput().get(), predictions->getFeatureInput().get());
+//     ASSERT_EQ(fo2->getFeatureOutputs()[0].value(), tc[0]->getFeatureInput().value());
+//     ASSERT_EQ(tc[0]->getFeatureOutput().value(), predictions->getFeatureInput().value());
 //
 //     // Accuracy Output
-//     ASSERT_EQ(acc[0]->getFeatureOutput().get(), accuracy->getFeatureInput().get());
+//     ASSERT_EQ(acc[0]->getFeatureOutput().value(), accuracy->getFeatureInput().value());
 //
 //     // Backward
 //
 //     // Back Prop stubs - conv top
-//     ASSERT_TRUE(cv[0]->getErrorOutputs()[0].isEmpty());
-//     ASSERT_TRUE(cv[5]->getErrorOutputs()[0].isEmpty());
+//     ASSERT_TRUE(cv[0]->!getErrorOutputs()[0].has_value());
+//     ASSERT_TRUE(cv[5]->!getErrorOutputs()[0].has_value());
 //     ASSERT_EQ(fo0->getErrorInputs().size(), 2U);
 //     ASSERT_EQ(numPresentTensors(fo0->getErrorInputs()), 0U);
 //     ASSERT_EQ(fo0->getErrorOutputs().size(), 1U);
-//     ASSERT_TRUE(fo0->getErrorOutputs()[0].isEmpty());
+//     ASSERT_TRUE(fo0->!getErrorOutputs()[0].has_value());
 //     ASSERT_EQ(fo1->getErrorInputs().size(), 2U);
 //     ASSERT_EQ(numPresentTensors(fo1->getErrorInputs()), 0U);
 //     ASSERT_EQ(fo1->getErrorOutputs().size(), 1U);
-//     ASSERT_TRUE(fo1->getErrorOutputs()[0].isEmpty());
+//     ASSERT_TRUE(fo1->!getErrorOutputs()[0].has_value());
 //     ASSERT_EQ(fo2->getErrorInputs().size(), 3U);
 //     ASSERT_EQ(numPresentTensors(fo2->getErrorInputs()), 1U);
 //     ASSERT_EQ(fo2->getErrorOutputs().size(), 1U);
-//     ASSERT_TRUE(fo2->getErrorOutputs()[0].isPresent());
+//     ASSERT_TRUE(fo2->getErrorOutputs()[0].has_value());
 //
 //     ASSERT_EQ(cv[0]->getErrorOutputs().size(), 1U);
-//     ASSERT_EQ(cv[0]->getErrorInputs()[0].get(), r[0]->getErrorOutput().get());
-//     ASSERT_EQ(r[0]->getErrorInput().get(), cv[1]->getErrorOutputs()[0].get());
-//     ASSERT_EQ(cv[1]->getErrorInputs()[0].get(), r[1]->getErrorOutput().get());
-//     ASSERT_EQ(r[1]->getErrorInput().get(), p[0]->getErrorOutput().get());
-//     ASSERT_EQ(p[0]->getErrorInput().get(), cv[2]->getErrorOutputs()[0].get());
-//     ASSERT_EQ(cv[2]->getErrorInputs()[0].get(), r[2]->getErrorOutput().get());
-//     ASSERT_EQ(r[2]->getErrorInput().get(), p[1]->getErrorOutput().get());
-//     ASSERT_EQ(p[1]->getErrorInput().get(), cv[3]->getErrorOutputs()[0].get());
-//     ASSERT_EQ(cv[3]->getErrorInputs()[0].get(), r[3]->getErrorOutput().get());
-//     ASSERT_EQ(r[3]->getErrorInput().get(), cv[4]->getErrorOutputs()[0].get());
-//     ASSERT_EQ(cv[4]->getErrorInputs()[0].get(), r[4]->getErrorOutput().get());
-//     ASSERT_EQ(r[4]->getErrorInput().get(), p[2]->getErrorOutput().get());
-//     ASSERT_EQ(p[2]->getErrorInput().get(), cat[0]->getErrorOutputs()[0].get());
+//     ASSERT_EQ(cv[0]->getErrorInputs()[0].value(), r[0]->getErrorOutput().value());
+//     ASSERT_EQ(r[0]->getErrorInput().value(), cv[1]->getErrorOutputs()[0].value());
+//     ASSERT_EQ(cv[1]->getErrorInputs()[0].value(), r[1]->getErrorOutput().value());
+//     ASSERT_EQ(r[1]->getErrorInput().value(), p[0]->getErrorOutput().value());
+//     ASSERT_EQ(p[0]->getErrorInput().value(), cv[2]->getErrorOutputs()[0].value());
+//     ASSERT_EQ(cv[2]->getErrorInputs()[0].value(), r[2]->getErrorOutput().value());
+//     ASSERT_EQ(r[2]->getErrorInput().value(), p[1]->getErrorOutput().value());
+//     ASSERT_EQ(p[1]->getErrorInput().value(), cv[3]->getErrorOutputs()[0].value());
+//     ASSERT_EQ(cv[3]->getErrorInputs()[0].value(), r[3]->getErrorOutput().value());
+//     ASSERT_EQ(r[3]->getErrorInput().value(), cv[4]->getErrorOutputs()[0].value());
+//     ASSERT_EQ(cv[4]->getErrorInputs()[0].value(), r[4]->getErrorOutput().value());
+//     ASSERT_EQ(r[4]->getErrorInput().value(), p[2]->getErrorOutput().value());
+//     ASSERT_EQ(p[2]->getErrorInput().value(), cat[0]->getErrorOutputs()[0].value());
 //
 //     ASSERT_EQ(cv[5]->getErrorOutputs().size(), 1U);
-//     ASSERT_EQ(cv[5]->getErrorInputs()[0].get(), r[5]->getErrorOutput().get());
-//     ASSERT_EQ(r[5]->getErrorInput().get(), cv[6]->getErrorOutputs()[0].get());
-//     ASSERT_EQ(cv[6]->getErrorInputs()[0].get(), r[6]->getErrorOutput().get());
-//     ASSERT_EQ(r[6]->getErrorInput().get(), p[3]->getErrorOutput().get());
-//     ASSERT_EQ(p[3]->getErrorInput().get(), cv[7]->getErrorOutputs()[0].get());
-//     ASSERT_EQ(cv[7]->getErrorInputs()[0].get(), r[7]->getErrorOutput().get());
-//     ASSERT_EQ(r[7]->getErrorInput().get(), p[4]->getErrorOutput().get());
-//     ASSERT_EQ(p[4]->getErrorInput().get(), cv[8]->getErrorOutputs()[0].get());
-//     ASSERT_EQ(cv[8]->getErrorInputs()[0].get(), r[8]->getErrorOutput().get());
-//     ASSERT_EQ(r[8]->getErrorInput().get(), cv[9]->getErrorOutputs()[0].get());
-//     ASSERT_EQ(cv[9]->getErrorInputs()[0].get(), r[9]->getErrorOutput().get());
-//     ASSERT_EQ(r[9]->getErrorInput().get(), p[5]->getErrorOutput().get());
-//     ASSERT_EQ(p[5]->getErrorInput().get(), cat[0]->getErrorOutputs()[1].get());
+//     ASSERT_EQ(cv[5]->getErrorInputs()[0].value(), r[5]->getErrorOutput().value());
+//     ASSERT_EQ(r[5]->getErrorInput().value(), cv[6]->getErrorOutputs()[0].value());
+//     ASSERT_EQ(cv[6]->getErrorInputs()[0].value(), r[6]->getErrorOutput().value());
+//     ASSERT_EQ(r[6]->getErrorInput().value(), p[3]->getErrorOutput().value());
+//     ASSERT_EQ(p[3]->getErrorInput().value(), cv[7]->getErrorOutputs()[0].value());
+//     ASSERT_EQ(cv[7]->getErrorInputs()[0].value(), r[7]->getErrorOutput().value());
+//     ASSERT_EQ(r[7]->getErrorInput().value(), p[4]->getErrorOutput().value());
+//     ASSERT_EQ(p[4]->getErrorInput().value(), cv[8]->getErrorOutputs()[0].value());
+//     ASSERT_EQ(cv[8]->getErrorInputs()[0].value(), r[8]->getErrorOutput().value());
+//     ASSERT_EQ(r[8]->getErrorInput().value(), cv[9]->getErrorOutputs()[0].value());
+//     ASSERT_EQ(cv[9]->getErrorInputs()[0].value(), r[9]->getErrorOutput().value());
+//     ASSERT_EQ(r[9]->getErrorInput().value(), p[5]->getErrorOutput().value());
+//     ASSERT_EQ(p[5]->getErrorInput().value(), cat[0]->getErrorOutputs()[1].value());
 //
 //     ASSERT_EQ(cat[0]->getErrorInputs().size(), 1U);
-//     ASSERT_EQ(cat[0]->getErrorInputs()[0].get(), f[0]->getErrorOutput().get());
-//     ASSERT_EQ(f[0]->getErrorInput().get(), d[0]->getErrorOutput().get());
-//     ASSERT_EQ(d[0]->getErrorInput().get(), fc0->getErrorOutputs()[0].get());
-//     ASSERT_EQ(fc0->getErrorInputs()[0].get(), r[10]->getErrorOutput().get());
-//     ASSERT_EQ(r[10]->getErrorInput().get(), d[1]->getErrorOutput().get());
-//     ASSERT_EQ(d[1]->getErrorInput().get(), fc1->getErrorOutputs()[0].get());
-//     ASSERT_EQ(fc1->getErrorInputs()[0].get(), r[11]->getErrorOutput().get());
-//     ASSERT_EQ(r[11]->getErrorInput().get(), fc2->getErrorOutputs()[0].get());
-//     ASSERT_EQ(fc2->getErrorInputs()[0].get(), ccl[0]->getErrorOutput().get());
+//     ASSERT_EQ(cat[0]->getErrorInputs()[0].value(), f[0]->getErrorOutput().value());
+//     ASSERT_EQ(f[0]->getErrorInput().value(), d[0]->getErrorOutput().value());
+//     ASSERT_EQ(d[0]->getErrorInput().value(), fc0->getErrorOutputs()[0].value());
+//     ASSERT_EQ(fc0->getErrorInputs()[0].value(), r[10]->getErrorOutput().value());
+//     ASSERT_EQ(r[10]->getErrorInput().value(), d[1]->getErrorOutput().value());
+//     ASSERT_EQ(d[1]->getErrorInput().value(), fc1->getErrorOutputs()[0].value());
+//     ASSERT_EQ(fc1->getErrorInputs()[0].value(), r[11]->getErrorOutput().value());
+//     ASSERT_EQ(r[11]->getErrorInput().value(), fc2->getErrorOutputs()[0].value());
+//     ASSERT_EQ(fc2->getErrorInputs()[0].value(), ccl[0]->getErrorOutput().value());
 //
 //     // Loss
-//     ASSERT_TRUE(ccl[0]->getErrorInput().isEmpty());
-//     ASSERT_TRUE(ccl[0]->getErrorOutput().isPresent());
-//     if (fo2->getErrorInputs()[0].isPresent()) {
-//         ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo2->getErrorInputs()[0].get());
+//     ASSERT_TRUE(ccl[0]->!getErrorInput().has_value());
+//     ASSERT_TRUE(ccl[0]->getErrorOutput().has_value());
+//     if (fo2->getErrorInputs()[0].has_value()) {
+//         ASSERT_EQ(ccl[0]->getErrorOutput().value(), fo2->getErrorInputs()[0].value());
 //     }
-//     if (fo2->getErrorInputs()[1].isPresent()) {
-//         ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo2->getErrorInputs()[1].get());
+//     if (fo2->getErrorInputs()[1].has_value()) {
+//         ASSERT_EQ(ccl[0]->getErrorOutput().value(), fo2->getErrorInputs()[1].value());
 //     }
-//     if (fo2->getErrorInputs()[2].isPresent()) {
-//         ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo2->getErrorInputs()[2].get());
+//     if (fo2->getErrorInputs()[2].has_value()) {
+//         ASSERT_EQ(ccl[0]->getErrorOutput().value(), fo2->getErrorInputs()[2].value());
 //     }
-//     ASSERT_EQ(fo2->getErrorOutputs()[0].get(), sm[0]->getErrorInput().get());
-//     ASSERT_EQ(ccl[0]->getErrorOutput().get(), sm[0]->getErrorInput().get());
+//     ASSERT_EQ(fo2->getErrorOutputs()[0].value(), sm[0]->getErrorInput().value());
+//     ASSERT_EQ(ccl[0]->getErrorOutput().value(), sm[0]->getErrorInput().value());
 //     ASSERT_TRUE(sm[0]->isBackwardComputedExternally());
-//     ASSERT_EQ(ccl[0]->getErrorOutput().get(), fc2->getErrorInputs()[0].get());
+//     ASSERT_EQ(ccl[0]->getErrorOutput().value(), fc2->getErrorInputs()[0].value());
 //
 //     // Outputs
-//     ASSERT_TRUE(acc[0]->getErrorInput().isEmpty());
-//     ASSERT_TRUE(acc[0]->getErrorOutput().isEmpty());
-//     ASSERT_TRUE(labels->getErrorInput().isEmpty());
-//     ASSERT_TRUE(labels->getErrorOutput().isEmpty());
-//     ASSERT_TRUE(predictions->getErrorInput().isEmpty());
-//     ASSERT_TRUE(predictions->getErrorOutput().isEmpty());
-//     ASSERT_TRUE(images->getErrorInput().isEmpty());
-//     ASSERT_TRUE(images->getErrorOutput().isEmpty());
+//     ASSERT_TRUE(acc[0]->!getErrorInput().has_value());
+//     ASSERT_TRUE(acc[0]->!getErrorOutput().has_value());
+//     ASSERT_TRUE(labels->!getErrorInput().has_value());
+//     ASSERT_TRUE(labels->!getErrorOutput().has_value());
+//     ASSERT_TRUE(predictions->!getErrorInput().has_value());
+//     ASSERT_TRUE(predictions->!getErrorOutput().has_value());
+//     ASSERT_TRUE(images->!getErrorInput().has_value());
+//     ASSERT_TRUE(images->!getErrorOutput().has_value());
 //
 //     // Check tensor dimensions
 //     // Forward
 //     vector<uint64_t> expectedDimensions;
 //     expectedDimensions = {batchSize, 48, 55, 55};
-//     ASSERT_EQ(cv[0]->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[0]->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 55, 55};
-//     ASSERT_EQ(cv[1]->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[1]->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 27, 27};
-//     ASSERT_EQ(cv[2]->getFeatureInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[2]->getFeatureInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 27, 27};
-//     ASSERT_EQ(cv[2]->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[2]->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 13, 13};
-//     ASSERT_EQ(cv[3]->getFeatureInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[3]->getFeatureInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 13, 13};
-//     ASSERT_EQ(cv[3]->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[3]->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 13, 13};
-//     ASSERT_EQ(cv[4]->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[4]->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //
 //     expectedDimensions = {batchSize, 48, 55, 55};
-//     ASSERT_EQ(cv[5]->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[5]->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 55, 55};
-//     ASSERT_EQ(cv[6]->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[6]->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 27, 27};
-//     ASSERT_EQ(cv[7]->getFeatureInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[7]->getFeatureInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 27, 27};
-//     ASSERT_EQ(cv[7]->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[7]->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 13, 13};
-//     ASSERT_EQ(cv[8]->getFeatureInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[8]->getFeatureInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 13, 13};
-//     ASSERT_EQ(cv[8]->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[8]->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 13, 13};
-//     ASSERT_EQ(cv[9]->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[9]->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //
 //     expectedDimensions = {batchSize, 9216};
-//     ASSERT_EQ(fc0->getFeatureInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(fc0->getFeatureInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 4096};
-//     ASSERT_EQ(fc0->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(fc0->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 4096};
-//     ASSERT_EQ(fc1->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(fc1->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 1000};
-//     ASSERT_EQ(fc2->getFeatureOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(fc2->getFeatureOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //
 //     // Backward
-//     ASSERT_TRUE(cv[0]->getErrorOutputs()[0].isEmpty());
+//     ASSERT_TRUE(cv[0]->!getErrorOutputs()[0].has_value());
 //     expectedDimensions = {batchSize, 48, 55, 55};
-//     ASSERT_EQ(cv[1]->getErrorOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[1]->getErrorOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 55, 55};
-//     ASSERT_EQ(cv[1]->getErrorInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[1]->getErrorInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 27, 27};
-//     ASSERT_EQ(cv[2]->getErrorOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[2]->getErrorOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 27, 27};
-//     ASSERT_EQ(cv[2]->getErrorInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[2]->getErrorInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 13, 13};
-//     ASSERT_EQ(cv[3]->getErrorOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[3]->getErrorOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 13, 13};
-//     ASSERT_EQ(cv[4]->getErrorOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[4]->getErrorOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 13, 13};
-//     ASSERT_EQ(cv[4]->getErrorInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[4]->getErrorInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //
-//     ASSERT_TRUE(cv[5]->getErrorOutputs()[0].isEmpty());
+//     ASSERT_TRUE(cv[5]->!getErrorOutputs()[0].has_value());
 //     expectedDimensions = {batchSize, 48, 55, 55};
-//     ASSERT_EQ(cv[6]->getErrorOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[6]->getErrorOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 55, 55};
-//     ASSERT_EQ(cv[6]->getErrorInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[6]->getErrorInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 27, 27};
-//     ASSERT_EQ(cv[7]->getErrorOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[7]->getErrorOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 27, 27};
-//     ASSERT_EQ(cv[7]->getErrorInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[7]->getErrorInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 13, 13};
-//     ASSERT_EQ(cv[8]->getErrorOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[8]->getErrorOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 192, 13, 13};
-//     ASSERT_EQ(cv[9]->getErrorOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[9]->getErrorOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 128, 13, 13};
-//     ASSERT_EQ(cv[9]->getErrorInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(cv[9]->getErrorInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //
 //     expectedDimensions = {batchSize, 9216};
-//     ASSERT_EQ(fc0->getErrorOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(fc0->getErrorOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 4096};
-//     ASSERT_EQ(fc0->getErrorInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(fc0->getErrorInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 4096};
-//     ASSERT_EQ(fc1->getErrorOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(fc1->getErrorOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 4096};
-//     ASSERT_EQ(fc1->getErrorInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(fc1->getErrorInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 4096};
-//     ASSERT_EQ(fc2->getErrorOutputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(fc2->getErrorOutputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //     expectedDimensions = {batchSize, 1000};
-//     ASSERT_EQ(fc2->getErrorInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
+//     ASSERT_EQ(fc2->getErrorInputs()[0].value().getDescriptor().getDimensions(), expectedDimensions);
 //
 //     // Check weights initialization
 //     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
@@ -1201,7 +1201,7 @@
 //     for (uint32_t i = 0; i < 11 * 11 * 3 * 48; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     ThorImplementation::Tensor convBiases = conv->getBiases().get().clone(cpuPlacement);
+//     ThorImplementation::Tensor convBiases = conv->getBiases().value().clone(cpuPlacement);
 //     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
 //     conv->getStreams()[0].synchronize();
 //     half *biasesMem = (half *)convBiases.getMemPtr();
@@ -1217,7 +1217,7 @@
 //     for (uint32_t i = 0; i < 5 * 5 * 48 * 128; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     convBiases = conv->getBiases().get().clone(cpuPlacement);
+//     convBiases = conv->getBiases().value().clone(cpuPlacement);
 //     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
 //     conv->getStreams()[0].synchronize();
 //     biasesMem = (half *)convBiases.getMemPtr();
@@ -1233,7 +1233,7 @@
 //     for (uint32_t i = 0; i < 3 * 3 * 128 * 192; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     convBiases = conv->getBiases().get().clone(cpuPlacement);
+//     convBiases = conv->getBiases().value().clone(cpuPlacement);
 //     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
 //     conv->getStreams()[0].synchronize();
 //     biasesMem = (half *)convBiases.getMemPtr();
@@ -1249,7 +1249,7 @@
 //     for (uint32_t i = 0; i < 3 * 3 * 192 * 192; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     convBiases = conv->getBiases().get().clone(cpuPlacement);
+//     convBiases = conv->getBiases().value().clone(cpuPlacement);
 //     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
 //     conv->getStreams()[0].synchronize();
 //     biasesMem = (half *)convBiases.getMemPtr();
@@ -1265,7 +1265,7 @@
 //     for (uint32_t i = 0; i < 3 * 3 * 192 * 128; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     convBiases = conv->getBiases().get().clone(cpuPlacement);
+//     convBiases = conv->getBiases().value().clone(cpuPlacement);
 //     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
 //     conv->getStreams()[0].synchronize();
 //     biasesMem = (half *)convBiases.getMemPtr();
@@ -1281,7 +1281,7 @@
 //     for (uint32_t i = 0; i < 11 * 11 * 3 * 48; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     convBiases = conv->getBiases().get().clone(cpuPlacement);
+//     convBiases = conv->getBiases().value().clone(cpuPlacement);
 //     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
 //     conv->getStreams()[0].synchronize();
 //     biasesMem = (half *)convBiases.getMemPtr();
@@ -1297,7 +1297,7 @@
 //     for (uint32_t i = 0; i < 5 * 5 * 48 * 128; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     convBiases = conv->getBiases().get().clone(cpuPlacement);
+//     convBiases = conv->getBiases().value().clone(cpuPlacement);
 //     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
 //     conv->getStreams()[0].synchronize();
 //     biasesMem = (half *)convBiases.getMemPtr();
@@ -1313,7 +1313,7 @@
 //     for (uint32_t i = 0; i < 3 * 3 * 128 * 192; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     convBiases = conv->getBiases().get().clone(cpuPlacement);
+//     convBiases = conv->getBiases().value().clone(cpuPlacement);
 //     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
 //     conv->getStreams()[0].synchronize();
 //     biasesMem = (half *)convBiases.getMemPtr();
@@ -1329,7 +1329,7 @@
 //     for (uint32_t i = 0; i < 3 * 3 * 192 * 192; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     convBiases = conv->getBiases().get().clone(cpuPlacement);
+//     convBiases = conv->getBiases().value().clone(cpuPlacement);
 //     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
 //     conv->getStreams()[0].synchronize();
 //     biasesMem = (half *)convBiases.getMemPtr();
@@ -1345,7 +1345,7 @@
 //     for (uint32_t i = 0; i < 3 * 3 * 192 * 128; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     convBiases = conv->getBiases().get().clone(cpuPlacement);
+//     convBiases = conv->getBiases().value().clone(cpuPlacement);
 //     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
 //     conv->getStreams()[0].synchronize();
 //     biasesMem = (half *)convBiases.getMemPtr();
@@ -1361,7 +1361,7 @@
 //     for (uint32_t i = 0; i < 9216 * 4096; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
+//     ThorImplementation::Tensor fcBiases = fc->getBiases().value().clone(cpuPlacement);
 //     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
 //     fc->getStreams()[0].synchronize();
 //     biasesMem = (half *)fcBiases.getMemPtr();
@@ -1377,7 +1377,7 @@
 //     for (uint32_t i = 0; i < 4096 * 4096; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     fcBiases = fc->getBiases().get().clone(cpuPlacement);
+//     fcBiases = fc->getBiases().value().clone(cpuPlacement);
 //     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
 //     fc->getStreams()[0].synchronize();
 //     biasesMem = (half *)fcBiases.getMemPtr();
@@ -1393,7 +1393,7 @@
 //     for (uint32_t i = 0; i < 4096 * 1000; ++i) {
 //         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
 //     }
-//     fcBiases = fc->getBiases().get().clone(cpuPlacement);
+//     fcBiases = fc->getBiases().value().clone(cpuPlacement);
 //     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
 //     fc->getStreams()[0].synchronize();
 //     biasesMem = (half *)fcBiases.getMemPtr();
@@ -1401,3 +1401,4 @@
 //         ASSERT_TRUE(biasesMem[i] >= (half)-0.1 && biasesMem[i] <= (half)0.1);
 //     }
 // }
+#include <optional>

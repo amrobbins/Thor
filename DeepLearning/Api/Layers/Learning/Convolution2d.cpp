@@ -1,22 +1,22 @@
-#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Learning/Convolution2d.h"
+#include <optional>
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 using json = nlohmann::json;
 
 namespace Thor {
 
-
 namespace {
 
 ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
-                                                                    uint32_t strideH,
-                                                                    uint32_t strideW,
-                                                                    uint32_t padH,
-                                                                    uint32_t padW,
-                                                                    ThorImplementation::TensorPlacement placement,
-                                                                    std::shared_ptr<Thor::Activation> activation,
-                                                                    Optional<ThorImplementation::Expression> epilogue) {
+                                                                   uint32_t strideH,
+                                                                   uint32_t strideW,
+                                                                   uint32_t padH,
+                                                                   uint32_t padW,
+                                                                   ThorImplementation::TensorPlacement placement,
+                                                                   std::shared_ptr<Thor::Activation> activation,
+                                                                   std::optional<ThorImplementation::Expression> epilogue) {
     using ImplDataType = ThorImplementation::TensorDescriptor::DataType;
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
@@ -47,7 +47,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
 
         const uint64_t expectedOutputRows = (featureInputTensor.getDimensions()[2] + 2 * padH - wTensor.getDimensions()[2]) / strideH + 1;
         const uint64_t expectedOutputCols = (featureInputTensor.getDimensions()[3] + 2 * padW - wTensor.getDimensions()[3]) / strideW + 1;
-        Optional<ImplDataType> featureOutputDType = Optional<ImplDataType>::empty();
+        std::optional<ImplDataType> featureOutputDType = std::nullopt;
 
         if (outputs.contains("feature_output")) {
             const Tensor& featureOutputTensor = outputs.at("feature_output");
@@ -88,11 +88,11 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
         if (activation != nullptr) {
             fout = activation->toExpression(fout);
         }
-        if (epilogue.isPresent()) {
-            fout = Convolution2d::applyEpilogue(fout, epilogue.get());
+        if (epilogue.has_value()) {
+            fout = Convolution2d::applyEpilogue(fout, epilogue.value());
         }
-        if (featureOutputDType.isPresent()) {
-            fout = fout.withOutputDType(featureOutputDType.get());
+        if (featureOutputDType.has_value()) {
+            fout = fout.withOutputDType(featureOutputDType.value());
         }
 
         auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
@@ -110,10 +110,10 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
 }  // namespace
 
 std::shared_ptr<ThorImplementation::Layer> Convolution2d::stamp(ThorImplementation::TensorPlacement placement,
-                                                                 std::shared_ptr<ThorImplementation::Layer> drivingLayer,
-                                                                 std::shared_ptr<Thor::Layer> drivingApiLayer,
-                                                                 Thor::Tensor connectingApiTensor,
-                                                                 const bool inferenceOnly) const {
+                                                                std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                                std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                                Thor::Tensor connectingApiTensor,
+                                                                const bool inferenceOnly) const {
     (void)drivingLayer;
     (void)drivingApiLayer;
 
@@ -122,7 +122,8 @@ std::shared_ptr<ThorImplementation::Layer> Convolution2d::stamp(ThorImplementati
 
     Tensor::DataType weightsDataType = Tensor::DataType::FP16;
     std::shared_ptr<ThorImplementation::CustomLayer> physicalConvolution2d = std::make_shared<ThorImplementation::CustomLayer>(
-        buildConvolution2dExpression(hasBias, verticalStride, horizontalStride, verticalPadding, horizontalPadding, placement, activation, epilogue),
+        buildConvolution2dExpression(
+            hasBias, verticalStride, horizontalStride, verticalPadding, horizontalPadding, placement, activation, epilogue),
         placement,
         ThorImplementation::Convolution2d::defineParameters(numOutputChannels, hasBias, filterWidth, filterHeight, weightsDataType),
         inferenceOnly,
@@ -133,7 +134,7 @@ std::shared_ptr<ThorImplementation::Layer> Convolution2d::stamp(ThorImplementati
     return physicalConvolution2d;
 }
 
-void Convolution2d::buildSupportLayersAndAddToNetwork(Network *network) {
+void Convolution2d::buildSupportLayersAndAddToNetwork(Network* network) {
     Convolution2d::Builder convolution2dBuilder;
     convolution2dBuilder.network(*network)
         .numOutputChannels(numOutputChannels)
@@ -153,8 +154,8 @@ void Convolution2d::buildSupportLayersAndAddToNetwork(Network *network) {
     } else {
         convolution2dBuilder.noActivation();
     }
-    if (epilogue.isPresent()) {
-        convolution2dBuilder.epilogue(epilogue.get());
+    if (epilogue.has_value()) {
+        convolution2dBuilder.epilogue(epilogue.value());
     }
 
     vector<Tensor> currentFeatureInputs;
@@ -170,7 +171,7 @@ void Convolution2d::buildSupportLayersAndAddToNetwork(Network *network) {
                                               .featureInput(currentFeatureInputs[i])
                                               .newDataType(Tensor::DataType::FP16)
                                               .build();
-            currentFeatureInputs[i] = typeConverter.getFeatureOutput();
+            currentFeatureInputs[i] = typeConverter.getFeatureOutput().value();
         }
     }
 
@@ -179,10 +180,10 @@ void Convolution2d::buildSupportLayersAndAddToNetwork(Network *network) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
             batchNormBuilder.featureInput(currentFeatureInputs[i]);
         }
-        if (batchNormExponentialRunningAverageFactor.isPresent())
-            batchNormBuilder.exponentialRunningAverageFactor(batchNormExponentialRunningAverageFactor);
-        if (batchNormEpsilon.isPresent())
-            batchNormBuilder.epsilon(batchNormEpsilon);
+        if (batchNormExponentialRunningAverageFactor.has_value())
+            batchNormBuilder.exponentialRunningAverageFactor(batchNormExponentialRunningAverageFactor.value());
+        if (batchNormEpsilon.has_value())
+            batchNormBuilder.epsilon(batchNormEpsilon.value());
         BatchNormalization batchNormalization = batchNormBuilder.network(*network).build();
         currentFeatureInputs = batchNormalization.getFeatureOutputs();
     }
@@ -191,7 +192,7 @@ void Convolution2d::buildSupportLayersAndAddToNetwork(Network *network) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
             DropOut dropOut =
                 DropOut::Builder().network(*network).dropProportion(dropProportion).featureInput(currentFeatureInputs[i]).build();
-            currentFeatureInputs[i] = dropOut.getFeatureOutput();
+            currentFeatureInputs[i] = dropOut.getFeatureOutput().value();
         }
     }
 
@@ -240,10 +241,10 @@ json Convolution2d::architectureJson() const {
     } else {
         j["activation"] = nullptr;
     }
-    if (epilogue.isPresent()) {
-        if (serializableEpilogue.isEmpty())
-            serializableEpilogue = makeEpilogueDefinition(epilogue.get());
-        j["epilogue"] = serializableEpilogue.get().architectureJson();
+    if (epilogue.has_value()) {
+        if (!serializableEpilogue.has_value())
+            serializableEpilogue = makeEpilogueDefinition(epilogue.value());
+        j["epilogue"] = serializableEpilogue.value().architectureJson();
     } else {
         j["epilogue"] = nullptr;
     }
@@ -279,10 +280,10 @@ json Convolution2d::architectureJson() const {
     return j;
 }
 
-json Convolution2d::serialize(thor_file::TarWriter &archiveWriter,
+json Convolution2d::serialize(thor_file::TarWriter& archiveWriter,
                               Stream stream,
                               bool saveOptimizerState,
-                              ThorImplementation::StampedNetwork &stampedNetwork) const {
+                              ThorImplementation::StampedNetwork& stampedNetwork) const {
     json j = architectureJson();
     string layerName = string("layer") + to_string(getId());
 
@@ -300,13 +301,13 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter,
         if (hasBias) {
             biasesFile = (layerName + "_biases.gds");
             j["biases_tensor"] = biasesFile;
-            biases = twbLayer->getParameter("biases")->getStorage().get();
+            biases = twbLayer->getParameter("biases")->getStorage().value();
             archiveWriter.addArchiveFile(biasesFile, biases);
         }
 
         weightsFile = (layerName + "_weights.gds");
         j["weights_tensor"] = weightsFile;
-        weights = twbLayer->getParameter("weights")->getStorage();
+        weights = twbLayer->getParameter("weights")->getStorage().value();
         archiveWriter.addArchiveFile(weightsFile, weights);
     }
 
@@ -328,7 +329,7 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter,
     return j;
 }
 
-void Convolution2d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
+void Convolution2d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
     // if (j.at("version").get<std::string>() != "1.0.0")
     //     throw runtime_error("Unsupported version in Convolution2d::deserialize: " + j["version"].get<std::string>());
     // if (j.at("layer_type").get<std::string>() != "convolution_2d")
@@ -403,7 +404,7 @@ void Convolution2d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
 vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::TrainableLayer> physicalLayer,
                                         bool isFirstStamp,
                                         shared_ptr<ThorImplementation::TrainableLayer> sisterPhysicalLayer,
-                                        Optional<Event> sisterPhysicalLayerLoadedEvent) {
+                                        std::optional<Event> sisterPhysicalLayerLoadedEvent) {
     vector<Event> initDoneEvents =
         TrainableLayer::initialize(physicalLayer, isFirstStamp, sisterPhysicalLayer, sisterPhysicalLayerLoadedEvent);
 
@@ -415,39 +416,39 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
     // if (!isFirstStamp) {
     //     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
     //     THOR_THROW_IF_FALSE(sisterPhysicalLayer != nullptr);
-    //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
+    //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage().value();
     //     Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
-    //     if (sisterPhysicalLayerLoadedEvent.isPresent())
+    //     if (sisterPhysicalLayerLoadedEvent.has_value())
     //         stream.waitEvent(sisterPhysicalLayerLoadedEvent);
     //     weights.copyFromAsync(sisterPhysicalLayer->getParameter("weights")->getStorage(), stream);
     //     if (hasBias) {
-    //         ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage();
-    //         Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getParameter("biases")->getStorage();
-    //         THOR_THROW_IF_FALSE(sisterLayerBiases.isPresent());
-    //         biases.copyFromAsync(sisterLayerBiases.get(), stream);
+    //         ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().value();
+    //         std::optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getParameter("biases")->getStorage();
+    //         THOR_THROW_IF_FALSE(sisterLayerBiases.has_value());
+    //         biases.copyFromAsync(sisterLayerBiases.value(), stream);
     //     }
     //
     //     initDoneEvents.push_back(stream.putEvent(false, true));
-    // } else if (weightsFile.isPresent()) {
+    // } else if (weightsFile.has_value()) {
     //     // 2. Copy from a file - when loading a saved network
     //     THOR_THROW_IF_FALSE(archiveReader != nullptr);
-    //     THOR_THROW_IF_FALSE(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getMemDevice() ==
+    //     THOR_THROW_IF_FALSE(physicalLayer->getParameter("weights")->getStorage().value().getPlacement().getMemDevice() ==
     //            ThorImplementation::TensorPlacement::MemDevices::GPU);
     //     Stream stream =
-    //         Stream::getNextUploadStream(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getDeviceNum());
+    //         Stream::getNextUploadStream(physicalLayer->getParameter("weights")->getStorage().value().getPlacement().getDeviceNum());
     //
-    //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
+    //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage().value();
     //     archiveReader->registerReadRequest(weightsFile.get(), weights);
     //     if (hasBias) {
-    //         THOR_THROW_IF_FALSE(biasesFile.isPresent());
-    //         ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().get();
+    //         THOR_THROW_IF_FALSE(biasesFile.has_value());
+    //         ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().value();
     //         archiveReader->registerReadRequest(biasesFile.get(), biases);
     //     }
     //
     //     // Can't use the file later, it may not still be there
     //     archiveReader = nullptr;
-    //     weightsFile = Optional<string>::empty();
-    //     biasesFile = Optional<string>::empty();
+    //     weightsFile = std::nullopt;
+    //     biasesFile = std::nullopt;
     // } else {
     //     // FIXME: This needs to be updated to use Parameter's. It should be moved to API Thor::TrainableLayer
     //     //     // 3. Run an initializer to set the weights - on an untrained network
@@ -455,15 +456,15 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
     //     //     if (hasBias)
     //     //         THOR_THROW_IF_FALSE(biasInitializer != nullptr);
     //     //
-    //     //     Optional<Event> initDoneEvent;
+    //     //     std::optional<Event> initDoneEvent;
     //     //
     //     //     initDoneEvent = weightsInitializer->initialize(physicalLayer->getParameter("weights")->getStorage(), physicalLayer.get());
-    //     //     if (initDoneEvent.isPresent())
+    //     //     if (initDoneEvent.has_value())
     //     //         initDoneEvents.push_back(initDoneEvent);
     //     //
-    //     //     if (physicalLayer->getParameter("biases")->getStorage().isPresent()) {
-    //     //         initDoneEvent = biasInitializer->initialize(physicalLayer->getParameter("biases")->getStorage().get(),
-    //     //         physicalLayer.get()); if (initDoneEvent.isPresent())
+    //     //     if (physicalLayer->getParameter("biases")->getStorage().has_value()) {
+    //     //         initDoneEvent = biasInitializer->initialize(physicalLayer->getParameter("biases")->getStorage().value(),
+    //     //         physicalLayer.get()); if (initDoneEvent.has_value())
     //     //             initDoneEvents.push_back(initDoneEvent);
     //     //     }
     // }

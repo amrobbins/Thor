@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
@@ -130,10 +131,10 @@ void applyMomentumSgdReferenceStep(SgdReferenceState& state,
 }
 
 void runSgdStep(Sgd& sgd, const std::vector<float>& rawGradient, uint32_t batchSize, Stream& stream) {
-    Optional<Tensor> gradientOpt = sgd.getWeightsGradient();
-    ASSERT_TRUE(gradientOpt.isPresent());
+    std::optional<Tensor> gradientOpt = sgd.getWeightsGradient();
+    ASSERT_TRUE(gradientOpt.has_value());
 
-    Tensor gradient = gradientOpt.get();
+    Tensor gradient = gradientOpt.value();
     copyValuesToGpuFp32Tensor(gradient, rawGradient, stream);
 
     sgd.updateWeights(batchSize);
@@ -143,10 +144,10 @@ void runSgdStep(Sgd& sgd, const std::vector<float>& rawGradient, uint32_t batchS
 Tensor getMomentumStorage(Sgd& sgd) {
     EXPECT_TRUE(sgd.hasParameter("momentum"));
 
-    Optional<Tensor> storage = sgd.getParameter("momentum")->getStorage();
-    EXPECT_TRUE(storage.isPresent());
+    std::optional<Tensor> storage = sgd.getParameter("momentum")->getStorage();
+    EXPECT_TRUE(storage.has_value());
 
-    return storage.get();
+    return storage.value();
 }
 
 }  // namespace
@@ -214,10 +215,10 @@ TEST(SgdTest, CompileWithoutMomentumCreatesGradientAndWeightsOutputOnly) {
     EXPECT_TRUE(sgd.isCompiled());
     EXPECT_FALSE(sgd.hasParameter("momentum"));
 
-    Optional<Tensor> gradientOpt = sgd.getWeightsGradient();
-    ASSERT_TRUE(gradientOpt.isPresent());
+    std::optional<Tensor> gradientOpt = sgd.getWeightsGradient();
+    ASSERT_TRUE(gradientOpt.has_value());
 
-    Tensor gradient = gradientOpt.get();
+    Tensor gradient = gradientOpt.value();
     EXPECT_EQ(gradient.getPlacement(), gpuPlacement);
     EXPECT_EQ(gradient.getDataType(), DataType::FP16);
     EXPECT_EQ(gradient.getDimensions(), weights.getDimensions());

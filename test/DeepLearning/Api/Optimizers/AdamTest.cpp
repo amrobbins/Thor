@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Optimizers/Adam.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
@@ -99,11 +100,11 @@ Impl::Tensor requireOptimizerStorage(const std::shared_ptr<Impl::Adam>& adam, co
     if (!adam->hasParameter(name))
         throw std::runtime_error("Adam optimizer is missing parameter: " + name);
 
-    Optional<Impl::Tensor> storage = adam->getParameter(name)->getStorage();
-    if (storage.isEmpty())
+    std::optional<Impl::Tensor> storage = adam->getParameter(name)->getStorage();
+    if (!storage.has_value())
         throw std::runtime_error("Adam optimizer parameter has no storage: " + name);
 
-    return storage.get();
+    return storage.value();
 }
 
 std::shared_ptr<Impl::Adam> stampCompileAdam(Api::Adam& adam, Impl::Tensor& weights, Stream& stream) {
@@ -177,11 +178,11 @@ TEST(AdamApi, BuilderCustomValuesStampAndCompilePhysicalAdam) {
     EXPECT_FLOAT_EQ(physicalAdam->getBeta2(), beta2);
     EXPECT_FLOAT_EQ(physicalAdam->getEpsilon(), epsilon);
 
-    Optional<Impl::Tensor> gradient = physicalAdam->getWeightsGradient();
-    ASSERT_TRUE(gradient.isPresent());
-    EXPECT_EQ(gradient.get().getPlacement(), gpuPlacement);
-    EXPECT_EQ(gradient.get().getDataType(), DataType::FP32);
-    EXPECT_EQ(gradient.get().getDimensions(), weights.getDimensions());
+    std::optional<Impl::Tensor> gradient = physicalAdam->getWeightsGradient();
+    ASSERT_TRUE(gradient.has_value());
+    EXPECT_EQ(gradient.value().getPlacement(), gpuPlacement);
+    EXPECT_EQ(gradient.value().getDataType(), DataType::FP32);
+    EXPECT_EQ(gradient.value().getDimensions(), weights.getDimensions());
 
     Impl::Tensor m = requireOptimizerStorage(physicalAdam, "m");
     Impl::Tensor v = requireOptimizerStorage(physicalAdam, "v");
@@ -219,7 +220,7 @@ TEST(AdamApi, InitializeFirstStampZerosMomentParameters) {
     copyValuesToGpuFp32Tensor(m, {1.0f, -2.0f, 3.0f, -4.0f}, stream);
     copyValuesToGpuFp32Tensor(v, {5.0f, 6.0f, 7.0f, 8.0f}, stream);
 
-    std::vector<Event> initEvents = adam->initialize(physicalAdam, /*isFirstStamp=*/true, nullptr, Optional<Event>::empty());
+    std::vector<Event> initEvents = adam->initialize(physicalAdam, /*isFirstStamp=*/true, nullptr, std::nullopt);
     synchronizeEvents(initEvents);
     stream.synchronize();
 
@@ -255,7 +256,7 @@ TEST(AdamApi, InitializeNonFirstStampCopiesMomentParametersFromSisterOptimizer) 
     copyValuesToGpuFp32Tensor(targetM, {100.0f, 101.0f, 102.0f, 103.0f, 104.0f, 105.0f}, stream);
     copyValuesToGpuFp32Tensor(targetV, {200.0f, 201.0f, 202.0f, 203.0f, 204.0f, 205.0f}, stream);
 
-    Optional<Event> sisterReadyEvent = stream.putEvent(false, true);
+    std::optional<Event> sisterReadyEvent = stream.putEvent(false, true);
 
     std::vector<Event> initEvents = adam->initialize(targetAdam, /*isFirstStamp=*/false, sisterAdam, sisterReadyEvent);
     synchronizeEvents(initEvents);

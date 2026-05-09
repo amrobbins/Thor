@@ -1,3 +1,4 @@
+#include <optional>
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
 using namespace ThorImplementation;
@@ -74,7 +75,7 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
         if (perfResults[i].status != CUDNN_STATUS_SUCCESS)
             continue;
         uint64_t workspaceSizeInBytes = perfResults[i].memory;
-        Optional<Tensor> workspace;
+        std::optional<Tensor> workspace;
         // if (workspaceSizeInBytes > maxWorkspaceSizeInBytes)
         //    continue;
         if (workspaceSizeInBytes > 0)
@@ -91,7 +92,7 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
                                               weights.getMemPtr(),
                                               convolutionKernelRequirement.getConvolutionDescriptor(),
                                               perfResults[i].algo,
-                                              workspace.isPresent() ? workspace.get().getMemPtr() : nullptr,
+                                              workspace.has_value() ? workspace.value().getMemPtr() : nullptr,
                                               perfResults[i].memory,
                                               &BETA_ACCUMULATE,
                                               convolutionKernelRequirement.getDataOutputTensorDescriptor(),
@@ -184,7 +185,7 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
         // if (workspaceSizeInBytes > maxWorkspaceSizeInBytes)
         //    continue;
 
-        Optional<Tensor> workspace;
+        std::optional<Tensor> workspace;
         if (workspaceSizeInBytes > 0)
             workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 
@@ -199,7 +200,7 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
                                                    errorInput.getMemPtr(),
                                                    convolutionKernelRequirement.getConvolutionDescriptor(),
                                                    perfResults[i].algo,
-                                                   workspace.isPresent() ? workspace.get().getMemPtr() : nullptr,
+                                                   workspace.has_value() ? workspace.value().getMemPtr() : nullptr,
                                                    perfResults[i].memory,
                                                    &BETA_ACCUMULATE,
                                                    convolutionKernelRequirement.getErrorOutputTensorDescriptor(),
@@ -291,7 +292,7 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
         uint64_t workspaceSizeInBytes = perfResults[i].memory;
         // if (workspaceSizeInBytes > maxWorkspaceSizeInBytes)
         //    continue;
-        Optional<Tensor> workspace;
+        std::optional<Tensor> workspace;
         if (workspaceSizeInBytes > 0)
             workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 
@@ -306,7 +307,7 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
                                                      errorInput.getMemPtr(),
                                                      convolutionKernelRequirement.getConvolutionDescriptor(),
                                                      perfResults[i].algo,
-                                                     workspace.isPresent() ? workspace.get().getMemPtr() : nullptr,
+                                                     workspace.has_value() ? workspace.value().getMemPtr() : nullptr,
                                                      perfResults[i].memory,
                                                      &BETA_ACCUMULATE,
                                                      convolutionKernelRequirement.getWeightsGradientFilterDescriptor(),
@@ -352,9 +353,9 @@ uint64_t GpuConvolution::getBackwardBiasWorkspaceSizeInBytes(ConvolutionKernelRe
 void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolutionKernelRequirement,
                                         Tensor dataInput,
                                         Tensor weights,
-                                        Optional<Tensor> biases,
+                                        std::optional<Tensor> biases,
                                         Tensor dataOutput,
-                                        Optional<Tensor> workspace,
+                                        std::optional<Tensor> workspace,
                                         Stream stream) {
     assert(dataInput.getPlacement() == weights.getPlacement());
     assert(dataInput.getPlacement() == dataOutput.getPlacement());
@@ -364,8 +365,8 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
     cudnnConvolutionFwdAlgoPerf_t optimalKernel = *maybeOptimalKernel;
 
     if (optimalKernel.memory > 0) {
-        assert(workspace.isPresent());
-        assert(optimalKernel.memory == workspace.get().getDescriptor().getArraySizeInBytes());
+        assert(workspace.has_value());
+        assert(optimalKernel.memory == workspace.value().getDescriptor().getArraySizeInBytes());
     }
 
     ScopedGpu scopedGpu(stream.getGpuNum());
@@ -379,7 +380,7 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
                                           weights.getMemPtr(),
                                           convolutionKernelRequirement.getConvolutionDescriptor(),
                                           optimalKernel.algo,
-                                          workspace.isPresent() ? workspace.get().getMemPtr() : nullptr,
+                                          workspace.has_value() ? workspace.value().getMemPtr() : nullptr,
                                           optimalKernel.memory,
                                           &BETA_CLEAR,
                                           convolutionKernelRequirement.getDataOutputTensorDescriptor(),
@@ -391,9 +392,9 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
     }
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-    if (biases.isPresent()) {
-        assert(biases.get().getPlacement() == weights.getPlacement());
-        vector<unsigned long> biasDimensions = biases.get().getDescriptor().getDimensions();
+    if (biases.has_value()) {
+        assert(biases.value().getPlacement() == weights.getPlacement());
+        vector<unsigned long> biasDimensions = biases.value().getDescriptor().getDimensions();
         assert(biasDimensions.size() == 1);
         assert(biasDimensions[0] == dataOutput.getDescriptor().getDimensions()[1]);
 
@@ -401,13 +402,13 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
             cudnnStatus = cudnnAddTensor(stream.getCudnnHandle(),
                                          &ALPHA_NO_SCALE,
                                          convolutionKernelRequirement.getBiasesTensorDescriptor(),
-                                         biases.get().getMemPtr(),
+                                         biases.value().getMemPtr(),
                                          &BETA_ACCUMULATE,
                                          convolutionKernelRequirement.getDataOutputTensorDescriptor(),
                                          dataOutput.getMemPtr());
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         } else {
-            addConvolutionBias(dataOutput, biases, stream);
+            addConvolutionBias(dataOutput, biases.value(), stream);
         }
     }
 }
@@ -416,7 +417,7 @@ void GpuConvolution::convolutionBackwardData(ConvolutionKernelRequirement convol
                                              Tensor errorInput,
                                              Tensor weights,
                                              Tensor errorOutput,
-                                             Optional<Tensor> workspace,
+                                             std::optional<Tensor> workspace,
                                              Stream stream) {
     assert(errorInput.getPlacement() == weights.getPlacement());
     assert(errorInput.getPlacement() == errorOutput.getPlacement());
@@ -426,11 +427,11 @@ void GpuConvolution::convolutionBackwardData(ConvolutionKernelRequirement convol
     cudnnConvolutionBwdDataAlgoPerf_t optimalKernel = *maybeOptimalKernel;
 
     if (optimalKernel.memory > 0) {
-        if (!workspace.isPresent()) {
+        if (!workspace.has_value()) {
             printf("algo %d workspaceBytes %ld\n", optimalKernel.algo, optimalKernel.memory);
         }
-        assert(workspace.isPresent());
-        assert(optimalKernel.memory == workspace.get().getDescriptor().getArraySizeInBytes());
+        assert(workspace.has_value());
+        assert(optimalKernel.memory == workspace.value().getDescriptor().getArraySizeInBytes());
     }
 
     ScopedGpu scopedGpu(stream.getGpuNum());
@@ -444,7 +445,7 @@ void GpuConvolution::convolutionBackwardData(ConvolutionKernelRequirement convol
                                                errorInput.getMemPtr(),
                                                convolutionKernelRequirement.getConvolutionDescriptor(),
                                                optimalKernel.algo,
-                                               workspace.isPresent() ? workspace.get().getMemPtr() : nullptr,
+                                               workspace.has_value() ? workspace.value().getMemPtr() : nullptr,
                                                optimalKernel.memory,
                                                &BETA_CLEAR,
                                                convolutionKernelRequirement.getErrorOutputTensorDescriptor(),
@@ -460,7 +461,7 @@ void GpuConvolution::convolutionBackwardFilter(ConvolutionKernelRequirement conv
                                                Tensor dataInput,
                                                Tensor errorInput,
                                                Tensor weightsGradient,
-                                               Optional<Tensor> workspace,
+                                               std::optional<Tensor> workspace,
                                                Stream stream,
                                                bool accumulateGradient) {
     assert(dataInput.getPlacement() == errorInput.getPlacement());
@@ -471,8 +472,8 @@ void GpuConvolution::convolutionBackwardFilter(ConvolutionKernelRequirement conv
     cudnnConvolutionBwdFilterAlgoPerf_t optimalKernel = *maybeOptimalKernel;
 
     if (optimalKernel.memory > 0) {
-        assert(workspace.isPresent());
-        assert(optimalKernel.memory == workspace.get().getDescriptor().getArraySizeInBytes());
+        assert(workspace.has_value());
+        assert(optimalKernel.memory == workspace.value().getDescriptor().getArraySizeInBytes());
     }
 
     ScopedGpu scopedGpu(stream.getGpuNum());
@@ -486,7 +487,7 @@ void GpuConvolution::convolutionBackwardFilter(ConvolutionKernelRequirement conv
                                                  errorInput.getMemPtr(),
                                                  convolutionKernelRequirement.getConvolutionDescriptor(),
                                                  optimalKernel.algo,
-                                                 workspace.isPresent() ? workspace.get().getMemPtr() : nullptr,
+                                                 workspace.has_value() ? workspace.value().getMemPtr() : nullptr,
                                                  optimalKernel.memory,
                                                  accumulateGradient ? &BETA_ACCUMULATE : &BETA_CLEAR,
                                                  convolutionKernelRequirement.getWeightsGradientFilterDescriptor(),
@@ -501,7 +502,7 @@ void GpuConvolution::convolutionBackwardFilter(ConvolutionKernelRequirement conv
 void GpuConvolution::convolutionBackwardBias(ConvolutionKernelRequirement convolutionKernelRequirement,
                                              Tensor errorInput,
                                              Tensor biasesGradient,
-                                             Optional<Tensor> workspace,
+                                             std::optional<Tensor> workspace,
                                              Stream stream,
                                              bool accumulateGradient) {
     if (useCudnnBackwardBias) {
@@ -515,7 +516,7 @@ void GpuConvolution::convolutionBackwardBias(ConvolutionKernelRequirement convol
                                                    biasesGradient.getMemPtr());
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
     } else {
-        computeConvolutionBiasesGradient(errorInput, biasesGradient, workspace, stream);
+        computeConvolutionBiasesGradient(errorInput, biasesGradient, workspace.value(), stream);
     }
 }
 

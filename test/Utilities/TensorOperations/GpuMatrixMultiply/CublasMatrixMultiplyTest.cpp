@@ -1,3 +1,4 @@
+#include <optional>
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include "test/Utilities/TensorOperations/GpuMatrixMultiply/MatrixMultiplyTestHelper.h"
@@ -124,7 +125,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP32) {
 
         bool useWorkspace = rand() % 2;
 
-        Optional<Tensor> workspace_d;
+        std::optional<Tensor> workspace_d;
 
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
@@ -322,7 +323,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP16) {
 
         bool useWorkspace = rand() % 2;
 
-        Optional<Tensor> workspace_d;
+        std::optional<Tensor> workspace_d;
 
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
@@ -888,7 +889,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
 
         bool useWorkspace = rand() % 2;
 
-        Optional<Tensor> workspace_d;
+        std::optional<Tensor> workspace_d;
 
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
@@ -1142,7 +1143,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP16) {
 
         bool useWorkspace = rand() % 2;
 
-        Optional<Tensor> workspace_d;
+        std::optional<Tensor> workspace_d;
 
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
@@ -2185,7 +2186,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmSupportsFp8InputsAndFp32OutputInTNLa
                                                                                                        kernelWillRunOnGpu);
     ASSERT_TRUE(kernelWillRunOnGpu);
 
-    Optional<Tensor> workspace_d;
+    std::optional<Tensor> workspace_d;
     if (workspaceSizeInBytes > 0) {
         workspace_d = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
     }
@@ -2821,7 +2822,7 @@ void runSupportedFp8OptimalMatmulCase(int gpuNum, float tolerance) {
                                                                                                            kernelWillRunOnGpu);
         ASSERT_TRUE(kernelWillRunOnGpu);
 
-        Optional<Tensor> workspace_d;
+        std::optional<Tensor> workspace_d;
         if (workspaceSizeInBytes > 0) {
             workspace_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
         }
@@ -2946,7 +2947,7 @@ void runSupportedFp8OptimalGemmCase(int gpuNum, float alpha, float beta, float t
                                                                                                            kernelWillRunOnGpu);
         ASSERT_TRUE(kernelWillRunOnGpu);
 
-        Optional<Tensor> workspace_d;
+        std::optional<Tensor> workspace_d;
         if (workspaceSizeInBytes > 0) {
             workspace_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
         }
@@ -3196,7 +3197,7 @@ void runPackedFp8ToFp32OptimalGemmLayoutCase(int gpuNum, bool transposeA, bool t
                                                                                                            kernelWillRunOnGpu);
         ASSERT_TRUE(kernelWillRunOnGpu);
 
-        Optional<Tensor> workspace_d;
+        std::optional<Tensor> workspace_d;
         if (workspaceSizeInBytes > 0) {
             workspace_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
         }

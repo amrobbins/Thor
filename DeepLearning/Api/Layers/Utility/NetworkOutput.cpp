@@ -7,12 +7,12 @@ using json = nlohmann::json;
 namespace Thor {
 
 void NetworkOutput::buildSupportLayersAndAddToNetwork() {
-    Tensor currentFeatureInput = featureInput.get();
+    Tensor currentFeatureInput = featureInput.value();
 
     // Force the input tensor to this type of layer to be FP16
-    if (featureInput.get().getDataType() != dataType) {
+    if (featureInput.value().getDataType() != dataType) {
         currentFeatureInput =
-            TypeConverter::Builder().network(*network).featureInput(currentFeatureInput).newDataType(dataType).build().getFeatureOutput();
+            TypeConverter::Builder().network(*network).featureInput(currentFeatureInput).newDataType(dataType).build().getFeatureOutput().value();
     }
 
     currentFeatureInput = NetworkOutput::Builder()
@@ -21,7 +21,7 @@ void NetworkOutput::buildSupportLayersAndAddToNetwork() {
                               .inputTensor(currentFeatureInput)
                               .dataType(dataType)
                               .build()
-                              .getFeatureOutput();
+                              .getFeatureOutput().value();
 
     // Replace the output on the compound layer to be the outputs of the last stage
     // i.e. tunnel the actual inputs to actual output of the compound layer,
@@ -35,8 +35,8 @@ json NetworkOutput::architectureJson() const {
                 {"layer_type", "network_output"},
                 {"name", name},
                 {"data_type", json(getDataType())},
-                {"feature_input", featureInput.get().architectureJson()},
-                {"feature_output", featureOutput.get().architectureJson()}};
+                {"feature_input", featureInput.value().architectureJson()},
+                {"feature_output", featureOutput.value().architectureJson()}};
 }
 
 void NetworkOutput::deserialize(const json &j, Network *network) {

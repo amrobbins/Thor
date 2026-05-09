@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
+#include <optional>
 
 using namespace std;
 using json = nlohmann::json;
@@ -66,22 +67,22 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
         // FIXME: Simplify this with Parameterizable->serializeParameters(...)
         weightsFile = (layerName + "_weights.gds");
         j["weights_tensor"] = weightsFile;
-        weights = batchNorm->getParameter("weights")->getStorage();
+        weights = batchNorm->getParameter("weights")->getStorage().value();
         archiveWriter.addArchiveFile(weightsFile, weights);
 
         biasesFile = (layerName + "_biases.gds");
         j["biases_tensor"] = biasesFile;
-        biases = batchNorm->getParameter("biases")->getStorage().get();
+        biases = batchNorm->getParameter("biases")->getStorage().value();
         archiveWriter.addArchiveFile(biasesFile, biases);
 
         resultRunningMeanFile = (layerName + "_means.gds");
         j["means_tensor"] = resultRunningMeanFile;
-        means = batchNorm->getParameter("running_mean")->getStorage().get();
+        means = batchNorm->getParameter("running_mean")->getStorage().value();
         archiveWriter.addArchiveFile(resultRunningMeanFile, means);
 
         resultRunningVarianceFile = (layerName + "_variances.gds");
         j["variances_tensor"] = resultRunningVarianceFile;
-        variance = batchNorm->getParameter("running_variance")->getStorage().get();
+        variance = batchNorm->getParameter("running_variance")->getStorage().value();
         archiveWriter.addArchiveFile(resultRunningVarianceFile, variance);
 
         j["num_items_observed"] = batchNorm->getNumItemsObserved();
@@ -155,7 +156,7 @@ void BatchNormalization::deserialize(shared_ptr<thor_file::TarReader> &archiveRe
 vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::TrainableLayer> physicalLayer,
                                              bool isFirstStamp,
                                              shared_ptr<ThorImplementation::TrainableLayer> sisterPhysicalLayer,
-                                             Optional<Event> sisterPhysicalLayerLoadedEvent) {
+                                             std::optional<Event> sisterPhysicalLayerLoadedEvent) {
     vector<Event> initDoneEvents =
         TrainableLayer::initialize(physicalLayer, isFirstStamp, sisterPhysicalLayer, sisterPhysicalLayerLoadedEvent);
     // shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNorm =
@@ -170,95 +171,95 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
     // if (!isFirstStamp) {
     //     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
     //     THOR_THROW_IF_FALSE(sisterPhysicalLayer != nullptr);
-    //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
+    //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage().value();
     //     Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
-    //     if (sisterPhysicalLayerLoadedEvent.isPresent())
+    //     if (sisterPhysicalLayerLoadedEvent.has_value())
     //         stream.waitEvent(sisterPhysicalLayerLoadedEvent);
     //     weights.copyFromAsync(sisterPhysicalLayer->getParameter("weights")->getStorage(), stream);
     //
-    //     THOR_THROW_IF_FALSE(physicalLayer->getParameter("biases")->getStorage().isPresent());
-    //     ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage();
-    //     Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getParameter("biases")->getStorage();
-    //     THOR_THROW_IF_FALSE(sisterLayerBiases.isPresent());
-    //     biases.copyFromAsync(sisterLayerBiases.get(), stream);
+    //     THOR_THROW_IF_FALSE(physicalLayer->getParameter("biases")->getStorage().has_value());
+    //     ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().value();
+    //     std::optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getParameter("biases")->getStorage();
+    //     THOR_THROW_IF_FALSE(sisterLayerBiases.has_value());
+    //     biases.copyFromAsync(sisterLayerBiases.value(), stream);
     //
-    //     ThorImplementation::Tensor resultRunningVariance = physicalBatchNorm->getParameter("running_variance")->getStorage().get();
-    //     Optional<ThorImplementation::Tensor> sisterLayerResultRunningVariance =
-    //         sisterPhysicalBatchNorm->getParameter("running_variance")->getStorage().get();
+    //     ThorImplementation::Tensor resultRunningVariance = physicalBatchNorm->getParameter("running_variance")->getStorage().value();
+    //     std::optional<ThorImplementation::Tensor> sisterLayerResultRunningVariance =
+    //         sisterPhysicalBatchNorm->getParameter("running_variance")->getStorage().value();
     //     resultRunningVariance.copyFromAsync(sisterLayerResultRunningVariance, stream);
     //
-    //     ThorImplementation::Tensor resultRunningMean = physicalBatchNorm->getParameter("running_mean")->getStorage().get();
-    //     Optional<ThorImplementation::Tensor> sisterLayerResultRunningMean =
-    //         sisterPhysicalBatchNorm->getParameter("running_mean")->getStorage().get();
+    //     ThorImplementation::Tensor resultRunningMean = physicalBatchNorm->getParameter("running_mean")->getStorage().value();
+    //     std::optional<ThorImplementation::Tensor> sisterLayerResultRunningMean =
+    //         sisterPhysicalBatchNorm->getParameter("running_mean")->getStorage().value();
     //     resultRunningMean.copyFromAsync(sisterLayerResultRunningMean, stream);
     //
     //     physicalBatchNorm->setExponentialRunningAverageFactor(exponentialRunningAverageFactor);
     //
     //     initDoneEvents.emplace_back(false, true);
-    // } else if (weightsFile.isPresent()) {
+    // } else if (weightsFile.has_value()) {
     //     // 2. Copy from a file - when loading a saved network
     //     THOR_THROW_IF_FALSE(archiveReader != nullptr);
-    //     THOR_THROW_IF_FALSE(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getMemDevice() ==
+    //     THOR_THROW_IF_FALSE(physicalLayer->getParameter("weights")->getStorage().value().getPlacement().getMemDevice() ==
     //            ThorImplementation::TensorPlacement::MemDevices::GPU);
     //     Stream stream =
-    //         Stream::getNextUploadStream(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getDeviceNum());
+    //         Stream::getNextUploadStream(physicalLayer->getParameter("weights")->getStorage().value().getPlacement().getDeviceNum());
     //
-    //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
+    //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage().value();
     //     archiveReader->registerReadRequest(weightsFile.get(), weights);
-    //     THOR_THROW_IF_FALSE(biasesFile.isPresent());
-    //     ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().get();
+    //     THOR_THROW_IF_FALSE(biasesFile.has_value());
+    //     ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().value();
     //     archiveReader->registerReadRequest(biasesFile.get(), biases);
     //
-    //     THOR_THROW_IF_FALSE(runningVariancesFile.isPresent());
-    //     ThorImplementation::Tensor variances = physicalBatchNorm->getParameter("running_variance")->getStorage().get();
-    //     archiveReader->registerReadRequest(runningVariancesFile.get(), variances);
+    //     THOR_THROW_IF_FALSE(runningVariancesFile.has_value());
+    //     ThorImplementation::Tensor variances = physicalBatchNorm->getParameter("running_variance")->getStorage().value();
+    //     archiveReader->registerReadRequest(runningVariancesFile.value(), variances);
     //
-    //     THOR_THROW_IF_FALSE(runningMeansFile.isPresent());
-    //     ThorImplementation::Tensor means = physicalBatchNorm->getParameter("running_mean")->getStorage().get();
-    //     archiveReader->registerReadRequest(runningMeansFile.get(), means);
+    //     THOR_THROW_IF_FALSE(runningMeansFile.has_value());
+    //     ThorImplementation::Tensor means = physicalBatchNorm->getParameter("running_mean")->getStorage().value();
+    //     archiveReader->registerReadRequest(runningMeansFile.value(), means);
     //
     //     // Can't use the file later, it may not still be there
     //     archiveReader = nullptr;
-    //     weightsFile = Optional<string>::empty();
-    //     biasesFile = Optional<string>::empty();
-    //     runningVariancesFile = Optional<string>::empty();
-    //     runningMeansFile = Optional<string>::empty();
+    //     weightsFile = std::nullopt;
+    //     biasesFile = std::nullopt;
+    //     runningVariancesFile = std::nullopt;
+    //     runningMeansFile = std::nullopt;
     //
     //     physicalBatchNorm->setExponentialRunningAverageFactor(exponentialRunningAverageFactor);
     // } else {
     //     // FIXME: This needs to be updated to use Parameter's. It needs be moved to API Thor::TrainableLayer
     //     // // 3. Run an initializer to set the weights - on an untrained network
-    //     // Optional<Event> initDoneEvent;
+    //     // std::optional<Event> initDoneEvent;
     //     //
     //     // UniformRandom::Builder onesInitializerBuilder = UniformRandom::Builder().minValue(1.0).maxValue(1.0);
     //     //
     //     // shared_ptr<Initializer::Builder> weightsInitializerBuilder = onesInitializerBuilder.clone();
     //     // shared_ptr<Initializer> weightsInitializer = weightsInitializerBuilder->build();
     //     // initDoneEvent = weightsInitializer->initialize(physicalBatchNorm->getParameter("weights")->getStorage(),
-    //     // physicalBatchNorm.get()); if (initDoneEvent.isPresent())
+    //     // physicalBatchNorm.get()); if (initDoneEvent.has_value())
     //     //     initDoneEvents.push_back(initDoneEvent);
     //     //
     //     // shared_ptr<Initializer::Builder> resultRunningVarianceBuilder = onesInitializerBuilder.clone();
     //     // shared_ptr<Initializer> resultRunningVarianceInitializer = resultRunningVarianceBuilder->build();
     //     // initDoneEvent =
-    //     //     resultRunningVarianceInitializer->initialize(physicalBatchNorm->getParameter("running_variance")->getStorage().get();,
+    //     //     resultRunningVarianceInitializer->initialize(physicalBatchNorm->getParameter("running_variance")->getStorage().value();,
     //     //     physicalBatchNorm.get());
-    //     // if (initDoneEvent.isPresent())
+    //     // if (initDoneEvent.has_value())
     //     //     initDoneEvents.push_back(initDoneEvent);
     //     //
     //     // UniformRandom::Builder zerosInitializerBuilder = UniformRandom::Builder().minValue(0.0).maxValue(0.0);
     //     //
-    //     // THOR_THROW_IF_FALSE(physicalBatchNorm->getParameter("biases")->getStorage().isPresent());
+    //     // THOR_THROW_IF_FALSE(physicalBatchNorm->getParameter("biases")->getStorage().has_value());
     //     // shared_ptr<Initializer::Builder> biasInitializerBuilder = zerosInitializerBuilder.clone();
     //     // shared_ptr<Initializer> biasInitializer = biasInitializerBuilder->build();
     //     // initDoneEvent = biasInitializer->initialize(physicalBatchNorm->getParameter("biases")->getStorage(), physicalBatchNorm.get());
-    //     // if (initDoneEvent.isPresent())
+    //     // if (initDoneEvent.has_value())
     //     //     initDoneEvents.push_back(initDoneEvent);
     //     //
     //     // shared_ptr<Initializer::Builder> resultRunningMeanBuilder = zerosInitializerBuilder.clone();
     //     // shared_ptr<Initializer> resultRunningMeanInitializer = resultRunningMeanBuilder->build();
-    //     // initDoneEvent = resultRunningMeanInitializer->initialize(physicalBatchNorm->getParameter("running_mean")->getStorage().get();,
-    //     // physicalBatchNorm.get()); if (initDoneEvent.isPresent())
+    //     // initDoneEvent = resultRunningMeanInitializer->initialize(physicalBatchNorm->getParameter("running_mean")->getStorage().value();,
+    //     // physicalBatchNorm.get()); if (initDoneEvent.has_value())
     //     //     initDoneEvents.push_back(initDoneEvent);
     //     //
     //     // // Start with the actual average until there are enough elements observed so that the running average

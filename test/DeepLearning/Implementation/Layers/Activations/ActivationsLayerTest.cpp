@@ -68,7 +68,7 @@ TEST(Relu, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -94,7 +94,7 @@ TEST(Relu, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = relu->getErrorOutput();
+        Tensor errorOutGpu = relu->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -153,7 +153,7 @@ TEST(Tanh, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -172,7 +172,7 @@ TEST(Tanh, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = tanhLayer->getErrorOutput();
+        Tensor errorOutGpu = tanhLayer->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -257,7 +257,7 @@ TEST(Elu, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -280,7 +280,7 @@ TEST(Elu, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = eluLayer->getErrorOutput();
+        Tensor errorOutGpu = eluLayer->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -359,7 +359,7 @@ TEST(Swish, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -382,7 +382,7 @@ TEST(Swish, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = swishLayer->getErrorOutput();
+        Tensor errorOutGpu = swishLayer->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -441,7 +441,7 @@ TEST(Exponential, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -464,7 +464,7 @@ TEST(Exponential, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = exponentialLayer->getErrorOutput();
+        Tensor errorOutGpu = exponentialLayer->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -536,7 +536,7 @@ TEST(SoftSign, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -559,7 +559,7 @@ TEST(SoftSign, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = softSignLayer->getErrorOutput();
+        Tensor errorOutGpu = softSignLayer->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -633,7 +633,7 @@ TEST(HardSigmoid, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -656,7 +656,7 @@ TEST(HardSigmoid, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = hardSigmoidLayer->getErrorOutput();
+        Tensor errorOutGpu = hardSigmoidLayer->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -728,7 +728,7 @@ TEST(SoftPlus, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -751,7 +751,7 @@ TEST(SoftPlus, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = softPlusLayer->getErrorOutput();
+        Tensor errorOutGpu = softPlusLayer->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -824,7 +824,7 @@ TEST(Sigmoid, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -847,7 +847,7 @@ TEST(Sigmoid, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = sigmoidLayer->getErrorOutput();
+        Tensor errorOutGpu = sigmoidLayer->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -934,7 +934,7 @@ TEST(Selu, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -957,7 +957,7 @@ TEST(Selu, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = seluLayer->getErrorOutput();
+        Tensor errorOutGpu = seluLayer->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -1035,7 +1035,7 @@ TEST(Gelu, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -1058,7 +1058,7 @@ TEST(Gelu, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = geluLayer->getErrorOutput();
+        Tensor errorOutGpu = geluLayer->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -1129,7 +1129,7 @@ TEST(Softmax, Works) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
@@ -1170,7 +1170,7 @@ TEST(Softmax, Works) {
         Tensor errorInCpuFloat(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = softmaxLayer->getErrorOutput();
+        Tensor errorOutGpu = softmaxLayer->getErrorOutput().value();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {

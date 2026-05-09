@@ -2,6 +2,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Network/StampedNetwork.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
@@ -101,7 +102,7 @@ Impl::DynamicExpression makeSerializableAffineExpression() {
 
 struct PlacedCustomLayerFixture {
     std::shared_ptr<Api::PlacedNetwork> placedNetwork;
-    Api::StampedNetwork* stampedNetwork = nullptr;
+    ThorImplementation::StampedNetwork* stampedNetwork = nullptr;
     std::shared_ptr<Impl::NetworkInput> physicalInput;
     std::shared_ptr<Impl::NetworkOutput> physicalOutput;
     std::shared_ptr<Impl::CustomLayer> physicalCustomLayer;
@@ -120,7 +121,8 @@ PlacedCustomLayerFixture placeSingleCustomLayerNetwork(Api::Network& network,
     EXPECT_NE(fixture.placedNetwork, nullptr);
     fixture.stampedNetwork = &fixture.placedNetwork->getStampedNetwork(0);
 
-    fixture.physicalInput = dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiInput.getId()));
+    fixture.physicalInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiInput.getId()));
     fixture.physicalOutput =
         dynamic_pointer_cast<Impl::NetworkOutput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiOutput.getId()));
     fixture.physicalCustomLayer =
@@ -139,7 +141,7 @@ vector<float> runForward(Impl::NetworkInput& physicalInput,
     physicalInput.forward(featureInHost, false, batchSize);
     Event featureOutReadyEvent = physicalOutput.getOutputReadyEvent();
     featureOutReadyEvent.synchronize();
-    return readCpuTensor(physicalOutput.getFeatureOutput());
+    return readCpuTensor(physicalOutput.getFeatureOutput().value());
 }
 
 }  // namespace
@@ -163,7 +165,7 @@ TEST(CustomLayerApi, SerializableExpressionDefinitionSaveLoadRoundTripPreservesE
                                            .expression(makeSerializableAffineExpression())
                                            .inputNames({"x"})
                                            .outputNames({"y"})
-                                           .inputInterface({{"x", input.getFeatureOutput()}})
+                                           .inputInterface({{"x", input.getFeatureOutput().value()}})
                                            .build();
         Api::NetworkOutput output = Api::NetworkOutput::Builder()
                                         .network(network)

@@ -9,6 +9,7 @@
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
+#include <optional>
 
 namespace Thor {
 class Optimizer;
@@ -62,12 +63,12 @@ class ParameterSpecification {
     // Build an implementation parameter that delegates storage creation to the factory bound on this API parameter.
     virtual std::shared_ptr<ThorImplementation::PhysicalParameter> stamp();
     uint64_t getTotalSizeInBytes() const {
-        THOR_THROW_IF_FALSE(dtype.isPresent());
-        THOR_THROW_IF_FALSE(shape.isPresent());
+        THOR_THROW_IF_FALSE(dtype.has_value());
+        THOR_THROW_IF_FALSE(shape.has_value());
         uint64_t totalSize = 1;
-        for (uint64_t dim : shape.get())
+        for (uint64_t dim : shape.value())
             totalSize *= dim;
-        return totalSize * Tensor::getBytesPerElement(dtype.get());
+        return totalSize * Tensor::getBytesPerElement(dtype.value());
     }
 
    private:
@@ -78,7 +79,7 @@ class ParameterSpecification {
     bool initialized = false;
 
     std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
-    Optional<std::string> storageFile;
+    std::optional<std::string> storageFile;
 
     std::string name{};
     std::shared_ptr<Initializer> initializer = nullptr;
@@ -90,8 +91,8 @@ class ParameterSpecification {
     // -- OR --
     // shape and dtype to determine attributes at parameter definition time
     StorageContextStorageFactory storageContextCreateStorage = nullptr;
-    Optional<std::vector<uint64_t>> shape = Optional<std::vector<uint64_t>>::empty();
-    Optional<DataType> dtype = Optional<DataType>::empty();
+    std::optional<std::vector<uint64_t>> shape = std::nullopt;
+    std::optional<DataType> dtype = std::nullopt;
 
     Tensor storage;
 
@@ -117,12 +118,12 @@ class ParameterSpecification::Builder {
    private:
     std::string _name{};
     std::shared_ptr<Initializer> _initializer = nullptr;
-    Optional<bool> _trainable = Optional<bool>::empty();
-    Optional<bool> _trainingInitiallyEnabled = Optional<bool>::empty();
+    std::optional<bool> _trainable = std::nullopt;
+    std::optional<bool> _trainingInitiallyEnabled = std::nullopt;
     std::shared_ptr<Optimizer> _optimizerOverride = nullptr;
     StorageContextStorageFactory _storageContextCreateStorage = nullptr;
     std::vector<uint64_t> _shape{};
-    Optional<DataType> _dtype;
+    std::optional<DataType> _dtype;
 };
 
 }  // namespace Thor

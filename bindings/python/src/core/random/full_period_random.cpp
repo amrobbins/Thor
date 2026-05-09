@@ -1,5 +1,6 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <optional>
 
 #include "Utilities/Random/FullPeriodRandom.h"
 
@@ -42,12 +43,7 @@ void bind_full_period_random(nb::module_ &m) {
 
     full_period_random.def(
         "reseed",
-        [](FullPeriodRandom &self, std::optional<uint64_t> seed_value) {
-            if (seed_value.has_value())
-                self.reseed(Optional<uint64_t>(seed_value.value()));
-            else
-                self.reseed(Optional<uint64_t>::empty());
-        },
+        [](FullPeriodRandom &self, std::optional<uint64_t> seed_value) { self.reseed(seed_value); },
         "seed_value"_a.none() = nb::none(),
         R"nbdoc(
             Reseed the generator and start a new randomized cycle.

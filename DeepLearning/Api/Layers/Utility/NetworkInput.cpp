@@ -12,8 +12,8 @@ json NetworkInput::architectureJson() const {
                 {"name", name},
                 {"dimensions", getDimensions()},
                 {"data_type", json(getDataType())},
-                {"feature_input", featureInput.get().architectureJson()},
-                {"feature_output", featureOutput.get().architectureJson()}};
+                {"feature_input", featureInput.value().architectureJson()},
+                {"feature_output", featureOutput.value().architectureJson()}};
 }
 
 void NetworkInput::deserialize(const json &j, Network *network) {

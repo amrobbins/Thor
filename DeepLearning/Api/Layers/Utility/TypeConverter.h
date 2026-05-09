@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/Utility/TypeConversion.h"
+#include <optional>
 
 namespace Thor {
 
@@ -29,59 +30,59 @@ class TypeConverter : public Layer {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput());
-        THOR_THROW_IF_FALSE(getFeatureOutput().isPresent());
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value());
+        THOR_THROW_IF_FALSE(getFeatureOutput().has_value());
 
         // Implementation has 1 extra dimension due to having the batchSize dimension
         std::shared_ptr<ThorImplementation::TypeConversion> typeConverter =
-            std::make_shared<ThorImplementation::TypeConversion>(getFeatureOutput().get().getDataType());
+            std::make_shared<ThorImplementation::TypeConversion>(getFeatureOutput().value().getDataType());
         return typeConverter;
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        THOR_THROW_IF_FALSE(getFeatureOutput().isPresent());
-        return getFeatureOutput().get().getTotalSizeInBytes();
+        THOR_THROW_IF_FALSE(getFeatureOutput().has_value());
+        return getFeatureOutput().value().getTotalSizeInBytes();
     }
 };
 
 class TypeConverter::Builder {
    public:
     virtual TypeConverter build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(_featureInput.isPresent());
-        THOR_THROW_IF_FALSE(_newDataType.isPresent());
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.has_value());
+        THOR_THROW_IF_FALSE(_newDataType.has_value());
 
         TypeConverter TypeConverter;
-        TypeConverter.featureInput = _featureInput;
-        TypeConverter.featureOutput = Tensor(_newDataType.get(), _featureInput.get().getDimensions());
+        TypeConverter.featureInput = _featureInput.value();
+        TypeConverter.featureOutput = Tensor(_newDataType.value(), _featureInput.value().getDimensions());
         TypeConverter.initialized = true;
-        TypeConverter.addToNetwork(_network.get());
+        TypeConverter.addToNetwork(_network.value());
         return TypeConverter;
     }
 
     virtual TypeConverter::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual TypeConverter::Builder &featureInput(Tensor _featureInput) {
-        THOR_THROW_IF_FALSE(!this->_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
         this->_featureInput = _featureInput;
         return *this;
     }
 
     virtual TypeConverter::Builder &newDataType(Tensor::DataType _newDataType) {
-        THOR_THROW_IF_FALSE(!this->_newDataType.isPresent());
+        THOR_THROW_IF_FALSE(!this->_newDataType.has_value());
         THOR_THROW_IF_FALSE(Tensor::dataTypeValid(_newDataType));
         this->_newDataType = _newDataType;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _featureInput;
-    Optional<Tensor::DataType> _newDataType;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _featureInput;
+    std::optional<Tensor::DataType> _newDataType;
 };
 
 }  // namespace Thor

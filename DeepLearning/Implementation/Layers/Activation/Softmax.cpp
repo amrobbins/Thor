@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Implementation/Layers/Activation/Softmax.h"
 
 #include <cudnn.h>
@@ -12,21 +13,21 @@ Softmax::Softmax() { backwardComputedExternally = false; }
 
 Softmax::Softmax(bool backwardComputedExternally) { this->backwardComputedExternally = backwardComputedExternally; }
 
-Optional<Tensor> Softmax::createFeatureOutputTensor() {
-    THOR_THROW_IF_FALSE(featureInput.isPresent());
-    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions().size() == 2);
-    return featureInput.get().clone();
+std::optional<Tensor> Softmax::createFeatureOutputTensor() {
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() == 2);
+    return featureInput.value().clone();
 }
 
 void Softmax::postCompile() {
     cudnnTensorDescriptor =
-        createCudnnTensorDescriptor(featureInput.get().getDescriptor().getDimensions(), featureInput.get().getDescriptor().getDataType());
+        createCudnnTensorDescriptor(featureInput.value().getDescriptor().getDimensions(), featureInput.value().getDescriptor().getDataType());
 
     if (backwardComputedExternally) {
         // ErrorInput to the previous layer is the errorInput coming to this layer,
         // then backProp is a no op
-        if (errorInput.isPresent() && errorOutput.isPresent() && previousLayer.isPresent()) {
-            previousLayer.get()->replaceErrorInput(errorOutput, errorInput);
+        if (errorInput.has_value() && errorOutput.has_value() && previousLayer.has_value()) {
+            previousLayer.value()->replaceErrorInput(errorOutput, errorInput);
         }
         errorOutput = errorInput;
     }
@@ -42,10 +43,10 @@ void Softmax::cleanup() {
     }
 }
 
-void Softmax::infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-    THOR_THROW_IF_FALSE(inputTensor.isPresent());
-    THOR_THROW_IF_FALSE(outputTensor.isPresent());
-    TensorPlacement placement = inputTensor.get().getPlacement();
+void Softmax::infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) {
+    THOR_THROW_IF_FALSE(inputTensor.has_value());
+    THOR_THROW_IF_FALSE(outputTensor.has_value());
+    TensorPlacement placement = inputTensor.value().getPlacement();
     THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     cudnnStatus_t cudnnStatus;
@@ -54,19 +55,19 @@ void Softmax::infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor,
                                       CUDNN_SOFTMAX_MODE_CHANNEL,
                                       &ALPHA_NO_SCALE,
                                       cudnnTensorDescriptor,
-                                      inputTensor.get().getMemPtr(),
+                                      inputTensor.value().getMemPtr(),
                                       &BETA_CLEAR,
                                       cudnnTensorDescriptor,
-                                      outputTensor.get().getMemPtr());
+                                      outputTensor.value().getMemPtr());
     THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
 
-void Softmax::backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-    THOR_THROW_IF_FALSE(dataIn.isPresent());
-    THOR_THROW_IF_FALSE(errorIn.isPresent());
-    THOR_THROW_IF_FALSE(errorOut.isPresent());
-    THOR_THROW_IF_FALSE(featureOutput.isPresent());
-    TensorPlacement placement = errorOut.get().getPlacement();
+void Softmax::backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) {
+    THOR_THROW_IF_FALSE(dataIn.has_value());
+    THOR_THROW_IF_FALSE(errorIn.has_value());
+    THOR_THROW_IF_FALSE(errorOut.has_value());
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
+    TensorPlacement placement = errorOut.value().getPlacement();
     THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     if (backwardComputedExternally)
@@ -80,12 +81,12 @@ void Softmax::backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Option
                                        cudnnTensorDescriptor,
                                        // cudnn softmax wants y instead of x, hopefully that is because the math works out
                                        // to where the already computed y can be used for backpropagation.
-                                       featureOutput.get().getMemPtr(),
+                                       featureOutput.value().getMemPtr(),
                                        cudnnTensorDescriptor,
-                                       errorIn.get().getMemPtr(),
+                                       errorIn.value().getMemPtr(),
                                        &BETA_CLEAR,
                                        cudnnTensorDescriptor,
-                                       errorOut.get().getMemPtr());
+                                       errorOut.value().getMemPtr());
     THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
 

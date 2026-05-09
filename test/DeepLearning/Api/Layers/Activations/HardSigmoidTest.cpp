@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Activations/HardSigmoid.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
@@ -33,15 +34,15 @@ TEST(Activations, HardSigmoidBuilds) {
 
     ASSERT_TRUE(hardSigmoid->isInitialized());
 
-    Optional<Tensor> actualInput = hardSigmoid->getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualInput = hardSigmoid->getFeatureInput();
+    ASSERT_TRUE(actualInput.has_value());
+    ASSERT_EQ(actualInput.value().getDataType(), dataType);
+    ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> actualOutput = hardSigmoid->getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualOutput = hardSigmoid->getFeatureOutput();
+    ASSERT_TRUE(actualOutput.has_value());
+    ASSERT_EQ(actualOutput.value().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.value().getDimensions(), dimensions);
 
     shared_ptr<Layer> cloneLayer = hardSigmoid->clone();
     HardSigmoid *clone = dynamic_cast<HardSigmoid *>(cloneLayer.get());
@@ -49,15 +50,15 @@ TEST(Activations, HardSigmoidBuilds) {
 
     ASSERT_TRUE(clone->isInitialized());
 
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.has_value());
+    ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
-    ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.has_value());
+    ASSERT_EQ(cloneOutput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.value().getDimensions(), dimensions);
 
     ASSERT_NE(hardSigmoid->getId(), clone->getId());
     ASSERT_GT(hardSigmoid->getId(), 1u);
@@ -76,27 +77,28 @@ TEST(Activations, HardSigmoidSerializeDeserialize) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    HardSigmoid::Builder hardSigmoidBuilder = HardSigmoid::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    HardSigmoid::Builder hardSigmoidBuilder =
+        HardSigmoid::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<HardSigmoid> hardSigmoid = dynamic_pointer_cast<HardSigmoid>(hardSigmoidBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(hardSigmoid->getFeatureOutput())
+                                      .inputTensor(hardSigmoid->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 
     ASSERT_TRUE(hardSigmoid->isInitialized());
 
-    Tensor featureInput = hardSigmoid->getFeatureInput();
-    Tensor featureOutput = hardSigmoid->getFeatureOutput();
+    Tensor featureInput = hardSigmoid->getFeatureInput().value();
+    Tensor featureOutput = hardSigmoid->getFeatureOutput().value();
     assert(featureInput == networkInput.getFeatureOutput());
 
-    ASSERT_TRUE(hardSigmoid->getFeatureOutput().isPresent());
-    ASSERT_EQ(hardSigmoid->getFeatureOutput().get(), featureOutput);
+    ASSERT_TRUE(hardSigmoid->getFeatureOutput().has_value());
+    ASSERT_EQ(hardSigmoid->getFeatureOutput().value(), featureOutput);
 
-    ASSERT_TRUE(hardSigmoid->getFeatureInput().isPresent());
-    assert(hardSigmoid->getFeatureInput().get() == featureInput);
+    ASSERT_TRUE(hardSigmoid->getFeatureInput().has_value());
+    assert(hardSigmoid->getFeatureInput().value() == featureInput);
 
     ASSERT_EQ(featureInput.getDataType(), dataType);
     ASSERT_EQ(featureInput.getDimensions(), inputDimensions);
@@ -194,11 +196,11 @@ TEST(Activations, HardSigmoidSerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
 
-    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedHardSigmoid->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
-    ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedHardSigmoid->getFeatureInput().get());
-    ASSERT_EQ(stampedHardSigmoid->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedHardSigmoid->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().has_value());
+    ASSERT_EQ(stampedInput->getFeatureOutput().value(), stampedHardSigmoid->getFeatureInput().value());
+    ASSERT_EQ(stampedHardSigmoid->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
     filesystem::remove("/tmp/testModel.thor.tar");
 }
@@ -216,13 +218,14 @@ TEST(Activations, HardSigmoidRegistered) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    HardSigmoid::Builder hardSigmoidBuilder = HardSigmoid::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    HardSigmoid::Builder hardSigmoidBuilder =
+        HardSigmoid::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<HardSigmoid> hardSigmoid = dynamic_pointer_cast<HardSigmoid>(hardSigmoidBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(hardSigmoid->getFeatureOutput())
+                                      .inputTensor(hardSigmoid->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 

@@ -1,6 +1,7 @@
 /*
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "Utilities/TensorOperations/Loss/CrossEntropyLoss.h"
 
@@ -35,24 +36,24 @@ class CategoricalCrossEntropyLoss : public Loss {
 
     virtual void compile() {
         if (!isInferenceOnly()) {
-            THOR_THROW_IF_FALSE(labelsInput.isPresent());
-            THOR_THROW_IF_FALSE(errorOutput.isPresent());
-            THOR_THROW_IF_FALSE(errorOutput.get().isInitialized());
-            THOR_THROW_IF_FALSE(errorOutput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-            THOR_THROW_IF_FALSE(errorOutput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
-            THOR_THROW_IF_FALSE(errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+            THOR_THROW_IF_FALSE(labelsInput.has_value());
+            THOR_THROW_IF_FALSE(errorOutput.has_value());
+            THOR_THROW_IF_FALSE(errorOutput.value().isInitialized());
+            THOR_THROW_IF_FALSE(errorOutput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            THOR_THROW_IF_FALSE(errorOutput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
+            THOR_THROW_IF_FALSE(errorOutput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
         }
 
-        THOR_THROW_IF_FALSE(labelsInput.isPresent());
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(labelsInput.has_value());
+        THOR_THROW_IF_FALSE(featureInput.has_value());
 
-        THOR_THROW_IF_FALSE(labelsInput.get().isInitialized());
-        THOR_THROW_IF_FALSE(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
+        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
 
-        vector<uint64_t> featureInputDimensions = featureInput.get().getDescriptor().getDimensions();
-        vector<uint64_t> labelDimensions = labelsInput.get().getDescriptor().getDimensions();
-        TensorDescriptor::DataType labelsDataType = labelsInput.get().getDescriptor().getDataType();
+        vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
+        vector<uint64_t> labelDimensions = labelsInput.value().getDescriptor().getDimensions();
+        TensorDescriptor::DataType labelsDataType = labelsInput.value().getDescriptor().getDataType();
         perClassLabels = featureInputDimensions == labelDimensions &&
                          (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::FP16 ||
                           labelsDataType == TensorDescriptor::DataType::FP32);
@@ -61,54 +62,54 @@ class CategoricalCrossEntropyLoss : public Loss {
                             labelsDataType == TensorDescriptor::DataType::UINT32);
         THOR_THROW_IF_FALSE(perClassLabels ^ classIndexLabels);
 
-        THOR_THROW_IF_FALSE(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions().size() == 2);
+        THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() == 2);
 
-        lossWorkspace = Tensor(featureInput.get().getPlacement(),
-                               TensorDescriptor(TensorDescriptor::DataType::FP32, featureInput.get().getDescriptor().getDimensions()));
+        lossWorkspace = Tensor(featureInput.value().getPlacement(),
+                               TensorDescriptor(TensorDescriptor::DataType::FP32, featureInput.value().getDescriptor().getDimensions()));
 
-        batchSize = featureInput.get().getDescriptor().getDimensions()[0];
-        numClasses = featureInput.get().getDescriptor().getDimensions()[1];
+        batchSize = featureInput.value().getDescriptor().getDimensions()[0];
+        numClasses = featureInput.value().getDescriptor().getDimensions()[1];
 
         // When there are two classes and the label is a single 1 or 0, binary cross entropy can be used, instead of categorical cross
         // entropy.
         THOR_THROW_IF_FALSE(numClasses >= 2);
 
         inverseSumOfInputExponentials =
-            Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
+            Tensor(featureInput.value().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
 
         if (lossScalingFactor == 1) {
         } else if (!isInferenceOnly()) {
-            errorOutputWorkspace = errorOutput.get().clone(TensorDescriptor::DataType::FP32);
+            errorOutputWorkspace = errorOutput.value().clone(TensorDescriptor::DataType::FP32);
         }
     }
 
     virtual void cleanup() {}
 
-    virtual void infer(Optional<Tensor> rawPredictionsIn, Optional<Tensor> normalizedPredictionsOut, Stream stream) {
-        THOR_THROW_IF_FALSE(rawPredictionsIn.isPresent());
-        THOR_THROW_IF_FALSE(normalizedPredictionsOut.isPresent());
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        THOR_THROW_IF_FALSE(rawPredictionsIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(rawPredictionsIn.get() == featureInput.get());
-        ScopedGpu scopedGpu(rawPredictionsIn.get().getPlacement().getDeviceNum());
+    virtual void infer(std::optional<Tensor> rawPredictionsIn, std::optional<Tensor> normalizedPredictionsOut, Stream stream) {
+        THOR_THROW_IF_FALSE(rawPredictionsIn.has_value());
+        THOR_THROW_IF_FALSE(normalizedPredictionsOut.has_value());
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(rawPredictionsIn.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(rawPredictionsIn.value() == featureInput.value());
+        ScopedGpu scopedGpu(rawPredictionsIn.value().getPlacement().getDeviceNum());
 
         // Softmax
 
         // Take the e^rawPrediction
-        if (rawPredictionsIn.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            launchExponentiation((half*)rawPredictionsIn.get().getMemPtr(),
-                                 (float*)normalizedPredictionsOut.get().getMemPtr(),
-                                 rawPredictionsIn.get().getDescriptor().getTotalNumElements(),
+        if (rawPredictionsIn.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+            launchExponentiation((half*)rawPredictionsIn.value().getMemPtr(),
+                                 (float*)normalizedPredictionsOut.value().getMemPtr(),
+                                 rawPredictionsIn.value().getDescriptor().getTotalNumElements(),
                                  stream);
         } else {
-            launchExponentiation((float*)rawPredictionsIn.get().getMemPtr(),
-                                 (float*)normalizedPredictionsOut.get().getMemPtr(),
-                                 rawPredictionsIn.get().getDescriptor().getTotalNumElements(),
+            launchExponentiation((float*)rawPredictionsIn.value().getMemPtr(),
+                                 (float*)normalizedPredictionsOut.value().getMemPtr(),
+                                 rawPredictionsIn.value().getDescriptor().getTotalNumElements(),
                                  stream);
         }
         // sum the exponentials per batch item
-        launchSumManyToOne((float*)normalizedPredictionsOut.get().getMemPtr(),
+        launchSumManyToOne((float*)normalizedPredictionsOut.value().getMemPtr(),
                            (float*)inverseSumOfInputExponentials.getMemPtr(),
                            numClasses,
                            batchSize,
@@ -117,9 +118,9 @@ class CategoricalCrossEntropyLoss : public Loss {
                            stream);
 
         // Normalize predictions to sum to 1 per batch item
-        launchMultiplyByScalar((float*)normalizedPredictionsOut.get().getMemPtr(),
+        launchMultiplyByScalar((float*)normalizedPredictionsOut.value().getMemPtr(),
                                (float*)inverseSumOfInputExponentials.getMemPtr(),
-                               (float*)normalizedPredictionsOut.get().getMemPtr(),
+                               (float*)normalizedPredictionsOut.value().getMemPtr(),
                                numClasses,
                                batchSize,
                                stream);
@@ -215,33 +216,33 @@ class CategoricalCrossEntropyLoss : public Loss {
                 if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
                     launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
                                               (uint8_t*)labels.getMemPtr(),
-                                              (float*)errorOutputWorkspace.get().getMemPtr(),
+                                              (float*)errorOutputWorkspace.value().getMemPtr(),
                                               lossGradient.getDescriptor().getTotalNumElements(),
                                               stream);
                 } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
                     launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
                                               (half*)labels.getMemPtr(),
-                                              (float*)errorOutputWorkspace.get().getMemPtr(),
+                                              (float*)errorOutputWorkspace.value().getMemPtr(),
                                               lossGradient.getDescriptor().getTotalNumElements(),
                                               stream);
                 } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
                     launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
                                               (float*)labels.getMemPtr(),
-                                              (float*)errorOutputWorkspace.get().getMemPtr(),
+                                              (float*)errorOutputWorkspace.value().getMemPtr(),
                                               lossGradient.getDescriptor().getTotalNumElements(),
                                               stream);
                 } else {
                     THOR_UNREACHABLE();
                 }
-                launchScale((float*)errorOutputWorkspace.get().getMemPtr(),
+                launchScale((float*)errorOutputWorkspace.value().getMemPtr(),
                             (float)lossScalingFactor,
                             (half*)lossGradient.getMemPtr(),
                             lossGradient.getDescriptor().getTotalNumElements(),
                             stream);
             }
         } else if (classIndexLabels) {
-            uint64_t batchSize = featureInput.get().getDescriptor().getDimensions()[0];
-            uint64_t numClasses = featureInput.get().getDescriptor().getTotalNumElements() / batchSize;
+            uint64_t batchSize = featureInput.value().getDescriptor().getDimensions()[0];
+            uint64_t numClasses = featureInput.value().getDescriptor().getTotalNumElements() / batchSize;
 
             if (lossScalingFactor == 1) {
                 if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
@@ -272,28 +273,28 @@ class CategoricalCrossEntropyLoss : public Loss {
                 if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
                     launchLossGradient_classIndexLabels((uint8_t*)labels.getMemPtr(),
                                                         (float*)normalizedPredictions.getMemPtr(),
-                                                        (float*)errorOutputWorkspace.get().getMemPtr(),
+                                                        (float*)errorOutputWorkspace.value().getMemPtr(),
                                                         numClasses,
                                                         batchSize,
                                                         stream);
                 } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
                     launchLossGradient_classIndexLabels((uint16_t*)labels.getMemPtr(),
                                                         (float*)normalizedPredictions.getMemPtr(),
-                                                        (float*)errorOutputWorkspace.get().getMemPtr(),
+                                                        (float*)errorOutputWorkspace.value().getMemPtr(),
                                                         numClasses,
                                                         batchSize,
                                                         stream);
                 } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
                     launchLossGradient_classIndexLabels((uint32_t*)labels.getMemPtr(),
                                                         (float*)normalizedPredictions.getMemPtr(),
-                                                        (float*)errorOutputWorkspace.get().getMemPtr(),
+                                                        (float*)errorOutputWorkspace.value().getMemPtr(),
                                                         numClasses,
                                                         batchSize,
                                                         stream);
                 } else {
                     THOR_UNREACHABLE();
                 }
-                launchScale((float*)errorOutputWorkspace.get().getMemPtr(),
+                launchScale((float*)errorOutputWorkspace.value().getMemPtr(),
                             (float)lossScalingFactor,
                             (half*)lossGradient.getMemPtr(),
                             lossGradient.getDescriptor().getTotalNumElements(),
@@ -308,8 +309,8 @@ class CategoricalCrossEntropyLoss : public Loss {
         //        should reduce as desired.
     }
 
-    virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream) {
-        THOR_THROW_IF_FALSE(lossGradient.isPresent());
+    virtual void backProp(std::optional<Tensor> labels, std::optional<Tensor> normalizedPredictions, std::optional<Tensor> lossGradient, Stream stream) {
+        THOR_THROW_IF_FALSE(lossGradient.has_value());
     }
 
    protected:
@@ -323,7 +324,7 @@ class CategoricalCrossEntropyLoss : public Loss {
     Tensor inverseSumOfInputExponentials;
     Tensor lossWorkspace;
 
-    Optional<Tensor> errorOutputWorkspace;
+    std::optional<Tensor> errorOutputWorkspace;
 };
 
 }  // namespace ThorImplementation

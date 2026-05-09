@@ -1,7 +1,7 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
-#include "Utilities/Common/Optional.h"
 #include "Utilities/Expression/Expression.h"
 
 #include <stdexcept>
@@ -13,19 +13,18 @@ class LayerEpilogue {
    public:
     [[nodiscard]] static ThorImplementation::Expression input(
         const std::string& inputName,
-        Optional<ThorImplementation::TensorDescriptor::DataType> computeDType =
-            Optional<ThorImplementation::TensorDescriptor::DataType>::empty(),
-        Optional<ThorImplementation::TensorDescriptor::DataType> outputDType =
-            Optional<ThorImplementation::TensorDescriptor::DataType>::empty()) {
+        std::optional<ThorImplementation::TensorDescriptor::DataType> computeDType = std::nullopt,
+        std::optional<ThorImplementation::TensorDescriptor::DataType> outputDType = std::nullopt) {
         return ThorImplementation::Expression::input(inputName, computeDType, outputDType);
     }
 
+   public:
     [[nodiscard]] static ThorImplementation::ExpressionDefinition makeDefinition(const ThorImplementation::Expression& expression,
                                                                                  const std::string& inputName,
                                                                                  const std::string& outputName,
                                                                                  const std::string& layerType) {
-        ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
-            ThorImplementation::Expression::outputs({{outputName, expression}}));
+        ThorImplementation::ExpressionDefinition definition =
+            ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{outputName, expression}}));
         validateDefinition(definition, inputName, outputName, layerType);
         return definition;
     }
@@ -52,11 +51,10 @@ class LayerEpilogue {
         }
     }
 
-    [[nodiscard]] static ThorImplementation::Expression expressionFromDefinition(
-        const ThorImplementation::ExpressionDefinition& definition,
-        const std::string& inputName,
-        const std::string& outputName,
-        const std::string& layerType) {
+    [[nodiscard]] static ThorImplementation::Expression expressionFromDefinition(const ThorImplementation::ExpressionDefinition& definition,
+                                                                                 const std::string& inputName,
+                                                                                 const std::string& outputName,
+                                                                                 const std::string& layerType) {
         validateDefinition(definition, inputName, outputName, layerType);
         const ThorImplementation::NamedOutput& epilogueOutput = definition.outputs.outputs.front();
         return ThorImplementation::Expression::fromPhysicalNode(definition.outputs.expr, epilogueOutput.node_idx);

@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <utility>
+#include <optional>
 
 namespace Thor {
 
@@ -36,12 +37,12 @@ class Loss : public Layer {
     virtual Tensor getLabels() const { return labelsTensor; }
     virtual Tensor getLoss() const { return lossTensor; }
 
-    // getPredictions() ia a synonym for getFeatureInput() and in losses BY DEFAULT ONLY.
+    // getPredictions() ia a synonym for getFeatureInput().value() and in losses BY DEFAULT ONLY.
     // If the raw predictions are transformed. i.e. by softmax before becoming predictions
     // then featureInput will be a different tensor than predictions,
     // i.e. featureInput will be the input to softmax and predictions will be the output of softmax
-    Optional<Tensor> getFeatureInput() const override { return predictionsTensor; }
-    Optional<Tensor> getFeatureOutput() const override { return lossTensor; }
+    std::optional<Tensor> getFeatureInput() const override { return predictionsTensor; }
+    std::optional<Tensor> getFeatureOutput() const override { return lossTensor; }
 
     int getConnectionType(Tensor connectingTensor) const override {
         if (connectingTensor == labelsTensor) {

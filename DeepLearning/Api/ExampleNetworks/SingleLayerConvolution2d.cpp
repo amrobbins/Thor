@@ -19,7 +19,7 @@ Network buildSingleLayerConvolution2d() {
                              .dimensions({1, 28, 28})
                              .dataType(Tensor::DataType::FP32)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
     expectedDimensions = {1, 28, 28};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -38,7 +38,7 @@ Network buildSingleLayerConvolution2d() {
                              .activation(relu)
                              .batchNormalization()
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
     expectedDimensions = {128, 4, 4};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -50,7 +50,7 @@ Network buildSingleLayerConvolution2d() {
                              .windowWidth(4)
                              .noPadding()
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
     expectedDimensions = {128, 1, 1};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -63,7 +63,7 @@ Network buildSingleLayerConvolution2d() {
                              .biasInitializer(glorot)
                              .noActivation()
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
     expectedDimensions = {10};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -73,7 +73,7 @@ Network buildSingleLayerConvolution2d() {
                               .dimensions({10})
                               .dataType(Tensor::DataType::UINT8)
                               .build()
-                              .getFeatureOutput();
+                              .getFeatureOutput().value();
 
     CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
                                             .network(singleLayerConvolution2d)

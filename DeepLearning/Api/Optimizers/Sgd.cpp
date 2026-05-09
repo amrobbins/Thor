@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include <optional>
 
 using namespace std;
 using json = nlohmann::json;
@@ -69,9 +70,9 @@ void Sgd::updateParameters(PlacedNetwork *placedNetwork) {
     //     uint32_t numTrainableLayers = stampedNetwork.getNumTrainableLayers();
     //     for (uint32_t j = 0; j < numTrainableLayers; ++j) {
     //         shared_ptr<ThorImplementation::TrainableLayer> &trainableLayer = stampedNetwork.getTrainableLayer(j);
-    //         Optional<shared_ptr<ThorImplementation::Optimizer>> maybePhysicalOptimizer = trainableLayer->getOptimizer();
-    //         THOR_THROW_IF_FALSE(maybePhysicalOptimizer.isPresent());
-    //         shared_ptr<ThorImplementation::Optimizer> optimizer = maybePhysicalOptimizer.get();
+    //         std::optional<shared_ptr<ThorImplementation::Optimizer>> maybePhysicalOptimizer = trainableLayer->getOptimizer();
+    //         THOR_THROW_IF_FALSE(maybePhysicalOptimizer.has_value());
+    //         shared_ptr<ThorImplementation::Optimizer> optimizer = maybePhysicalOptimizer.value();
     //         shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
     //         if (physicalSgd == nullptr || physicalSgd->getId() != getId())
     //             continue;

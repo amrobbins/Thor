@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
@@ -151,10 +152,10 @@ void applyMomentumSgdReferenceStep(SgdReferenceState& state,
 }
 
 void runSgdStep(Impl::Sgd& sgd, const std::vector<float>& rawGradient, uint32_t batchSize, Stream& stream) {
-    Optional<Impl::Tensor> gradientOpt = sgd.getWeightsGradient();
-    ASSERT_TRUE(gradientOpt.isPresent());
+    std::optional<Impl::Tensor> gradientOpt = sgd.getWeightsGradient();
+    ASSERT_TRUE(gradientOpt.has_value());
 
-    Impl::Tensor gradient = gradientOpt.get();
+    Impl::Tensor gradient = gradientOpt.value();
     copyValuesToGpuFp32Tensor(gradient, rawGradient, stream);
 
     sgd.updateWeights(batchSize);
@@ -164,10 +165,10 @@ void runSgdStep(Impl::Sgd& sgd, const std::vector<float>& rawGradient, uint32_t 
 Impl::Tensor getMomentumStorage(Impl::Sgd& sgd) {
     EXPECT_TRUE(sgd.hasParameter("momentum"));
 
-    Optional<Impl::Tensor> storage = sgd.getParameter("momentum")->getStorage();
-    EXPECT_TRUE(storage.isPresent());
+    std::optional<Impl::Tensor> storage = sgd.getParameter("momentum")->getStorage();
+    EXPECT_TRUE(storage.has_value());
 
-    return storage.get();
+    return storage.value();
 }
 
 }  // namespace
@@ -239,11 +240,11 @@ TEST(SgdApi, BuilderCustomValuesStampAndCompilePhysicalSgdWithoutMomentum) {
     EXPECT_EQ(physicalSgd->getUseNesterovMomentum(), useNesterovMomentum);
     EXPECT_FALSE(physicalSgd->hasParameter("momentum"));
 
-    Optional<Impl::Tensor> gradient = physicalSgd->getWeightsGradient();
-    ASSERT_TRUE(gradient.isPresent());
-    EXPECT_EQ(gradient.get().getPlacement(), gpuPlacement);
-    EXPECT_EQ(gradient.get().getDataType(), DataType::FP32);
-    EXPECT_EQ(gradient.get().getDimensions(), weights.getDimensions());
+    std::optional<Impl::Tensor> gradient = physicalSgd->getWeightsGradient();
+    ASSERT_TRUE(gradient.has_value());
+    EXPECT_EQ(gradient.value().getPlacement(), gpuPlacement);
+    EXPECT_EQ(gradient.value().getDataType(), DataType::FP32);
+    EXPECT_EQ(gradient.value().getDimensions(), weights.getDimensions());
 
     Impl::Tensor weightsOut = physicalSgd->getOptimizerParameterTensor("weights");
     EXPECT_EQ(weightsOut, weights);

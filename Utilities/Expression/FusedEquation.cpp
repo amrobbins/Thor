@@ -1,4 +1,5 @@
 #include "Utilities/Expression/FusedEquation.h"
+#include <optional>
 
 #include "Utilities/Expression/AutoDiff.h"
 #include "Utilities/Expression/CudaSourceEmitter.h"
@@ -27,12 +28,13 @@ static const TensorScalarBinding& runtimeInputTensorScalarBinding(const RuntimeI
     return std::get<TensorScalarBinding>(value);
 }
 
-static bool optionalRuntimeInputIsTensorScalarBinding(const Optional<RuntimeInputValue>& value) {
-    return value.isPresent() && std::holds_alternative<TensorScalarBinding>(value.get());
+static bool optionalRuntimeInputIsTensorScalarBinding(const std::optional<RuntimeInputValue>& value) {
+    return value.has_value() && std::holds_alternative<TensorScalarBinding>(value.value());
 }
 
-static bool optionalRuntimeInputIsTensorLike(const Optional<RuntimeInputValue>& value) {
-    return value.isPresent() && (std::holds_alternative<Tensor>(value.get()) || std::holds_alternative<TensorScalarBinding>(value.get()));
+static bool optionalRuntimeInputIsTensorLike(const std::optional<RuntimeInputValue>& value) {
+    return value.has_value() &&
+           (std::holds_alternative<Tensor>(value.value()) || std::holds_alternative<TensorScalarBinding>(value.value()));
 }
 
 static size_t dataTypeSizeBytes(DataType dtype) {
@@ -185,14 +187,14 @@ static std::vector<uint64_t> applyNormalizedUnsqueezeDims(const std::vector<uint
     return output_dims;
 }
 
-static const Optional<TensorPlacement> runtimeInputPlacementOrNull(const RuntimeInputValue& value) {
+static const std::optional<TensorPlacement> runtimeInputPlacementOrNull(const RuntimeInputValue& value) {
     if (std::holds_alternative<Tensor>(value)) {
         return std::get<Tensor>(value).getPlacement();
     }
     if (std::holds_alternative<TensorScalarBinding>(value)) {
         return std::get<TensorScalarBinding>(value).buffer.getPlacement();
     }
-    return Optional<TensorPlacement>::empty();
+    return std::nullopt;
 }
 
 static bool isScalarLikeNodeOp(ExprOp op) {
@@ -308,7 +310,7 @@ static std::vector<uint64_t> inferExpressionConvolutionOutputDims(const ExprNode
     const std::vector<int32_t> strides = is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
                                                : std::vector<int32_t>{node.conv_stride_h, node.conv_stride_w};
     const std::vector<int32_t> pads = is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
-                                           : std::vector<int32_t>{node.conv_pad_h, node.conv_pad_w};
+                                            : std::vector<int32_t>{node.conv_pad_h, node.conv_pad_w};
 
     for (size_t i = 0; i < strides.size(); ++i) {
         const size_t dim_idx = 2 + i;
@@ -354,11 +356,11 @@ static std::vector<uint64_t> inferExpressionConvolutionBackwardDataOutputDims(co
     const std::vector<int32_t> strides = is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
                                                : std::vector<int32_t>{node.conv_stride_h, node.conv_stride_w};
     const std::vector<int32_t> pads = is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
-                                           : std::vector<int32_t>{node.conv_pad_h, node.conv_pad_w};
+                                            : std::vector<int32_t>{node.conv_pad_h, node.conv_pad_w};
     for (size_t i = 0; i < strides.size(); ++i) {
         const size_t dim_idx = 2 + i;
-        const int64_t extent = static_cast<int64_t>(grad_output_dims[dim_idx] - 1) * strides[i] - 2LL * pads[i] +
-                               static_cast<int64_t>(filter_dims[dim_idx]);
+        const int64_t extent =
+            static_cast<int64_t>(grad_output_dims[dim_idx] - 1) * strides[i] - 2LL * pads[i] + static_cast<int64_t>(filter_dims[dim_idx]);
         if (extent <= 0) {
             throw std::runtime_error("Convolution backward-data shape inference produced non-positive output extent.");
         }
@@ -397,11 +399,11 @@ static std::vector<uint64_t> inferExpressionConvolutionBackwardFilterOutputDims(
     const std::vector<int32_t> strides = is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
                                                : std::vector<int32_t>{node.conv_stride_h, node.conv_stride_w};
     const std::vector<int32_t> pads = is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
-                                           : std::vector<int32_t>{node.conv_pad_h, node.conv_pad_w};
+                                            : std::vector<int32_t>{node.conv_pad_h, node.conv_pad_w};
     for (size_t i = 0; i < strides.size(); ++i) {
         const size_t dim_idx = 2 + i;
-        const int64_t extent = static_cast<int64_t>(input_dims[dim_idx]) + 2LL * pads[i] -
-                               static_cast<int64_t>(grad_output_dims[dim_idx] - 1) * strides[i];
+        const int64_t extent =
+            static_cast<int64_t>(input_dims[dim_idx]) + 2LL * pads[i] - static_cast<int64_t>(grad_output_dims[dim_idx] - 1) * strides[i];
         if (extent <= 0) {
             throw std::runtime_error("Convolution backward-filter shape inference produced non-positive filter extent.");
         }
@@ -544,8 +546,8 @@ struct ScaledMatmulPattern {
     bool transpose_rhs = false;
     double alpha_scale = 1.0;
     uint32_t alpha_node = UINT32_MAX;
-    Optional<DataType> compute_dtype = Optional<DataType>::empty();
-    Optional<DataType> backward_compute_dtype = Optional<DataType>::empty();
+    std::optional<DataType> compute_dtype = std::nullopt;
+    std::optional<DataType> backward_compute_dtype = std::nullopt;
 };
 
 struct ScaledAddendPattern {
@@ -564,8 +566,8 @@ struct GemmLoweringPattern {
     double beta_scale = 1.0;
     uint32_t alpha_node = UINT32_MAX;
     uint32_t beta_node = UINT32_MAX;
-    Optional<DataType> inherited_compute_dtype = Optional<DataType>::empty();
-    Optional<DataType> inherited_backward_compute_dtype = Optional<DataType>::empty();
+    std::optional<DataType> inherited_compute_dtype = std::nullopt;
+    std::optional<DataType> inherited_backward_compute_dtype = std::nullopt;
 };
 
 static bool tryMatchScaledMatmulPattern(const PhysicalExpression& expr, uint32_t node_idx, ScaledMatmulPattern& out) {
@@ -762,11 +764,11 @@ static void optimizeExpressionGemmPatternsInPlace(PhysicalExpression& expr,
         node.squeeze_axes.clear();
         node.unsqueeze_axes.clear();
         node.fill_dims.clear();
-        if (!node.compute_dtype.isPresent() && pattern.inherited_compute_dtype.isPresent()) {
-            node.compute_dtype = pattern.inherited_compute_dtype.get();
+        if (!node.compute_dtype.has_value() && pattern.inherited_compute_dtype.has_value()) {
+            node.compute_dtype = pattern.inherited_compute_dtype.value();
         }
-        if (!node.backward_compute_dtype.isPresent() && pattern.inherited_backward_compute_dtype.isPresent()) {
-            node.backward_compute_dtype = pattern.inherited_backward_compute_dtype.get();
+        if (!node.backward_compute_dtype.has_value() && pattern.inherited_backward_compute_dtype.has_value()) {
+            node.backward_compute_dtype = pattern.inherited_backward_compute_dtype.value();
         }
     }
 }
@@ -1252,7 +1254,8 @@ static std::vector<std::string> inferBackwardWrtNamesFromOutputs(const PhysicalO
 static std::string dimsToString(const std::vector<uint64_t>& dims);
 static void verifyRequestedOutputLayout(const std::vector<uint64_t>& outputDimensions, const std::vector<uint64_t>& expectedDimensions);
 
-static Optional<DataType> preferredBackwardGradBufferDType(const BackwardEquationConfig& backward_config, const std::string& wrt_name) {
+static std::optional<DataType> preferredBackwardGradBufferDType(const BackwardEquationConfig& backward_config,
+                                                                const std::string& wrt_name) {
     if (!backward_config.forward_outputs_template.expr) {
         throw std::runtime_error("Backward grad-buffer dtype lookup requires non-null forward expr.");
     }
@@ -1271,13 +1274,13 @@ static Optional<DataType> preferredBackwardGradBufferDType(const BackwardEquatio
     for (const ExprNode& node : backward_config.forward_outputs_template.expr->nodes) {
         if ((node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) &&
             node.input_slot == slot) {
-            if (node.backward_output_dtype.isPresent()) {
+            if (node.backward_output_dtype.has_value()) {
                 return node.backward_output_dtype;
             }
-            if (node.output_dtype.isPresent()) {
+            if (node.output_dtype.has_value()) {
                 return node.output_dtype;
             }
-            return Optional<DataType>::empty();
+            return std::nullopt;
         }
     }
 
@@ -1356,8 +1359,8 @@ static void validateBackwardAccumulationOutputs(const std::optional<BackwardEqua
                                      dimsToString(accumulator.getDimensions()) + ".");
         }
 
-        const Optional<DataType> preferred_dtype = preferredBackwardGradBufferDType(backward_config.value(), wrt_name);
-        const DataType expected_dtype = preferred_dtype.isPresent() ? preferred_dtype.get() : wrt_input.getDataType();
+        const std::optional<DataType> preferred_dtype = preferredBackwardGradBufferDType(backward_config.value(), wrt_name);
+        const DataType expected_dtype = preferred_dtype.has_value() ? preferred_dtype.value() : wrt_input.getDataType();
         if (accumulator.getDataType() != expected_dtype) {
             throw std::runtime_error("Gradient accumulator tensor dtype mismatch for output '" + grad_output_name + "'.");
         }
@@ -2430,17 +2433,17 @@ static bool stageHasShapeOnlyOps(const CompiledExecutionStage& stage) {
 static TensorPlacement pickStageOutputPlacement(const std::vector<RuntimeInputValue>& stage_inputs,
                                                 const std::unordered_map<uint32_t, RuntimeInputValue>& available_values) {
     for (const RuntimeInputValue& input : stage_inputs) {
-        Optional<TensorPlacement> placement = runtimeInputPlacementOrNull(input);
-        if (placement.isPresent()) {
-            return placement;
+        std::optional<TensorPlacement> placement = runtimeInputPlacementOrNull(input);
+        if (placement.has_value()) {
+            return placement.value();
         }
     }
     if (!available_values.empty()) {
         for (const auto& [value_id, value] : available_values) {
             (void)value_id;
-            Optional<TensorPlacement> placement = runtimeInputPlacementOrNull(value);
-            if (placement.isPresent()) {
-                return placement;
+            std::optional<TensorPlacement> placement = runtimeInputPlacementOrNull(value);
+            if (placement.has_value()) {
+                return placement.value();
             }
         }
     }
@@ -3767,8 +3770,8 @@ std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputsFor
             dims = requested_it->second;
         }
 
-        const Optional<DataType> preferred_dtype = preferredBackwardGradBufferDType(backward_config.value(), wrt_name);
-        const DataType grad_buffer_dtype = preferred_dtype.isPresent() ? preferred_dtype.get() : forward_input_it->second.getDataType();
+        const std::optional<DataType> preferred_dtype = preferredBackwardGradBufferDType(backward_config.value(), wrt_name);
+        const DataType grad_buffer_dtype = preferred_dtype.has_value() ? preferred_dtype.value() : forward_input_it->second.getDataType();
         TensorDescriptor descriptor(grad_buffer_dtype, dims);
         values.emplace(slot_it->second, Tensor(forward_input_it->second.getPlacement(), descriptor));
     }
@@ -3863,12 +3866,12 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
                                                                 Tensor& input,
                                                                 const Stream& stream,
                                                                 const std::vector<uint64_t>& requested_output_shape) const {
-    return stampReduction(compiledReduction, input, Optional<Tensor>::empty(), stream, requested_output_shape);
+    return stampReduction(compiledReduction, input, std::nullopt, stream, requested_output_shape);
 }
 
 std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
                                                                 Tensor& input,
-                                                                const Optional<Tensor>& preallocatedOutput,
+                                                                const std::optional<Tensor>& preallocatedOutput,
                                                                 const Stream& stream,
                                                                 const std::vector<uint64_t>& requested_output_shape) const {
     if (!compiledReduction)
@@ -3878,7 +3881,7 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
 
     std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(compiledReduction, adaptedInput, stream.getGpuNum());
 
-    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
         TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
         workspace = Tensor(adaptedInput.getPlacement(), workspaceDescriptor);
@@ -3894,8 +3897,8 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
     }
 
     Tensor output;
-    if (preallocatedOutput.isPresent()) {
-        output = preallocatedOutput.get();
+    if (preallocatedOutput.has_value()) {
+        output = preallocatedOutput.value();
 
         if (output.getPlacement() != adaptedInput.getPlacement()) {
             throw std::runtime_error("Preallocated reduction output tensor placement does not match the reduction input placement.");
@@ -3922,12 +3925,12 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
                                                                 Tensor& input,
                                                                 const Stream& stream,
                                                                 const std::vector<uint64_t>& requested_output_shape) const {
-    return stampArgMinMax(compiledStage, input, Optional<Tensor>::empty(), stream, requested_output_shape);
+    return stampArgMinMax(compiledStage, input, std::nullopt, stream, requested_output_shape);
 }
 
 std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::shared_ptr<CompiledArgMinMax>& compiledStage,
                                                                 Tensor& input,
-                                                                const Optional<Tensor>& preallocatedOutput,
+                                                                const std::optional<Tensor>& preallocatedOutput,
                                                                 const Stream& stream,
                                                                 const std::vector<uint64_t>& requested_output_shape) const {
     if (!compiledStage) {
@@ -3946,7 +3949,7 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
                                                                             adaptedInput,
                                                                             stream.getGpuNum());
 
-    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
         TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
         workspace = Tensor(adaptedInput.getPlacement(), workspaceDescriptor);
@@ -3961,8 +3964,8 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
     }
 
     Tensor output;
-    if (preallocatedOutput.isPresent()) {
-        output = preallocatedOutput.get();
+    if (preallocatedOutput.has_value()) {
+        output = preallocatedOutput.value();
 
         if (output.getPlacement() != adaptedInput.getPlacement()) {
             throw std::runtime_error(
@@ -3994,7 +3997,7 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
 
 std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_ptr<CompiledSoftmax>& compiledStage,
                                                             Tensor& input,
-                                                            const Optional<Tensor>& preallocatedOutput,
+                                                            const std::optional<Tensor>& preallocatedOutput,
                                                             const Stream& stream,
                                                             const std::vector<uint64_t>& requested_output_shape) const {
     if (!compiledStage) {
@@ -4011,8 +4014,8 @@ std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_pt
     }
 
     Tensor output;
-    if (preallocatedOutput.isPresent()) {
-        output = preallocatedOutput.get();
+    if (preallocatedOutput.has_value()) {
+        output = preallocatedOutput.value();
         if (output.getPlacement() != adaptedInput.getPlacement()) {
             throw std::runtime_error("Preallocated softmax output tensor placement does not match the softmax input placement.");
         }
@@ -4035,7 +4038,7 @@ std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_pt
 std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::shared_ptr<CompiledConvolution>& compiledStage,
                                                                     Tensor& input,
                                                                     Tensor& filter,
-                                                                    const Optional<Tensor>& preallocatedOutput,
+                                                                    const std::optional<Tensor>& preallocatedOutput,
                                                                     const Stream& stream) const {
     if (!compiledStage) {
         throw std::runtime_error("stampConvolution requires non-null compiled stage.");
@@ -4048,8 +4051,8 @@ std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::s
     const std::vector<uint64_t> output_dims = resolveConvolutionOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
     Tensor output;
-    if (preallocatedOutput.isPresent()) {
-        output = preallocatedOutput.get();
+    if (preallocatedOutput.has_value()) {
+        output = preallocatedOutput.value();
         if (output.getPlacement() != adaptedInput.getPlacement()) {
             throw std::runtime_error("Preallocated convolution output tensor placement does not match input placement.");
         }
@@ -4068,7 +4071,7 @@ std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::s
     std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolution(
         compiledStage, adaptedInput, adaptedFilter, output, stream, adaptedInput.getPlacement().getDeviceNum());
 
-    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
         workspace = Tensor(adaptedInput.getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes}));
     }
@@ -4080,7 +4083,7 @@ std::shared_ptr<StampedConvolutionBackward> FusedEquation::stampConvolutionBackw
     const std::shared_ptr<CompiledConvolutionBackward>& compiledStage,
     Tensor& input,
     Tensor& grad_output,
-    const Optional<Tensor>& preallocatedOutput,
+    const std::optional<Tensor>& preallocatedOutput,
     const Stream& stream) const {
     if (!compiledStage) {
         throw std::runtime_error("stampConvolutionBackward requires non-null compiled stage.");
@@ -4093,8 +4096,8 @@ std::shared_ptr<StampedConvolutionBackward> FusedEquation::stampConvolutionBackw
     const std::vector<uint64_t> output_dims = resolveConvolutionBackwardOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
     Tensor output;
-    if (preallocatedOutput.isPresent()) {
-        output = preallocatedOutput.get();
+    if (preallocatedOutput.has_value()) {
+        output = preallocatedOutput.value();
         if (output.getPlacement() != adaptedInput.getPlacement()) {
             throw std::runtime_error("Preallocated convolution-backward output tensor placement does not match input placement.");
         }
@@ -4113,7 +4116,7 @@ std::shared_ptr<StampedConvolutionBackward> FusedEquation::stampConvolutionBackw
     std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolutionBackward(
         compiledStage, adaptedInput, adaptedGradOutput, output, stream, adaptedInput.getPlacement().getDeviceNum());
 
-    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
         workspace = Tensor(adaptedInput.getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes}));
     }
@@ -4124,10 +4127,10 @@ std::shared_ptr<StampedConvolutionBackward> FusedEquation::stampConvolutionBackw
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
                                                           Tensor& lhs,
                                                           Tensor& rhs,
-                                                          const Optional<Tensor>& preallocatedOutput,
+                                                          const std::optional<Tensor>& preallocatedOutput,
                                                           const Stream& stream,
-                                                          const Optional<RuntimeInputValue>& alpha_input,
-                                                          const Optional<RuntimeInputValue>& beta_input,
+                                                          const std::optional<RuntimeInputValue>& alpha_input,
+                                                          const std::optional<RuntimeInputValue>& beta_input,
                                                           const std::optional<std::string>& alpha_runtime_name,
                                                           const std::optional<std::string>& beta_runtime_name) const {
     if (!compiledStage) {
@@ -4144,17 +4147,17 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     stage_input_dims[0] = adaptedLhs.getDimensions();
     stage_input_dims[1] = adaptedRhs.getDimensions();
 
-    auto assign_scale_dims = [&](uint32_t slot, const Optional<RuntimeInputValue>& input, const char* label) {
+    auto assign_scale_dims = [&](uint32_t slot, const std::optional<RuntimeInputValue>& input, const char* label) {
         if (slot == UINT32_MAX) {
             return;
         }
-        if (!input.isPresent()) {
+        if (!input.has_value()) {
             throw std::runtime_error(std::string("Matmul stage missing bound ") + label + " scale input.");
         }
         if (stage_input_dims.size() <= slot) {
             stage_input_dims.resize(slot + 1);
         }
-        stage_input_dims[slot] = runtimeInputDims(input.get());
+        stage_input_dims[slot] = runtimeInputDims(input.value());
     };
 
     assign_scale_dims(compiledStage->alpha_input_slot, alpha_input, "alpha");
@@ -4163,8 +4166,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     const std::vector<uint64_t> output_dims = resolveMatmulOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
     Tensor output;
-    if (preallocatedOutput.isPresent()) {
-        output = preallocatedOutput.get();
+    if (preallocatedOutput.has_value()) {
+        output = preallocatedOutput.value();
         if (output.getPlacement() != adaptedLhs.getPlacement()) {
             throw std::runtime_error("Preallocated matmul output tensor placement does not match the input placement.");
         }
@@ -4179,10 +4182,10 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         output = Tensor(adaptedLhs.getPlacement(), outputDescriptor);
     }
 
-    std::shared_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(
-        compiledStage, adaptedLhs, adaptedRhs, Optional<Tensor>::empty(), output, adaptedLhs.getPlacement().getDeviceNum());
+    std::shared_ptr<BuiltMatmul> built =
+        StampedEquation::buildMatmul(compiledStage, adaptedLhs, adaptedRhs, std::nullopt, output, adaptedLhs.getPlacement().getDeviceNum());
 
-    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
         TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
         workspace = Tensor(adaptedLhs.getPlacement(), workspaceDescriptor);
@@ -4192,7 +4195,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       built,
                                       adaptedLhs,
                                       adaptedRhs,
-                                      Optional<Tensor>::empty(),
+                                      std::nullopt,
                                       output,
                                       stream,
                                       workspace,
@@ -4200,20 +4203,20 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       beta_input,
                                       alpha_runtime_name,
                                       beta_runtime_name,
-                                      Optional<Tensor>::empty(),
-                                      Optional<Tensor>::empty(),
-                                      Optional<Tensor>::empty(),
-                                      Optional<Tensor>::empty());
+                                      std::nullopt,
+                                      std::nullopt,
+                                      std::nullopt,
+                                      std::nullopt);
 }
 
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
                                                           Tensor& lhs,
                                                           Tensor& rhs,
                                                           Tensor& addend,
-                                                          const Optional<Tensor>& preallocatedOutput,
+                                                          const std::optional<Tensor>& preallocatedOutput,
                                                           const Stream& stream,
-                                                          const Optional<RuntimeInputValue>& alpha_input,
-                                                          const Optional<RuntimeInputValue>& beta_input,
+                                                          const std::optional<RuntimeInputValue>& alpha_input,
+                                                          const std::optional<RuntimeInputValue>& beta_input,
                                                           const std::optional<std::string>& alpha_runtime_name,
                                                           const std::optional<std::string>& beta_runtime_name) const {
     if (!compiledStage) {
@@ -4232,17 +4235,17 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     stage_input_dims[1] = adaptedRhs.getDimensions();
     stage_input_dims[2] = adaptedAddend.getDimensions();
 
-    auto assign_scale_dims = [&](uint32_t slot, const Optional<RuntimeInputValue>& input, const char* label) {
+    auto assign_scale_dims = [&](uint32_t slot, const std::optional<RuntimeInputValue>& input, const char* label) {
         if (slot == UINT32_MAX) {
             return;
         }
-        if (!input.isPresent()) {
+        if (!input.has_value()) {
             throw std::runtime_error(std::string("Matmul stage missing bound ") + label + " scale input.");
         }
         if (stage_input_dims.size() <= slot) {
             stage_input_dims.resize(slot + 1);
         }
-        stage_input_dims[slot] = runtimeInputDims(input.get());
+        stage_input_dims[slot] = runtimeInputDims(input.value());
     };
 
     assign_scale_dims(compiledStage->alpha_input_slot, alpha_input, "alpha");
@@ -4251,8 +4254,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     const std::vector<uint64_t> output_dims = resolveMatmulOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
     Tensor output;
-    if (preallocatedOutput.isPresent()) {
-        output = preallocatedOutput.get();
+    if (preallocatedOutput.has_value()) {
+        output = preallocatedOutput.value();
         if (output.getPlacement() != adaptedLhs.getPlacement()) {
             throw std::runtime_error("Preallocated gemm output tensor placement does not match the input placement.");
         }
@@ -4268,18 +4271,18 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     }
 
     std::shared_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(
-        compiledStage, adaptedLhs, adaptedRhs, Optional<Tensor>(adaptedAddend), output, adaptedLhs.getPlacement().getDeviceNum());
+        compiledStage, adaptedLhs, adaptedRhs, std::optional<Tensor>(adaptedAddend), output, adaptedLhs.getPlacement().getDeviceNum());
 
-    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
         TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
         workspace = Tensor(adaptedLhs.getPlacement(), workspaceDescriptor);
     }
 
-    Optional<Tensor> alpha_device_scratch = Optional<Tensor>::empty();
-    Optional<Tensor> beta_device_scratch = Optional<Tensor>::empty();
-    Optional<Tensor> alpha_host_scratch = Optional<Tensor>::empty();
-    Optional<Tensor> beta_host_scratch = Optional<Tensor>::empty();
+    std::optional<Tensor> alpha_device_scratch = std::nullopt;
+    std::optional<Tensor> beta_device_scratch = std::nullopt;
+    std::optional<Tensor> alpha_host_scratch = std::nullopt;
+    std::optional<Tensor> beta_host_scratch = std::nullopt;
     const bool any_tensor_backed_scale = optionalRuntimeInputIsTensorLike(alpha_input) || optionalRuntimeInputIsTensorLike(beta_input);
     if (any_tensor_backed_scale) {
         TensorDescriptor scalarDescriptor(TensorDescriptor::DataType::FP32, {1});
@@ -4294,7 +4297,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       built,
                                       adaptedLhs,
                                       adaptedRhs,
-                                      Optional<Tensor>(adaptedAddend),
+                                      std::optional<Tensor>(adaptedAddend),
                                       output,
                                       stream,
                                       workspace,
@@ -4310,14 +4313,14 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
     const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const {
-    return stampReduceMinMaxBackward(compiledStage, input, grad_output, Optional<Tensor>::empty(), stream);
+    return stampReduceMinMaxBackward(compiledStage, input, grad_output, std::nullopt, stream);
 }
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
     const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
     Tensor& input,
     Tensor& grad_output,
-    const Optional<Tensor>& preallocatedOutput,
+    const std::optional<Tensor>& preallocatedOutput,
     const Stream& stream) const {
     if (!compiledStage) {
         throw std::runtime_error("stampReduceMinMaxBackward requires non-null compiled stage.");
@@ -4350,7 +4353,7 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
                                                                             adaptedInput,
                                                                             stream.getGpuNum());
 
-    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
         TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
         workspace = Tensor(adaptedInput.getPlacement(), workspaceDescriptor);
@@ -4366,8 +4369,8 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
     Tensor reductionValueOutput(adaptedInput.getPlacement(), reductionValueDescriptor);
 
     Tensor output;
-    if (preallocatedOutput.isPresent()) {
-        output = preallocatedOutput.get();
+    if (preallocatedOutput.has_value()) {
+        output = preallocatedOutput.value();
 
         if (output.getPlacement() != adaptedInput.getPlacement()) {
             throw std::runtime_error("Preallocated reduce-min/max-backward output tensor placement does not match the input placement.");
@@ -4676,7 +4679,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
 
                 auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
-                Optional<Tensor> preallocated = Optional<Tensor>::empty();
+                std::optional<Tensor> preallocated = std::nullopt;
                 if (preallocated_it != preallocated_final_outputs_by_name.end()) {
                     preallocated = preallocated_it->second;
                 }
@@ -4700,13 +4703,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
                 auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
-                Optional<Tensor> preallocated = Optional<Tensor>::empty();
+                std::optional<Tensor> preallocated = std::nullopt;
                 if (preallocated_it != preallocated_final_outputs_by_name.end()) {
                     preallocated = preallocated_it->second;
                 }
                 std::shared_ptr<StampedMatmul> stampedMatmul;
-                Optional<RuntimeInputValue> alpha_input = Optional<RuntimeInputValue>::empty();
-                Optional<RuntimeInputValue> beta_input = Optional<RuntimeInputValue>::empty();
+                std::optional<RuntimeInputValue> alpha_input = std::nullopt;
+                std::optional<RuntimeInputValue> beta_input = std::nullopt;
                 std::optional<std::string> alpha_runtime_name = std::nullopt;
                 std::optional<std::string> beta_runtime_name = std::nullopt;
 
@@ -4804,7 +4807,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
                 auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
-                Optional<Tensor> preallocated = Optional<Tensor>::empty();
+                std::optional<Tensor> preallocated = std::nullopt;
                 if (preallocated_it != preallocated_final_outputs_by_name.end()) {
                     preallocated = preallocated_it->second;
                 }
@@ -4834,7 +4837,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
                 auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
-                Optional<Tensor> preallocated = Optional<Tensor>::empty();
+                std::optional<Tensor> preallocated = std::nullopt;
                 if (preallocated_it != preallocated_final_outputs_by_name.end()) {
                     preallocated = preallocated_it->second;
                 }
@@ -4993,9 +4996,9 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
     int32_t gpu_num = -1;
     for (const auto& [value_id, value] : root_values) {
         (void)value_id;
-        Optional<TensorPlacement> placement = runtimeInputPlacementOrNull(value);
-        if (placement.isPresent()) {
-            gpu_num = placement.get().getDeviceNum();
+        std::optional<TensorPlacement> placement = runtimeInputPlacementOrNull(value);
+        if (placement.has_value()) {
+            gpu_num = placement.value().getDeviceNum();
             break;
         }
     }
@@ -5008,9 +5011,9 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
 
     for (const auto& [value_id, value] : root_values) {
         (void)value_id;
-        Optional<TensorPlacement> placement = runtimeInputPlacementOrNull(value);
-        if (placement.isPresent()) {
-            if (placement.get().getDeviceNum() != gpu_num) {
+        std::optional<TensorPlacement> placement = runtimeInputPlacementOrNull(value);
+        if (placement.has_value()) {
+            if (placement.value().getDeviceNum() != gpu_num) {
                 throw std::runtime_error("FusedEquation::run requires all root tensor inputs to be on the same GPU.");
             }
         }

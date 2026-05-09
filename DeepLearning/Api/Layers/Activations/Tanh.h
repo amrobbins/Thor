@@ -52,7 +52,7 @@ class Tanh : public Activation {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
         std::shared_ptr<ThorImplementation::Tanh> tanh = std::make_shared<ThorImplementation::Tanh>();
         return tanh;
@@ -60,7 +60,7 @@ class Tanh : public Activation {
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
-        return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
+        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
     }
 };
 
@@ -68,13 +68,13 @@ class Tanh::Builder : public Activation::Builder {
    public:
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<Tanh> tanh = std::make_shared<Tanh>();
-        if (_featureInput.isPresent()) {
+        if (_featureInput.has_value()) {
             // Standalone layer support.
-            THOR_THROW_IF_FALSE(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.has_value());
             tanh->featureInput = _featureInput;
-            tanh->featureOutput = _featureInput.get().clone();
+            tanh->featureOutput = _featureInput.value().clone();
             tanh->initialized = true;
-            tanh->addToNetwork(_network.get());
+            tanh->addToNetwork(_network.value());
         } else {
             // Template activation support
             tanh->initialized = true;

@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <optional>
 
 namespace Thor {
 
@@ -23,7 +24,7 @@ class Adam : public Optimizer {
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
-                                          Optional<Event> sisterOptimizerLoadedEvent) override;
+                                          std::optional<Event> sisterOptimizerLoadedEvent) override;
     virtual void setAlpha(float newAlpha, PlacedNetwork *placedNetwork);
     virtual float getAlpha();
     virtual void setBeta1(float newBeta1, PlacedNetwork *placedNetwork);
@@ -59,28 +60,28 @@ class Adam : public Optimizer {
     float epsilon;
 
     std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
-    Optional<std::string> mFile;
-    Optional<std::string> vFile;
-    Optional<std::string> mBiasFile;
-    Optional<std::string> vBiasFile;
+    std::optional<std::string> mFile;
+    std::optional<std::string> vFile;
+    std::optional<std::string> mBiasFile;
+    std::optional<std::string> vBiasFile;
 };
 
 class Adam::Builder {
    public:
     virtual std::shared_ptr<Adam> build() {
-        if (_alpha.isEmpty())
+        if (!_alpha.has_value())
             _alpha = 0.001f;
-        if (_beta1.isEmpty())
+        if (!_beta1.has_value())
             _beta1 = 0.9f;
-        if (_beta2.isEmpty())
+        if (!_beta2.has_value())
             _beta2 = 0.999f;
-        if (_epsilon.isEmpty())
+        if (!_epsilon.has_value())
             _epsilon = 1e-7f;
         Adam adam;
-        adam.alpha = _alpha;
-        adam.beta1 = _beta1;
-        adam.beta2 = _beta2;
-        adam.epsilon = _epsilon;
+        adam.alpha = _alpha.value();
+        adam.beta1 = _beta1.value();
+        adam.beta2 = _beta2.value();
+        adam.epsilon = _epsilon.value();
 
         THOR_THROW_IF_FALSE(adam.alpha > 0.0f);
         THOR_THROW_IF_FALSE(adam.beta1 >= 0.0f && adam.beta1 < 1.0f);
@@ -88,46 +89,46 @@ class Adam::Builder {
         THOR_THROW_IF_FALSE(adam.epsilon > 0);
 
         // When network is passed to the builder, this optimizer becomes the network default optimizer:
-        if (_network.isPresent() && _network.get() != nullptr) {
-            adam.addToNetwork(_network);
-            THOR_THROW_IF_FALSE(std::dynamic_pointer_cast<Adam>(_network.get()->getDefaultOptimizer()) != nullptr);
-            return std::dynamic_pointer_cast<Adam>(_network.get()->getDefaultOptimizer());
+        if (_network.has_value() && _network.value() != nullptr) {
+            adam.addToNetwork(_network.value());
+            THOR_THROW_IF_FALSE(std::dynamic_pointer_cast<Adam>(_network.value()->getDefaultOptimizer()) != nullptr);
+            return std::dynamic_pointer_cast<Adam>(_network.value()->getDefaultOptimizer());
         } else {
             return std::dynamic_pointer_cast<Adam>(adam.clone());
         }
     }
     virtual Adam::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
     virtual Adam::Builder alpha(float _alpha) {
-        THOR_THROW_IF_FALSE(!this->_alpha.isPresent());
+        THOR_THROW_IF_FALSE(!this->_alpha.has_value());
         this->_alpha = _alpha;
         return *this;
     }
     virtual Adam::Builder beta1(float _beta1) {
-        THOR_THROW_IF_FALSE(!this->_beta1.isPresent());
+        THOR_THROW_IF_FALSE(!this->_beta1.has_value());
         this->_beta1 = _beta1;
         return *this;
     }
     virtual Adam::Builder beta2(float _beta2) {
-        THOR_THROW_IF_FALSE(!this->_beta2.isPresent());
+        THOR_THROW_IF_FALSE(!this->_beta2.has_value());
         this->_beta2 = _beta2;
         return *this;
     }
     virtual Adam::Builder epsilon(float _epsilon) {
-        THOR_THROW_IF_FALSE(!this->_epsilon.isPresent());
+        THOR_THROW_IF_FALSE(!this->_epsilon.has_value());
         this->_epsilon = _epsilon;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<float> _alpha;
-    Optional<float> _beta1;
-    Optional<float> _beta2;
-    Optional<float> _epsilon;
+    std::optional<Network *> _network;
+    std::optional<float> _alpha;
+    std::optional<float> _beta1;
+    std::optional<float> _beta2;
+    std::optional<float> _epsilon;
 };
 
 }  // namespace Thor

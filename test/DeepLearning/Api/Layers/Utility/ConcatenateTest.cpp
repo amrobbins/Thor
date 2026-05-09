@@ -152,7 +152,7 @@ TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
 
     Concatenate::Builder concatenateBuilder = Concatenate::Builder().network(initialNetwork).concatenationAxis(concatenationAxis);
     for (uint32_t t = 0; t < numTensors; ++t) {
-        concatenateBuilder.featureInput(networkInputs[t].getFeatureOutput().get());
+        concatenateBuilder.featureInput(networkInputs[t].getFeatureOutput().value());
     }
     Concatenate concatenate = concatenateBuilder.build();
     ASSERT_TRUE(concatenate.isInitialized());
@@ -263,8 +263,8 @@ TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
 
         shared_ptr<ThorImplementation::NetworkInput> stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(inputLayers[t]);
         ASSERT_NE(stampedInput, nullptr);
-        ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-        ASSERT_EQ(stampedInput->getFeatureOutput().get().getDimensions(), stampedDimensions);
+        ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+        ASSERT_EQ(stampedInput->getFeatureOutput().value().getDimensions(), stampedDimensions);
     }
 
     vector<shared_ptr<ThorImplementation::NetworkOutput>> outputLayers = stampedNetwork.getOutputs();
@@ -275,20 +275,20 @@ TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
     for (uint32_t d = 0; d < numDimensions; ++d) {
         stampedDimensions.push_back(concatenatedDimensions[d]);
     }
-    ASSERT_EQ(stampedOutput->getFeatureOutput().get().getDimensions(), stampedDimensions);
+    ASSERT_EQ(stampedOutput->getFeatureOutput().value().getDimensions(), stampedDimensions);
 
     for (uint32_t t = 0; t < numTensors; ++t) {
-        ASSERT_TRUE(inputLayers[t]->getFeatureOutput().isPresent());
+        ASSERT_TRUE(inputLayers[t]->getFeatureOutput().has_value());
     }
     ASSERT_EQ(stampedConcatenate->getFeatureOutputs().size(), 1U);
-    ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().has_value());
 
     // Ensure 1. that they are all connected and 2. that they are in the same order as pre-serialization
     for (uint32_t t = 0; t < numTensors; ++t) {
-        ASSERT_TRUE(inputLayers[t]->getFeatureOutput().isPresent());
-        ASSERT_TRUE(stampedConcatenate->getFeatureInputs()[t].isPresent());
-        EXPECT_EQ(inputLayers[t]->getFeatureOutput().get().getTensorId(), stampedConcatenate->getFeatureInputs()[t].get().getTensorId());
-        EXPECT_EQ(inputLayers[t]->getFeatureOutput().get(), stampedConcatenate->getFeatureInputs()[t].get());
+        ASSERT_TRUE(inputLayers[t]->getFeatureOutput().has_value());
+        ASSERT_TRUE(stampedConcatenate->getFeatureInputs()[t].has_value());
+        EXPECT_EQ(inputLayers[t]->getFeatureOutput().value().getTensorId(), stampedConcatenate->getFeatureInputs()[t].value().getTensorId());
+        EXPECT_EQ(inputLayers[t]->getFeatureOutput().value(), stampedConcatenate->getFeatureInputs()[t].value());
     }
-    ASSERT_EQ(stampedConcatenate->getFeatureOutputs()[0].get(), stampedOutput->getFeatureInput().get());
+    ASSERT_EQ(stampedConcatenate->getFeatureOutputs()[0].value(), stampedOutput->getFeatureInput().value());
 }

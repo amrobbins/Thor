@@ -41,15 +41,15 @@
 //
 //     ASSERT_TRUE(batchNormalization.isInitialized());
 //
-//     Optional<Tensor> actualInput = batchNormalization.getFeatureInput();
-//     ASSERT_TRUE(actualInput.isPresent());
-//     ASSERT_EQ(actualInput.get().getDataType(), dataType);
-//     ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+//     std::optional<Tensor> actualInput = batchNormalization.getFeatureInput();
+//     ASSERT_TRUE(actualInput.has_value());
+//     ASSERT_EQ(actualInput.value().getDataType(), dataType);
+//     ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 //
-//     Optional<Tensor> actualOutput = batchNormalization.getFeatureOutput();
-//     ASSERT_TRUE(actualOutput.isPresent());
-//     ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-//     ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+//     std::optional<Tensor> actualOutput = batchNormalization.getFeatureOutput();
+//     ASSERT_TRUE(actualOutput.has_value());
+//     ASSERT_EQ(actualOutput.value().getDataType(), dataType);
+//     ASSERT_EQ(actualOutput.value().getDimensions(), dimensions);
 //
 //     double actualExponentialRunningAverageFactor = batchNormalization.getExponentialRunningAverageFactor();
 //     ASSERT_EQ(actualExponentialRunningAverageFactor, exponentialRunningAverageFactor);
@@ -63,15 +63,15 @@
 //
 //     ASSERT_TRUE(clone->isInitialized());
 //
-//     Optional<Tensor> cloneInput = clone->getFeatureInput();
-//     ASSERT_TRUE(cloneInput.isPresent());
-//     ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-//     ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+//     std::optional<Tensor> cloneInput = clone->getFeatureInput();
+//     ASSERT_TRUE(cloneInput.has_value());
+//     ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+//     ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 //
-//     Optional<Tensor> cloneOutput = clone->getFeatureOutput();
-//     ASSERT_TRUE(cloneOutput.isPresent());
-//     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-//     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+//     std::optional<Tensor> cloneOutput = clone->getFeatureOutput();
+//     ASSERT_TRUE(cloneOutput.has_value());
+//     ASSERT_EQ(cloneOutput.value().getDataType(), dataType);
+//     ASSERT_EQ(cloneOutput.value().getDimensions(), dimensions);
 //
 //     double cloneExponentialRunningAverageFactor = clone->getExponentialRunningAverageFactor();
 //     ASSERT_EQ(cloneExponentialRunningAverageFactor, exponentialRunningAverageFactor);
@@ -487,3 +487,4 @@
 //
 //     filesystem::remove("/tmp/testModel.thor.tar");
 // }
+#include <optional>

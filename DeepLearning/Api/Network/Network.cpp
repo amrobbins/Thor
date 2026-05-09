@@ -1,7 +1,8 @@
-#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include <optional>
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 using json = nlohmann::json;
@@ -43,11 +44,11 @@ Network::StatusCode Network::createDagAndFreeze() {
 // Calls preomptimize on each layer, one at a time, in DAG order.
 void Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
     for (auto it = orderedNetwork.begin(); it != orderedNetwork.end(); ++it) {
-        Optional<Tensor> inputTensor = it->first;
+        std::optional<Tensor> inputTensor = it->first;
         shared_ptr<Layer> layer = it->second;
 
-        if (inputTensor.isPresent()) {
-            layer->preOptimize(inputTensor.get(), batchSize, Stream::getNextUploadStream(gpuNum));
+        if (inputTensor.has_value()) {
+            layer->preOptimize(inputTensor.value(), batchSize, Stream::getNextUploadStream(gpuNum));
         }
     }
 }
@@ -81,7 +82,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
         // FIXME: need to throw GPU_OUT_OF_MEMORY when stamping and run out of memory
 
         for (auto it = orderedNetwork.begin(); it != orderedNetwork.end(); ++it) {
-            Optional<Tensor> inputTensor = it->first;
+            std::optional<Tensor> inputTensor = it->first;
             shared_ptr<Layer> layer = it->second;
 
             const shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
@@ -90,9 +91,10 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                 continue;
             }
 
+            THOR_THROW_IF_FALSE(inputTensor.has_value());
             const shared_ptr<NetworkOutput> networkOutput = dynamic_pointer_cast<NetworkOutput>(layer);
             if (networkOutput) {
-                stampNetworkOutput(inputTensor, networkOutput, gpuNum, batchSize, stampedNetwork, inferenceOnly);
+                stampNetworkOutput(inputTensor.value(), networkOutput, gpuNum, batchSize, stampedNetwork, inferenceOnly);
                 continue;
             }
 
@@ -104,7 +106,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                 continue;
             }
 
-            stampLayer(inputTensor, layer, gpuNum, batchSize, stampedNetwork, inferenceOnly);
+            stampLayer(inputTensor.value(), layer, gpuNum, batchSize, stampedNetwork, inferenceOnly);
         }
 
         // 3. Now that all layers have been constructed and connected, compile all layers
@@ -132,8 +134,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                 shared_ptr<ThorImplementation::TrainableLayer> implementationTrainableLayer =
                     dynamic_pointer_cast<ThorImplementation::TrainableLayer>(implementationLayer);
                 THOR_THROW_IF_FALSE(implementationTrainableLayer != nullptr);
-                vector<Event> layerEvents =
-                    trainableLayer->initialize(implementationTrainableLayer, true, nullptr, Optional<Event>::empty());
+                vector<Event> layerEvents = trainableLayer->initialize(implementationTrainableLayer, true, nullptr, std::nullopt);
                 initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
             } else {
                 vector<Event> layerEvents = layer->initialize(implementationLayer);
@@ -344,7 +345,7 @@ Network::StatusCode Network::evaluateGraph() {
         // Handle each class of layers
         shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
         if (networkInput) {
-            Tensor outputTensor = networkInput->getFeatureOutput();
+            Tensor outputTensor = networkInput->getFeatureOutput().value();
             allTensors.insert(outputTensor);
             THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
             apiTensorToApiDrivingLayer[outputTensor] = networkInput;
@@ -354,7 +355,7 @@ Network::StatusCode Network::evaluateGraph() {
 
         shared_ptr<NetworkOutput> networkOutput = dynamic_pointer_cast<NetworkOutput>(layer);
         if (networkOutput) {
-            Tensor inputTensor = networkOutput->getFeatureInput();
+            Tensor inputTensor = networkOutput->getFeatureInput().value();
             allTensors.insert(inputTensor);
             apiTensorToApiLoadingLayers[inputTensor].push_back(networkOutput);
             apiLayerToApiInputTensors[networkOutput].push_back(inputTensor);
@@ -363,7 +364,7 @@ Network::StatusCode Network::evaluateGraph() {
 
         shared_ptr<Stub> stub = dynamic_pointer_cast<Stub>(layer);
         if (stub) {
-            Tensor inputTensor = stub->getFeatureInput();
+            Tensor inputTensor = stub->getFeatureInput().value();
             allTensors.insert(inputTensor);
             apiTensorToApiLoadingLayers[inputTensor].push_back(stub);
             apiLayerToApiInputTensors[stub].push_back(inputTensor);
@@ -375,7 +376,7 @@ Network::StatusCode Network::evaluateGraph() {
             // Predictions and Labels in, Loss out
             // Note: getPredictions() does not return the featureInput tensor when there is an initial transformation layer, like
             // sigmoid
-            Tensor rawPredictionsTensor = loss->getFeatureInput();
+            Tensor rawPredictionsTensor = loss->getFeatureInput().value();
             Tensor labelsTensor = loss->getLabels();
             Tensor lossTensor = loss->getLoss();
             allTensors.insert(rawPredictionsTensor);
@@ -393,9 +394,9 @@ Network::StatusCode Network::evaluateGraph() {
 
         shared_ptr<Metric> metric = dynamic_pointer_cast<Metric>(layer);
         if (metric) {
-            Tensor inputTensor = metric->getFeatureInput();
+            Tensor inputTensor = metric->getFeatureInput().value();
             Tensor labelsTensor = metric->getLabels();
-            Tensor outputTensor = metric->getFeatureOutput();
+            Tensor outputTensor = metric->getFeatureOutput().value();
             allTensors.insert(inputTensor);
             allTensors.insert(labelsTensor);
             allTensors.insert(outputTensor);
@@ -450,8 +451,8 @@ Network::StatusCode Network::evaluateGraph() {
         }
 
         // So it is a base single connection layer
-        Tensor inputTensor = layer->getFeatureInput();
-        Tensor outputTensor = layer->getFeatureOutput();
+        Tensor inputTensor = layer->getFeatureInput().value();
+        Tensor outputTensor = layer->getFeatureOutput().value();
         allTensors.insert(inputTensor);
         allTensors.insert(outputTensor);
         THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
@@ -580,7 +581,7 @@ bool Network::terminatesWithoutHitting(Tensor tensor, shared_ptr<Layer> layer) {
 }
 
 void Network::topologicalSort() {
-    deque<pair<Optional<Tensor>, shared_ptr<Layer>>> workQueue;
+    deque<pair<std::optional<Tensor>, shared_ptr<Layer>>> workQueue;
 
     orderedNetwork.clear();
 
@@ -590,13 +591,13 @@ void Network::topologicalSort() {
 
         const shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
         if (networkInput) {
-            Tensor outputTensor = layer->getFeatureOutput();
+            Tensor outputTensor = layer->getFeatureOutput().value();
             vector<shared_ptr<Layer>> loadingLayers = apiTensorToApiLoadingLayers[outputTensor];
             for (uint32_t i = 0; i < loadingLayers.size(); ++i) {
                 workQueue.push_front(make_pair(outputTensor, loadingLayers[i]));
             }
 
-            orderedNetwork.push_back(make_pair(Optional<Tensor>::empty(), layer));
+            orderedNetwork.push_back(make_pair(std::nullopt, layer));
         }
     }
 
@@ -604,17 +605,18 @@ void Network::topologicalSort() {
         // Visit a node, connect the output tensor that corresponds to this input tensor by adding the loading layer
         // and its input tensor to orderedNetwork
         // After connecting an output tensor to its loading layer, add that loading layer and its input tensor to the work queue.
-        pair<Optional<Tensor>, shared_ptr<Layer>> workNode = workQueue.back();
+        pair<std::optional<Tensor>, shared_ptr<Layer>> workNode = workQueue.back();
         workQueue.pop_back();
-        Optional<Tensor> inputTensor = workNode.first;
+        std::optional<Tensor> inputTensor = workNode.first;
         shared_ptr<Layer> layer = workNode.second;
+        THOR_THROW_IF_FALSE(inputTensor.has_value());
 
-        // printf("connecting tensor %ld into layer id %ld\n", inputTensor.get().getId(), layer->getId());
+        // printf("connecting tensor %ld into layer id %ld\n", inputTensor.value().getId(), layer->getId());
 
         // For layers, such as concatenate, that need all inputs to be connected before creating the output
-        layer->informThatInputConnectionMade(inputTensor);
+        layer->informThatInputConnectionMade(inputTensor.value());
 
-        vector<Tensor> outputTensors = layer->getOutputsFromInput(inputTensor);
+        vector<Tensor> outputTensors = layer->getOutputsFromInput(inputTensor.value());
         for (uint32_t t = 0; t < outputTensors.size(); ++t) {
             Tensor outputTensor = outputTensors[t];
             vector<shared_ptr<Layer>> loadingLayers = apiTensorToApiLoadingLayers[outputTensor];
@@ -669,7 +671,7 @@ void Network::stampNetworkInput(const shared_ptr<Thor::NetworkInput> networkInpu
                                 ThorImplementation::StampedNetwork &stampedNetwork) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     shared_ptr<ThorImplementation::Layer> outputLayer;
-    Tensor outputTensor = networkInput->getFeatureOutput();
+    Tensor outputTensor = networkInput->getFeatureOutput().value();
 
     // Stamp network input
     shared_ptr<ThorImplementation::NetworkInput> implementationNetworkInput = networkInput->stamp(placement, batchSize);
@@ -720,25 +722,25 @@ void Network::addLayerToNetwork(const Layer *layer) {
     auto customLayer = dynamic_cast<const CustomLayer *>(layer);
     auto multiConnectionLayer = dynamic_cast<const MultiConnectionLayer *>(layer);
     if (networkInput) {
-        Tensor outputTensor = networkInput->getFeatureOutput();
+        Tensor outputTensor = networkInput->getFeatureOutput().value();
         apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
     } else if (networkOutput) {
-        Tensor inputTensor = networkOutput->getFeatureInput();
+        Tensor inputTensor = networkOutput->getFeatureInput().value();
         apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
     } else if (stub) {
-        Tensor inputTensor = stub->getFeatureInput();
+        Tensor inputTensor = stub->getFeatureInput().value();
         apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
     } else if (loss) {
-        Tensor rawPredictionsTensor = loss->getFeatureInput();
+        Tensor rawPredictionsTensor = loss->getFeatureInput().value();
         Tensor labelsTensor = loss->getLabels();
         Tensor lossTensor = loss->getLoss();
         apiTensorByOriginalId[rawPredictionsTensor.getOriginalId()] = rawPredictionsTensor;
         apiTensorByOriginalId[labelsTensor.getOriginalId()] = labelsTensor;
         apiTensorByOriginalId[lossTensor.getOriginalId()] = lossTensor;
     } else if (metric) {
-        Tensor inputTensor = metric->getFeatureInput();
+        Tensor inputTensor = metric->getFeatureInput().value();
         Tensor labelsTensor = metric->getLabels();
-        Tensor outputTensor = metric->getFeatureOutput();
+        Tensor outputTensor = metric->getFeatureOutput().value();
         apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
         apiTensorByOriginalId[labelsTensor.getOriginalId()] = labelsTensor;
         apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
@@ -766,8 +768,8 @@ void Network::addLayerToNetwork(const Layer *layer) {
         }
     } else {
         // base Layer type
-        Tensor inputTensor = layer->getFeatureInput();
-        Tensor outputTensor = layer->getFeatureOutput();
+        Tensor inputTensor = layer->getFeatureInput().value();
+        Tensor outputTensor = layer->getFeatureOutput().value();
         apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
         apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
     }

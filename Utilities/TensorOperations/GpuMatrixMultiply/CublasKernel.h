@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/ReferenceCounted.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
@@ -108,7 +110,7 @@ class CublasKernel : private ReferenceCounted {
                        Tensor B,
                        Tensor C,
                        Tensor D,
-                       Optional<Tensor> workspace,
+                       std::optional<Tensor> workspace,
                        const float *alpha,
                        const float *beta,
                        Stream stream,
@@ -138,7 +140,7 @@ class CublasKernel : private ReferenceCounted {
                        size_t ldB,
                        size_t ldC,
                        size_t ldD,
-                       Optional<Tensor> workspace,
+                       std::optional<Tensor> workspace,
                        const float *alpha,
                        const float *beta,
                        Stream stream,
@@ -184,7 +186,7 @@ class CublasKernel : private ReferenceCounted {
                                            Tensor B,
                                            Tensor C,
                                            Tensor D,
-                                           Optional<Tensor> workspace,
+                                           std::optional<Tensor> workspace,
                                            const float *alpha,
                                            const float *beta,
                                            Stream stream,
@@ -197,11 +199,11 @@ class CublasKernel : private ReferenceCounted {
         const size_t requiredWorkspaceSize = getWorkspaceSizeInBytes(stream.getGpuNum(), kernelWillRunOnGpu, fp8Scales);
         assert(kernelWillRunOnGpu);
 
-        if (requiredWorkspaceSize > 0 && !workspace.isPresent()) {
+        if (requiredWorkspaceSize > 0 && !workspace.has_value()) {
             throw std::runtime_error("CublasKernel::runWithoutChecks requires a workspace tensor for this cuBLASLt kernel.");
         }
-        if (workspace.isPresent()) {
-            assert(workspace.get().getDescriptor().getArraySizeInBytes() >= requiredWorkspaceSize);
+        if (workspace.has_value()) {
+            assert(workspace.value().getDescriptor().getArraySizeInBytes() >= requiredWorkspaceSize);
         }
 
         cublasLtMatmulDesc_t operationDesc = getOperationDesc(pointerMode);
@@ -226,7 +228,7 @@ class CublasKernel : private ReferenceCounted {
                     "CublasKernel FP8 row-major TN path currently requires contiguous B rows when B must be materialized transposed.");
             }
 
-            void *workspaceBase = requiredWorkspaceSize > 0 ? workspace.get().getMemPtr() : nullptr;
+            void *workspaceBase = requiredWorkspaceSize > 0 ? workspace.value().getMemPtr() : nullptr;
 
             // Internal FP8 cuBLASLt uses column-major TN.  The first cuBLASLt operand is derived from external B,
             // and the second cuBLASLt operand is derived from external A, so the row-major public contract still computes
@@ -261,7 +263,7 @@ class CublasKernel : private ReferenceCounted {
 
             ltWorkspace = ltWorkspaceSizeInBytes > 0 ? addBytes(workspaceBase, cublasWorkspaceOffsetInBytes()) : nullptr;
         } else {
-            ltWorkspace = ltWorkspaceSizeInBytes > 0 ? workspace.get().getMemPtr() : nullptr;
+            ltWorkspace = ltWorkspaceSizeInBytes > 0 ? workspace.value().getMemPtr() : nullptr;
         }
 
         cublasStatus_t cublasStatus;

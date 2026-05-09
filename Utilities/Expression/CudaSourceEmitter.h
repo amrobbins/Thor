@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include <cstdint>
 #include <string>
 
@@ -24,8 +26,8 @@ class CudaSourceEmitter {
                                                 const std::string& kernel_name);
     static bool specializedBroadcastUsesUInt32IndexMath(const std::vector<SpecializedBroadcastGroup>& groups);
 
-    static Optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const PhysicalExecutionStage& stage);
-    static Optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const CompiledExecutionStage& stage);
+    static std::optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const PhysicalExecutionStage& stage);
+    static std::optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const CompiledExecutionStage& stage);
     static uint32_t flatElementsPerThread(const PhysicalExecutionStage& stage);
     static uint32_t tiledTransposePackScalars(const PhysicalExecutionStage& stage);
     static uint32_t tiledTransposePackScalars(const CompiledExecutionStage& stage);

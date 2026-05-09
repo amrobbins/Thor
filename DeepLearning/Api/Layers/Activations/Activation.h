@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <utility>
+#include <optional>
 
 namespace Thor {
 
@@ -47,12 +48,12 @@ class Activation::Builder {
    public:
     virtual ~Builder() {}
     virtual Activation::Builder& network(Network& _network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
     virtual Activation::Builder& featureInput(Tensor _featureInput) {
-        THOR_THROW_IF_FALSE(!this->_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
         THOR_THROW_IF_FALSE(!_featureInput.getDimensions().empty());
         this->_featureInput = _featureInput;
         return *this;
@@ -61,8 +62,8 @@ class Activation::Builder {
     virtual std::shared_ptr<Activation> build() = 0;
 
    protected:
-    Optional<Network*> _network;
-    Optional<Tensor> _featureInput;
+    std::optional<Network*> _network;
+    std::optional<Tensor> _featureInput;
 };
 
 }  // namespace Thor

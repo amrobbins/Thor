@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -26,22 +27,22 @@ class Pad : public Layer {
         this->paddingAmount = paddingAmount;
     }
 
-    Optional<Tensor> createFeatureOutputTensor() override {
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        std::vector<unsigned long> paddedDimensions = getDimensionsAfterPadding(featureInput);
-        return Tensor(featureInput.get().getPlacement(),
-                      TensorDescriptor(featureInput.get().getDescriptor().getDataType(), paddedDimensions));
+    std::optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        std::vector<unsigned long> paddedDimensions = getDimensionsAfterPadding(featureInput.value());
+        return Tensor(featureInput.value().getPlacement(),
+                      TensorDescriptor(featureInput.value().getDescriptor().getDataType(), paddedDimensions));
     }
 
     void compileImpl() override {
         Layer::compileImpl();
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        THOR_THROW_IF_FALSE(featureOutput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
 
-        TensorPlacement placement = featureInput.get().getPlacement();
+        TensorPlacement placement = featureInput.value().getPlacement();
         std::vector<unsigned long> strideArrayDimensions;
 
-        std::vector<unsigned long> inputTensorDimensions = featureInput.get().getDescriptor().getDimensions();
+        std::vector<unsigned long> inputTensorDimensions = featureInput.value().getDescriptor().getDimensions();
         strideArrayDimensions.push_back(inputTensorDimensions.size());
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
         Tensor stridePerUnpaddedDimension(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
@@ -52,7 +53,7 @@ class Pad : public Layer {
             strideCpu[i] = inputTensorDimensions[i + 1] * strideCpu[i + 1];
         stridePerUnpaddedDimension_d.copyFromAsync(stridePerUnpaddedDimension, stream);
 
-        std::vector<unsigned long> outputTensorDimensions = featureOutput.get().getDescriptor().getDimensions();
+        std::vector<unsigned long> outputTensorDimensions = featureOutput.value().getDescriptor().getDimensions();
         Tensor stridePerPaddedDimension(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
         stridePerPaddedDimension_d = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
         strideCpu = (unsigned long *)stridePerPaddedDimension.getMemPtr();
@@ -67,9 +68,9 @@ class Pad : public Layer {
         padAfter_d = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::UINT32, strideArrayDimensions));
         unsigned int *padBeforeCpu = (unsigned int *)padBefore.getMemPtr();
         unsigned int *padAfterCpu = (unsigned int *)padAfter.getMemPtr();
-        for (unsigned int i = 0; i < featureInput.get().getDescriptor().getDimensions().size(); ++i) {
+        for (unsigned int i = 0; i < featureInput.value().getDescriptor().getDimensions().size(); ++i) {
             auto it = paddingAmount.find(i);
-            unsigned long inputDimensionSize = featureInput.get().getDescriptor().getDimensions()[i];
+            unsigned long inputDimensionSize = featureInput.value().getDescriptor().getDimensions()[i];
             if (it == paddingAmount.end()) {
                 padBeforeCpu[i] = 0;
                 padAfterCpu[i] = inputDimensionSize - 1;
@@ -77,7 +78,7 @@ class Pad : public Layer {
                 std::pair<unsigned int, unsigned int> dimensionPadding = it->second;
                 padBeforeCpu[i] = dimensionPadding.first;
                 padAfterCpu[i] = padBeforeCpu[i] + inputDimensionSize - 1;
-                unsigned long outputDimensionSize = featureOutput.get().getDescriptor().getDimensions()[i];
+                unsigned long outputDimensionSize = featureOutput.value().getDescriptor().getDimensions()[i];
                 THOR_THROW_IF_FALSE(outputDimensionSize - (inputDimensionSize + dimensionPadding.first) == dimensionPadding.second);
             }
         }
@@ -85,16 +86,16 @@ class Pad : public Layer {
         padAfter_d.copyFromAsync(padAfter, stream);
     }
 
-    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
-        THOR_THROW_IF_FALSE(inputTensor.isPresent());
-        THOR_THROW_IF_FALSE(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(outputTensor.isPresent());
-        ScopedGpu scopedGpu(inputTensor.get().getPlacement().getDeviceNum());
+    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(inputTensor.has_value());
+        THOR_THROW_IF_FALSE(inputTensor.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(outputTensor.has_value());
+        ScopedGpu scopedGpu(inputTensor.value().getPlacement().getDeviceNum());
 
-        launchPad((half *)outputTensor.get().getMemPtr(),
-                  (half *)inputTensor.get().getMemPtr(),
-                  outputTensor.get().getDescriptor().getTotalNumElements(),
-                  outputTensor.get().getDescriptor().getDimensions().size(),
+        launchPad((half *)outputTensor.value().getMemPtr(),
+                  (half *)inputTensor.value().getMemPtr(),
+                  outputTensor.value().getDescriptor().getTotalNumElements(),
+                  outputTensor.value().getDescriptor().getDimensions().size(),
                   (unsigned long *)stridePerPaddedDimension_d.getMemPtr(),
                   (unsigned long *)stridePerUnpaddedDimension_d.getMemPtr(),
                   (unsigned int *)padBefore_d.getMemPtr(),
@@ -102,18 +103,18 @@ class Pad : public Layer {
                   stream);
     }
 
-    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
-        if (errorOut.isEmpty())
+    void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override {
+        if (!errorOut.has_value())
             return;
 
-        THOR_THROW_IF_FALSE(errorIn.isPresent());
-        THOR_THROW_IF_FALSE(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        ScopedGpu scopedGpu(errorIn.get().getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(errorIn.has_value());
+        THOR_THROW_IF_FALSE(errorIn.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        ScopedGpu scopedGpu(errorIn.value().getPlacement().getDeviceNum());
 
-        launchExtract((half *)errorOut.get().getMemPtr(),
-                      (half *)errorIn.get().getMemPtr(),
-                      errorOut.get().getDescriptor().getTotalNumElements(),
-                      errorOut.get().getDescriptor().getDimensions().size(),
+        launchExtract((half *)errorOut.value().getMemPtr(),
+                      (half *)errorIn.value().getMemPtr(),
+                      errorOut.value().getDescriptor().getTotalNumElements(),
+                      errorOut.value().getDescriptor().getDimensions().size(),
                       (unsigned long *)stridePerPaddedDimension_d.getMemPtr(),
                       (unsigned long *)stridePerUnpaddedDimension_d.getMemPtr(),
                       (unsigned int *)padBefore_d.getMemPtr(),

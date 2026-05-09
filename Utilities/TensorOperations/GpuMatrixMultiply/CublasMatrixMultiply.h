@@ -4,7 +4,7 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelRequirement.h"
 
 #include "Utilities/Cache/LruCache.h"
-#include "Utilities/Common/Optional.h"
+#include <optional>
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
@@ -103,7 +103,7 @@ class CublasMatrixMultiply {
     void multiply(Tensor A,
                   Tensor B,
                   Tensor C,
-                  Optional<Tensor> workspace,
+                  std::optional<Tensor> workspace,
                   const int32_t A_rows,
                   const int32_t A_cols,
                   const int32_t B_rows,
@@ -117,7 +117,7 @@ class CublasMatrixMultiply {
     void multiply(Tensor A,
                   Tensor B,
                   Tensor C,
-                  Optional<Tensor> workspace,
+                  std::optional<Tensor> workspace,
                   const int32_t A_rows,
                   const int32_t A_cols,
                   const int32_t B_rows,
@@ -140,7 +140,7 @@ class CublasMatrixMultiply {
               Tensor B,
               Tensor C,
               Tensor D,
-              Optional<Tensor> workspace,
+              std::optional<Tensor> workspace,
               const int32_t A_rows,
               const int32_t A_cols,
               const int32_t B_rows,
@@ -159,7 +159,7 @@ class CublasMatrixMultiply {
               Tensor B,
               Tensor C,
               Tensor D,
-              Optional<Tensor> workspace,
+              std::optional<Tensor> workspace,
               const int32_t A_rows,
               const int32_t A_cols,
               const int32_t B_rows,
@@ -178,7 +178,7 @@ class CublasMatrixMultiply {
               Tensor B,
               Tensor C,
               Tensor D,
-              Optional<Tensor> workspace,
+              std::optional<Tensor> workspace,
               const int32_t A_rows,
               const int32_t A_cols,
               const int32_t B_rows,
@@ -638,7 +638,7 @@ class CublasMatrixMultiply {
     CublasMatrixMultiply() : optimalKernels(MAX_KERNEL_CACHE_OCCUPANCY), knownHeuristicAlgorithms(MAX_KERNEL_CACHE_OCCUPANCY) {}
 
     cudaDataType_t mapToCublasDataType(TensorDescriptor::DataType dataType);
-    Optional<cublasComputeType_t> mapToCublasComputeType(TensorDescriptor::DataType dataType);
+    std::optional<cublasComputeType_t> mapToCublasComputeType(TensorDescriptor::DataType dataType);
     OperationType makeOperationType(MatmulDataTypes dataTypes);
     OperationType makeOperationType(TensorDescriptor::DataType ABCDDataType);
     bool isSupportedMatmulDataTypes(MatmulDataTypes dataTypes);

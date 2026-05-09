@@ -52,27 +52,27 @@
 //
 //         ASSERT_TRUE(meanAbsoluteError.isInitialized());
 //
-//         Optional<Tensor> actualLabels = meanAbsoluteError.getLabels();
-//         ASSERT_TRUE(actualLabels.isPresent());
-//         ASSERT_EQ(actualLabels.get().getDataType(), labelsDataType);
-//         ASSERT_EQ(actualLabels.get().getDimensions(), dimensions);
+//         std::optional<Tensor> actualLabels = meanAbsoluteError.getLabels();
+//         ASSERT_TRUE(actualLabels.has_value());
+//         ASSERT_EQ(actualLabels.value().getDataType(), labelsDataType);
+//         ASSERT_EQ(actualLabels.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> actualPredictions = meanAbsoluteError.getPredictions();
-//         ASSERT_TRUE(actualPredictions.isPresent());
-//         ASSERT_EQ(actualPredictions.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(actualPredictions.get().getDimensions(), dimensions);
+//         std::optional<Tensor> actualPredictions = meanAbsoluteError.getPredictions();
+//         ASSERT_TRUE(actualPredictions.has_value());
+//         ASSERT_EQ(actualPredictions.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(actualPredictions.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> actualLoss = meanAbsoluteError.getLoss();
-//         ASSERT_TRUE(actualLoss.isPresent());
-//         ASSERT_EQ(actualLoss.get().getDataType(), predictionsDataType);
+//         std::optional<Tensor> actualLoss = meanAbsoluteError.getLoss();
+//         ASSERT_TRUE(actualLoss.has_value());
+//         ASSERT_EQ(actualLoss.value().getDataType(), predictionsDataType);
 //         if (shape == 0) {
-//             ASSERT_EQ(actualLoss.get().getDimensions(), batchDimensions);
+//             ASSERT_EQ(actualLoss.value().getDimensions(), batchDimensions);
 //         } else if (shape == 1) {
-//             ASSERT_EQ(actualLoss.get().getDimensions(), elementwiseDimensions);
+//             ASSERT_EQ(actualLoss.value().getDimensions(), elementwiseDimensions);
 //         } else if (shape == 2) {
-//             ASSERT_EQ(actualLoss.get().getDimensions(), perOutputDimensions);
+//             ASSERT_EQ(actualLoss.value().getDimensions(), perOutputDimensions);
 //         } else if (shape == 3) {
-//             ASSERT_EQ(actualLoss.get().getDimensions(), rawLossDimensions);
+//             ASSERT_EQ(actualLoss.value().getDimensions(), rawLossDimensions);
 //         } else {
 //             assert(false);
 //         }
@@ -86,22 +86,22 @@
 //
 //         ASSERT_TRUE(clone->isInitialized());
 //
-//         Optional<Tensor> clonePredictions = clone->getPredictions();
-//         ASSERT_TRUE(clonePredictions.isPresent());
-//         ASSERT_EQ(clonePredictions.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(clonePredictions.get().getDimensions(), dimensions);
+//         std::optional<Tensor> clonePredictions = clone->getPredictions();
+//         ASSERT_TRUE(clonePredictions.has_value());
+//         ASSERT_EQ(clonePredictions.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(clonePredictions.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> cloneLoss = clone->getLoss();
-//         ASSERT_TRUE(cloneLoss.isPresent());
-//         ASSERT_EQ(cloneLoss.get().getDataType(), predictionsDataType);
+//         std::optional<Tensor> cloneLoss = clone->getLoss();
+//         ASSERT_TRUE(cloneLoss.has_value());
+//         ASSERT_EQ(cloneLoss.value().getDataType(), predictionsDataType);
 //         if (shape == 0) {
-//             ASSERT_EQ(cloneLoss.get().getDimensions(), batchDimensions);
+//             ASSERT_EQ(cloneLoss.value().getDimensions(), batchDimensions);
 //         } else if (shape == 1) {
-//             ASSERT_EQ(cloneLoss.get().getDimensions(), elementwiseDimensions);
+//             ASSERT_EQ(cloneLoss.value().getDimensions(), elementwiseDimensions);
 //         } else if (shape == 2) {
-//             ASSERT_EQ(cloneLoss.get().getDimensions(), perOutputDimensions);
+//             ASSERT_EQ(cloneLoss.value().getDimensions(), perOutputDimensions);
 //         } else if (shape == 3) {
-//             ASSERT_EQ(cloneLoss.get().getDimensions(), rawLossDimensions);
+//             ASSERT_EQ(cloneLoss.value().getDimensions(), rawLossDimensions);
 //         } else {
 //             assert(false);
 //         }
@@ -317,17 +317,18 @@
 //         ASSERT_EQ(stampedReshape == nullptr, lossShape != 2);
 //     }
 //
-//     ASSERT_EQ(stampedMeanAbsoluteError->getPredictionsInput().get(), stampedFC->getFeatureOutputs()[0].get());
-//     ASSERT_EQ(stampedMeanAbsoluteError->getLabelsInput().get(), stampedLabelsInput->getFeatureOutput().get());
+//     ASSERT_EQ(stampedMeanAbsoluteError->getPredictionsInput().value(), stampedFC->getFeatureOutputs()[0].value());
+//     ASSERT_EQ(stampedMeanAbsoluteError->getLabelsInput().value(), stampedLabelsInput->getFeatureOutput().value());
 //     if (stampedLossShaper) {
-//         ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().get(), stampedLossShaper->getFeatureInput().get());
-//         ASSERT_EQ(stampedLossShaper->getFeatureOutput().get(), stampedLossOutput->getFeatureInput().get());
+//         ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().value(), stampedLossShaper->getFeatureInput().value());
+//         ASSERT_EQ(stampedLossShaper->getFeatureOutput().value(), stampedLossOutput->getFeatureInput().value());
 //     } else if (stampedReshape) {
-//         ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().get(), stampedReshape->getFeatureInput().get());
-//         ASSERT_EQ(stampedReshape->getFeatureOutput().get(), stampedLossOutput->getFeatureInput().get());
+//         ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().value(), stampedReshape->getFeatureInput().value());
+//         ASSERT_EQ(stampedReshape->getFeatureOutput().value(), stampedLossOutput->getFeatureInput().value());
 //     } else {
-//         ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
+//         ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().value(), stampedLossOutput->getFeatureInput().value());
 //     }
 //
 //     filesystem::remove("/tmp/testModel.thor.tar");
 // }
+#include <optional>

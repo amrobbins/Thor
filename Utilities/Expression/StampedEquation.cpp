@@ -87,11 +87,11 @@ void StampedEquation::runOn(Stream& run_stream, const std::unordered_map<std::st
 }
 
 StampedReduction::StampedReduction(
-    std::shared_ptr<BuiltReduction> built, const Tensor& input, const Tensor& output, const Stream& stream, Optional<Tensor> workspace)
+    std::shared_ptr<BuiltReduction> built, const Tensor& input, const Tensor& output, const Stream& stream, std::optional<Tensor> workspace)
     : built_reduction(built), input(input), output(output), workspace(workspace), stream(stream) {
     if (built_reduction->workspace_bytes != 0) {
-        assert(workspace.isPresent());
-        assert(workspace.get().getArraySizeInBytes() >= built_reduction->workspace_bytes);
+        assert(workspace.has_value());
+        assert(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
     }
     assert(input.getDataType() == built_reduction->key.input_dtype);
     assert(output.getDataType() == built_reduction->key.output_dtype);
@@ -102,8 +102,8 @@ void StampedReduction::run() { runOn(stream); }
 void StampedReduction::runOn(Stream& run_stream) const {
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
-        assert(workspace.isPresent());
-        workspace_ptr = (void*)workspace.get().getMemPtr();
+        assert(workspace.has_value());
+        workspace_ptr = (void*)workspace.value().getMemPtr();
     }
 
     CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
@@ -125,7 +125,7 @@ StampedArgMinMax::StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
                                    const Tensor& output,
                                    const Tensor& reduction_value_output,
                                    const Stream& stream,
-                                   Optional<Tensor> workspace)
+                                   std::optional<Tensor> workspace)
     : built_reduction(built),
       input(input),
       output(output),
@@ -136,8 +136,8 @@ StampedArgMinMax::StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
         throw std::runtime_error("StampedArgMinMax requires a BuiltReduction configured for indices.");
     }
     if (built_reduction->workspace_bytes != 0) {
-        assert(workspace.isPresent());
-        assert(workspace.get().getArraySizeInBytes() >= built_reduction->workspace_bytes);
+        assert(workspace.has_value());
+        assert(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
     }
 }
 
@@ -153,8 +153,8 @@ void StampedArgMinMax::runOn(Stream& run_stream) const {
 
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
-        assert(workspace.isPresent());
-        workspace_ptr = (void*)workspace.get().getMemPtr();
+        assert(workspace.has_value());
+        workspace_ptr = (void*)workspace.value().getMemPtr();
     }
 
     CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
@@ -204,7 +204,7 @@ StampedConvolution::StampedConvolution(std::shared_ptr<CompiledConvolution> comp
                                        const Tensor& filter,
                                        const Tensor& output,
                                        const Stream& stream,
-                                       Optional<Tensor> workspace)
+                                       std::optional<Tensor> workspace)
     : compiled_convolution(std::move(compiled)),
       built_convolution(std::move(built)),
       input(input),
@@ -223,7 +223,7 @@ void StampedConvolution::runOn(Stream& run_stream) const {
     if (built_convolution->use_cudnn_nd) {
         const float alpha = 1.0f;
         const float beta = 0.0f;
-        void* workspace_ptr = workspace.isPresent() ? const_cast<void*>(workspace.get().getMemPtr()) : nullptr;
+        void* workspace_ptr = workspace.has_value() ? const_cast<void*>(workspace.value().getMemPtr()) : nullptr;
         CUDNN_CHECK(cudnnConvolutionForward(run_stream.getCudnnHandle(),
                                             &alpha,
                                             built_convolution->x_desc,
@@ -240,12 +240,12 @@ void StampedConvolution::runOn(Stream& run_stream) const {
         return;
     }
 
-    if (!built_convolution->requirement.isPresent()) {
+    if (!built_convolution->requirement.has_value()) {
         throw std::runtime_error("StampedConvolution missing built convolution requirement.");
     }
 
     GpuConvolution::instance().convolutionForward(
-        built_convolution->requirement.get(), input, filter, Optional<Tensor>::empty(), output, workspace, run_stream);
+        built_convolution->requirement.value(), input, filter, std::nullopt, output, workspace, run_stream);
 }
 
 StampedConvolutionBackward::StampedConvolutionBackward(std::shared_ptr<CompiledConvolutionBackward> compiled,
@@ -254,7 +254,7 @@ StampedConvolutionBackward::StampedConvolutionBackward(std::shared_ptr<CompiledC
                                                        const Tensor& grad_output,
                                                        const Tensor& output,
                                                        const Stream& stream,
-                                                       Optional<Tensor> workspace)
+                                                       std::optional<Tensor> workspace)
     : compiled_convolution_backward(std::move(compiled)),
       built_convolution(std::move(built)),
       input(input),
@@ -276,7 +276,7 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
     if (built_convolution->use_cudnn_nd) {
         const float alpha = 1.0f;
         const float beta = 0.0f;
-        void* workspace_ptr = workspace.isPresent() ? const_cast<void*>(workspace.get().getMemPtr()) : nullptr;
+        void* workspace_ptr = workspace.has_value() ? const_cast<void*>(workspace.value().getMemPtr()) : nullptr;
         if (compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_DATA) {
             CUDNN_CHECK(cudnnConvolutionBackwardData(run_stream.getCudnnHandle(),
                                                      &alpha,
@@ -312,16 +312,16 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
         throw std::runtime_error("StampedConvolutionBackward received unsupported cuDNN nD convolution backward op.");
     }
 
-    if (!built_convolution->requirement.isPresent()) {
+    if (!built_convolution->requirement.has_value()) {
         throw std::runtime_error("StampedConvolutionBackward missing built convolution requirement.");
     }
 
     if (compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_DATA) {
         GpuConvolution::instance().convolutionBackwardData(
-            built_convolution->requirement.get(), grad_output, input, output, workspace, run_stream);
+            built_convolution->requirement.value(), grad_output, input, output, workspace, run_stream);
     } else if (compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_FILTER) {
         GpuConvolution::instance().convolutionBackwardFilter(
-            built_convolution->requirement.get(), input, grad_output, output, workspace, run_stream, false);
+            built_convolution->requirement.value(), input, grad_output, output, workspace, run_stream, false);
     } else {
         throw std::runtime_error("StampedConvolutionBackward received unsupported convolution backward op.");
     }
@@ -331,18 +331,18 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                              std::shared_ptr<BuiltMatmul> built,
                              const Tensor& lhs,
                              const Tensor& rhs,
-                             const Optional<Tensor>& addend,
+                             const std::optional<Tensor>& addend,
                              const Tensor& output,
                              const Stream& stream,
-                             Optional<Tensor> workspace,
-                             Optional<RuntimeInputValue> alpha_input,
-                             Optional<RuntimeInputValue> beta_input,
+                             std::optional<Tensor> workspace,
+                             std::optional<RuntimeInputValue> alpha_input,
+                             std::optional<RuntimeInputValue> beta_input,
                              std::optional<std::string> alpha_runtime_name,
                              std::optional<std::string> beta_runtime_name,
-                             Optional<Tensor> alpha_device_scratch,
-                             Optional<Tensor> beta_device_scratch,
-                             Optional<Tensor> alpha_host_scratch,
-                             Optional<Tensor> beta_host_scratch)
+                             std::optional<Tensor> alpha_device_scratch,
+                             std::optional<Tensor> beta_device_scratch,
+                             std::optional<Tensor> alpha_host_scratch,
+                             std::optional<Tensor> beta_host_scratch)
     : compiled_matmul(std::move(compiled)),
       built_matmul(std::move(built)),
       lhs(lhs),
@@ -366,10 +366,10 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
         throw std::runtime_error("StampedMatmul requires non-null built matmul payload.");
     }
     if (built_matmul->workspace_bytes != 0) {
-        if (!workspace.isPresent()) {
+        if (!workspace.has_value()) {
             throw std::runtime_error("StampedMatmul requires workspace for the chosen optimal kernel.");
         }
-        assert(workspace.get().getArraySizeInBytes() >= built_matmul->workspace_bytes);
+        assert(workspace.value().getArraySizeInBytes() >= built_matmul->workspace_bytes);
     }
 }
 
@@ -377,11 +377,11 @@ struct ResolvedMatmulScale {
     float host_value = 1.0f;
     const float* ptr = nullptr;
     bool is_device_pointer = false;
-    Optional<Tensor> device_scratch = Optional<Tensor>::empty();
-    Optional<Tensor> host_scratch = Optional<Tensor>::empty();
+    std::optional<Tensor> device_scratch = std::nullopt;
+    std::optional<Tensor> host_scratch = std::nullopt;
 
-    explicit ResolvedMatmulScale(Optional<Tensor> device_scratch = Optional<Tensor>::empty(),
-                                 Optional<Tensor> host_scratch = Optional<Tensor>::empty())
+    explicit ResolvedMatmulScale(std::optional<Tensor> device_scratch = std::nullopt,
+                                 std::optional<Tensor> host_scratch = std::nullopt)
         : ptr(&host_value), device_scratch(device_scratch), host_scratch(host_scratch) {}
 
     void refreshHostPointer() {
@@ -396,21 +396,21 @@ struct ResolvedMatmulScale {
     }
 
     void copyHostValueToDevice(Stream& run_stream) {
-        if (!device_scratch.isPresent()) {
+        if (!device_scratch.has_value()) {
             throw std::runtime_error("Missing preallocated GEMM device scalar scratch tensor.");
         }
-        if (host_scratch.isPresent()) {
-            std::memcpy(host_scratch.get().getMemPtr(), &host_value, sizeof(float));
-            device_scratch.get().copyFromAsync(host_scratch.get(), run_stream);
+        if (host_scratch.has_value()) {
+            std::memcpy(host_scratch.value().getMemPtr(), &host_value, sizeof(float));
+            device_scratch.value().copyFromAsync(host_scratch.value(), run_stream);
         } else {
-            CUDA_CHECK(cudaMemcpyAsync(device_scratch.get().getMemPtr(), &host_value, sizeof(float), cudaMemcpyHostToDevice, run_stream));
+            CUDA_CHECK(cudaMemcpyAsync(device_scratch.value().getMemPtr(), &host_value, sizeof(float), cudaMemcpyHostToDevice, run_stream));
         }
-        ptr = reinterpret_cast<const float*>(device_scratch.get().getMemPtr());
+        ptr = reinterpret_cast<const float*>(device_scratch.value().getMemPtr());
         is_device_pointer = true;
     }
 
     void scaleTensorDeviceValueIntoScratch(const TensorScalarBinding& binding, Stream& run_stream) {
-        if (!device_scratch.isPresent()) {
+        if (!device_scratch.has_value()) {
             throw std::runtime_error("Missing preallocated GEMM device scalar scratch tensor.");
         }
         if (binding.sourceDType != TensorDescriptor::DataType::FP32) {
@@ -418,37 +418,37 @@ struct ResolvedMatmulScale {
         }
         const char* device_ptr = static_cast<const char*>(binding.buffer.getMemPtr());
         const float* source_ptr = reinterpret_cast<const float*>(device_ptr + binding.byteOffset);
-        launchScaleFp32DeviceScalar(source_ptr, static_cast<float*>(device_scratch.get().getMemPtr()), host_value, run_stream);
-        ptr = reinterpret_cast<const float*>(device_scratch.get().getMemPtr());
+        launchScaleFp32DeviceScalar(source_ptr, static_cast<float*>(device_scratch.value().getMemPtr()), host_value, run_stream);
+        ptr = reinterpret_cast<const float*>(device_scratch.value().getMemPtr());
         is_device_pointer = true;
     }
 
     void copyTensorValueToScratch(const Tensor& tensor, Stream& run_stream) {
-        if (!device_scratch.isPresent()) {
+        if (!device_scratch.has_value()) {
             throw std::runtime_error("Missing preallocated GEMM device scalar scratch tensor.");
         }
-        device_scratch.get().copyFromAsync(tensor, run_stream);
-        ptr = reinterpret_cast<const float*>(device_scratch.get().getMemPtr());
+        device_scratch.value().copyFromAsync(tensor, run_stream);
+        ptr = reinterpret_cast<const float*>(device_scratch.value().getMemPtr());
         is_device_pointer = true;
     }
 
     void scaleTensorValueIntoScratch(const Tensor& tensor, Stream& run_stream) {
-        if (!device_scratch.isPresent()) {
+        if (!device_scratch.has_value()) {
             throw std::runtime_error("Missing preallocated GEMM device scalar scratch tensor.");
         }
         if (tensor.getDataType() == TensorDescriptor::DataType::FP32) {
             launchScaleFp32DeviceScalar(static_cast<const float*>(tensor.getMemPtr()),
-                                        static_cast<float*>(device_scratch.get().getMemPtr()),
+                                        static_cast<float*>(device_scratch.value().getMemPtr()),
                                         host_value,
                                         run_stream);
         } else {
-            device_scratch.get().copyFromAsync(tensor, run_stream);
-            launchScaleFp32DeviceScalar(static_cast<const float*>(device_scratch.get().getMemPtr()),
-                                        static_cast<float*>(device_scratch.get().getMemPtr()),
+            device_scratch.value().copyFromAsync(tensor, run_stream);
+            launchScaleFp32DeviceScalar(static_cast<const float*>(device_scratch.value().getMemPtr()),
+                                        static_cast<float*>(device_scratch.value().getMemPtr()),
                                         host_value,
                                         run_stream);
         }
-        ptr = reinterpret_cast<const float*>(device_scratch.get().getMemPtr());
+        ptr = reinterpret_cast<const float*>(device_scratch.value().getMemPtr());
         is_device_pointer = true;
     }
 };
@@ -475,12 +475,12 @@ static bool tensorResolvesToSingleElement(const Tensor& tensor) {
     return numel == 1;
 }
 
-static ResolvedMatmulScale resolveMatmulRuntimeScale(const Optional<RuntimeInputValue>& bound_input,
+static ResolvedMatmulScale resolveMatmulRuntimeScale(const std::optional<RuntimeInputValue>& bound_input,
                                                      const std::optional<std::string>& runtime_name,
                                                      double base_scale,
                                                      const std::unordered_map<std::string, float>& runtime_scalars,
-                                                     const Optional<Tensor>& device_scratch,
-                                                     const Optional<Tensor>& host_scratch,
+                                                     const std::optional<Tensor>& device_scratch,
+                                                     const std::optional<Tensor>& host_scratch,
                                                      Stream& run_stream) {
     ResolvedMatmulScale resolved(device_scratch, host_scratch);
     resolved.host_value = static_cast<float>(base_scale);
@@ -494,11 +494,11 @@ static ResolvedMatmulScale resolveMatmulRuntimeScale(const Optional<RuntimeInput
             used_runtime_override = true;
         }
     }
-    if (!bound_input.isPresent()) {
+    if (!bound_input.has_value()) {
         return resolved;
     }
 
-    const RuntimeInputValue& value = bound_input.get();
+    const RuntimeInputValue& value = bound_input.value();
     if (std::holds_alternative<float>(value)) {
         if (!used_runtime_override) {
             resolved.host_value *= std::get<float>(value);
@@ -534,17 +534,17 @@ static ResolvedMatmulScale resolveMatmulRuntimeScale(const Optional<RuntimeInput
         "Dynamic GEMM scale currently requires fp32 runtime scalar, tensor-backed runtime scalar, or single-element tensor bindings.");
 }
 
-static ResolvedMatmulScales resolveMatmulRuntimeScales(const Optional<RuntimeInputValue>& alpha_input,
-                                                       const Optional<RuntimeInputValue>& beta_input,
+static ResolvedMatmulScales resolveMatmulRuntimeScales(const std::optional<RuntimeInputValue>& alpha_input,
+                                                       const std::optional<RuntimeInputValue>& beta_input,
                                                        const std::optional<std::string>& alpha_runtime_name,
                                                        const std::optional<std::string>& beta_runtime_name,
                                                        double alpha_base_scale,
                                                        double beta_base_scale,
                                                        const std::unordered_map<std::string, float>& runtime_scalars,
-                                                       const Optional<Tensor>& alpha_device_scratch,
-                                                       const Optional<Tensor>& beta_device_scratch,
-                                                       const Optional<Tensor>& alpha_host_scratch,
-                                                       const Optional<Tensor>& beta_host_scratch,
+                                                       const std::optional<Tensor>& alpha_device_scratch,
+                                                       const std::optional<Tensor>& beta_device_scratch,
+                                                       const std::optional<Tensor>& alpha_host_scratch,
+                                                       const std::optional<Tensor>& beta_host_scratch,
                                                        Stream& run_stream) {
     ResolvedMatmulScales resolved;
     resolved.alpha = resolveMatmulRuntimeScale(
@@ -606,10 +606,10 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
         return;
     }
 
-    if (!addend.isPresent()) {
+    if (!addend.has_value()) {
         throw std::runtime_error("Stamped GEMM requires an addend tensor.");
     }
-    if (addend.get().getDimensions().size() != 2) {
+    if (addend.value().getDimensions().size() != 2) {
         throw std::runtime_error("Stamped GEMM currently only supports rank-2 addend tensors.");
     }
 
@@ -628,12 +628,12 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
 
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{lhs.getDescriptor().getDataType(),
                                                           rhs.getDescriptor().getDataType(),
-                                                          addend.get().getDescriptor().getDataType(),
+                                                          addend.value().getDescriptor().getDataType(),
                                                           output.getDescriptor().getDataType(),
                                                           compiled_matmul->compute_dtype};
     CublasMatrixMultiply::instance().gemm(lhs,
                                           rhs,
-                                          addend.get(),
+                                          addend.value(),
                                           output,
                                           workspace,
                                           a_rows,
@@ -657,7 +657,7 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltRe
                                                          const Tensor& indices,
                                                          const Tensor& reduction_value_output,
                                                          const Stream& stream,
-                                                         Optional<Tensor> workspace)
+                                                         std::optional<Tensor> workspace)
     : built_reduction(built),
       input(input),
       grad_output(grad_output),
@@ -670,8 +670,8 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltRe
         throw std::runtime_error("StampedReduceMinMaxBackward requires a BuiltReduction configured for indices.");
     }
     if (built_reduction->workspace_bytes != 0) {
-        assert(workspace.isPresent());
-        assert(workspace.get().getArraySizeInBytes() >= built_reduction->workspace_bytes);
+        assert(workspace.has_value());
+        assert(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
     }
 }
 
@@ -688,8 +688,8 @@ void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
 
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
-        assert(workspace.isPresent());
-        workspace_ptr = (void*)workspace.get().getMemPtr();
+        assert(workspace.has_value());
+        workspace_ptr = (void*)workspace.value().getMemPtr();
     }
 
     CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
@@ -1063,7 +1063,7 @@ static int32_t leadingDimensionForStoredMatrix(const Tensor& matrix) {
 std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
                                                           const Tensor& lhs,
                                                           const Tensor& rhs,
-                                                          const Optional<Tensor>& addend,
+                                                          const std::optional<Tensor>& addend,
                                                           const Tensor& output,
                                                           int device_num) {
     if (!compiled_matmul) {
@@ -1073,10 +1073,10 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         throw std::runtime_error("buildMatmul currently only supports rank-2 tensors.");
     }
     if (compiled_matmul->op == ExprOp::GEMM) {
-        if (!addend.isPresent()) {
+        if (!addend.has_value()) {
             throw std::runtime_error("buildMatmul requires an addend tensor for GEMM.");
         }
-        if (addend.get().getDimensions().size() != 2) {
+        if (addend.value().getDimensions().size() != 2) {
             throw std::runtime_error("buildMatmul currently only supports rank-2 GEMM addend tensors.");
         }
         if (compiled_matmul->transpose_aux) {
@@ -1093,12 +1093,12 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     const int32_t ld_a = leadingDimensionForStoredMatrix(lhs);
     const int32_t ld_b = leadingDimensionForStoredMatrix(rhs);
     const int32_t ld_d = leadingDimensionForStoredMatrix(output);
-    const int32_t ld_c = addend.isPresent() ? leadingDimensionForStoredMatrix(addend.get()) : ld_d;
+    const int32_t ld_c = addend.has_value() ? leadingDimensionForStoredMatrix(addend.value()) : ld_d;
 
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
         lhs.getDescriptor().getDataType(),
         rhs.getDescriptor().getDataType(),
-        addend.isPresent() ? addend.get().getDescriptor().getDataType() : output.getDescriptor().getDataType(),
+        addend.has_value() ? addend.value().getDescriptor().getDataType() : output.getDescriptor().getDataType(),
         output.getDescriptor().getDataType(),
         compiled_matmul->compute_dtype};
 
@@ -1266,8 +1266,8 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
                                                       static_cast<int>(input_dims[3]),
                                                       static_cast<int>(input_dims[2]));
 
-    GpuConvolution::instance().chooseOptimalKernelForward(built->requirement.get(), stream);
-    built->workspace_bytes = GpuConvolution::instance().getForwardWorkspaceSizeInBytes(built->requirement.get());
+    GpuConvolution::instance().chooseOptimalKernelForward(built->requirement.value(), stream);
+    built->workspace_bytes = GpuConvolution::instance().getForwardWorkspaceSizeInBytes(built->requirement.value());
     return built;
 }
 
@@ -1396,10 +1396,10 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
         throw std::runtime_error("buildConvolutionBackward received unsupported convolution backward op.");
     }
 
-    GpuConvolution::instance().chooseOptimalKernelBackward(built->requirement.get(), stream);
+    GpuConvolution::instance().chooseOptimalKernelBackward(built->requirement.value(), stream);
     built->workspace_bytes = compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_DATA
-                                 ? GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(built->requirement.get())
-                                 : GpuConvolution::instance().getBackwardFilterWorkspaceSizeInBytes(built->requirement.get());
+                                 ? GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(built->requirement.value())
+                                 : GpuConvolution::instance().getBackwardFilterWorkspaceSizeInBytes(built->requirement.value());
     return built;
 }
 

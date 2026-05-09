@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -26,15 +27,15 @@ TEST(UtilityApiLayers, NetworkInputBuilds) {
 
     ASSERT_TRUE(networkInput.isInitialized());
 
-    Optional<Tensor> actualInput = networkInput.getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualInput = networkInput.getFeatureInput();
+    ASSERT_TRUE(actualInput.has_value());
+    ASSERT_EQ(actualInput.value().getDataType(), dataType);
+    ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> actualOutput = networkInput.getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualOutput = networkInput.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.has_value());
+    ASSERT_EQ(actualOutput.value().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.value().getDimensions(), dimensions);
 
     shared_ptr<Layer> cloneLayer = networkInput.clone();
     NetworkInput *clone = dynamic_cast<NetworkInput *>(cloneLayer.get());
@@ -42,15 +43,15 @@ TEST(UtilityApiLayers, NetworkInputBuilds) {
 
     ASSERT_TRUE(clone->isInitialized());
 
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.has_value());
+    ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
-    ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.has_value());
+    ASSERT_EQ(cloneOutput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.value().getDimensions(), dimensions);
 
     ASSERT_EQ(networkInput.getId(), clone->getId());
     ASSERT_GT(networkInput.getId(), 1u);
@@ -79,15 +80,15 @@ TEST(UtilityApiLayers, NetworkOutputBuilds) {
 
     ASSERT_TRUE(networkOutput.isInitialized());
 
-    Optional<Tensor> actualInput = networkOutput.getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualInput = networkOutput.getFeatureInput();
+    ASSERT_TRUE(actualInput.has_value());
+    ASSERT_EQ(actualInput.value().getDataType(), dataType);
+    ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> actualOutput = networkOutput.getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), outputDataType);
-    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualOutput = networkOutput.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.has_value());
+    ASSERT_EQ(actualOutput.value().getDataType(), outputDataType);
+    ASSERT_EQ(actualOutput.value().getDimensions(), dimensions);
 
     shared_ptr<Layer> cloneLayer = networkOutput.clone();
     NetworkOutput *clone = dynamic_cast<NetworkOutput *>(cloneLayer.get());
@@ -95,15 +96,15 @@ TEST(UtilityApiLayers, NetworkOutputBuilds) {
 
     ASSERT_TRUE(clone->isInitialized());
 
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.has_value());
+    ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
-    ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), outputDataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.has_value());
+    ASSERT_EQ(cloneOutput.value().getDataType(), outputDataType);
+    ASSERT_EQ(cloneOutput.value().getDimensions(), dimensions);
 
     ASSERT_EQ(networkOutput.getId(), clone->getId());
     ASSERT_GT(networkOutput.getId(), 1u);
@@ -137,7 +138,7 @@ TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(networkInput.getFeatureOutput().get())
+                                      .inputTensor(networkInput.getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 
@@ -212,19 +213,19 @@ TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
     ASSERT_EQ(inputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkInput> stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(inputLayers[0]);
     ASSERT_NE(stampedInput, nullptr);
-    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-    ASSERT_EQ(stampedInput->getFeatureOutput().get().getDimensions(), stampedDimensions);
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+    ASSERT_EQ(stampedInput->getFeatureOutput().value().getDimensions(), stampedDimensions);
 
     vector<shared_ptr<ThorImplementation::NetworkOutput>> outputLayers = stampedNetwork.getOutputs();
     ASSERT_EQ(outputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
-    ASSERT_TRUE(stampedOutput->getFeatureInput().isPresent());
-    ASSERT_EQ(stampedOutput->getFeatureInput().get().getDimensions(), stampedDimensions);
+    ASSERT_TRUE(stampedOutput->getFeatureInput().has_value());
+    ASSERT_EQ(stampedOutput->getFeatureInput().value().getDimensions(), stampedDimensions);
 
     // Ensure that they are all connected
-    EXPECT_EQ(stampedInput->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+    EXPECT_EQ(stampedInput->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
-    ASSERT_EQ(stampedInput->getFeatureOutput().get().getDataType(), dataType);
-    ASSERT_EQ(stampedOutput->getFeatureInput().get().getDataType(), dataType);
+    ASSERT_EQ(stampedInput->getFeatureOutput().value().getDataType(), dataType);
+    ASSERT_EQ(stampedOutput->getFeatureInput().value().getDataType(), dataType);
 }

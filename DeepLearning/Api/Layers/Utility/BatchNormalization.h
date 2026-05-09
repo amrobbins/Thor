@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h"
+#include <optional>
 
 namespace Thor {
 
@@ -18,8 +19,8 @@ class BatchNormalization : public TrainableLayer {
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<BatchNormalization>(*this); }
 
-    virtual Optional<double> getExponentialRunningAverageFactor() { return exponentialRunningAverageFactor; }
-    virtual Optional<double> getEpsilon() { return epsilon; }
+    virtual std::optional<double> getExponentialRunningAverageFactor() { return exponentialRunningAverageFactor; }
+    virtual std::optional<double> getEpsilon() { return epsilon; }
 
     std::string getLayerType() const override { return "BatchNormalization"; }
 
@@ -50,14 +51,14 @@ class BatchNormalization : public TrainableLayer {
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> physicalLayer,
                                   bool isFirstStamp,
                                   std::shared_ptr<ThorImplementation::TrainableLayer> sisterPhysicalLayer,
-                                  Optional<Event> sisterPhysicalLayerLoadedEvent);
+                                  std::optional<Event> sisterPhysicalLayerLoadedEvent);
 
    private:
     double exponentialRunningAverageFactor;
     double epsilon;
 
-    Optional<std::string> runningMeansFile;
-    Optional<std::string> runningVariancesFile;
+    std::optional<std::string> runningMeansFile;
+    std::optional<std::string> runningVariancesFile;
     uint64_t numItemsObserved = 0;
     std::shared_ptr<Optimizer> optimizer;
 };
@@ -67,17 +68,17 @@ class BatchNormalization::Builder {
     virtual ~Builder() = default;
 
     virtual BatchNormalization build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(!_featureInputs.empty());
 
         BatchNormalization batchNormalization;
         batchNormalization.featureInputs = _featureInputs;
         batchNormalization.exponentialRunningAverageFactor = 0.05;
-        if (_exponentialRunningAverageFactor.isPresent())
-            batchNormalization.exponentialRunningAverageFactor = _exponentialRunningAverageFactor.get();
+        if (_exponentialRunningAverageFactor.has_value())
+            batchNormalization.exponentialRunningAverageFactor = _exponentialRunningAverageFactor.value();
         batchNormalization.epsilon = 0.0001;
-        if (_epsilon.isPresent())
-            batchNormalization.epsilon = _epsilon.get();
+        if (_epsilon.has_value())
+            batchNormalization.epsilon = _epsilon.value();
 
         // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
         batchNormalization.optimizer = _layerOptimizer;
@@ -89,13 +90,13 @@ class BatchNormalization::Builder {
             batchNormalization.outputTensorFromInputTensor[batchNormalization.featureInputs[i]] = batchNormalization.featureOutputs[i];
             batchNormalization.inputTensorFromOutputTensor[batchNormalization.featureOutputs[i]] = batchNormalization.featureInputs[i];
         }
-        batchNormalization.addToNetwork(_network.get());
+        batchNormalization.addToNetwork(_network.value());
 
         return batchNormalization;
     }
 
     virtual BatchNormalization::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
@@ -110,7 +111,7 @@ class BatchNormalization::Builder {
     }
 
     virtual BatchNormalization::Builder &exponentialRunningAverageFactor(double exponentialRunningAverageFactor) {
-        THOR_THROW_IF_FALSE(!_exponentialRunningAverageFactor.isPresent());
+        THOR_THROW_IF_FALSE(!_exponentialRunningAverageFactor.has_value());
         THOR_THROW_IF_FALSE(exponentialRunningAverageFactor > 0.0);
         THOR_THROW_IF_FALSE(exponentialRunningAverageFactor <= 1.0);
         this->_exponentialRunningAverageFactor = exponentialRunningAverageFactor;
@@ -118,7 +119,7 @@ class BatchNormalization::Builder {
     }
 
     virtual BatchNormalization::Builder &epsilon(double epsilon) {
-        THOR_THROW_IF_FALSE(!_epsilon.isPresent());
+        THOR_THROW_IF_FALSE(!_epsilon.has_value());
         THOR_THROW_IF_FALSE(epsilon > 0.0);
         this->_epsilon = epsilon;
         return *this;
@@ -131,10 +132,10 @@ class BatchNormalization::Builder {
     }
 
    private:
-    Optional<Network *> _network;
+    std::optional<Network *> _network;
     std::vector<Tensor> _featureInputs;
-    Optional<double> _exponentialRunningAverageFactor;
-    Optional<double> _epsilon;
+    std::optional<double> _exponentialRunningAverageFactor;
+    std::optional<double> _epsilon;
     std::shared_ptr<Optimizer> _layerOptimizer;
 };
 
