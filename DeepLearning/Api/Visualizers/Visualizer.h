@@ -3,7 +3,6 @@
 #include "DeepLearning/Api/Executors/ExecutionState.h"
 #include "DeepLearning/Api/HyperparameterControllers/HyperparameterController.h"
 
-#include <assert.h>
 #include <memory>
 
 namespace Thor {

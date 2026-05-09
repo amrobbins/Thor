@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Learning/Convolution2d.h"
 
 using namespace std;
@@ -31,7 +32,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
 
         const Tensor& featureInputTensor = inputs.at("feature_input");
         const Tensor& wTensor = inputs.at("weights");
-        assert(wTensor.getPlacement() == placement);
+        THOR_THROW_IF_FALSE(wTensor.getPlacement() == placement);
 
         if (featureInputTensor.getDimensions().size() != 4) {
             throw std::runtime_error("Convolution2d expects feature_input to be 4D NCHW.");
@@ -42,7 +43,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
         if (featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
             throw std::runtime_error("Convolution2d input channels must match weight channels.");
         }
-        assert(featureInputTensor.getPlacement() == placement);
+        THOR_THROW_IF_FALSE(featureInputTensor.getPlacement() == placement);
 
         const uint64_t expectedOutputRows = (featureInputTensor.getDimensions()[2] + 2 * padH - wTensor.getDimensions()[2]) / strideH + 1;
         const uint64_t expectedOutputCols = (featureInputTensor.getDimensions()[3] + 2 * padW - wTensor.getDimensions()[3]) / strideW + 1;
@@ -59,7 +60,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
                 featureOutputTensor.getDimensions()[3] != expectedOutputCols) {
                 throw std::runtime_error("Convolution2d feature_output shape does not match the implied convolution output shape.");
             }
-            assert(featureOutputTensor.getPlacement() == placement);
+            THOR_THROW_IF_FALSE(featureOutputTensor.getPlacement() == placement);
             featureOutputDType = featureOutputTensor.getDescriptor().getDataType();
         }
 
@@ -116,8 +117,8 @@ std::shared_ptr<ThorImplementation::Layer> Convolution2d::stamp(ThorImplementati
     (void)drivingLayer;
     (void)drivingApiLayer;
 
-    assert(initialized);
-    assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    THOR_THROW_IF_FALSE(initialized);
+    THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
     Tensor::DataType weightsDataType = Tensor::DataType::FP16;
     std::shared_ptr<ThorImplementation::CustomLayer> physicalConvolution2d = std::make_shared<ThorImplementation::CustomLayer>(
@@ -289,7 +290,7 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter,
     shared_ptr<ThorImplementation::TrainableLayer> twbLayer = nullptr;
     shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
     twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
-    assert(twbLayer != nullptr);
+    THOR_THROW_IF_FALSE(twbLayer != nullptr);
 
     ThorImplementation::Tensor weights;
     ThorImplementation::Tensor biases;
@@ -413,7 +414,7 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
     // // 3. Run an initializer to set the weights - on an untrained network
     // if (!isFirstStamp) {
     //     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
-    //     assert(sisterPhysicalLayer != nullptr);
+    //     THOR_THROW_IF_FALSE(sisterPhysicalLayer != nullptr);
     //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
     //     Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
     //     if (sisterPhysicalLayerLoadedEvent.isPresent())
@@ -422,15 +423,15 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
     //     if (hasBias) {
     //         ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage();
     //         Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getParameter("biases")->getStorage();
-    //         assert(sisterLayerBiases.isPresent());
+    //         THOR_THROW_IF_FALSE(sisterLayerBiases.isPresent());
     //         biases.copyFromAsync(sisterLayerBiases.get(), stream);
     //     }
     //
     //     initDoneEvents.push_back(stream.putEvent(false, true));
     // } else if (weightsFile.isPresent()) {
     //     // 2. Copy from a file - when loading a saved network
-    //     assert(archiveReader != nullptr);
-    //     assert(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getMemDevice() ==
+    //     THOR_THROW_IF_FALSE(archiveReader != nullptr);
+    //     THOR_THROW_IF_FALSE(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getMemDevice() ==
     //            ThorImplementation::TensorPlacement::MemDevices::GPU);
     //     Stream stream =
     //         Stream::getNextUploadStream(physicalLayer->getParameter("weights")->getStorage().get().getPlacement().getDeviceNum());
@@ -438,7 +439,7 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
     //     ThorImplementation::Tensor weights = physicalLayer->getParameter("weights")->getStorage();
     //     archiveReader->registerReadRequest(weightsFile.get(), weights);
     //     if (hasBias) {
-    //         assert(biasesFile.isPresent());
+    //         THOR_THROW_IF_FALSE(biasesFile.isPresent());
     //         ThorImplementation::Tensor biases = physicalLayer->getParameter("biases")->getStorage().get();
     //         archiveReader->registerReadRequest(biasesFile.get(), biases);
     //     }
@@ -450,9 +451,9 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
     // } else {
     //     // FIXME: This needs to be updated to use Parameter's. It should be moved to API Thor::TrainableLayer
     //     //     // 3. Run an initializer to set the weights - on an untrained network
-    //     //     assert(weightsInitializer != nullptr);
+    //     //     THOR_THROW_IF_FALSE(weightsInitializer != nullptr);
     //     //     if (hasBias)
-    //     //         assert(biasInitializer != nullptr);
+    //     //         THOR_THROW_IF_FALSE(biasInitializer != nullptr);
     //     //
     //     //     Optional<Event> initDoneEvent;
     //     //
@@ -472,7 +473,7 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
     // //     shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
     // //     shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
     // //         sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
-    // //     assert(optimizer != nullptr);
+    // //     THOR_THROW_IF_FALSE(optimizer != nullptr);
     // //
     // //     vector<Event> optimizerInitDoneEvents =
     // //         optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);

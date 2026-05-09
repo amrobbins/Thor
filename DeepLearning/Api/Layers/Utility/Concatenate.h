@@ -1,10 +1,10 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/Concatenate.h"
 
-#include <assert.h>
 
 namespace Thor {
 
@@ -19,18 +19,18 @@ class Concatenate : public MultiConnectionLayer {
 
     virtual Tensor getFeatureOutput(Tensor inputTensor) const {
         std::map<Tensor, Tensor>::const_iterator it = outputTensorFromInputTensor.find(inputTensor);
-        assert(it != outputTensorFromInputTensor.end());
+        THOR_THROW_IF_FALSE(it != outputTensorFromInputTensor.end());
         return it->second;
     }
 
     virtual Optional<Tensor> getFeatureOutput() const {
-        assert(featureOutputs.size() == 1);
+        THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
         return featureOutputs[0];
     }
 
     virtual Tensor getFeatureInput(Tensor outputTensor) const {
         // Can't identify a particular input from the concatenated output.
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
@@ -44,7 +44,7 @@ class Concatenate : public MultiConnectionLayer {
     virtual bool mustConnectAllInputsToDriveOutput() { return true; }
     virtual void informThatInputConnectionMade(Tensor inputTensor) {
         numInputConnectionsMade += 1;
-        assert(numInputConnectionsMade <= featureInputs.size());
+        THOR_THROW_IF_FALSE(numInputConnectionsMade <= featureInputs.size());
     }
 
     virtual std::string getLayerType() const { return "Concatenate"; }
@@ -59,8 +59,8 @@ class Concatenate : public MultiConnectionLayer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         // Add 1 to concatenation axis since API does not consider batch size (the first dimension)
         std::shared_ptr<ThorImplementation::Concatenate> concatenate =
@@ -86,12 +86,12 @@ class Concatenate::Builder {
     Builder() {}
 
     virtual Concatenate build() {
-        assert(_network.isPresent());
-        assert(!_featureInputs.empty());
-        assert(!_concatenationAxis.isEmpty());
-        assert(_concatenationAxis.get() < _featureInputs[0].getDimensions().size());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(!_featureInputs.empty());
+        THOR_THROW_IF_FALSE(!_concatenationAxis.isEmpty());
+        THOR_THROW_IF_FALSE(_concatenationAxis.get() < _featureInputs[0].getDimensions().size());
         std::set<Tensor> uniqueFeatureInputs(_featureInputs.begin(), _featureInputs.end());
-        assert(uniqueFeatureInputs.size() == _featureInputs.size());  // No duplicate inputs
+        THOR_THROW_IF_FALSE(uniqueFeatureInputs.size() == _featureInputs.size());  // No duplicate inputs
 
         Concatenate concatenate;
         concatenate.featureInputs = _featureInputs;
@@ -116,21 +116,21 @@ class Concatenate::Builder {
     }
 
     virtual Concatenate::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual Concatenate::Builder &featureInput(Tensor _featureInput) {
-        assert(!_featureInput.getDimensions().empty());
+        THOR_THROW_IF_FALSE(!_featureInput.getDimensions().empty());
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1)
-            assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
         return *this;
     }
 
     virtual Concatenate::Builder &concatenationAxis(uint32_t _concatenationAxis) {
-        assert(!this->_concatenationAxis.isPresent());
+        THOR_THROW_IF_FALSE(!this->_concatenationAxis.isPresent());
         this->_concatenationAxis = _concatenationAxis;
         return *this;
     }

@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 
 #include "DeepLearning/Api/Layers/Activations/Elu.h"
@@ -28,7 +29,7 @@ unordered_map<string, Activation::Deserializer>& Activation::get_registry() {
 void Activation::register_layer(string name, Deserializer fn) { get_registry().emplace(std::move(name), std::move(fn)); }
 
 json Activation::architectureJson() const {
-    assert(initialized);
+    THOR_THROW_IF_FALSE(initialized);
 
     json j;
     j["factory"] = Layer::Factory::Activation.value();
@@ -48,7 +49,7 @@ json Activation::architectureJson() const {
 }
 
 void Activation::deserialize(const json& j, Network* network) {
-    assert(j.at("factory").get<std::string>() == Layer::Factory::Activation);
+    THOR_THROW_IF_FALSE(j.at("factory").get<std::string>() == Layer::Factory::Activation);
     std::string type = j.at("layer_type").get<std::string>();
 
     unordered_map<string, Activation::Deserializer>& registry = get_registry();

@@ -5,7 +5,6 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 
-#include <assert.h>
 #include <memory>
 #include <string>
 #include <unordered_map>

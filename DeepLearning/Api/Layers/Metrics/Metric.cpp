@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
 
 using namespace std;
@@ -13,7 +14,7 @@ unordered_map<string, Metric::Deserializer> &Metric::get_registry() {
 void Metric::register_layer(string name, Deserializer fn) { get_registry().emplace(move(name), move(fn)); }
 
 void Metric::deserialize(const nlohmann::json &j, Network *network) {
-    assert(j.at("factory").get<std::string>() == Layer::Factory::Metric.value());
+    THOR_THROW_IF_FALSE(j.at("factory").get<std::string>() == Layer::Factory::Metric.value());
     std::string type = j.at("layer_type").get<std::string>();
 
     unordered_map<string, Layer::Deserializer> &registry = get_registry();

@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -23,7 +24,7 @@ string Network::statusCodeToString(StatusCode statusCode) {
         return "DUPLICATE NAMED NETWORK OUTPUT";
     else if (statusCode == StatusCode::DEADLOCK_CYCLE)
         return "DEADLOCK CYCLE";
-    assert(false);
+    THOR_UNREACHABLE();
 }
 
 // Records the layers in sorted DAG order.
@@ -130,7 +131,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
             if (trainableLayer != nullptr) {
                 shared_ptr<ThorImplementation::TrainableLayer> implementationTrainableLayer =
                     dynamic_pointer_cast<ThorImplementation::TrainableLayer>(implementationLayer);
-                assert(implementationTrainableLayer != nullptr);
+                THOR_THROW_IF_FALSE(implementationTrainableLayer != nullptr);
                 vector<Event> layerEvents =
                     trainableLayer->initialize(implementationTrainableLayer, true, nullptr, Optional<Event>::empty());
                 initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
@@ -184,13 +185,13 @@ shared_ptr<PlacedNetwork> Network::place(
         if (dagStatus != StatusCode::SUCCESS)
             throw logic_error("Network graph is invalid, error: " + statusCodeToString(dagStatus));
     }
-    assert(frozen);
+    THOR_THROW_IF_FALSE(frozen);
 
     // FIXME: multiple stamps, multiple gpus
     // FIXME: smart placement and stamping
-    assert(forcedNumStampsPerGpu == 0 || forcedNumStampsPerGpu == 1);
+    THOR_THROW_IF_FALSE(forcedNumStampsPerGpu == 0 || forcedNumStampsPerGpu == 1);
     vector<int32_t> gpu0 = {0};
-    assert(forcedDevices == gpu0 || forcedDevices.empty());
+    THOR_THROW_IF_FALSE(forcedDevices == gpu0 || forcedDevices.empty());
 
     vector<int32_t> devices;
     vector<uint32_t> numStampsPerDevice;
@@ -345,7 +346,7 @@ Network::StatusCode Network::evaluateGraph() {
         if (networkInput) {
             Tensor outputTensor = networkInput->getFeatureOutput();
             allTensors.insert(outputTensor);
-            assert(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
+            THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
             apiTensorToApiDrivingLayer[outputTensor] = networkInput;
             apiLayerToApiOutputTensors[networkInput].push_back(outputTensor);
             continue;
@@ -384,7 +385,7 @@ Network::StatusCode Network::evaluateGraph() {
             apiTensorToApiLoadingLayers[labelsTensor].push_back(loss);
             apiLayerToApiInputTensors[loss].push_back(rawPredictionsTensor);
             apiLayerToApiInputTensors[loss].push_back(labelsTensor);
-            assert(apiTensorToApiDrivingLayer.count(lossTensor) == 0);
+            THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(lossTensor) == 0);
             apiTensorToApiDrivingLayer[lossTensor] = loss;
             apiLayerToApiOutputTensors[loss].push_back(lossTensor);
             continue;
@@ -402,7 +403,7 @@ Network::StatusCode Network::evaluateGraph() {
             apiTensorToApiLoadingLayers[labelsTensor].push_back(metric);
             apiLayerToApiInputTensors[metric].push_back(inputTensor);
             apiLayerToApiInputTensors[metric].push_back(labelsTensor);
-            assert(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
+            THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
             apiTensorToApiDrivingLayer[outputTensor] = metric;
             apiLayerToApiOutputTensors[metric].push_back(outputTensor);
             continue;
@@ -412,8 +413,8 @@ Network::StatusCode Network::evaluateGraph() {
         if (customLayer) {
             vector<Tensor> inputTensors = customLayer->getFeatureInputs();
             vector<Tensor> outputTensors = customLayer->getFeatureOutputs();
-            assert(!inputTensors.empty());
-            assert(!outputTensors.empty());
+            THOR_THROW_IF_FALSE(!inputTensors.empty());
+            THOR_THROW_IF_FALSE(!outputTensors.empty());
             for (uint32_t i = 0; i < inputTensors.size(); ++i) {
                 allTensors.insert(inputTensors[i]);
                 apiTensorToApiLoadingLayers[inputTensors[i]].push_back(customLayer);
@@ -421,7 +422,7 @@ Network::StatusCode Network::evaluateGraph() {
             }
             for (uint32_t i = 0; i < outputTensors.size(); ++i) {
                 allTensors.insert(outputTensors[i]);
-                assert(apiTensorToApiDrivingLayer.count(outputTensors[i]) == 0);
+                THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensors[i]) == 0);
                 apiTensorToApiDrivingLayer[outputTensors[i]] = customLayer;
                 apiLayerToApiOutputTensors[customLayer].push_back(outputTensors[i]);
             }
@@ -432,8 +433,8 @@ Network::StatusCode Network::evaluateGraph() {
         if (multiConnectionLayer) {
             vector<Tensor> inputTensors = multiConnectionLayer->getFeatureInputs();
             vector<Tensor> outputTensors = multiConnectionLayer->getFeatureOutputs();
-            assert(!inputTensors.empty());
-            assert(!outputTensors.empty());
+            THOR_THROW_IF_FALSE(!inputTensors.empty());
+            THOR_THROW_IF_FALSE(!outputTensors.empty());
             for (uint32_t i = 0; i < inputTensors.size(); ++i) {
                 allTensors.insert(inputTensors[i]);
                 apiTensorToApiLoadingLayers[inputTensors[i]].push_back(multiConnectionLayer);
@@ -441,7 +442,7 @@ Network::StatusCode Network::evaluateGraph() {
             }
             for (uint32_t i = 0; i < outputTensors.size(); ++i) {
                 allTensors.insert(outputTensors[i]);
-                assert(apiTensorToApiDrivingLayer.count(outputTensors[i]) == 0);
+                THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensors[i]) == 0);
                 apiTensorToApiDrivingLayer[outputTensors[i]] = multiConnectionLayer;
                 apiLayerToApiOutputTensors[multiConnectionLayer].push_back(outputTensors[i]);
             }
@@ -453,7 +454,7 @@ Network::StatusCode Network::evaluateGraph() {
         Tensor outputTensor = layer->getFeatureOutput();
         allTensors.insert(inputTensor);
         allTensors.insert(outputTensor);
-        assert(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
+        THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
         apiTensorToApiDrivingLayer[outputTensor] = layer;
         apiTensorToApiLoadingLayers[inputTensor].push_back(layer);
         apiLayerToApiInputTensors[layer].push_back(inputTensor);
@@ -649,7 +650,7 @@ uint64_t Network::computeNonFirstInstanceMemRequirements(uint32_t batchSize, Ten
 }
 
 void Network::createBatchDimensions(vector<uint64_t> &batchDimensions, vector<uint64_t> tensorDimensions, uint32_t batchSize) {
-    assert(!tensorDimensions.empty());
+    THOR_THROW_IF_FALSE(!tensorDimensions.empty());
 
     batchDimensions.clear();
     batchDimensions.push_back(batchSize);
@@ -695,7 +696,7 @@ void Network::stampNetworkInput(const shared_ptr<Thor::NetworkInput> networkInpu
 void Network::addToNetwork(Layer *layer) {
     frozen = false;
 
-    assert(layer != nullptr);
+    THOR_THROW_IF_FALSE(layer != nullptr);
     addLayerToNetwork(layer);
 }
 
@@ -744,8 +745,8 @@ void Network::addLayerToNetwork(const Layer *layer) {
     } else if (customLayer) {
         vector<Tensor> inputTensors = customLayer->getFeatureInputs();
         vector<Tensor> outputTensors = customLayer->getFeatureOutputs();
-        assert(!inputTensors.empty());
-        assert(!outputTensors.empty());
+        THOR_THROW_IF_FALSE(!inputTensors.empty());
+        THOR_THROW_IF_FALSE(!outputTensors.empty());
         for (uint32_t i = 0; i < inputTensors.size(); ++i) {
             apiTensorByOriginalId[inputTensors[i].getOriginalId()] = inputTensors[i];
         }
@@ -755,8 +756,8 @@ void Network::addLayerToNetwork(const Layer *layer) {
     } else if (multiConnectionLayer) {
         vector<Tensor> inputTensors = multiConnectionLayer->getFeatureInputs();
         vector<Tensor> outputTensors = multiConnectionLayer->getFeatureOutputs();
-        assert(!inputTensors.empty());
-        assert(!outputTensors.empty());
+        THOR_THROW_IF_FALSE(!inputTensors.empty());
+        THOR_THROW_IF_FALSE(!outputTensors.empty());
         for (uint32_t i = 0; i < inputTensors.size(); ++i) {
             apiTensorByOriginalId[inputTensors[i].getOriginalId()] = inputTensors[i];
         }
@@ -795,7 +796,7 @@ shared_ptr<Optimizer> Network::getDefaultOptimizer() { return defaultOptimizer; 
 void Network::attachOptimizerToLayers(bool replaceIfExisting) {
     // Once the optimizer is distributed to the layers, the layers own the optimizer instances.
     // If additional layers are added later on, attachOptimizerToLayers(false) will need to be called before training more.
-    assert(defaultOptimizer != nullptr);
+    THOR_THROW_IF_FALSE(defaultOptimizer != nullptr);
 
     for (shared_ptr<TrainableLayer> &trainableLayer : allTrainableLayersInNetwork) {
         if (replaceIfExisting or !trainableLayer->hasOptimizer())
@@ -817,7 +818,7 @@ void Network::stampLayer(Tensor inputTensor,
     // If the api tensor has multiple loads and the physical driving layer is not a fanout,
     // then replace the physical driving layer with a newly stamped fanout
     uint32_t numLoadingLayers = apiTensorToApiLoadingLayers[inputTensor].size();
-    assert(numLoadingLayers > 0);
+    THOR_THROW_IF_FALSE(numLoadingLayers > 0);
     shared_ptr<ThorImplementation::TensorFanout> implementationTensorFanout =
         dynamic_pointer_cast<ThorImplementation::TensorFanout>(physicalDrivingLayer);
     if (apiTensorToApiLoadingLayers[inputTensor].size() != 1) {
@@ -920,7 +921,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     uint32_t numLoadingLayers = apiTensorToApiLoadingLayers[inputTensor].size();
     shared_ptr<ThorImplementation::TensorFanout> implementationTensorFanout =
         dynamic_pointer_cast<ThorImplementation::TensorFanout>(physicalDrivingLayer);
-    assert(numLoadingLayers > 0);
+    THOR_THROW_IF_FALSE(numLoadingLayers > 0);
     if (apiTensorToApiLoadingLayers[inputTensor].size() != 1 && implementationTensorFanout == nullptr) {
         implementationTensorFanout = make_shared<ThorImplementation::TensorFanout>();
         Layer::connectTwoLayers(physicalDrivingLayer, implementationTensorFanout, apiDrivingLayer, nullptr, inputTensor);
@@ -944,7 +945,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     shared_ptr<ThorImplementation::NetworkOutput> implementationNetworkOutput =
         dynamic_pointer_cast<ThorImplementation::NetworkOutput>(implementationLayer);
     Layer::connectTwoLayers(physicalDrivingLayer, implementationNetworkOutput, apiDrivingLayer, networkOutput, inputTensor);
-    assert(implementationNetworkOutput != nullptr);
+    THOR_THROW_IF_FALSE(implementationNetworkOutput != nullptr);
     stampedNetwork.outputsShared.push_back(implementationNetworkOutput);
     stampedNetwork.outputs.push_back(implementationNetworkOutput.get());
     stampedNetwork.outputNamedShared[implementationNetworkOutput->getName()] = implementationNetworkOutput;
@@ -970,7 +971,7 @@ Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {
             fflush(stdout);
         }
     }
-    assert(apiTensorByOriginalId.count(originalId) != 0);
+    THOR_THROW_IF_FALSE(apiTensorByOriginalId.count(originalId) != 0);
     return apiTensorByOriginalId[originalId];
 }
 

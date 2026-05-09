@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.h"
 
 #include "Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.h"
@@ -8,7 +9,7 @@ using json = nlohmann::json;
 namespace Thor {
 
 void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
-    assert(!sigmoidAddedToNetwork);
+    THOR_THROW_IF_FALSE(!sigmoidAddedToNetwork);
     shared_ptr<Activation> sigmoid = Sigmoid::Builder().backwardComputedExternally().build();
     sigmoidOutput = sigmoid->addToNetwork(predictionsTensor, network);
 
@@ -27,7 +28,7 @@ void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
         lossTensor = lossShaper.getFeatureOutput();
     } else {
         // No loss shaper needed in this case
-        assert(lossShape == LossShape::ELEMENTWISE);
+        THOR_THROW_IF_FALSE(lossShape == LossShape::ELEMENTWISE);
         lossTensor = lossShaperInput;
     }
 }
@@ -62,7 +63,7 @@ void BinaryCrossEntropy::deserialize(const json &j, Network *network) {
     // Only connect the single layer and add it to the network, like when it was built.
     // Helper layers deserialize themselves.
     BinaryCrossEntropy binaryCrossEntropy;
-    assert(j.at("loss_shape").get<LossShape>() == LossShape::RAW);
+    THOR_THROW_IF_FALSE(j.at("loss_shape").get<LossShape>() == LossShape::RAW);
     binaryCrossEntropy.lossShape = LossShape::RAW;
     binaryCrossEntropy.lossDataType = j.at("loss_data_type").get<Tensor::DataType>();
 

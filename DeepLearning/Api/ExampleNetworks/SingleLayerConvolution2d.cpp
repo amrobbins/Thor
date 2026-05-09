@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.h"
 
 using namespace Thor;
@@ -20,7 +21,7 @@ Network buildSingleLayerConvolution2d() {
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {1, 28, 28};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(singleLayerConvolution2d)
@@ -39,7 +40,7 @@ Network buildSingleLayerConvolution2d() {
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {128, 4, 4};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Pooling::Builder()
                              .network(singleLayerConvolution2d)
@@ -51,7 +52,7 @@ Network buildSingleLayerConvolution2d() {
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {128, 1, 1};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = FullyConnected::Builder()
                              .network(singleLayerConvolution2d)
@@ -64,7 +65,7 @@ Network buildSingleLayerConvolution2d() {
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {10};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+    THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
     Tensor labelsTensor = NetworkInput::Builder()
                               .network(singleLayerConvolution2d)

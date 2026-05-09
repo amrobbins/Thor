@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Loaders/LocalBatchLoader.h"
 
 using namespace std;
@@ -16,8 +17,8 @@ LocalBatchLoader::LocalBatchLoader(set<string> shardPaths,
         shards.push_back(make_shared<Shard>());
         string shardPath = *it;
         shards.back()->openShard(shardPath);
-        assert(shards.back()->getExampleSizeInBytes() == exampleSizeInBytes);
-        assert(shards.back()->getDataType() == exampleDescriptor.getDataType());
+        THOR_THROW_IF_FALSE(shards.back()->getExampleSizeInBytes() == exampleSizeInBytes);
+        THOR_THROW_IF_FALSE(shards.back()->getDataType() == exampleDescriptor.getDataType());
     }
 
     batchAssemblerTrain = make_shared<BatchAssembler>(
@@ -48,7 +49,7 @@ uint64_t LocalBatchLoader::getNextBatchNum(ExampleType exampleType) {
     else if (exampleType == ExampleType::TEST)
         return batchAssemblerTest->getNextBatchNum();
     else
-        assert(false);
+        THOR_UNREACHABLE();
 }
 
 uint64_t LocalBatchLoader::getNumBatchesPerEpoch(ExampleType exampleType) {
@@ -59,7 +60,7 @@ uint64_t LocalBatchLoader::getNumBatchesPerEpoch(ExampleType exampleType) {
     else if (exampleType == ExampleType::TEST)
         return batchAssemblerTest->getNumBatchesPerEpoch();
     else
-        assert(false);
+        THOR_UNREACHABLE();
 }
 
 uint64_t LocalBatchLoader::getNumExamples(ExampleType exampleType) {
@@ -70,7 +71,7 @@ uint64_t LocalBatchLoader::getNumExamples(ExampleType exampleType) {
     else if (exampleType == ExampleType::TEST)
         return batchAssemblerTest->getNumExamples();
     else
-        assert(false);
+        THOR_UNREACHABLE();
 }
 
 map<string, Tensor> LocalBatchLoader::getBatch(ExampleType exampleType, uint64_t &batchNum) {
@@ -83,15 +84,15 @@ map<string, Tensor> LocalBatchLoader::getBatch(ExampleType exampleType, uint64_t
     } else if (exampleType == ExampleType::TEST) {
         batchAssemblerTest->getBatch(tensorMap["examples"], tensorMap["labels"], batchNum);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     return tensorMap;
 }
 
 void LocalBatchLoader::returnBatchBuffers(ExampleType exampleType, map<std::string, Tensor> tensorMap) {
-    assert(tensorMap.count("examples") == 1);
-    assert(tensorMap.count("labels") == 1);
+    THOR_THROW_IF_FALSE(tensorMap.count("examples") == 1);
+    THOR_THROW_IF_FALSE(tensorMap.count("labels") == 1);
 
     if (exampleType == ExampleType::TRAIN) {
         batchAssemblerTrain->returnBuffer(tensorMap["examples"], tensorMap["labels"]);
@@ -100,6 +101,6 @@ void LocalBatchLoader::returnBatchBuffers(ExampleType exampleType, map<std::stri
     } else if (exampleType == ExampleType::TEST) {
         batchAssemblerTest->returnBuffer(tensorMap["examples"], tensorMap["labels"]);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }

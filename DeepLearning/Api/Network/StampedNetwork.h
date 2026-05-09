@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
@@ -6,7 +7,6 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
-#include <assert.h>
 #include <vector>
 
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
@@ -57,19 +57,19 @@ class StampedNetwork {
     //     std::shared_ptr<Thor::Parameterizable> parameterizable = dynamic_pointer_cast<Thor::Parameterizable>(layer);
     //     if (parameterizable != nullptr) {
     //         auto implementationParameterizable = std::dynamic_pointer_cast<ThorImplementation::Parameterizable>(implementationLayer);
-    //         assert(implementationParameterizable != nullptr);
+    //         THOR_THROW_IF_FALSE(implementationParameterizable != nullptr);
     //         apiParameterizableToPhysicalParameterizable[parameterizable->getId()] = implementationParameterizable;
     //     }
     // }
     // std::shared_ptr<ThorImplementation::Parameterizable> getPhysicalParameterizableFromApiParameterizable(uint64_t apiParameterizableId)
     // {
     //     auto it = apiParameterizableToPhysicalParameterizable.find(apiParameterizableId);
-    //     assert(it != apiParameterizableToPhysicalParameterizable.end());
+    //     THOR_THROW_IF_FALSE(it != apiParameterizableToPhysicalParameterizable.end());
     //     return it->second;
     // }
     // std::shared_ptr<ThorImplementation::Parameterizable> getPhysicalParameterizableFromApiParameterizable(
     //     std::shared_ptr<Thor::Layer> apiParameterizable) {
-    //     assert(apiParameterizable != nullptr);
+    //     THOR_THROW_IF_FALSE(apiParameterizable != nullptr);
     //     uint64_t apiParameterizableId = apiParameterizable->getId();
     //     return getPhysicalParameterizableFromApiParameterizable(apiParameterizableId);
     // }

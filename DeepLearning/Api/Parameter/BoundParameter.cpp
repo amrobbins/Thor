@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -112,16 +113,16 @@ json BoundParameter::serialize(json parameterJson,
 
     // Serialize the initializer
     shared_ptr<Initializer> apiInitializer = parameterSpecification->getInitializer();
-    assert(apiInitializer != nullptr);
+    THOR_THROW_IF_FALSE(apiInitializer != nullptr);
     shared_ptr<ThorImplementation::Initializer> physicalInitializer = physicalParameter->getInitializer();
-    assert(physicalInitializer != nullptr);
+    THOR_THROW_IF_FALSE(physicalInitializer != nullptr);
     json initializerJson = apiInitializer->serialize(archiveWriter, stream, physicalInitializer, filenamePrefix);
     parameterJson["initializer"] = initializerJson;
 
     // Serialize the optimizer if present
     if (parameterSpecification->hasOptimizer()) {
         std::shared_ptr<Optimizer> optimizer = parameterSpecification->getOptimizer();
-        assert(optimizer != nullptr);
+        THOR_THROW_IF_FALSE(optimizer != nullptr);
         json optimizerJson =
             optimizer->serialize(archiveWriter, stream, physicalParameter->getOptimizer(), filenamePrefix, saveOptimizerState);
         parameterJson["optimizer_override"] = optimizerJson;
@@ -129,7 +130,7 @@ json BoundParameter::serialize(json parameterJson,
 
     // Serialize the parameter values
     Optional<ThorImplementation::Tensor> physicalStorage = physicalParameter->getStorage();
-    assert(physicalStorage.isPresent());
+    THOR_THROW_IF_FALSE(physicalStorage.isPresent());
     string parameterStorageFile = (filenamePrefix + "_parameter_" + parameterSpecification->getName() + ".gds");
     parameterJson["storage_file"] = parameterStorageFile;
     archiveWriter.addArchiveFile(parameterStorageFile, physicalStorage.get());

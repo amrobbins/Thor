@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Network/Network.h"
 
@@ -10,9 +11,9 @@ TypeConverter::TypeConverter() = default;
 TypeConverter::~TypeConverter() = default;
 
 json TypeConverter::architectureJson() const {
-    assert(initialized);
-    assert(featureInput.isPresent());
-    assert(featureOutput.isPresent());
+    THOR_THROW_IF_FALSE(initialized);
+    THOR_THROW_IF_FALSE(featureInput.isPresent());
+    THOR_THROW_IF_FALSE(featureOutput.isPresent());
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();

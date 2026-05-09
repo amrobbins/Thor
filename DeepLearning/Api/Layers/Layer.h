@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Common/Optional.h"
@@ -10,7 +11,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <assert.h>
 #include <atomic>
 #include <filesystem>
 #include <memory>
@@ -38,9 +38,9 @@ class Layer {
     virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
 
     virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
-        assert(getFeatureInput().isPresent());
-        assert(getFeatureOutput().isPresent());
-        assert(inputTensor == getFeatureInput().get());
+        THOR_THROW_IF_FALSE(getFeatureInput().isPresent());
+        THOR_THROW_IF_FALSE(getFeatureOutput().isPresent());
+        THOR_THROW_IF_FALSE(inputTensor == getFeatureInput().get());
         return {getFeatureOutput().get()};
     }
 
@@ -72,7 +72,7 @@ class Layer {
     bool operator>(const Layer &other) const { return id > other.id; }
 
     virtual int getConnectionType(Tensor connectingTensor) const {
-        assert(connectingTensor == getFeatureInput() || connectingTensor == getFeatureOutput());
+        THOR_THROW_IF_FALSE(connectingTensor == getFeatureInput() || connectingTensor == getFeatureOutput());
         return 0;
     }
 

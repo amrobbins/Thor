@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 // #pragma once
 //
 // #include "DeepLearning/Api/Layers/Layer.h"
@@ -88,10 +89,10 @@
 // class DeepDpm::Builder {
 //   public:
 //    virtual DeepDpm build() {
-//        assert(_network.isPresent());
-//        assert(_featureInput.isPresent());
+//        THOR_THROW_IF_FALSE(_network.isPresent());
+//        THOR_THROW_IF_FALSE(_featureInput.isPresent());
 //
-//        assert(!_d.isEmpty());
+//        THOR_THROW_IF_FALSE(!_d.isEmpty());
 //
 //        if (_clusteringNetNumHiddenLayers.isEmpty())
 //            _clusteringNetNumHiddenLayers = 1;
@@ -115,12 +116,12 @@
 //            _psiScalar = 0.005f;
 //
 //        if (_disableFeatureEncoder.isPresent()) {
-//            assert(_m.isPresent());
-//            assert(_m.get().size() == _initialK.get());
+//            THOR_THROW_IF_FALSE(_m.isPresent());
+//            THOR_THROW_IF_FALSE(_m.get().size() == _initialK.get());
 //            for (uint32_t i = 0; i < _m.get().size(); ++i)
-//                assert(_m.get()[i].size() == _d.get());
+//                THOR_THROW_IF_FALSE(_m.get()[i].size() == _d.get());
 //        } else {
-//            assert(_m.isEmpty());
+//            THOR_THROW_IF_FALSE(_m.isEmpty());
 //        }
 //
 //        DeepDpm deepDpm;
@@ -145,64 +146,64 @@
 //    }
 //
 //    virtual DeepDpm::Builder &network(Network &_network) {
-//        assert(!this->_network.isPresent());
+//        THOR_THROW_IF_FALSE(!this->_network.isPresent());
 //        this->_network = &_network;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &featureInput(Tensor _featureInput) {
-//        assert(this->_featureInput.isEmpty());
+//        THOR_THROW_IF_FALSE(this->_featureInput.isEmpty());
 //        this->_featureInput = _featureInput;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &disableFeatureEncoder() {
-//        assert(_disableFeatureEncoder.isEmpty());
+//        THOR_THROW_IF_FALSE(_disableFeatureEncoder.isEmpty());
 //        _disableFeatureEncoder = true;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &encodedFeatureWidth(uint32_t _encodedFeatureWidth) {
-//        assert(_encodedFeatureWidth > 0);
-//        assert(!this->_encodedFeatureWidth.isPresent());
+//        THOR_THROW_IF_FALSE(_encodedFeatureWidth > 0);
+//        THOR_THROW_IF_FALSE(!this->_encodedFeatureWidth.isPresent());
 //        this->_encodedFeatureWidth = _encodedFeatureWidth;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &clusteringNetNumHiddenLayers(uint32_t _clusteringNetNumHiddenLayers) {
-//        assert(!this->_clusteringNetNumHiddenLayers.isPresent());
+//        THOR_THROW_IF_FALSE(!this->_clusteringNetNumHiddenLayers.isPresent());
 //        this->_clusteringNetNumHiddenLayers = _clusteringNetNumHiddenLayers;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &clusteringNetNumHiddenLayerUnits(uint32_t _clusteringNetNumHiddenLayerUnits) {
-//        assert(_clusteringNetNumHiddenLayerUnits > 0);
-//        assert(!this->_clusteringNetNumHiddenLayerUnits.isPresent());
+//        THOR_THROW_IF_FALSE(_clusteringNetNumHiddenLayerUnits > 0);
+//        THOR_THROW_IF_FALSE(!this->_clusteringNetNumHiddenLayerUnits.isPresent());
 //        this->_clusteringNetNumHiddenLayerUnits = _clusteringNetNumHiddenLayerUnits;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &clusteringNetLearningRate(float _clusteringNetLearningRate) {
-//        assert(!this->_clusteringNetLearningRate.isPresent());
+//        THOR_THROW_IF_FALSE(!this->_clusteringNetLearningRate.isPresent());
 //        this->_clusteringNetLearningRate = _clusteringNetLearningRate;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &subclusteringNetNumHiddenLayers(uint32_t _subclusteringNetNumHiddenLayers) {
-//        assert(!this->_subclusteringNetNumHiddenLayers.isPresent());
+//        THOR_THROW_IF_FALSE(!this->_subclusteringNetNumHiddenLayers.isPresent());
 //        this->_subclusteringNetNumHiddenLayers = _subclusteringNetNumHiddenLayers;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &subclusteringNetNumHiddenLayerUnits(uint32_t _subclusteringNetNumHiddenLayerUnits) {
-//        assert(_subclusteringNetNumHiddenLayerUnits > 0);
-//        assert(!this->_subclusteringNetNumHiddenLayerUnits.isPresent());
+//        THOR_THROW_IF_FALSE(_subclusteringNetNumHiddenLayerUnits > 0);
+//        THOR_THROW_IF_FALSE(!this->_subclusteringNetNumHiddenLayerUnits.isPresent());
 //        this->_subclusteringNetNumHiddenLayerUnits = _subclusteringNetNumHiddenLayerUnits;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &subclusteringNetLearningRate(float _subclusteringNetLearningRate) {
-//        assert(!this->_subclusteringNetLearningRate.isPresent());
+//        THOR_THROW_IF_FALSE(!this->_subclusteringNetLearningRate.isPresent());
 //        this->_subclusteringNetLearningRate = _subclusteringNetLearningRate;
 //        return *this;
 //    }
@@ -213,10 +214,10 @@
 //     * i.e. the output dimension of the auto encoder
 //     */
 //    virtual DeepDpm::Builder &d(uint32_t _d) {
-//        assert(!this->_d.isPresent());
-//        assert(_d > 0);
+//        THOR_THROW_IF_FALSE(!this->_d.isPresent());
+//        THOR_THROW_IF_FALSE(_d > 0);
 //        if (_v.isPresent())
-//            assert(_v.get() > _d - 1);
+//            THOR_THROW_IF_FALSE(_v.get() > _d - 1);
 //        this->_d = _d;
 //        return *this;
 //    }
@@ -225,10 +226,10 @@
 //     * v must be > d - 1
 //     */
 //    virtual DeepDpm::Builder &d(float _v) {
-//        assert(!this->_v.isPresent());
-//        assert(_v > 0);
+//        THOR_THROW_IF_FALSE(!this->_v.isPresent());
+//        THOR_THROW_IF_FALSE(_v > 0);
 //        if (_d.isPresent())
-//            assert(_v > _d.get() - 1);
+//            THOR_THROW_IF_FALSE(_v > _d.get() - 1);
 //        this->_v = _v;
 //        return *this;
 //    }
@@ -251,32 +252,32 @@
 //     * psi will be initialized to psiScalar * I where I is the intialK x initialK identity matrix.
 //     */
 //    virtual DeepDpm::Builder &psiScalar(float _psiScalar) {
-//        assert(!this->_psiScalar.isPresent());
+//        THOR_THROW_IF_FALSE(!this->_psiScalar.isPresent());
 //        this->_psiScalar = _psiScalar;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &beta(float _beta) {
-//        assert(!this->_beta.isPresent());
+//        THOR_THROW_IF_FALSE(!this->_beta.isPresent());
 //        this->_beta = _beta;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &alpha(float _alpha) {
-//        assert(!this->_alpha.isPresent());
+//        THOR_THROW_IF_FALSE(!this->_alpha.isPresent());
 //        this->_alpha = _alpha;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &kappa(float _kappa) {
-//        assert(!this->_kappa.isPresent());
+//        THOR_THROW_IF_FALSE(!this->_kappa.isPresent());
 //        this->_kappa = _kappa;
 //        return *this;
 //    }
 //
 //    virtual DeepDpm::Builder &initialK(uint32_t _initialK) {
-//        assert(!this->_initialK.isPresent());
-//        assert(_initialK > 0);
+//        THOR_THROW_IF_FALSE(!this->_initialK.isPresent());
+//        THOR_THROW_IF_FALSE(_initialK > 0);
 //        this->_initialK = _initialK;
 //        return *this;
 //    }

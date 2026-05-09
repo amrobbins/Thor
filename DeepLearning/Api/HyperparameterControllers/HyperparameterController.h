@@ -2,7 +2,6 @@
 
 #include "DeepLearning/Api/Executors/ExecutionState.h"
 
-#include <assert.h>
 #include <memory>
 #include <string>
 #include <utility>

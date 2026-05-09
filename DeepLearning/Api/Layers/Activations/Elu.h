@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/Activation/Elu.h"
@@ -57,8 +58,8 @@ class Elu : public Activation {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
 
         std::shared_ptr<ThorImplementation::Elu> elu = std::make_shared<ThorImplementation::Elu>(alpha);
         return elu;
@@ -82,7 +83,7 @@ class Elu::Builder : public Activation::Builder {
         std::shared_ptr<Elu> elu = std::make_shared<Elu>(alpha);
         if (_featureInput.isPresent()) {
             // Standalone layer support.
-            assert(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.isPresent());
             elu->featureInput = _featureInput;
             elu->featureOutput = _featureInput.get().clone();
             elu->initialized = true;
@@ -96,8 +97,8 @@ class Elu::Builder : public Activation::Builder {
     }
 
     virtual Elu::Builder &alpha(float _alpha) {
-        assert(!this->_alpha.isPresent());
-        assert(_alpha >= 0);
+        THOR_THROW_IF_FALSE(!this->_alpha.isPresent());
+        THOR_THROW_IF_FALSE(_alpha >= 0);
         this->_alpha = _alpha;
         return *this;
     }

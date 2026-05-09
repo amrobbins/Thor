@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
@@ -37,7 +38,7 @@ class BatchNormalization : public TrainableLayer {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        assert(initialized);
+        THOR_THROW_IF_FALSE(initialized);
 
         std::shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormalization =
             std::make_shared<ThorImplementation::BatchNormalization>(
@@ -66,8 +67,8 @@ class BatchNormalization::Builder {
     virtual ~Builder() = default;
 
     virtual BatchNormalization build() {
-        assert(_network.isPresent());
-        assert(!_featureInputs.empty());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(!_featureInputs.empty());
 
         BatchNormalization batchNormalization;
         batchNormalization.featureInputs = _featureInputs;
@@ -94,7 +95,7 @@ class BatchNormalization::Builder {
     }
 
     virtual BatchNormalization::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
@@ -102,29 +103,29 @@ class BatchNormalization::Builder {
     virtual BatchNormalization::Builder &featureInput(Tensor _featureInput) {
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1) {
-            assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
-            assert(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
         }
         return *this;
     }
 
     virtual BatchNormalization::Builder &exponentialRunningAverageFactor(double exponentialRunningAverageFactor) {
-        assert(!_exponentialRunningAverageFactor.isPresent());
-        assert(exponentialRunningAverageFactor > 0.0);
-        assert(exponentialRunningAverageFactor <= 1.0);
+        THOR_THROW_IF_FALSE(!_exponentialRunningAverageFactor.isPresent());
+        THOR_THROW_IF_FALSE(exponentialRunningAverageFactor > 0.0);
+        THOR_THROW_IF_FALSE(exponentialRunningAverageFactor <= 1.0);
         this->_exponentialRunningAverageFactor = exponentialRunningAverageFactor;
         return *this;
     }
 
     virtual BatchNormalization::Builder &epsilon(double epsilon) {
-        assert(!_epsilon.isPresent());
-        assert(epsilon > 0.0);
+        THOR_THROW_IF_FALSE(!_epsilon.isPresent());
+        THOR_THROW_IF_FALSE(epsilon > 0.0);
         this->_epsilon = epsilon;
         return *this;
     }
 
     virtual BatchNormalization::Builder &optimizer(std::shared_ptr<Optimizer> _layerOptimizer) {
-        assert(this->_layerOptimizer == nullptr);
+        THOR_THROW_IF_FALSE(this->_layerOptimizer == nullptr);
         this->_layerOptimizer = _layerOptimizer;
         return *this;
     }

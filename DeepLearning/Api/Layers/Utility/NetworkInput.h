@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 
@@ -32,7 +33,7 @@ class NetworkInput : public Layer {
    protected:
     virtual std::shared_ptr<ThorImplementation::NetworkInput> stamp(ThorImplementation::TensorPlacement placement,
                                                                     uint32_t batchSize) const {
-        assert(initialized);
+        THOR_THROW_IF_FALSE(initialized);
 
         std::vector<uint64_t> batchDimensions;
         batchDimensions.push_back(batchSize);
@@ -52,7 +53,7 @@ class NetworkInput : public Layer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
@@ -71,9 +72,9 @@ class NetworkInput : public Layer {
 class NetworkInput::Builder {
    public:
     virtual NetworkInput build() {
-        assert(_network.isPresent());
-        assert(_dimensions.isPresent());
-        assert(_dataType.isPresent());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_dimensions.isPresent());
+        THOR_THROW_IF_FALSE(_dataType.isPresent());
 
         NetworkInput networkInput;
         if (_name.isPresent())
@@ -90,27 +91,27 @@ class NetworkInput::Builder {
     }
 
     virtual NetworkInput::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual NetworkInput::Builder &name(const std::string &_name) {
-        assert(!_name.empty());
-        assert(this->_name.isEmpty());
+        THOR_THROW_IF_FALSE(!_name.empty());
+        THOR_THROW_IF_FALSE(this->_name.isEmpty());
         this->_name = _name;
         return *this;
     }
 
     // Note: dimensions do not include batch size
     virtual NetworkInput::Builder &dimensions(const std::vector<uint64_t> &_dimensions) {
-        assert(!_dimensions.empty());
+        THOR_THROW_IF_FALSE(!_dimensions.empty());
         this->_dimensions = _dimensions;
         return *this;
     }
 
     virtual NetworkInput::Builder &dataType(const Tensor::DataType &_dataType) {
-        assert(Tensor::dataTypeValid(_dataType));
+        THOR_THROW_IF_FALSE(Tensor::dataTypeValid(_dataType));
         this->_dataType = _dataType;
         return *this;
     }

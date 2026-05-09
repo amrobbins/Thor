@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 
@@ -23,7 +24,7 @@ class NetworkOutput : public Layer {
     virtual std::string getLayerType() const { return "NetworkOutput"; }
 
     virtual bool isMultiLayer() const {
-        assert(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         return featureInput.get().getDataType() != dataType;
     }
 
@@ -39,8 +40,8 @@ class NetworkOutput : public Layer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
 
         std::shared_ptr<ThorImplementation::NetworkOutput> networkOutput = std::make_shared<ThorImplementation::NetworkOutput>(placement);
         networkOutput->setName(name);
@@ -61,8 +62,8 @@ class NetworkOutput : public Layer {
 class NetworkOutput::Builder {
    public:
     virtual NetworkOutput build() {
-        assert(_network.isPresent());
-        assert(!_inputTensor.isEmpty());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(!_inputTensor.isEmpty());
         if (_dataType.isEmpty())
             _dataType = _inputTensor.get().getDataType();
 
@@ -88,26 +89,26 @@ class NetworkOutput::Builder {
     }
 
     virtual NetworkOutput::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual NetworkOutput::Builder &name(const std::string &_name) {
-        assert(!_name.empty());
-        assert(this->_name.isEmpty());
+        THOR_THROW_IF_FALSE(!_name.empty());
+        THOR_THROW_IF_FALSE(this->_name.isEmpty());
         this->_name = _name;
         return *this;
     }
 
     virtual NetworkOutput::Builder &inputTensor(const Tensor &_inputTensor) {
-        assert(_inputTensor.isInitialized());
+        THOR_THROW_IF_FALSE(_inputTensor.isInitialized());
         this->_inputTensor = _inputTensor;
         return *this;
     }
 
     virtual NetworkOutput::Builder &dataType(const Tensor::DataType &_dataType) {
-        assert(Tensor::dataTypeValid(_dataType));
+        THOR_THROW_IF_FALSE(Tensor::dataTypeValid(_dataType));
         this->_dataType = _dataType;
         return *this;
     }

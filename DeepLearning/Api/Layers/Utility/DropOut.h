@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -29,15 +30,15 @@ class DropOut : public Layer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == getFeatureInput());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput());
 
         std::shared_ptr<ThorImplementation::DropOut> dropOut = std::make_shared<ThorImplementation::DropOut>(dropProportion, true);
         return dropOut;
     }
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
-        assert(tensorPlacement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(tensorPlacement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         uint32_t gpuNum = tensorPlacement.getDeviceNum();
         cudnnHandle_t cudnnHandle = ThorImplementation::CudnnHelper::getCudnnHandle(gpuNum);
         uint64_t randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(cudnnHandle);
@@ -65,9 +66,9 @@ class DropOut : public Layer {
 class DropOut::Builder {
    public:
     virtual DropOut build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
-        assert(_dropProportion.isPresent());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(_dropProportion.isPresent());
 
         DropOut dropOut;
         dropOut.featureInput = _featureInput;
@@ -79,21 +80,21 @@ class DropOut::Builder {
     }
 
     virtual DropOut::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual DropOut::Builder &featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
         return *this;
     }
 
     virtual DropOut::Builder &dropProportion(float _dropProportion) {
-        assert(!this->_dropProportion.isPresent());
-        assert(_dropProportion >= 0.0);
-        assert(_dropProportion <= 1.0);
+        THOR_THROW_IF_FALSE(!this->_dropProportion.isPresent());
+        THOR_THROW_IF_FALSE(_dropProportion >= 0.0);
+        THOR_THROW_IF_FALSE(_dropProportion <= 1.0);
         this->_dropProportion = _dropProportion;
         return *this;
     }

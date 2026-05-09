@@ -1,9 +1,9 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Initializers/UniformRandom.h"
 
-#include <assert.h>
 #include <chrono>
 
 namespace Thor {
@@ -38,22 +38,22 @@ class UniformRandom::Builder : public Initializer::Builder {
     virtual ~Builder() = default;
 
     virtual std::shared_ptr<Initializer> build() {
-        assert(this->_minValue.isPresent());
-        assert(this->_maxValue.isPresent());
-        assert(_minValue.get() <= _maxValue.get());
+        THOR_THROW_IF_FALSE(this->_minValue.isPresent());
+        THOR_THROW_IF_FALSE(this->_maxValue.isPresent());
+        THOR_THROW_IF_FALSE(_minValue.get() <= _maxValue.get());
 
         UniformRandom uniformRandomInitializer(_minValue, _maxValue);
         return uniformRandomInitializer.clone();
     }
 
     virtual UniformRandom::Builder &minValue(float _minValue) {
-        assert(!this->_minValue.isPresent());
+        THOR_THROW_IF_FALSE(!this->_minValue.isPresent());
         this->_minValue = _minValue;
         return *this;
     }
 
     virtual UniformRandom::Builder &maxValue(float _maxValue) {
-        assert(!this->_maxValue.isPresent());
+        THOR_THROW_IF_FALSE(!this->_maxValue.isPresent());
         this->_maxValue = _maxValue;
         return *this;
     }

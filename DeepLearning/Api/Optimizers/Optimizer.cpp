@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -26,13 +27,13 @@ Optimizer::Optimizer(uint64_t originalId) {
 }
 
 void Optimizer::addToNetwork(Network *network) {
-    assert(network != nullptr);
+    THOR_THROW_IF_FALSE(network != nullptr);
     network->addToNetwork(this);
 }
 
 unordered_map<string, float> Optimizer::getAllHyperParameters(PlacedNetwork *placedNetwork) {
-    assert(placedNetwork->getNumStamps() >= 1);
-    assert(placedNetwork->getNumTrainableLayers() >= 1);
+    THOR_THROW_IF_FALSE(placedNetwork->getNumStamps() >= 1);
+    THOR_THROW_IF_FALSE(placedNetwork->getNumTrainableLayers() >= 1);
 
     // // All optimizer instances must have the same parameters.
     // ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(0);
@@ -80,7 +81,7 @@ unordered_map<string, Optimizer::Deserializer> &Optimizer::getRegistry() {
 void Optimizer::registerLayer(string name, Deserializer fn) { getRegistry().emplace(std::move(name), std::move(fn)); }
 
 shared_ptr<Optimizer> Optimizer::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
-    assert(j.contains("optimizer_type"));
+    THOR_THROW_IF_FALSE(j.contains("optimizer_type"));
     string optimizerType = j.at("optimizer_type").get<string>();
 
     unordered_map<string, Deserializer> &registry = getRegistry();

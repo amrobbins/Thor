@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -23,12 +24,12 @@ unordered_map<string, Layer::Deserializer>& Layer::get_registry() {
 void Layer::register_layer(string name, Deserializer fn) { get_registry().emplace(std::move(name), std::move(fn)); }
 
 void Layer::addToNetwork(Network* network) {
-    assert(isInitialized());
+    THOR_THROW_IF_FALSE(isInitialized());
     network->addToNetwork(this);
 }
 
 // void Layer::addTemplateLayerToNetwork(Network* network) {
-//     assert(isInitialized());
+//     THOR_THROW_IF_FALSE(isInitialized());
 //     network->addTemplateLayerToNetwork(this, nextId.fetch_add(1));
 // }
 

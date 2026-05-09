@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
 
 using namespace std;
@@ -5,7 +6,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
-    assert(!softmaxAddedToNetwork);
+    THOR_THROW_IF_FALSE(!softmaxAddedToNetwork);
     shared_ptr<Activation> softmax = Softmax::Builder().backwardComputedExternally().build();
     softmaxOutput = softmax->addToNetwork(predictionsTensor, network);
 
@@ -19,7 +20,7 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
     if (labelType == LabelType::INDEX) {
         categoricalCrossEntropyBuilder.receivesClassIndexLabels(numClasses);
     } else {
-        assert(labelType == LabelType::ONE_HOT);
+        THOR_THROW_IF_FALSE(labelType == LabelType::ONE_HOT);
         categoricalCrossEntropyBuilder.receivesOneHotLabels();
     }
     CategoricalCrossEntropy crossEntropy = categoricalCrossEntropyBuilder.build();
@@ -36,7 +37,7 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
         lossTensor = lossShaper.getLossOutput();
     } else {
         // No loss shaper needed in this case
-        assert(lossShape == LossShape::RAW);
+        THOR_THROW_IF_FALSE(lossShape == LossShape::RAW);
         lossTensor = lossShaperInput;
     }
 }

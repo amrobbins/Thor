@@ -1,3 +1,4 @@
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 
 #include <algorithm>
@@ -459,7 +460,7 @@ int CustomLayer::getConnectionType(Tensor connectingTensor) const {
     auto inputIt = inputBindingsByTensorOriginalId.find(originalId);
     if (inputIt != inputBindingsByTensorOriginalId.end()) {
         const std::vector<InputBinding>& bindings = inputIt->second;
-        assert(!bindings.empty());
+        THOR_THROW_IF_FALSE(!bindings.empty());
 
         uint32_t& cursor = nextInputBindingConnectionCursorByTensorOriginalId[originalId];
         const InputBinding& binding = bindings[cursor % bindings.size()];
@@ -486,7 +487,7 @@ void CustomLayer::informThatInputConnectionMade(Tensor inputTensor) {
     }
 
     for (const InputBinding& binding : it->second) {
-        assert(binding.interfaceIndex < connectedInputPortIndicesByInterface.size());
+        THOR_THROW_IF_FALSE(binding.interfaceIndex < connectedInputPortIndicesByInterface.size());
         connectedInputPortIndicesByInterface[binding.interfaceIndex].insert(binding.inputPortIndex);
     }
 }

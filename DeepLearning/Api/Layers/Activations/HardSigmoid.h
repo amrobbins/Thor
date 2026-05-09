@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/Activation/HardSigmoid.h"
@@ -52,8 +53,8 @@ class HardSigmoid : public Activation {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
 
         std::shared_ptr<ThorImplementation::HardSigmoid> hardSigmoid = std::make_shared<ThorImplementation::HardSigmoid>();
         return hardSigmoid;
@@ -71,7 +72,7 @@ class HardSigmoid::Builder : public Activation::Builder {
         std::shared_ptr<HardSigmoid> hardSigmoid = std::make_shared<HardSigmoid>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
-            assert(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.isPresent());
             hardSigmoid->featureInput = _featureInput;
             hardSigmoid->featureOutput = _featureInput.get().clone();
             hardSigmoid->initialized = true;

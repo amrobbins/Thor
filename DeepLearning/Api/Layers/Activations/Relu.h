@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/Activation/Relu.h"
@@ -50,8 +51,8 @@ class Relu : public Activation {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
 
         std::shared_ptr<ThorImplementation::Relu> relu = std::make_shared<ThorImplementation::Relu>();
         return relu;
@@ -69,7 +70,7 @@ class Relu::Builder : public Activation::Builder {
         std::shared_ptr<Relu> relu = std::make_shared<Relu>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
-            assert(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.isPresent());
             relu->featureInput = _featureInput;
             relu->featureOutput = _featureInput.get().clone();
             relu->initialized = true;

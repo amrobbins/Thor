@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 
@@ -13,25 +14,25 @@ class MultiConnectionLayer : public Layer {
 
     // When there is only one connection, you may use the following version:
     virtual Optional<Tensor> getFeatureOutput() const {
-        assert(featureOutputs.size() == 1);
+        THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
         return featureOutputs[0];
     }
 
     virtual Optional<Tensor> getFeatureInput() const {
-        assert(featureInputs.size() == 1);
+        THOR_THROW_IF_FALSE(featureInputs.size() == 1);
         return featureInputs[0];
     }
 
     // When there is more than one connection, you must use the following version:
     virtual Tensor getFeatureOutput(Tensor inputTensor) const {
         std::map<Tensor, Tensor>::const_iterator it = outputTensorFromInputTensor.find(inputTensor);
-        assert(it != outputTensorFromInputTensor.end());
+        THOR_THROW_IF_FALSE(it != outputTensorFromInputTensor.end());
         return it->second;
     }
 
     virtual Tensor getFeatureInput(Tensor outputTensor) const {
         std::map<Tensor, Tensor>::const_iterator it = inputTensorFromOutputTensor.find(outputTensor);
-        assert(it != inputTensorFromOutputTensor.end());
+        THOR_THROW_IF_FALSE(it != inputTensorFromOutputTensor.end());
         return it->second;
     }
 
@@ -44,7 +45,7 @@ class MultiConnectionLayer : public Layer {
             if (connectingTensor == featureOutputs[i])
                 return 0;
         }
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return {getFeatureOutput(inputTensor)}; }

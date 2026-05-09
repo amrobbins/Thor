@@ -1,10 +1,10 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "Utilities/Expression/Expression.h"
 
-#include <assert.h>
 #include <atomic>
 #include <utility>
 
@@ -47,13 +47,13 @@ class Activation::Builder {
    public:
     virtual ~Builder() {}
     virtual Activation::Builder& network(Network& _network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
     virtual Activation::Builder& featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
-        assert(!_featureInput.getDimensions().empty());
+        THOR_THROW_IF_FALSE(!this->_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(!_featureInput.getDimensions().empty());
         this->_featureInput = _featureInput;
         return *this;
     }

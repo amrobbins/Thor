@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
@@ -6,7 +7,6 @@
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
 
-#include <assert.h>
 
 #include <memory>
 #include <set>
@@ -135,15 +135,15 @@ class CustomLayer::Builder {
     virtual ~Builder() = default;
 
     virtual CustomLayer build() {
-        assert(_network.isPresent());
-        assert(_expr != nullptr);
-        assert(!_inputInterfaces.empty());
+        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_expr != nullptr);
+        THOR_THROW_IF_FALSE(!_inputInterfaces.empty());
         if (_inputNames.empty())
             _inputNames = _expr->getExpectedInputNames();
         if (_outputNames.empty())
             _outputNames = _expr->getExpectedOutputNames();
-        assert(!_inputNames.empty());
-        assert(!_outputNames.empty());
+        THOR_THROW_IF_FALSE(!_inputNames.empty());
+        THOR_THROW_IF_FALSE(!_outputNames.empty());
 
         CustomLayer customLayer(*_expr, _inputNames, _outputNames, _inputInterfaces, _outputInterfaces, _parameters, _useFastMath);
 
@@ -155,25 +155,25 @@ class CustomLayer::Builder {
     }
 
     virtual CustomLayer::Builder& network(Network& _network) {
-        assert(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.isPresent());
         this->_network = &_network;
         return *this;
     }
 
     virtual CustomLayer::Builder& expression(ThorImplementation::DynamicExpression _expr) {
-        assert(this->_expr == nullptr);
+        THOR_THROW_IF_FALSE(this->_expr == nullptr);
         this->_expr = std::make_shared<ThorImplementation::DynamicExpression>(std::move(_expr));
         return *this;
     }
 
     virtual CustomLayer::Builder& inputNames(std::vector<std::string> inputNames) {
-        assert(this->_inputNames.empty());
+        THOR_THROW_IF_FALSE(this->_inputNames.empty());
         this->_inputNames = std::move(inputNames);
         return *this;
     }
 
     virtual CustomLayer::Builder& outputNames(std::vector<std::string> outputNames) {
-        assert(this->_outputNames.empty());
+        THOR_THROW_IF_FALSE(this->_outputNames.empty());
         this->_outputNames = std::move(outputNames);
         return *this;
     }
@@ -192,13 +192,13 @@ class CustomLayer::Builder {
     //       affect the parameter as it was passed to the builder.
     //       Once a parameter is bound to a layer, the user needs to interact with a BoundParameter instance instead.
     virtual CustomLayer::Builder& parameter(std::shared_ptr<ParameterSpecification> parameter) {
-        assert(parameter != nullptr);
+        THOR_THROW_IF_FALSE(parameter != nullptr);
         this->_parameters.push_back(std::make_shared<ParameterSpecification>(*parameter));
         return *this;
     }
 
     virtual CustomLayer::Builder& parameters(std::vector<std::shared_ptr<ParameterSpecification>> parameters) {
-        assert(this->_parameters.empty());
+        THOR_THROW_IF_FALSE(this->_parameters.empty());
         this->_parameters.clear();
         this->_parameters.reserve(parameters.size());
 
@@ -222,7 +222,7 @@ class CustomLayer::Builder {
     }
 
     virtual CustomLayer::Builder& optimizer(std::shared_ptr<Optimizer> _layerOptimizer) {
-        assert(this->_layerOptimizer == nullptr);
+        THOR_THROW_IF_FALSE(this->_layerOptimizer == nullptr);
         this->_layerOptimizer = std::move(_layerOptimizer);
         return *this;
     }

@@ -1,4 +1,5 @@
 #pragma once
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
@@ -52,8 +53,8 @@ class Sigmoid : public Activation {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
-        assert(initialized);
-        assert(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
 
         std::shared_ptr<ThorImplementation::Sigmoid> sigmoid = std::make_shared<ThorImplementation::Sigmoid>(backwardComputedExternally);
         return sigmoid;
@@ -73,7 +74,7 @@ class Sigmoid::Builder : public Activation::Builder {
         std::shared_ptr<Sigmoid> sigmoid = std::make_shared<Sigmoid>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
-            assert(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.isPresent());
             sigmoid->featureInput = _featureInput;
             sigmoid->featureOutput = _featureInput.get().clone();
             sigmoid->initialized = true;
@@ -101,7 +102,7 @@ class Sigmoid::Builder : public Activation::Builder {
 
    protected:
     virtual Sigmoid::Builder &backwardComputedExternally() {
-        assert(!_backwardComputedExternally.isPresent());
+        THOR_THROW_IF_FALSE(!_backwardComputedExternally.isPresent());
         _backwardComputedExternally = true;
         return *this;
     }
