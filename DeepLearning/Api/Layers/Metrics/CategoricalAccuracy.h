@@ -11,13 +11,13 @@ class CategoricalAccuracy : public Metric {
     class Builder;
     CategoricalAccuracy() {}
 
-    virtual ~CategoricalAccuracy() {}
+    ~CategoricalAccuracy() override {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<CategoricalAccuracy>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<CategoricalAccuracy>(*this); }
 
-    virtual std::string getLayerType() const { return "CategoricalAccuracy"; }
+    std::string getLayerType() const override { return "CategoricalAccuracy"; }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
     enum class LabelType { INDEX = 5, ONE_HOT };
@@ -37,7 +37,7 @@ class CategoricalAccuracy : public Metric {
         return categoricalAccuracy;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         uint64_t workspaceSize = 4 * batchSize;
         uint64_t metricOutputSize = 4;
 

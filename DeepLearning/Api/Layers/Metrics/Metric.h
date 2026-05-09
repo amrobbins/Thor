@@ -14,9 +14,9 @@ namespace Thor {
 class Metric : public Layer {
    public:
     Metric() { numInputConnectionsMade = 0; }
-    virtual ~Metric() {}
+    ~Metric() override {}
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
     using Deserializer = std::function<void(const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();
@@ -25,9 +25,9 @@ class Metric : public Layer {
     // Note:  Fully connected layers may have multiple independent inputs, each of which is all that
     //        is required to drive an output. This is not the case for layers that require all inputs
     //        to arrive before they can compute the output.
-    virtual bool mustConnectAllInputsToDriveOutput() { return true; }
+    bool mustConnectAllInputsToDriveOutput() override { return true; }
 
-    virtual void informThatInputConnectionMade(Tensor inputTensor) {
+    void informThatInputConnectionMade(Tensor inputTensor) override {
         numInputConnectionsMade += 1;
         THOR_THROW_IF_FALSE(numInputConnectionsMade < 3);
     }
@@ -35,10 +35,10 @@ class Metric : public Layer {
     virtual Tensor getPredictions() const { return getFeatureInput(); }
     virtual Tensor getLabels() const { return labelsTensor; }
     virtual Tensor getMetric() const { return metricTensor; }
-    virtual Optional<Tensor> getFeatureOutput() const { return getMetric(); }
-    virtual std::vector<Tensor> getAllOutputTensors() const { return {getFeatureOutput()}; }
+    Optional<Tensor> getFeatureOutput() const override { return getMetric(); }
+    std::vector<Tensor> getAllOutputTensors() const override { return {getFeatureOutput()}; }
 
-    virtual int getConnectionType(Tensor connectingTensor) const {
+    int getConnectionType(Tensor connectingTensor) const override {
         if (connectingTensor == getFeatureInput())
             return (int)ThorImplementation::Metric::ConnectionType::FORWARD;
         else if (connectingTensor == getLabels())
@@ -48,7 +48,7 @@ class Metric : public Layer {
         THOR_UNREACHABLE();
     }
 
-    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override {
         THOR_THROW_IF_FALSE(inputTensor == getFeatureInput() || inputTensor == getLabels());
         if (numInputConnectionsMade == 2)
             return {metricTensor};
@@ -60,7 +60,7 @@ class Metric : public Layer {
     Tensor labelsTensor;
     Tensor metricTensor;
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // Metric
         uint64_t metricBytes = metricTensor.getTotalSizeInBytes();
         return metricBytes;

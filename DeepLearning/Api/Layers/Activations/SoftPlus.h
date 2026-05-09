@@ -11,19 +11,19 @@ class SoftPlus : public Activation {
     class Builder;
     SoftPlus() {}
 
-    virtual ~SoftPlus() {}
+    ~SoftPlus() override {}
 
-    virtual std::shared_ptr<Layer> clone() const {
+    std::shared_ptr<Layer> clone() const override {
         std::shared_ptr<SoftPlus> myClone = std::make_shared<SoftPlus>(*this);
         myClone->id = getUnusedId();
         return myClone;
     }
 
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+    ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
         return input.softplus();
     }
 
-    virtual std::string getLayerType() const { return "SoftPlus"; }
+    std::string getLayerType() const override { return "SoftPlus"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
         if (j.at("version").get<std::string>() != "1.0.0")
@@ -58,7 +58,7 @@ class SoftPlus : public Activation {
         return softPlus;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
@@ -66,7 +66,7 @@ class SoftPlus : public Activation {
 
 class SoftPlus::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Activation> build() {
+    std::shared_ptr<Activation> build() override {
         std::shared_ptr<SoftPlus> softPlus = std::make_shared<SoftPlus>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
@@ -83,12 +83,12 @@ class SoftPlus::Builder : public Activation::Builder {
         return softPlus;
     }
 
-    virtual SoftPlus::Builder &network(Network &_network) {
+    SoftPlus::Builder &network(Network &_network) override {
         Activation::Builder::network(_network);
         return *this;
     }
 
-    virtual SoftPlus::Builder &featureInput(Tensor _featureInput) {
+    SoftPlus::Builder &featureInput(Tensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

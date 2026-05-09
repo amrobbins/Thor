@@ -25,7 +25,7 @@ class FullyConnected : public TrainableLayer {
 
     FullyConnected(const Optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
 
-    virtual ~FullyConnected() = default;
+    ~FullyConnected() override = default;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<FullyConnected>(*this); }
 

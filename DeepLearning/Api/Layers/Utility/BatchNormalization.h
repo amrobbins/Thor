@@ -14,7 +14,7 @@ class BatchNormalization : public TrainableLayer {
     class Builder;
     BatchNormalization() {}
 
-    virtual ~BatchNormalization() {}
+    ~BatchNormalization() override {}
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<BatchNormalization>(*this); }
 

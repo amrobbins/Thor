@@ -16,15 +16,15 @@ class BinaryCrossEntropy : public Loss {
     class Builder;
     BinaryCrossEntropy() {}
 
-    virtual ~BinaryCrossEntropy() {}
+    ~BinaryCrossEntropy() override {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<BinaryCrossEntropy>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<BinaryCrossEntropy>(*this); }
 
-    virtual Tensor getPredictions() const { return sigmoidOutput; }
+    Tensor getPredictions() const override { return sigmoidOutput; }
 
-    virtual std::string getLayerType() const { return "BinaryCrossEntropy"; }
+    std::string getLayerType() const override { return "BinaryCrossEntropy"; }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:

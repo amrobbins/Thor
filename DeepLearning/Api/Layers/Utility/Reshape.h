@@ -11,13 +11,13 @@ class Reshape : public Layer {
    public:
     class Builder;
     Reshape();
-    virtual ~Reshape();
+    ~Reshape() override;
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Reshape>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<Reshape>(*this); }
 
-    virtual std::string getLayerType() const { return "Reshape"; }
+    std::string getLayerType() const override { return "Reshape"; }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -36,7 +36,7 @@ class Reshape : public Layer {
     }
 
     // Reshape only changes the descriptor, no tensor is allocated
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         return 0;
     }
 

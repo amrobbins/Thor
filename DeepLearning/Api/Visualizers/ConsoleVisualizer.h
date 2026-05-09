@@ -56,10 +56,10 @@ class ConsoleVisualizer : public Visualizer {
     ConsoleVisualizer(const ConsoleVisualizer &) = delete;
     ConsoleVisualizer &operator=(const ConsoleVisualizer &) = delete;
 
-    virtual ~ConsoleVisualizer();
+    ~ConsoleVisualizer() override;
 
-    virtual void startUI();
-    virtual void stopUI();
+    void startUI() override;
+    void stopUI() override;
 
     static void cursorForward(int32_t spaces) { printf("\033[%dC", spaces); }
     static void cursorBackward(int32_t spaces) { printf("\033[%dD", spaces); }

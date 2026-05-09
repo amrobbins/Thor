@@ -51,7 +51,7 @@ class LocalExecutor : public Executor {
 
     LocalExecutor() { initialized = false; }
 
-    virtual ~LocalExecutor();
+    ~LocalExecutor() override;
 
     // FIXME: need train, validate and test and no exampleType
     void trainEpochs(uint32_t numEpochs, std::set<std::string> tensorsToReturn);

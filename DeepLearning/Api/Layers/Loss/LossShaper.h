@@ -14,20 +14,20 @@ class LossShaper : public Layer {
     class Builder;
     LossShaper() {}
 
-    virtual ~LossShaper() {}
+    ~LossShaper() override {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<LossShaper>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<LossShaper>(*this); }
 
-    virtual std::string getLayerType() const { return "LossShaper"; }
+    std::string getLayerType() const override { return "LossShaper"; }
 
     virtual Tensor getLossInput() const { return lossInput; }
     virtual Tensor getLossOutput() const { return lossOutput; }
 
     // getLossInput() and getLossOutput() are synonyms for getFeatureInput() and getFeatureOutput() in losses:
-    virtual Optional<Tensor> getFeatureInput() const { return getLossInput(); }
-    virtual Optional<Tensor> getFeatureOutput() const { return getLossOutput(); }
+    Optional<Tensor> getFeatureInput() const override { return getLossInput(); }
+    Optional<Tensor> getFeatureOutput() const override { return getLossOutput(); }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -58,7 +58,7 @@ class LossShaper : public Layer {
         }
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         std::vector<uint64_t> implementationInputLossDimensions = createRepresentativeImplementationDimensions(lossInput.getDimensions());
         std::vector<uint64_t> implementationOutputLossDimensions =
             getImplementationOutputDimensions(implementationInputLossDimensions, outputLossType);

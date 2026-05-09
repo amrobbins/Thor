@@ -14,7 +14,7 @@ class Pooling : public Layer {
 
     ~Pooling() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Pooling>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<Pooling>(*this); }
 
     enum class Type { AVERAGE = 3, MAX };
 
@@ -27,9 +27,9 @@ class Pooling : public Layer {
     uint32_t getVerticalPadding() { return verticalPadding; }
     uint32_t getHorizontalPadding() { return horizontalPadding; }
 
-    virtual std::string getLayerType() const { return "Pooling"; }
+    std::string getLayerType() const override { return "Pooling"; }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -51,7 +51,7 @@ class Pooling : public Layer {
         return pooling;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         return batchSize * featureOutput.get().getTotalSizeInBytes();
     }
 

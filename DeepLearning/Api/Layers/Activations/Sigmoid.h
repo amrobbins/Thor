@@ -13,19 +13,19 @@ class Sigmoid : public Activation {
     class Builder;
     Sigmoid() {}
 
-    virtual ~Sigmoid() {}
+    ~Sigmoid() override {}
 
-    virtual std::shared_ptr<Layer> clone() const {
+    std::shared_ptr<Layer> clone() const override {
         std::shared_ptr<Sigmoid> myClone = std::make_shared<Sigmoid>(*this);
         myClone->id = getUnusedId();
         return myClone;
     }
 
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+    ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
         return input.sigmoid();
     }
 
-    virtual std::string getLayerType() const { return "Sigmoid"; }
+    std::string getLayerType() const override { return "Sigmoid"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
         if (j.at("version").get<std::string>() != "1.0.0")
@@ -60,7 +60,7 @@ class Sigmoid : public Activation {
         return sigmoid;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
@@ -70,7 +70,7 @@ class Sigmoid : public Activation {
 
 class Sigmoid::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Activation> build() {
+    std::shared_ptr<Activation> build() override {
         std::shared_ptr<Sigmoid> sigmoid = std::make_shared<Sigmoid>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
@@ -90,12 +90,12 @@ class Sigmoid::Builder : public Activation::Builder {
         return sigmoid;
     }
 
-    virtual Sigmoid::Builder &network(Network &_network) {
+    Sigmoid::Builder &network(Network &_network) override {
         Activation::Builder::network(_network);
         return *this;
     }
 
-    virtual Sigmoid::Builder &featureInput(Tensor _featureInput) {
+    Sigmoid::Builder &featureInput(Tensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

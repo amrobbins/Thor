@@ -14,12 +14,12 @@ class LocalBatchLoader : public Loader {
                      ThorImplementation::TensorDescriptor labelDescriptor,
                      uint64_t batchSize);
 
-    virtual std::map<std::string, ThorImplementation::Tensor> getBatch(ExampleType exampleType, uint64_t &batchNum);
-    virtual void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor> tensorMap);
+    std::map<std::string, ThorImplementation::Tensor> getBatch(ExampleType exampleType, uint64_t &batchNum) override;
+    void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor> tensorMap) override;
 
-    virtual uint64_t getNumBatchesPerEpoch(ExampleType exampleType);
-    virtual uint64_t getNumExamples(ExampleType exampleType);
-    virtual uint64_t getNextBatchNum(ExampleType exampleType);
+    uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override;
+    uint64_t getNumExamples(ExampleType exampleType) override;
+    uint64_t getNextBatchNum(ExampleType exampleType) override;
 
    private:
     std::vector<std::shared_ptr<Shard>> shards;

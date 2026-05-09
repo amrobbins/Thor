@@ -13,27 +13,27 @@ class Concatenate : public MultiConnectionLayer {
     class Builder;
 
     Concatenate();
-    virtual ~Concatenate();
+    ~Concatenate() override;
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Concatenate>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<Concatenate>(*this); }
 
-    virtual Tensor getFeatureOutput(Tensor inputTensor) const {
+    Tensor getFeatureOutput(Tensor inputTensor) const override {
         std::map<Tensor, Tensor>::const_iterator it = outputTensorFromInputTensor.find(inputTensor);
         THOR_THROW_IF_FALSE(it != outputTensorFromInputTensor.end());
         return it->second;
     }
 
-    virtual Optional<Tensor> getFeatureOutput() const {
+    Optional<Tensor> getFeatureOutput() const override {
         THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
         return featureOutputs[0];
     }
 
-    virtual Tensor getFeatureInput(Tensor outputTensor) const {
+    Tensor getFeatureInput(Tensor outputTensor) const override {
         // Can't identify a particular input from the concatenated output.
         THOR_UNREACHABLE();
     }
 
-    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override {
         if (numInputConnectionsMade == featureInputs.size()) {
             return {featureOutputs[0]};
         } else {
@@ -41,15 +41,15 @@ class Concatenate : public MultiConnectionLayer {
         }
     }
 
-    virtual bool mustConnectAllInputsToDriveOutput() { return true; }
-    virtual void informThatInputConnectionMade(Tensor inputTensor) {
+    bool mustConnectAllInputsToDriveOutput() override { return true; }
+    void informThatInputConnectionMade(Tensor inputTensor) override {
         numInputConnectionsMade += 1;
         THOR_THROW_IF_FALSE(numInputConnectionsMade <= featureInputs.size());
     }
 
-    virtual std::string getLayerType() const { return "Concatenate"; }
+    std::string getLayerType() const override { return "Concatenate"; }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -68,7 +68,7 @@ class Concatenate : public MultiConnectionLayer {
         return concatenate;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // featureOutput and errorInput
         return (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
     }

@@ -11,21 +11,21 @@ class HardSigmoid : public Activation {
     class Builder;
     HardSigmoid() {}
 
-    virtual ~HardSigmoid() {}
+    ~HardSigmoid() override {}
 
-    virtual std::shared_ptr<Layer> clone() const {
+    std::shared_ptr<Layer> clone() const override {
         std::shared_ptr<HardSigmoid> myClone = std::make_shared<HardSigmoid>(*this);
         myClone->id = getUnusedId();
         return myClone;
     }
 
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+    ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
         const ThorImplementation::Expression zero(0.0);
         const ThorImplementation::Expression one(1.0);
         return ((input * ThorImplementation::Expression(0.2)) + ThorImplementation::Expression(0.5)).min(one).max(zero);
     }
 
-    virtual std::string getLayerType() const { return "HardSigmoid"; }
+    std::string getLayerType() const override { return "HardSigmoid"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
         if (j.at("version").get<std::string>() != "1.0.0")
@@ -60,7 +60,7 @@ class HardSigmoid : public Activation {
         return hardSigmoid;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
@@ -68,7 +68,7 @@ class HardSigmoid : public Activation {
 
 class HardSigmoid::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Activation> build() {
+    std::shared_ptr<Activation> build() override {
         std::shared_ptr<HardSigmoid> hardSigmoid = std::make_shared<HardSigmoid>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
@@ -85,12 +85,12 @@ class HardSigmoid::Builder : public Activation::Builder {
         return hardSigmoid;
     }
 
-    virtual HardSigmoid::Builder &network(Network &_network) {
+    HardSigmoid::Builder &network(Network &_network) override {
         Activation::Builder::network(_network);
         return *this;
     }
 
-    virtual HardSigmoid::Builder &featureInput(Tensor _featureInput) {
+    HardSigmoid::Builder &featureInput(Tensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

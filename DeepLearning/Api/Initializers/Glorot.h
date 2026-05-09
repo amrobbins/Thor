@@ -13,13 +13,13 @@ class Glorot : public Initializer {
 
     Glorot(ThorImplementation::Glorot::Mode mode) : mode(mode) { initialized = true; }
 
-    virtual ~Glorot() = default;
+    ~Glorot() override = default;
 
     std::shared_ptr<ThorImplementation::Initializer> stamp() override { return ThorImplementation::Glorot(mode).clone(); }
 
-    virtual std::shared_ptr<Initializer> clone() const { return std::make_shared<Glorot>(*this); }
+    std::shared_ptr<Initializer> clone() const override { return std::make_shared<Glorot>(*this); }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);
     ThorImplementation::Glorot::Mode getMode() const { return mode; }
 
@@ -29,9 +29,9 @@ class Glorot : public Initializer {
 
 class Glorot::Builder : public Initializer::Builder {
    public:
-    virtual ~Builder() = default;
+    ~Builder() override = default;
 
-    virtual std::shared_ptr<Initializer> build() {
+    std::shared_ptr<Initializer> build() override {
         if (_mode.isEmpty())
             _mode = ThorImplementation::Glorot::Mode::UNIFORM;
 
@@ -45,7 +45,7 @@ class Glorot::Builder : public Initializer::Builder {
         return *this;
     }
 
-    virtual std::shared_ptr<Initializer::Builder> clone() { return std::make_shared<Glorot::Builder>(*this); }
+    std::shared_ptr<Initializer::Builder> clone() override { return std::make_shared<Glorot::Builder>(*this); }
 
    protected:
     Optional<ThorImplementation::Glorot::Mode> _mode;

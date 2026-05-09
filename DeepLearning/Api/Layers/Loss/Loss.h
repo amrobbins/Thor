@@ -17,16 +17,16 @@ class Loss : public Layer {
     enum class LossShape { BATCH = 9, ELEMENTWISE, CLASSWISE, RAW };
 
     Loss() { numInputConnectionsMade = 0; }
-    virtual ~Loss() {}
+    ~Loss() override {}
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
     using Deserializer = std::function<void(const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();
     static void register_layer(std::string name, Deserializer fn);
 
-    virtual bool mustConnectAllInputsToDriveOutput() { return true; }
-    virtual void informThatInputConnectionMade(Tensor inputTensor) {
+    bool mustConnectAllInputsToDriveOutput() override { return true; }
+    void informThatInputConnectionMade(Tensor inputTensor) override {
         numInputConnectionsMade += 1;
         // Only one type of loss is supported at a time.
         THOR_THROW_IF_FALSE(numInputConnectionsMade < 3);
@@ -40,10 +40,10 @@ class Loss : public Layer {
     // If the raw predictions are transformed. i.e. by softmax before becoming predictions
     // then featureInput will be a different tensor than predictions,
     // i.e. featureInput will be the input to softmax and predictions will be the output of softmax
-    virtual Optional<Tensor> getFeatureInput() const { return predictionsTensor; }
-    virtual Optional<Tensor> getFeatureOutput() const { return lossTensor; }
+    Optional<Tensor> getFeatureInput() const override { return predictionsTensor; }
+    Optional<Tensor> getFeatureOutput() const override { return lossTensor; }
 
-    virtual int getConnectionType(Tensor connectingTensor) const {
+    int getConnectionType(Tensor connectingTensor) const override {
         if (connectingTensor == labelsTensor) {
             return (int)ThorImplementation::Loss::ConnectionType::LABELS;
         } else if (connectingTensor == predictionsTensor) {
@@ -54,14 +54,14 @@ class Loss : public Layer {
         THOR_UNREACHABLE();
     }
 
-    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override {
         if (numInputConnectionsMade == 2)
             return {lossTensor};
         else
             return std::vector<Tensor>();
     }
 
-    virtual std::vector<Tensor> getAllOutputTensors() const { return {getLoss()}; }
+    std::vector<Tensor> getAllOutputTensors() const override { return {getLoss()}; }
 
    protected:
     Tensor labelsTensor;
@@ -72,7 +72,7 @@ class Loss : public Layer {
 
     Network *network;
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         uint32_t fixedMem = 4;  // loss scaling factor, FP32
 
         // Labels

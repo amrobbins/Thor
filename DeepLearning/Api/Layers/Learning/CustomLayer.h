@@ -22,7 +22,7 @@ class CustomLayer : public TrainableLayer {
 
     class Builder;
 
-    virtual ~CustomLayer() = default;
+    ~CustomLayer() override = default;
 
     CustomLayer(ThorImplementation::DynamicExpression expr,
                 const std::vector<TensorMap>& inputInterfaces,

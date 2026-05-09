@@ -11,11 +11,11 @@ class BinaryAccuracy : public Metric {
     class Builder;
     BinaryAccuracy() {}
 
-    virtual ~BinaryAccuracy() {}
+    ~BinaryAccuracy() override {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<BinaryAccuracy>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<BinaryAccuracy>(*this); }
 
-    virtual std::string getLayerType() const { return "BinaryAccuracy"; }
+    std::string getLayerType() const override { return "BinaryAccuracy"; }
 
     static void deserialize(const nlohmann::json &j, Network *network);
 
@@ -33,7 +33,7 @@ class BinaryAccuracy : public Metric {
         return BinaryAccuracy;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         uint64_t workspaceSize = 2 * batchSize;
         uint64_t metricOutputSize = 4;
 

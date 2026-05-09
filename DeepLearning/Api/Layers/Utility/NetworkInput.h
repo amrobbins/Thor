@@ -15,19 +15,19 @@ class NetworkInput : public Layer {
 
     NetworkInput() {}
 
-    virtual ~NetworkInput() {}
+    ~NetworkInput() override {}
 
     virtual std::string getName() const { return name; }
     std::vector<uint64_t> getDimensions() const { return dimensions; }
     Tensor::DataType getDataType() const { return dataType; }
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<NetworkInput>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<NetworkInput>(*this); }
 
-    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return {featureOutput}; }
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override { return {featureOutput}; }
 
-    virtual std::string getLayerType() const { return "NetworkInput"; }
+    std::string getLayerType() const override { return "NetworkInput"; }
 
-    virtual nlohmann::json architectureJson() const;
+    nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -56,7 +56,7 @@ class NetworkInput : public Layer {
         THOR_UNREACHABLE();
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // Input has a prefetch buffer in addition to storing the output tensor
         return 2 * featureOutput.get().getTotalSizeInBytes();
     }

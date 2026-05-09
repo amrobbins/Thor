@@ -13,19 +13,19 @@ class Softmax : public Activation {
     class Builder;
     Softmax() {}
 
-    virtual ~Softmax() {}
+    ~Softmax() override {}
 
-    virtual std::shared_ptr<Layer> clone() const {
+    std::shared_ptr<Layer> clone() const override {
         std::shared_ptr<Softmax> myClone = std::make_shared<Softmax>(*this);
         myClone->id = getUnusedId();
         return myClone;
     }
 
-    virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+    ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
         return input.softmax();
     }
 
-    virtual std::string getLayerType() const { return "Softmax"; }
+    std::string getLayerType() const override { return "Softmax"; }
 
     static void deserialize(const nlohmann::json &j, Network *network) {
         if (j.at("version").get<std::string>() != "1.0.0")
@@ -60,7 +60,7 @@ class Softmax : public Activation {
         return softmax;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
@@ -70,7 +70,7 @@ class Softmax : public Activation {
 
 class Softmax::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Activation> build() {
+    std::shared_ptr<Activation> build() override {
         std::shared_ptr<Softmax> softmax = std::make_shared<Softmax>();
         if (_featureInput.isPresent()) {
             // Standalone layer support.
@@ -87,12 +87,12 @@ class Softmax::Builder : public Activation::Builder {
         return softmax;
     }
 
-    virtual Softmax::Builder &network(Network &_network) {
+    Softmax::Builder &network(Network &_network) override {
         Activation::Builder::network(_network);
         return *this;
     }
 
-    virtual Softmax::Builder &featureInput(Tensor _featureInput) {
+    Softmax::Builder &featureInput(Tensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
