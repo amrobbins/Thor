@@ -6,6 +6,7 @@
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace std;
 
 namespace ThorImplementation {
@@ -14,10 +15,10 @@ Adam::Adam(uint64_t id, float alpha, float beta1, float beta2, float epsilon)
     : Optimizer(id), alpha(alpha), beta1(beta1), beta2(beta2), epsilon(epsilon), t(0) {}
 
 void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
-    assert(!compiled);
-    assert(gradientUpdateStream.isInitialized());
-    assert(weights.isInitialized());
-    assert(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(!compiled);
+    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
+    THOR_THROW_IF_FALSE(weights.isInitialized());
+    THOR_THROW_IF_FALSE(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     this->gradientUpdateStream = gradientUpdateStream;
     this->weights = weights;
@@ -27,7 +28,7 @@ void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
     const int32_t gpuNum = weights.getPlacement().getDeviceNum();
 
     if (!hasParameter("m")) {
-        assert(!hasParameter("v"));
+        THOR_THROW_IF_FALSE(!hasParameter("v"));
         shared_ptr<PhysicalParameter> mParameter = make_shared<PhysicalParameter>("m", false, weights.getDimensions(), DataType::FP32);
         shared_ptr<PhysicalParameter> vParameter = make_shared<PhysicalParameter>("v", false, weights.getDimensions(), DataType::FP32);
         shared_ptr<Initializer> paramInitializer = make_shared<ZerosInitializer>();
@@ -42,8 +43,8 @@ void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
         vParameter->compileStorage(weights);
         vParameter->compileInitializer();
 
-        assert(mParameter->getStorage().isPresent());
-        assert(vParameter->getStorage().isPresent());
+        THOR_THROW_IF_FALSE(mParameter->getStorage().isPresent());
+        THOR_THROW_IF_FALSE(vParameter->getStorage().isPresent());
         mParameter->initialize(gradientUpdateStream);
         vParameter->initialize(gradientUpdateStream);
     }
@@ -100,15 +101,15 @@ void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
 }
 
 void Adam::updateWeights(uint32_t batchSize) {
-    assert(compiled);
-    assert(weightsGradient.isPresent());
-    assert(weightsGradient.get().isInitialized());
-    assert(weightsGradient.get().getPlacement() == weights.getPlacement());
-    assert(updateEquationStamped != nullptr);
+    THOR_THROW_IF_FALSE(compiled);
+    THOR_THROW_IF_FALSE(weightsGradient.isPresent());
+    THOR_THROW_IF_FALSE(weightsGradient.get().isInitialized());
+    THOR_THROW_IF_FALSE(weightsGradient.get().getPlacement() == weights.getPlacement());
+    THOR_THROW_IF_FALSE(updateEquationStamped != nullptr);
 
-    assert(batchSize > 0);
+    THOR_THROW_IF_FALSE(batchSize > 0);
     const float lossScalingFactor = Loss::getLossScalingFactor();
-    assert(lossScalingFactor > 0);
+    THOR_THROW_IF_FALSE(lossScalingFactor > 0);
 
     t += 1;
     double alphaT64 = static_cast<double>(alpha) * std::sqrt(1.0 - std::pow(static_cast<double>(beta2), t)) /

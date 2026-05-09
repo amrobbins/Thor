@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
 using namespace std;
 
@@ -1194,16 +1195,16 @@ __global__ void log10Dest4B(DEST_DATA_TYPE *dest, half *argument, uint64_t numEl
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::pow(Tensor base, Tensor exponent, Stream stream) {
-    assert(base.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(base.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(base.getPlacement() == exponent.getPlacement());
-    assert(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert((base.getDataType() == TensorDescriptor::DataType::FP32 && exponent.getDataType() == TensorDescriptor::DataType::FP32));
-    assert(base.getTotalNumElements() == exponent.getTotalNumElements());
-    assert(base.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(base.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(base.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(base.getPlacement() == exponent.getPlacement());
+    THOR_THROW_IF_FALSE(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE((base.getDataType() == TensorDescriptor::DataType::FP32 && exponent.getDataType() == TensorDescriptor::DataType::FP32));
+    THOR_THROW_IF_FALSE(base.getTotalNumElements() == exponent.getTotalNumElements());
+    THOR_THROW_IF_FALSE(base.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -1232,7 +1233,7 @@ void Tensor::pow(Tensor base, Tensor exponent, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::INT32) {
         powElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int32_t *)destMem, (float *)exponentMem, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -1242,12 +1243,12 @@ void Tensor::pow(Tensor base, Tensor exponent, Stream stream) {
  * base must have data type FP32.
  */
 void Tensor::pow(Tensor base, float exponent, Stream stream) {
-    assert(base.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(base.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(base.getDataType() == TensorDescriptor::DataType::FP32);
-    assert(base.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(base.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(base.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(base.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(base.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -1275,7 +1276,7 @@ void Tensor::pow(Tensor base, float exponent, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::INT32) {
         powScalarExponentDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int32_t *)destMem, exponent, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -1286,12 +1287,12 @@ void Tensor::pow(Tensor base, float exponent, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::pow(float base, Tensor exponent, Stream stream) {
-    assert(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(exponent.getDataType() == TensorDescriptor::DataType::FP32);
-    assert(exponent.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(exponent.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(exponent.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -1319,7 +1320,7 @@ void Tensor::pow(float base, Tensor exponent, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::INT32) {
         powScalarBaseDest4B<<<gridSize, blockSize, 0, stream>>>(base, (int32_t *)destMem, (float *)exponentMem, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -1331,12 +1332,12 @@ void Tensor::pow(float base, Tensor exponent, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::exp(Tensor exponent, Stream stream) {
-    assert(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(exponent.getDataType() == TensorDescriptor::DataType::FP32);
-    assert(exponent.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(exponent.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(exponent.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -1364,7 +1365,7 @@ void Tensor::exp(Tensor exponent, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::INT32) {
         expDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)exponentMem, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -1376,12 +1377,12 @@ void Tensor::exp(Tensor exponent, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::log(Tensor argument, Stream stream) {
-    assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
-    assert(argument.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -1410,7 +1411,7 @@ void Tensor::log(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             logDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     } else {
         if (destDataType == TensorDescriptor::DataType::FP16) {
@@ -1430,7 +1431,7 @@ void Tensor::log(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             logDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 }
@@ -3177,14 +3178,14 @@ __global__ void lgammaDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t num
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::log(Tensor argument, float base, Stream stream) {
-    assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
-    assert(argument.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
-    assert(base > 0.0f && base != 1.0f);
+    THOR_THROW_IF_FALSE(base > 0.0f && base != 1.0f);
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3215,7 +3216,7 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
             } else if (destDataType == TensorDescriptor::DataType::INT32) {
                 log2Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
             } else {
-                assert(false);
+                THOR_UNREACHABLE();
             }
         } else {
             if (destDataType == TensorDescriptor::DataType::FP16) {
@@ -3235,7 +3236,7 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
             } else if (destDataType == TensorDescriptor::DataType::INT32) {
                 log2Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
             } else {
-                assert(false);
+                THOR_UNREACHABLE();
             }
         }
     } else if (base == 10.0f) {
@@ -3257,7 +3258,7 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
             } else if (destDataType == TensorDescriptor::DataType::INT32) {
                 log10Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
             } else {
-                assert(false);
+                THOR_UNREACHABLE();
             }
         } else {
             if (destDataType == TensorDescriptor::DataType::FP16) {
@@ -3277,7 +3278,7 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
             } else if (destDataType == TensorDescriptor::DataType::INT32) {
                 log10Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
             } else {
-                assert(false);
+                THOR_UNREACHABLE();
             }
         }
     } else {
@@ -3301,7 +3302,7 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
             } else if (destDataType == TensorDescriptor::DataType::INT32) {
                 logXDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
             } else {
-                assert(false);
+                THOR_UNREACHABLE();
             }
         } else {
             if (destDataType == TensorDescriptor::DataType::FP16) {
@@ -3323,7 +3324,7 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
             } else if (destDataType == TensorDescriptor::DataType::INT32) {
                 logXDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
             } else {
-                assert(false);
+                THOR_UNREACHABLE();
             }
         }
     }
@@ -3337,12 +3338,12 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::ceil(Tensor argument, Stream stream) {
-    assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
-    assert(argument.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3371,7 +3372,7 @@ void Tensor::ceil(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             ceilDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     } else {
         if (destDataType == TensorDescriptor::DataType::FP16) {
@@ -3391,7 +3392,7 @@ void Tensor::ceil(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             ceilDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 }
@@ -3404,12 +3405,12 @@ void Tensor::ceil(Tensor argument, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::floor(Tensor argument, Stream stream) {
-    assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
-    assert(argument.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3438,7 +3439,7 @@ void Tensor::floor(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             floorDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     } else {
         if (destDataType == TensorDescriptor::DataType::FP16) {
@@ -3458,7 +3459,7 @@ void Tensor::floor(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             floorDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 }
@@ -3471,12 +3472,12 @@ void Tensor::floor(Tensor argument, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::round(Tensor argument, Stream stream) {
-    assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
-    assert(argument.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3505,7 +3506,7 @@ void Tensor::round(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             roundDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     } else {
         if (destDataType == TensorDescriptor::DataType::FP16) {
@@ -3525,7 +3526,7 @@ void Tensor::round(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             roundDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 }
@@ -3537,12 +3538,12 @@ void Tensor::round(Tensor argument, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::truncateFloatingPoint(Tensor argument, Stream stream) {
-    assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
-    assert(argument.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3571,7 +3572,7 @@ void Tensor::truncateFloatingPoint(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             truncateFloatingPointDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     } else {
         if (destDataType == TensorDescriptor::DataType::FP16) {
@@ -3591,7 +3592,7 @@ void Tensor::truncateFloatingPoint(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             truncateFloatingPointDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 }
@@ -3604,12 +3605,12 @@ void Tensor::truncateFloatingPoint(Tensor argument, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::reciprocal(Tensor argument, Stream stream) {
-    assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(argument.getDataType() == TensorDescriptor::DataType::FP16);
-    assert(argument.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(argument.getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3637,7 +3638,7 @@ void Tensor::reciprocal(Tensor argument, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::INT32) {
         reciprocalDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -3649,12 +3650,12 @@ void Tensor::reciprocal(Tensor argument, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::sqrt(Tensor argument, Stream stream) {
-    assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
-    assert(argument.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3683,7 +3684,7 @@ void Tensor::sqrt(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             sqrtDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     } else {
         if (destDataType == TensorDescriptor::DataType::FP16) {
@@ -3703,7 +3704,7 @@ void Tensor::sqrt(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             sqrtDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 }
@@ -3716,12 +3717,12 @@ void Tensor::sqrt(Tensor argument, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::reciprocalSqrt(Tensor argument, Stream stream) {
-    assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
-    assert(argument.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3750,7 +3751,7 @@ void Tensor::reciprocalSqrt(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             reciprocalSqrtDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     } else {
         if (destDataType == TensorDescriptor::DataType::FP16) {
@@ -3770,7 +3771,7 @@ void Tensor::reciprocalSqrt(Tensor argument, Stream stream) {
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
             reciprocalSqrtDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 }
@@ -3783,13 +3784,13 @@ void Tensor::reciprocalSqrt(Tensor argument, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::erf(Tensor x, Stream stream) {
-    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
-    assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
-    assert(x.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3805,7 +3806,7 @@ void Tensor::erf(Tensor x, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
         erfDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -3817,13 +3818,13 @@ void Tensor::erf(Tensor x, Stream stream) {
  * The return type may be float or half
  */
 void Tensor::erfinv(Tensor x, Stream stream) {
-    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
-    assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
-    assert(x.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3839,7 +3840,7 @@ void Tensor::erfinv(Tensor x, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
         erfinvDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -3851,13 +3852,13 @@ void Tensor::erfinv(Tensor x, Stream stream) {
  * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::erfc(Tensor x, Stream stream) {
-    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
-    assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
-    assert(x.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3873,7 +3874,7 @@ void Tensor::erfc(Tensor x, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
         erfcDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -3884,13 +3885,13 @@ void Tensor::erfc(Tensor x, Stream stream) {
  * https://www.mathworks.com/help/matlab/ref/erfcinv.html#bup512o-2 x must be float. The return type may be float or half
  */
 void Tensor::erfcinv(Tensor x, Stream stream) {
-    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
-    assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
-    assert(x.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3906,7 +3907,7 @@ void Tensor::erfcinv(Tensor x, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
         erfcinvDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -3918,13 +3919,13 @@ void Tensor::erfcinv(Tensor x, Stream stream) {
  * The return type may be float or half
  */
 void Tensor::erfcx(Tensor x, Stream stream) {
-    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
-    assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
-    assert(x.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3940,7 +3941,7 @@ void Tensor::erfcx(Tensor x, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
         erfcxDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -3951,13 +3952,13 @@ void Tensor::erfcx(Tensor x, Stream stream) {
  * x must be float. The return type may be float or half
  */
 void Tensor::tgamma(Tensor x, Stream stream) {
-    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
-    assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
-    assert(x.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -3973,7 +3974,7 @@ void Tensor::tgamma(Tensor x, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
         tgammaDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -3984,13 +3985,13 @@ void Tensor::tgamma(Tensor x, Stream stream) {
  * x must be float. The return type may be float or half
  */
 void Tensor::lgamma(Tensor x, Stream stream) {
-    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
-    assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
-    assert(x.getTotalNumElements() == getTotalNumElements());
+    THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
+    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -4006,6 +4007,6 @@ void Tensor::lgamma(Tensor x, Stream stream) {
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
         lgammaDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }

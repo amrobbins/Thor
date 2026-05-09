@@ -1,22 +1,24 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
 namespace ThorImplementation {
 
 class NetworkOutput : public Layer {
    public:
-    virtual ~NetworkOutput() {}
+    ~NetworkOutput() override {}
 
     NetworkOutput(Optional<TensorPlacement> outputPlacement) : outputPlacement(outputPlacement) {}
 
-    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) { assert(false); }
+    void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override { THOR_UNREACHABLE(); }
 
-    virtual Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
-        assert(this->previousLayer.isEmpty());
-        assert(featureInput.isPresent());
-        assert(this->featureInput.isEmpty());
+    Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override {
+        THOR_THROW_IF_FALSE(this->previousLayer.isEmpty());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(this->featureInput.isEmpty());
 
         this->featureInput = featureInput;
         this->previousLayer = previousLayer;
@@ -31,8 +33,8 @@ class NetworkOutput : public Layer {
 
     virtual Event getOutputReadyEvent() { return outputReadyEvent; }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isEmpty() == outputPlacement.isEmpty());
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.isEmpty() == outputPlacement.isEmpty());
 
         if (outputPlacement.isEmpty()) {
             return Optional<Tensor>::empty();
@@ -48,16 +50,16 @@ class NetworkOutput : public Layer {
         }
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(inputTensor.isPresent() == outputTensor.isPresent());
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(inputTensor.isPresent() == outputTensor.isPresent());
 
         if (inputTensor.isPresent()) {
             if (outputPlacement.get() == featureInput.get().getPlacement()) {
                 outputTensor.get().copyFromAsync(inputTensor, stream);
                 outputReadyEvent = stream.putEvent(false, true);
             } else {
-                assert(outputBuffer.isPresent());
-                assert(outputStream.isPresent());
+                THOR_THROW_IF_FALSE(outputBuffer.isPresent());
+                THOR_THROW_IF_FALSE(outputStream.isPresent());
 
                 // Ensure that the previous offload has completed:
                 stream.waitEvent(outputReadyEvent);
@@ -75,9 +77,9 @@ class NetworkOutput : public Layer {
         }
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {}
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {}
 
-    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {}
+    void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {}
 
    protected:
     Event outputReadyEvent;

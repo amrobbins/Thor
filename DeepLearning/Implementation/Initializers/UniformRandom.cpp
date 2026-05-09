@@ -1,13 +1,14 @@
 #include "DeepLearning/Implementation/Initializers/UniformRandom.h"
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace std;
 
 namespace ThorImplementation {
 
 UniformRandom::UniformRandom(float maxValue, float minValue) : maxValue(maxValue), minValue(minValue) {
-    assert(isfinite(maxValue));
-    assert(isfinite(minValue));
-    assert(maxValue >= minValue);
+    THOR_THROW_IF_FALSE(isfinite(maxValue));
+    THOR_THROW_IF_FALSE(isfinite(minValue));
+    THOR_THROW_IF_FALSE(maxValue >= minValue);
 }
 
 void UniformRandom::initialize(Stream initStream) {
@@ -26,7 +27,7 @@ void UniformRandom::initialize(Stream initStream) {
     uint64_t maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
     if (numProcessors > maxDesiredProcessors)
         numProcessors = maxDesiredProcessors;
-    assert(numProcessors >= 1);
+    THOR_THROW_IF_FALSE(numProcessors >= 1);
     omp_set_num_threads(static_cast<int>(numProcessors));
     const uint64_t chunk = (totalNumWeights + (numProcessors - 1)) / numProcessors;
 #pragma omp parallel
@@ -51,7 +52,7 @@ void UniformRandom::initialize(Stream initStream) {
                 bufferMem[i] = distribution(generator);
             }
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 

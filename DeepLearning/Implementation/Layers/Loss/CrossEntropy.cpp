@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/Layers/Loss/CrossEntropy.h"
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
 using namespace std;
 
@@ -8,11 +9,11 @@ CrossEntropy::CrossEntropy() : Loss(TensorDescriptor::DataType::FP32) { crossEnt
 CrossEntropy::CrossEntropy(CrossEntropyLossType crossEntropyLossType, TensorDescriptor::DataType lossDataType, bool indexLabels)
     : Loss(lossDataType) {
     // Just to be clear, index labels is a feature for categorical only:
-    assert(!(crossEntropyLossType == CrossEntropyLossType::BINARY && indexLabels == true));
+    THOR_THROW_IF_FALSE(!(crossEntropyLossType == CrossEntropyLossType::BINARY && indexLabels == true));
 
     this->indexLabels = indexLabels;
 
-    assert(crossEntropyLossType == CrossEntropyLossType::BINARY || crossEntropyLossType == CrossEntropyLossType::CATEGORICAL);
+    THOR_THROW_IF_FALSE(crossEntropyLossType == CrossEntropyLossType::BINARY || crossEntropyLossType == CrossEntropyLossType::CATEGORICAL);
     this->crossEntropyLossType = crossEntropyLossType;
 }
 
@@ -20,42 +21,42 @@ CrossEntropy::~CrossEntropy() {}
 
 void CrossEntropy::compileImpl() {
     Layer::compileImpl();
-    assert(featureInput.isPresent());
-    assert(featureOutput.isPresent());
-    assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(featureInput.isPresent());
+    THOR_THROW_IF_FALSE(featureOutput.isPresent());
+    THOR_THROW_IF_FALSE(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     if (crossEntropyLossType == CrossEntropyLossType::BINARY) {
         bool oneDimension = (featureInput.get().getDimensions().size() == 1);
         bool twoDimensionsSecondIsSingleton =
             (featureInput.get().getDimensions().size() == 2 && featureInput.get().getDimensions()[1] == 1);
-        assert(oneDimension || twoDimensionsSecondIsSingleton);
+        THOR_THROW_IF_FALSE(oneDimension || twoDimensionsSecondIsSingleton);
     } else {
         // CrossEntropyLossType::CATEGORICAL
-        assert(featureInput.get().getDescriptor().getDimensions().size() == 2);
+        THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions().size() == 2);
     }
 
     if (!isInferenceOnly()) {
-        assert(errorOutput.isPresent());
-        assert(errorOutput.get().isInitialized());
-        assert(errorOutput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(errorOutput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
-        assert(errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+        THOR_THROW_IF_FALSE(errorOutput.isPresent());
+        THOR_THROW_IF_FALSE(errorOutput.get().isInitialized());
+        THOR_THROW_IF_FALSE(errorOutput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(errorOutput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
-        assert(labelsInput.isPresent());
-        assert(labelsInput.get().isInitialized());
-        assert(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(labelsInput.isPresent());
+        THOR_THROW_IF_FALSE(labelsInput.get().isInitialized());
+        THOR_THROW_IF_FALSE(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
 
-        assert(labelsInput.isPresent());
+        THOR_THROW_IF_FALSE(labelsInput.isPresent());
         vector<uint64_t> labelDimensions = labelsInput.get().getDescriptor().getDimensions();
-        assert(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         vector<uint64_t> featureInputDimensions = featureInput.get().getDescriptor().getDimensions();
 
         if (indexLabels) {
-            assert(labelDimensions[0] == featureInputDimensions[0]);
-            assert(labelDimensions.size() == 1 || (labelDimensions.size() == 2 && labelDimensions[1] == 1));
+            THOR_THROW_IF_FALSE(labelDimensions[0] == featureInputDimensions[0]);
+            THOR_THROW_IF_FALSE(labelDimensions.size() == 1 || (labelDimensions.size() == 2 && labelDimensions[1] == 1));
         } else {
             // label per class
-            assert(featureInputDimensions == labelDimensions);
+            THOR_THROW_IF_FALSE(featureInputDimensions == labelDimensions);
         }
     }
 
@@ -68,17 +69,17 @@ void CrossEntropy::compileImpl() {
 }
 
 void CrossEntropy::infer(Optional<Tensor> predictions, Optional<Tensor> elementLoss, Stream stream) {
-    assert(predictions.isPresent());
-    assert(elementLoss.isPresent());
-    assert(labelsInput.isPresent());
-    assert(elementLoss.get().getDescriptor().getDimensions() == predictions.get().getDescriptor().getDimensions());
+    THOR_THROW_IF_FALSE(predictions.isPresent());
+    THOR_THROW_IF_FALSE(elementLoss.isPresent());
+    THOR_THROW_IF_FALSE(labelsInput.isPresent());
+    THOR_THROW_IF_FALSE(elementLoss.get().getDescriptor().getDimensions() == predictions.get().getDescriptor().getDimensions());
     if (!isInferenceOnly())
-        assert(errorOutput.isPresent());
+        THOR_THROW_IF_FALSE(errorOutput.isPresent());
 
     ScopedGpu scopedGpu(predictions.get().getPlacement().getDeviceNum());
 
-    assert(compiled);
-    assert(predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(compiled);
+    THOR_THROW_IF_FALSE(predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
     stream.waitEvent(labelsStream.putEvent());
 
@@ -87,42 +88,42 @@ void CrossEntropy::infer(Optional<Tensor> predictions, Optional<Tensor> elementL
     else if (predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
         launchCrossEntropyWithFP32Predictions();
     else
-        assert(false);
+        THOR_UNREACHABLE();
 }
 
 void CrossEntropy::backProp(Optional<Tensor> labels, Optional<Tensor> predictions, Optional<Tensor> lossGradient, Stream stream) {
     // Cross entropy loss gradient is pre-computed during infer() for efficiency
-    assert(lossGradient.isPresent());
-    assert(lossGradient.get().getDataType() == TensorDescriptor::DataType::FP32 ||
+    THOR_THROW_IF_FALSE(lossGradient.isPresent());
+    THOR_THROW_IF_FALSE(lossGradient.get().getDataType() == TensorDescriptor::DataType::FP32 ||
            lossGradient.get().getDataType() == TensorDescriptor::DataType::FP16);
 }
 
 // Yuck, but at least its flattened and contained.
 void CrossEntropy::launchCrossEntropyWithFP16Predictions() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
     if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
         launchCrossEntropyWithFP16PredictionsAndFP16Loss();
     else if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
         launchCrossEntropyWithFP16PredictionsAndFP32Loss();
     else
-        assert(false);
+        THOR_UNREACHABLE();
 }
 
 void CrossEntropy::launchCrossEntropyWithFP32Predictions() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
 
     if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
         launchCrossEntropyWithFP32PredictionsAndFP16Loss();
     else if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
         launchCrossEntropyWithFP32PredictionsAndFP32Loss();
     else
-        assert(false);
+        THOR_UNREACHABLE();
 }
 
 void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP16Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
     if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
         launchElementWiseCrossEntropyLoss<uint8_t, half, half>(labelsInput.get().getMemPtr(),
@@ -197,13 +198,13 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP16Loss() {
                                                             indexLabels,
                                                             stream);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
 void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP32Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
 
     if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
         launchElementWiseCrossEntropyLoss<uint8_t, half, float>(labelsInput.get().getMemPtr(),
@@ -278,13 +279,13 @@ void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP32Loss() {
                                                              indexLabels,
                                                              stream);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
 void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
     if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
         launchElementWiseCrossEntropyLoss<uint8_t, float, half>(labelsInput.get().getMemPtr(),
@@ -359,13 +360,13 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
                                                              indexLabels,
                                                              stream);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
 void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
 
     if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
         launchElementWiseCrossEntropyLoss<uint8_t, float, float>(labelsInput.get().getMemPtr(),
@@ -440,7 +441,7 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
                                                               indexLabels,
                                                               stream);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 

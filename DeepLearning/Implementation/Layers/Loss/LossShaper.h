@@ -25,15 +25,15 @@ class LossShaper : public Layer {
     enum class OutputLossType { BATCH = 1107, CLASSWISE, ELEMENTWISE };
 
     LossShaper(OutputLossType outputLossType);
-    virtual ~LossShaper();
+    ~LossShaper() override;
 
-    virtual Optional<Tensor> createFeatureOutputTensor();
-    virtual void compileImpl();
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream);
+    Optional<Tensor> createFeatureOutputTensor() override;
+    void compileImpl() override;
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override;
     virtual void backward(Optional<Tensor> errorInput);
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream);
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override;
 
-    virtual std::string getType();
+    std::string getType() override;
 
     static std::vector<uint64_t> getOutputDimensions(std::vector<uint64_t> inputDimensions, OutputLossType outputLossType);
 

@@ -1,5 +1,6 @@
 #include "LossShaper.h"
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
 using namespace std;
 
@@ -13,10 +14,10 @@ LossShaper::LossShaper(OutputLossType outputLossType) {
 LossShaper::~LossShaper() {}
 
 Optional<Tensor> LossShaper::createFeatureOutputTensor() {
-    assert(featureInput.isPresent());
+    THOR_THROW_IF_FALSE(featureInput.isPresent());
 
     vector<unsigned long> inputDimensions = featureInput.get().getDescriptor().getDimensions();
-    assert(inputDimensions.size() == 2);
+    THOR_THROW_IF_FALSE(inputDimensions.size() == 2);
     vector<unsigned long> outputDimensions = getOutputDimensions(inputDimensions, outputLossType);
 
     Tensor outputTensor;
@@ -29,8 +30,8 @@ Optional<Tensor> LossShaper::createFeatureOutputTensor() {
 
 void LossShaper::compileImpl() {
     Layer::compileImpl();
-    assert(featureInput.isPresent());
-    assert(featureOutput.isPresent());
+    THOR_THROW_IF_FALSE(featureInput.isPresent());
+    THOR_THROW_IF_FALSE(featureOutput.isPresent());
 
     if (featureOutput.get().getDimensions() == featureInput.get().getDimensions()) {
         // There is no ErrorInput to connect to the previous layer, so this is a nop
@@ -60,13 +61,13 @@ void LossShaper::compileImpl() {
 }
 
 void LossShaper::infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-    assert(inputTensor.isPresent());
-    assert(outputTensor.isPresent());
-    assert(!uninitialized);
+    THOR_THROW_IF_FALSE(inputTensor.isPresent());
+    THOR_THROW_IF_FALSE(outputTensor.isPresent());
+    THOR_THROW_IF_FALSE(!uninitialized);
 
     if (featureOutput.get().getDimensions() == featureInput.get().getDimensions()) {
         // Check that the output is properly the same tensor as the input, by checking their ids
-        assert(featureOutput.get() == featureInput.get());
+        THOR_THROW_IF_FALSE(featureOutput.get() == featureInput.get());
     } else {
         // Ensure that batchReduce stream is synchronized properly
         // It is done this way since the cudnnHandle belongs to the stream that batchReduce uses.
@@ -75,7 +76,7 @@ void LossShaper::infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTens
             batchReduceStream.waitEvent(stream.putEvent());
 
         TensorDescriptor::DataType lossDataType = inputTensor.get().getDataType();
-        assert(lossDataType == TensorDescriptor::DataType::FP16 || lossDataType == TensorDescriptor::DataType::FP32 ||
+        THOR_THROW_IF_FALSE(lossDataType == TensorDescriptor::DataType::FP16 || lossDataType == TensorDescriptor::DataType::FP32 ||
                lossDataType == TensorDescriptor::DataType::FP64);
         batchReduce->reduce(inputTensor, outputTensor);
 
@@ -88,11 +89,11 @@ void LossShaper::backward(Optional<Tensor> errorInput) {}
 
 void LossShaper::backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
     // This should never be called.
-    assert(false);
+    THOR_UNREACHABLE();
 }
 
 vector<uint64_t> LossShaper::getOutputDimensions(vector<uint64_t> inputDimensions, OutputLossType outputLossType) {
-    assert(inputDimensions.size() == 2);
+    THOR_THROW_IF_FALSE(inputDimensions.size() == 2);
 
     if (outputLossType == OutputLossType::BATCH) {
         // Sum all losses, return a scalar
@@ -104,7 +105,7 @@ vector<uint64_t> LossShaper::getOutputDimensions(vector<uint64_t> inputDimension
         // Sum all outputs for each batch item, return a scalar per batch item
         return {inputDimensions[0], 1};
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 

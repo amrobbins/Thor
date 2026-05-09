@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Tensor/PackedBoolean.h"
 
 #include "cuda.h"
@@ -125,7 +127,7 @@ class TensorDescriptor {
             case DataType::FP8_E5M2:
                 return "fp8_e5m2";
             default:
-                assert(false);
+                THOR_UNREACHABLE();
         }
         return "";
     }
@@ -169,7 +171,7 @@ class TensorDescriptor {
             case DataType::FP8_E5M2:
                 return std::to_string(static_cast<float>(*(((const __nv_fp8_e5m2 *)basePointer) + elementIndex)));
             default:
-                assert(false);
+                THOR_UNREACHABLE();
         }
         return "";
     }
@@ -197,9 +199,9 @@ class TensorDescriptor {
             case DataType::FP8_E5M2:
                 return false;
             default:
-                assert(false);
+                THOR_UNREACHABLE();
         }
-        assert(false);
+        THOR_UNREACHABLE();
         return false;
     }
 
@@ -231,9 +233,9 @@ class TensorDescriptor {
             case DataType::PACKED_BOOLEAN:
                 return false;
             default:
-                assert(false);
+                THOR_UNREACHABLE();
         }
-        assert(false);
+        THOR_UNREACHABLE();
         return false;
     }
 
@@ -258,24 +260,24 @@ class TensorDescriptor {
         uint64_t newTotalNumElements = 1;
         for (uint32_t i = 0; i < dimensions.size(); ++i)
             newTotalNumElements *= newDimensions[i];
-        assert(newTotalNumElements == totalNumElements);
+        THOR_THROW_IF_FALSE(newTotalNumElements == totalNumElements);
     }
 
     uint64_t getFlatIndex(std::vector<uint64_t> element) const {
-        assert(element.size() == dimensions.size());
+        THOR_THROW_IF_FALSE(element.size() == dimensions.size());
         uint64_t stepSize = 1;
         uint64_t index = 0;
         for (int32_t d = dimensions.size() - 1; d >= 0; --d) {
-            assert(element[d] < dimensions[d]);
+            THOR_THROW_IF_FALSE(element[d] < dimensions[d]);
             index += element[d] * stepSize;
             stepSize *= dimensions[d];
         }
-        assert(stepSize != 0);
+        THOR_THROW_IF_FALSE(stepSize != 0);
         return index;
     }
 
     std::vector<uint64_t> getDimensionalIndex(uint64_t flatIndex) const {
-        assert(flatIndex < totalNumElements);
+        THOR_THROW_IF_FALSE(flatIndex < totalNumElements);
 
         std::vector<uint64_t> dimensionIndex;
         for (uint32_t d = 0; d < dimensions.size(); ++d) {
@@ -286,15 +288,15 @@ class TensorDescriptor {
     }
 
     uint64_t getDimensionStride(uint32_t axis) const {
-        assert(axis < dimensions.size());
+        THOR_THROW_IF_FALSE(axis < dimensions.size());
         return stridePerDimension[axis];
     }
 
     void *getChunkAddress(std::vector<uint64_t> leadingDimensions, void *mem) const {
-        assert(leadingDimensions.size() <= dimensions.size());
+        THOR_THROW_IF_FALSE(leadingDimensions.size() <= dimensions.size());
         uint64_t chunkOffset = 0;
         for (uint32_t i = 0; i < leadingDimensions.size(); ++i) {
-            assert(leadingDimensions[i] < dimensions[i]);
+            THOR_THROW_IF_FALSE(leadingDimensions[i] < dimensions[i]);
             chunkOffset += stridePerDimension[i] * leadingDimensions[i];
         }
         return (uint8_t *)mem + getArraySizeInBytes(chunkOffset);
@@ -327,7 +329,7 @@ class TensorDescriptor {
             case DataType::PACKED_BOOLEAN:
                 return 0.125f;
             default:
-                assert(false);
+                THOR_UNREACHABLE();
         }
         return 0;
     }
@@ -339,12 +341,12 @@ class TensorDescriptor {
     std::vector<uint64_t> stridePerDimension;
 
     void construct() {
-        assert(!dimensions.empty());
+        THOR_THROW_IF_FALSE(!dimensions.empty());
 
         totalNumElements = 1;
         for (uint32_t i = 0; i < dimensions.size(); ++i)
             totalNumElements *= dimensions[i];
-        assert(totalNumElements > 0);
+        THOR_THROW_IF_FALSE(totalNumElements > 0);
 
         for (int32_t i = (int)dimensions.size() - 1; i >= 0; --i)
             stridePerDimension.push_back(1);

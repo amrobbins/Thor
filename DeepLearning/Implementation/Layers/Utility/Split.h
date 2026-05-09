@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 #include "Utilities/TensorOperations/Misc/Split.h"
@@ -41,12 +43,12 @@ namespace ThorImplementation {
  */
 class Split : public MultiConnectionLayer {
    public:
-    virtual ~Split() {}
+    ~Split() override {}
 
     Split(unsigned int axis, std::vector<unsigned long> axisElements) {
         this->axis = axis;
         this->axisElements = axisElements;
-        assert(!axisElements.empty());
+        THOR_THROW_IF_FALSE(!axisElements.empty());
         splitTensorErrorInputMemoriesArray_d = nullptr;
         splitTensorFeatureOutputMemoriesArray_d = nullptr;
         stridePerPackedTensorDimension_d = nullptr;
@@ -54,10 +56,10 @@ class Split : public MultiConnectionLayer {
         axisElementsPerSplitTensor_d = nullptr;
     }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
+    Optional<Tensor> createFeatureOutputTensor() override {
         unsigned int connection = featureOutputs.size();
-        assert(connection < axisElements.size());
-        assert(featureInputs[0].isPresent());
+        THOR_THROW_IF_FALSE(connection < axisElements.size());
+        THOR_THROW_IF_FALSE(featureInputs[0].isPresent());
 
         std::vector<unsigned long> dimensions = featureInputs[0].get().getDescriptor().getDimensions();
         dimensions[axis] = axisElements[connection];
@@ -65,35 +67,35 @@ class Split : public MultiConnectionLayer {
                       TensorDescriptor(featureInputs[0].get().getDescriptor().getDataType(), dimensions));
     }
 
-    virtual void compileImpl() {
+    void compileImpl() override {
         MultiConnectionLayer::compileImpl();
         // Ensure that the right amount of axis elements are specified and all output tensors were connected
         unsigned long totalAxisElements = 0;
         for (unsigned int i = 0; i < axisElements.size(); ++i)
             totalAxisElements += axisElements[i];
-        assert(featureInputs.size() == 1);
-        assert(featureInputs[0].isPresent());
+        THOR_THROW_IF_FALSE(featureInputs.size() == 1);
+        THOR_THROW_IF_FALSE(featureInputs[0].isPresent());
         std::vector<unsigned long> inputDimensions = featureInputs[0].get().getDescriptor().getDimensions();
-        assert(inputDimensions.size() > axis);
-        assert(totalAxisElements == inputDimensions[axis]);
-        assert(featureOutputs.size() == axisElements.size());
-        assert(nextLayers.size() == featureOutputs.size());
+        THOR_THROW_IF_FALSE(inputDimensions.size() > axis);
+        THOR_THROW_IF_FALSE(totalAxisElements == inputDimensions[axis]);
+        THOR_THROW_IF_FALSE(featureOutputs.size() == axisElements.size());
+        THOR_THROW_IF_FALSE(nextLayers.size() == featureOutputs.size());
         for (unsigned int i = 0; i < axisElements.size(); ++i) {
-            assert(featureOutputs[i].isPresent());
-            assert(featureOutputs[i].get().getDescriptor().getDimensions()[axis] == axisElements[i]);
+            THOR_THROW_IF_FALSE(featureOutputs[i].isPresent());
+            THOR_THROW_IF_FALSE(featureOutputs[i].get().getDescriptor().getDimensions()[axis] == axisElements[i]);
         }
 
-        assert(featureInputs[0].get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(featureInputs[0].get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].get().getPlacement().getDeviceNum());
         cudaError_t cudaStatus;
         int numSplitTensors = featureOutputs.size();
-        assert(errorInputs.size() == featureOutputs.size());
+        THOR_THROW_IF_FALSE(errorInputs.size() == featureOutputs.size());
 
         uint32_t numPresentErrorInputs = numPresentTensors(errorInputs);
-        assert(numPresentErrorInputs == errorInputs.size() || numPresentErrorInputs == 0);
+        THOR_THROW_IF_FALSE(numPresentErrorInputs == errorInputs.size() || numPresentErrorInputs == 0);
 
         cudaStatus = cudaMalloc(&splitTensorFeatureOutputMemoriesArray_d, numSplitTensors * sizeof(half *));
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         half **splitTensorFeatureOutputMemoriesArray = new half *[numSplitTensors];
         for (int i = 0; i < numSplitTensors; ++i)
             splitTensorFeatureOutputMemoriesArray[i] = (half *)featureOutputs[i].get().getMemPtr();
@@ -101,12 +103,12 @@ class Split : public MultiConnectionLayer {
                                 splitTensorFeatureOutputMemoriesArray,
                                 numSplitTensors * sizeof(half *),
                                 cudaMemcpyHostToDevice);
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         delete[] splitTensorFeatureOutputMemoriesArray;
 
         if (numPresentErrorInputs > 0) {
             cudaStatus = cudaMalloc(&splitTensorErrorInputMemoriesArray_d, numSplitTensors * sizeof(half *));
-            assert(cudaStatus == cudaSuccess);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             half **splitTensorErrorInputMemoriesArray = new half *[numSplitTensors];
             for (int i = 0; i < numSplitTensors; ++i) {
                 splitTensorErrorInputMemoriesArray[i] = (half *)errorInputs[i].get().getMemPtr();
@@ -115,11 +117,11 @@ class Split : public MultiConnectionLayer {
                                     splitTensorErrorInputMemoriesArray,
                                     numSplitTensors * sizeof(half *),
                                     cudaMemcpyHostToDevice);
-            assert(cudaStatus == cudaSuccess);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             delete[] splitTensorErrorInputMemoriesArray;
         } else {
             for (uint32_t i = 0; i < errorOutputs.size(); ++i) {
-                assert(previousLayers[i].isPresent());
+                THOR_THROW_IF_FALSE(previousLayers[i].isPresent());
                 if (errorOutputs[i].isPresent())
                     previousLayers[i].get()->replaceErrorInput(errorOutputs[i], Optional<Tensor>::empty());
             }
@@ -129,10 +131,10 @@ class Split : public MultiConnectionLayer {
         for (int i = 0; i < numSplitTensors; ++i)
             axisElementsPerSplitTensor[i] = axisElements[i];
         cudaStatus = cudaMalloc(&axisElementsPerSplitTensor_d, numSplitTensors * sizeof(long));
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         cudaStatus =
             cudaMemcpy(axisElementsPerSplitTensor_d, axisElementsPerSplitTensor, numSplitTensors * sizeof(long), cudaMemcpyHostToDevice);
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
 
         unsigned int numDimensions = featureInputs.front().get().getDescriptor().getDimensions().size();
         long *stridePerSplitTensorDimension = new long[numDimensions * numSplitTensors];
@@ -143,12 +145,12 @@ class Split : public MultiConnectionLayer {
                                                                        featureOutputs[t].get().getDescriptor().getDimensions()[d + 1];
         }
         cudaStatus = cudaMalloc(&stridePerSplitTensorDimension_d, numDimensions * numSplitTensors * sizeof(long));
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         cudaStatus = cudaMemcpy(stridePerSplitTensorDimension_d,
                                 stridePerSplitTensorDimension,
                                 numDimensions * numSplitTensors * sizeof(long),
                                 cudaMemcpyHostToDevice);
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
 
         delete[] stridePerSplitTensorDimension;
         delete[] axisElementsPerSplitTensor;
@@ -158,22 +160,22 @@ class Split : public MultiConnectionLayer {
         for (int i = (int)inputDimensions.size() - 2; i >= 0; --i)
             stridePerPackedTensorDimension[i] = inputDimensions[i + 1] * stridePerPackedTensorDimension[i + 1];
         cudaStatus = cudaMalloc(&stridePerPackedTensorDimension_d, inputDimensions.size() * sizeof(unsigned long));
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         cudaStatus = cudaMemcpy(stridePerPackedTensorDimension_d,
                                 stridePerPackedTensorDimension,
                                 inputDimensions.size() * sizeof(unsigned long),
                                 cudaMemcpyHostToDevice);
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         delete[] stridePerPackedTensorDimension;
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) {}
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) override {}
 
-    virtual void backProp(
-        Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) {}
+    void backProp(
+        Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) override {}
 
-    virtual void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
-        assert(featureInput.isPresent());
+    void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
 
         launchSplit(splitTensorFeatureOutputMemoriesArray_d,
                     (half *)featureInput.get().getMemPtr(),
@@ -194,7 +196,7 @@ class Split : public MultiConnectionLayer {
         }
     }
 
-    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {
+    void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {
         // Experimental - back propagation stops at empty error input
         if (errorInput.isEmpty())
             return;
@@ -204,7 +206,7 @@ class Split : public MultiConnectionLayer {
             std::unique_lock<std::mutex> lck(mtx);
 
             if (errorInput.isPresent()) {
-                assert(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
+                THOR_THROW_IF_FALSE(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
                 stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
             }
             if (!stillWaitingForErrorInputTensors.empty())
@@ -231,34 +233,34 @@ class Split : public MultiConnectionLayer {
         previousLayers[0].get()->backward(errorOutputs[0]);
     }
 
-    virtual void cleanup() {
+    void cleanup() override {
         cudaError_t cudaStatus;
         TensorPlacement placement = featureInputs[0].get().getPlacement();
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].get().getPlacement().getDeviceNum());
         if (splitTensorErrorInputMemoriesArray_d != nullptr) {
             cudaStatus = cudaFree(splitTensorErrorInputMemoriesArray_d);
-            assert(cudaStatus == cudaSuccess);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             splitTensorErrorInputMemoriesArray_d = nullptr;
         }
         cudaStatus = cudaFree(axisElementsPerSplitTensor_d);
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         axisElementsPerSplitTensor_d = nullptr;
         cudaStatus = cudaFree(stridePerPackedTensorDimension_d);
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         stridePerPackedTensorDimension_d = nullptr;
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
+    void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
         // FIXME: Reuse MultiConnectionLayer connectToNextLayer and add any additional logic here if needed
-        assert(!running);
-        assert(featureInputs.size() == 1);
+        THOR_THROW_IF_FALSE(!running);
+        THOR_THROW_IF_FALSE(featureInputs.size() == 1);
 
         unsigned int connection = featureOutputs.size();
-        assert(connection < axisElements.size());
+        THOR_THROW_IF_FALSE(connection < axisElements.size());
 
         TensorPlacement placement = featureInputs[0].get().getPlacement();
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
 
         featureOutputs.push_back(createFeatureOutputTensor());
         nextLayers.push_back(nextLayer);
@@ -268,18 +270,18 @@ class Split : public MultiConnectionLayer {
             this, featureOutputs.back(), streams.back(), shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType));
 
         if (errorInputs.back().isPresent()) {
-            assert(errorInputs.back().get().getDescriptor() == featureOutputs.back().get().getDescriptor());
-            assert(errorInputs.back().get().getPlacement() == errorInputs.front().get().getPlacement());
-            assert(errorInputs.back().get().getPlacement() == featureOutputs.back().get().getPlacement());
+            THOR_THROW_IF_FALSE(errorInputs.back().get().getDescriptor() == featureOutputs.back().get().getDescriptor());
+            THOR_THROW_IF_FALSE(errorInputs.back().get().getPlacement() == errorInputs.front().get().getPlacement());
+            THOR_THROW_IF_FALSE(errorInputs.back().get().getPlacement() == featureOutputs.back().get().getPlacement());
         }
         ensureNoDeviceCrossing();
     }
 
-    virtual Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
-        assert(!compiled);
-        assert(featureInputs.empty());
-        assert(featureInput.isPresent());
+    Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override {
+        THOR_THROW_IF_FALSE(!compiled);
+        THOR_THROW_IF_FALSE(featureInputs.empty());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
 
         streams.push_back(stream);
 
@@ -291,8 +293,8 @@ class Split : public MultiConnectionLayer {
             errorOutputs.emplace_back(Optional<Tensor>::empty());
 
         if (errorOutputs.back().isPresent()) {
-            assert(featureInputs.back().get().getDescriptor() == errorOutputs.back().get().getDescriptor());
-            assert(featureInputs.back().get().getPlacement() == errorOutputs.back().get().getPlacement());
+            THOR_THROW_IF_FALSE(featureInputs.back().get().getDescriptor() == errorOutputs.back().get().getDescriptor());
+            THOR_THROW_IF_FALSE(featureInputs.back().get().getPlacement() == errorOutputs.back().get().getPlacement());
         }
         ensureNoDeviceCrossing();
 

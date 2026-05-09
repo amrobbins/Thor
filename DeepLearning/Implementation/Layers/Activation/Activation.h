@@ -1,23 +1,25 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
 namespace ThorImplementation {
 
 class Activation : public Layer {
    public:
-    virtual ~Activation() {}
+    ~Activation() override {}
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isPresent());
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         return featureInput.get().clone();
     }
 
     // Just returns the number of floats in a single example.
     // For activation functions that require say 2 floating point operations per input float,
     // return 2 * Activation::floatingPointOperationsPerExampleForward()
-    virtual uint64_t floatingPointOperationsPerExampleForward() {
-        assert(featureInput.isPresent());
+    uint64_t floatingPointOperationsPerExampleForward() override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         std::vector<uint64_t> dimensions = featureInput.get().getDescriptor().getDimensions();
         uint64_t numElements = 1;
         for (uint32_t i = 1; i < dimensions.size(); ++i) {
@@ -26,7 +28,7 @@ class Activation : public Layer {
         return numElements;
     }
 
-    virtual uint64_t floatingPointOperationsPerExampleBackward() { return floatingPointOperationsPerExampleForward(); }
+    uint64_t floatingPointOperationsPerExampleBackward() override { return floatingPointOperationsPerExampleForward(); }
 };
 
 }  // namespace ThorImplementation

@@ -1,26 +1,28 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
 namespace ThorImplementation {
 
 class DeviceCrossing : public Layer {
    public:
-    virtual ~DeviceCrossing() {}
+    ~DeviceCrossing() override {}
 
     DeviceCrossing() { uninitialized = true; }
 
     DeviceCrossing(TensorPlacement inputPlacement, TensorPlacement outputPlacement) {
-        assert(inputPlacement != outputPlacement);
+        THOR_THROW_IF_FALSE(inputPlacement != outputPlacement);
 
         uninitialized = false;
         this->inputPlacement = inputPlacement;
         this->outputPlacement = outputPlacement;
     }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(!uninitialized);
-        assert(featureInput.isPresent());
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(!uninitialized);
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         outputBuffer = featureInput.get().clone();
         finishedCopyEvent = stream.putEvent();
         return Tensor(outputPlacement, featureInput.get().getDescriptor());
@@ -28,14 +30,14 @@ class DeviceCrossing : public Layer {
 
     // Crosses from source device to dest device
     // Output is buffered so the stream on the source device is not blocked during copy
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(!uninitialized);
-        assert(inputTensor.isPresent());
-        assert(outputTensor.isPresent());
-        assert(outputPlacement != featureInput.get().getPlacement());
-        assert(stream.getGpuNum() == inputPlacement.getDeviceNum());
-        assert(inputTensor.get().getPlacement() == inputPlacement);
-        assert(outputTensor.get().getPlacement() == outputPlacement);
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(!uninitialized);
+        THOR_THROW_IF_FALSE(inputTensor.isPresent());
+        THOR_THROW_IF_FALSE(outputTensor.isPresent());
+        THOR_THROW_IF_FALSE(outputPlacement != featureInput.get().getPlacement());
+        THOR_THROW_IF_FALSE(stream.getGpuNum() == inputPlacement.getDeviceNum());
+        THOR_THROW_IF_FALSE(inputTensor.get().getPlacement() == inputPlacement);
+        THOR_THROW_IF_FALSE(outputTensor.get().getPlacement() == outputPlacement);
 
         // Ensure the previous data transfer has finished, so the buffer is available
         stream.waitEvent(finishedCopyEvent);
@@ -52,18 +54,18 @@ class DeviceCrossing : public Layer {
     }
 
     // Crosses from dest device to source device
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-        assert(!uninitialized);
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
+        THOR_THROW_IF_FALSE(!uninitialized);
         if (errorOut.isPresent()) {
             stream.waitEvent(otherDeviceStream.putEvent());
             errorOut.get().copyFromAsync(errorIn, stream);
         }
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
-        assert(!compiled);
+    void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
+        THOR_THROW_IF_FALSE(!compiled);
 
-        assert(this->nextLayer.isEmpty());
+        THOR_THROW_IF_FALSE(this->nextLayer.isEmpty());
         this->nextLayer = nextLayer;
         if (nextLayer->hasFeatureInput())
             featureOutput = createFeatureOutputTensor();
@@ -81,18 +83,18 @@ class DeviceCrossing : public Layer {
         }
 
         if (errorInput.isPresent() && featureOutput.isPresent()) {
-            assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
-            assert(errorInput.get().getPlacement() == featureOutput.get().getPlacement());
+            THOR_THROW_IF_FALSE(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
+            THOR_THROW_IF_FALSE(errorInput.get().getPlacement() == featureOutput.get().getPlacement());
         }
 
         ensureNoDeviceCrossing();
     }
 
-    virtual Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
-        assert(!uninitialized);
-        assert(featureInput.isPresent());
-        assert(featureInput.get().getPlacement() == inputPlacement);
+    Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override {
+        THOR_THROW_IF_FALSE(!uninitialized);
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.get().getPlacement() == inputPlacement);
 
         if (outputPlacement.getMemDevice() == TensorPlacement::MemDevices::CPU)
             otherDeviceStream = stream;
@@ -102,7 +104,7 @@ class DeviceCrossing : public Layer {
         return Layer::connectToPreviousLayer(previousLayer, featureInput, stream, backPropagateError);
     }
 
-    virtual void ensureNoDeviceCrossing() {
+    void ensureNoDeviceCrossing() override {
         // device crossing allowed here.
     }
 

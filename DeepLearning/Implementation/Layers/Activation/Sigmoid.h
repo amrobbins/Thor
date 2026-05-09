@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Activation/Activation.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Activation/Sigmoid.h"
@@ -11,14 +13,14 @@ class Sigmoid : public Activation {
     Sigmoid() { this->backwardComputedExternally = false; }
     Sigmoid(bool backwardComputedExternally) { this->backwardComputedExternally = backwardComputedExternally; }
 
-    virtual ~Sigmoid() {}
+    ~Sigmoid() override {}
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isPresent());
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         return featureInput.get().clone();
     }
 
-    virtual void postCompile() {
+    void postCompile() override {
         if (backwardComputedExternally) {
             // ErrorInput to the previous layer is the errorInput coming to this layer,
             // then backProp is a no op
@@ -30,23 +32,23 @@ class Sigmoid : public Activation {
         Layer::postCompile();
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(inputTensor.isPresent());
-        assert(outputTensor.isPresent());
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(inputTensor.isPresent());
+        THOR_THROW_IF_FALSE(outputTensor.isPresent());
         TensorPlacement placement = inputTensor.get().getPlacement();
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         launchSigmoid((half*)outputTensor.get().getMemPtr(),
                       (half*)inputTensor.get().getMemPtr(),
                       inputTensor.get().getDescriptor().getTotalNumElements(),
                       stream);
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-        assert(dataIn.isPresent());
-        assert(errorIn.isPresent());
-        assert(errorOut.isPresent());
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
+        THOR_THROW_IF_FALSE(dataIn.isPresent());
+        THOR_THROW_IF_FALSE(errorIn.isPresent());
+        THOR_THROW_IF_FALSE(errorOut.isPresent());
         TensorPlacement placement = errorOut.get().getPlacement();
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
 
         if (backwardComputedExternally)
             return;
@@ -58,7 +60,7 @@ class Sigmoid : public Activation {
                               stream);
     }
 
-    virtual std::string getType() { return "Sigmoid"; }
+    std::string getType() override { return "Sigmoid"; }
 
    protected:
     bool backwardComputedExternally;

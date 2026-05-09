@@ -18,19 +18,19 @@ class CrossEntropy : public Loss {
     CrossEntropy();
     CrossEntropy(CrossEntropyLossType crossEntropyLossType, TensorDescriptor::DataType lossDataType, bool indexLabels = false);
 
-    virtual ~CrossEntropy();
+    ~CrossEntropy() override;
 
     CrossEntropy(bool indexLabels);
 
-    virtual void compileImpl();
+    void compileImpl() override;
 
-    virtual void cleanup() {}
+    void cleanup() override {}
 
-    virtual void infer(Optional<Tensor> predictions, Optional<Tensor> loss, Stream stream);
+    void infer(Optional<Tensor> predictions, Optional<Tensor> loss, Stream stream) override;
 
-    virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream);
+    void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream) override;
 
-    virtual std::string getType();
+    std::string getType() override;
 
    private:
     void launchCrossEntropyWithFP16Predictions();

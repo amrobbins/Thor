@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
 namespace ThorImplementation {
@@ -8,7 +10,7 @@ namespace ThorImplementation {
 // Data type will be converted if necessary, memory will be copied across devices if necessary.
 class NetworkInput : public Layer {
    public:
-    virtual ~NetworkInput() {}
+    ~NetworkInput() override {}
 
     NetworkInput(TensorPlacement networkPlacement,
                  Optional<TensorDescriptor::DataType> contentDataType,
@@ -17,14 +19,14 @@ class NetworkInput : public Layer {
     }
 
     NetworkInput(Tensor exampleTensor) {
-        assert(exampleTensor.isInitialized());
+        THOR_THROW_IF_FALSE(exampleTensor.isInitialized());
         construct(exampleTensor.getPlacement(), exampleTensor.getDescriptor().getDataType(), exampleTensor.getDescriptor().getDimensions());
     }
 
     void construct(TensorPlacement networkPlacement,
                    Optional<TensorDescriptor::DataType> contentDataType,
                    Optional<std::vector<unsigned long>> contentDimensions) {
-        assert(contentDimensions.isPresent() == contentDataType.isPresent());
+        THOR_THROW_IF_FALSE(contentDimensions.isPresent() == contentDataType.isPresent());
         this->networkPlacement = networkPlacement;
         this->contentDataType = contentDataType;
         this->contentDimensions = contentDimensions;
@@ -37,8 +39,8 @@ class NetworkInput : public Layer {
 
     virtual bool isInput() { return true; }
 
-    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
-        assert(this->nextLayer.isEmpty());
+    void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
+        THOR_THROW_IF_FALSE(this->nextLayer.isEmpty());
 
         this->nextLayer = nextLayer;
 
@@ -48,19 +50,19 @@ class NetworkInput : public Layer {
         nextLayer->connectToPreviousLayer(this, featureOutput, stream, false, loaderConnectionType);
     }
 
-    virtual Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
-        assert(false);
+    Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override {
+        THOR_UNREACHABLE();
     }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
+    Optional<Tensor> createFeatureOutputTensor() override {
         if (contentDimensions.isPresent())
             return Tensor(networkPlacement, TensorDescriptor(contentDataType, contentDimensions));
         return Optional<Tensor>::empty();
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {}
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {}
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {}
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {}
 
     // Only called for input endpoints
     // When the source tensor that will be sent to the input is loaded via a stream,
@@ -72,17 +74,17 @@ class NetworkInput : public Layer {
 
     // Only called for input endpoints
     // This version of forward expects that the memory in featureInput has already been populated before forward is called.
-    virtual void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
-        assert(contentDimensions.isPresent() == featureInput.isPresent());
+    void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
+        THOR_THROW_IF_FALSE(contentDimensions.isPresent() == featureInput.isPresent());
 
         if (contentDimensions.isPresent())
-            assert(featureInput.get().getDescriptor().getDimensions() == contentDimensions.get());
+            THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions() == contentDimensions.get());
 
         if (!nextLayer.isPresent())
             return;
 
         if (contentDimensions.isPresent()) {
-            assert(featureOutput.isPresent());
+            THOR_THROW_IF_FALSE(featureOutput.isPresent());
 
             // Wait for previous featureOutput load to finish
             // Copy into buffer using the load stream
@@ -100,7 +102,7 @@ class NetworkInput : public Layer {
         nextLayer.get()->forward(featureOutput, validationPass);
     }
 
-    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {}
+    void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {}
 
    protected:
     Optional<std::vector<unsigned long>> contentDimensions;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Misc/Extract.h"
 #include "Utilities/TensorOperations/Misc/Pad.h"
@@ -12,7 +14,7 @@ namespace ThorImplementation {
  */
 class Pad : public Layer {
    public:
-    virtual ~Pad() {}
+    ~Pad() override {}
 
     // The paddingAmount map key is the dimension number (starting from dimension 0 - the most significant dimension)
     // i.e. if there is a c++ array data[x][y][z] then paddingAmount[0] represents paddingAmount[x].
@@ -20,21 +22,21 @@ class Pad : public Layer {
     // beginning of that dimension and the second integer represents the number of elements of padding at the end of
     // that dimension.
     Pad(std::map<unsigned int, std::pair<unsigned int, unsigned int>> paddingAmount) {
-        assert(!paddingAmount.empty());
+        THOR_THROW_IF_FALSE(!paddingAmount.empty());
         this->paddingAmount = paddingAmount;
     }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isPresent());
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         std::vector<unsigned long> paddedDimensions = getDimensionsAfterPadding(featureInput);
         return Tensor(featureInput.get().getPlacement(),
                       TensorDescriptor(featureInput.get().getDescriptor().getDataType(), paddedDimensions));
     }
 
-    virtual void compileImpl() {
+    void compileImpl() override {
         Layer::compileImpl();
-        assert(featureInput.isPresent());
-        assert(featureOutput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureOutput.isPresent());
 
         TensorPlacement placement = featureInput.get().getPlacement();
         std::vector<unsigned long> strideArrayDimensions;
@@ -76,17 +78,17 @@ class Pad : public Layer {
                 padBeforeCpu[i] = dimensionPadding.first;
                 padAfterCpu[i] = padBeforeCpu[i] + inputDimensionSize - 1;
                 unsigned long outputDimensionSize = featureOutput.get().getDescriptor().getDimensions()[i];
-                assert(outputDimensionSize - (inputDimensionSize + dimensionPadding.first) == dimensionPadding.second);
+                THOR_THROW_IF_FALSE(outputDimensionSize - (inputDimensionSize + dimensionPadding.first) == dimensionPadding.second);
             }
         }
         padBefore_d.copyFromAsync(padBefore, stream);
         padAfter_d.copyFromAsync(padAfter, stream);
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(inputTensor.isPresent());
-        assert(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(outputTensor.isPresent());
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(inputTensor.isPresent());
+        THOR_THROW_IF_FALSE(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(outputTensor.isPresent());
         ScopedGpu scopedGpu(inputTensor.get().getPlacement().getDeviceNum());
 
         launchPad((half *)outputTensor.get().getMemPtr(),
@@ -100,12 +102,12 @@ class Pad : public Layer {
                   stream);
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
         if (errorOut.isEmpty())
             return;
 
-        assert(errorIn.isPresent());
-        assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(errorIn.isPresent());
+        THOR_THROW_IF_FALSE(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(errorIn.get().getPlacement().getDeviceNum());
 
         launchExtract((half *)errorOut.get().getMemPtr(),
@@ -123,7 +125,7 @@ class Pad : public Layer {
         std::vector<unsigned long> dimensions = unpaddedTensor.getDescriptor().getDimensions();
         for (auto it = paddingAmount.begin(); it != paddingAmount.end(); ++it) {
             unsigned int dimension = it->first;
-            assert(dimension < dimensions.size());
+            THOR_THROW_IF_FALSE(dimension < dimensions.size());
             std::pair<unsigned int, unsigned int> dimensionPadding = it->second;
             dimensions[dimension] += (dimensionPadding.first + dimensionPadding.second);
         }

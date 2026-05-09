@@ -3,6 +3,7 @@
 
 #include <stdexcept>
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace std;
 
 namespace ThorImplementation {
@@ -17,7 +18,7 @@ class BNParameter final : public PhysicalParameter {
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
-        assert(inputTensor.getDimensions().size() == 2 || inputTensor.getDimensions().size() == 4);
+        THOR_THROW_IF_FALSE(inputTensor.getDimensions().size() == 2 || inputTensor.getDimensions().size() == 4);
         const uint64_t channels = inputTensor.getDimensions()[1];
         TensorDescriptor::DataType resolvedDataType;
         if (storageDataType.isPresent())
@@ -60,14 +61,14 @@ BatchNormalization::~BatchNormalization() { cleanup(); }
 
 Optional<Tensor> BatchNormalization::createFeatureOutputTensor() {
     Optional<Tensor> maybeInput = getFirstPresentTensor(featureInputs);
-    assert(maybeInput.isPresent());
+    THOR_THROW_IF_FALSE(maybeInput.isPresent());
     return maybeInput.get().clone();
 }
 
 Optional<Tensor> BatchNormalization::createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) {
     if (backPropagateError && !isInferenceOnly()) {
-        assert(featureInputs.size() > connectionNumber);
-        assert(featureInputs[connectionNumber].isPresent());
+        THOR_THROW_IF_FALSE(featureInputs.size() > connectionNumber);
+        THOR_THROW_IF_FALSE(featureInputs[connectionNumber].isPresent());
         return featureInputs[connectionNumber].get().clone();
     }
     return Optional<Tensor>::empty();
@@ -90,16 +91,16 @@ uint64_t BatchNormalization::flopCountBackward() {
 void BatchNormalization::compileImpl() {
     TrainableLayer::compileImpl();
 
-    assert(!featureInputs.empty());
-    assert(!featureOutputs.empty());
-    assert(featureInputs.size() == featureOutputs.size());
+    THOR_THROW_IF_FALSE(!featureInputs.empty());
+    THOR_THROW_IF_FALSE(!featureOutputs.empty());
+    THOR_THROW_IF_FALSE(featureInputs.size() == featureOutputs.size());
 
     Optional<Tensor> maybeInput = getFirstPresentTensor(featureInputs);
-    assert(maybeInput.isPresent());
+    THOR_THROW_IF_FALSE(maybeInput.isPresent());
     const Tensor& input = maybeInput.get();
 
     placement = input.getPlacement();
-    assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     ensureNoDeviceCrossing(placement);
 
     attachGradientUpdateStream();
@@ -118,16 +119,16 @@ void BatchNormalization::compileImpl() {
     biases = getParameter("biases")->getStorage();
     resultRunningMean = getParameter("running_mean")->getStorage();
     resultRunningVariance = getParameter("running_variance")->getStorage();
-    assert(weights.getDataType() == DataType::FP32);
-    assert(biases.getDataType() == DataType::FP32);
-    assert(resultRunningMean.getDataType() == DataType::FP32);
-    assert(resultRunningVariance.getDataType() == DataType::FP32);
-    assert(weights.getDimensions() == biases.getDimensions());
-    assert(weights.getDimensions() == resultRunningMean.getDimensions());
-    assert(weights.getDimensions() == resultRunningVariance.getDimensions());
+    THOR_THROW_IF_FALSE(weights.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(biases.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(resultRunningMean.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(resultRunningVariance.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(weights.getDimensions() == biases.getDimensions());
+    THOR_THROW_IF_FALSE(weights.getDimensions() == resultRunningMean.getDimensions());
+    THOR_THROW_IF_FALSE(weights.getDimensions() == resultRunningVariance.getDimensions());
 
     const vector<uint64_t> inputDimensions = input.getDescriptor().getDimensions();
-    assert(inputDimensions.size() == 2 || inputDimensions.size() == 4);
+    THOR_THROW_IF_FALSE(inputDimensions.size() == 2 || inputDimensions.size() == 4);
     batchSize = inputDimensions[0];
     numChannels = inputDimensions[1];
     if (inputDimensions.size() == 2) {
@@ -177,15 +178,15 @@ void BatchNormalization::compileImpl() {
         resultSaveMean.push_back(weights.clone());
         resultSaveInvVariance.push_back(weights.clone());
         if (errorInputs.size() > i && errorInputs[i].isPresent() && (errorOutputs.size() <= i || errorOutputs[i].isEmpty())) {
-            assert(featureInputs[i].isPresent());
+            THOR_THROW_IF_FALSE(featureInputs[i].isPresent());
             // We may need a single, right sized, chunk of scratch memory for back prop pruned paths.
             if (scratchErrorOutput.isEmpty())
                 scratchErrorOutput = featureInputs[i].get().clone();
         }
     }
 
-    assert(exponentialRunningAverageFactor > 0.0);
-    assert(exponentialRunningAverageFactor <= 1.0);
+    THOR_THROW_IF_FALSE(exponentialRunningAverageFactor > 0.0);
+    THOR_THROW_IF_FALSE(exponentialRunningAverageFactor <= 1.0);
     itemsObserved = 0;
     currentExponentialRunningAverageFactor.assign(featureInputs.size(), 0.0);
 }
@@ -220,8 +221,8 @@ void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
     Optional<Tensor> inputTensor = featureInputs[connectionNumber];
     Optional<Tensor> outputTensor = featureOutputs[connectionNumber];
     Stream stream = streams[connectionNumber];
-    assert(inputTensor.isPresent());
-    assert(outputTensor.isPresent());
+    THOR_THROW_IF_FALSE(inputTensor.isPresent());
+    THOR_THROW_IF_FALSE(outputTensor.isPresent());
 
     if (itemsObserved != UINT64_MAX)
         itemsObserved += 1;
@@ -281,15 +282,15 @@ Optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradienFused
 
     auto weightsParameter = getParameter("weights");
     auto biasesParameter = getParameter("biases");
-    assert(weightsParameter->hasOptimizer());
-    assert(biasesParameter->hasOptimizer());
+    THOR_THROW_IF_FALSE(weightsParameter->hasOptimizer());
+    THOR_THROW_IF_FALSE(biasesParameter->hasOptimizer());
 
     shared_ptr<Optimizer> weightsOptimizer = weightsParameter->getOptimizer();
     shared_ptr<Optimizer> biasesOptimizer = biasesParameter->getOptimizer();
-    assert(weightsOptimizer != nullptr);
-    assert(biasesOptimizer != nullptr);
-    assert(weightsOptimizer->getWeightsGradient().isPresent());
-    assert(biasesOptimizer->getWeightsGradient().isPresent());
+    THOR_THROW_IF_FALSE(weightsOptimizer != nullptr);
+    THOR_THROW_IF_FALSE(biasesOptimizer != nullptr);
+    THOR_THROW_IF_FALSE(weightsOptimizer->getWeightsGradient().isPresent());
+    THOR_THROW_IF_FALSE(biasesOptimizer->getWeightsGradient().isPresent());
 
     Optional<Tensor> errorOut = Optional<Tensor>::empty();
     if (errorOutputs.size() > connectionNumber && errorOutputs[connectionNumber].isPresent()) {
@@ -297,8 +298,8 @@ Optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradienFused
     } else {
         errorOut = scratchErrorOutput;
     }
-    assert(errorOut.isPresent());
-    assert(gradientUpdateStream.isPresent());
+    THOR_THROW_IF_FALSE(errorOut.isPresent());
+    THOR_THROW_IF_FALSE(gradientUpdateStream.isPresent());
 
     CUDNN_CHECK(cudnnBatchNormalizationBackward(gradientUpdateStream.get().getCudnnHandle(),
                                                 height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -21,8 +23,8 @@ class Initializer {
         // Seems special case it here or change the shape, so just adding Glorot special case support.
         this->layerFanIn = layerFanIn;
         this->layerFanOut = layerFanOut;
-        assert(this->layerFanIn > 0);
-        assert(this->layerFanOut > 0);
+        THOR_THROW_IF_FALSE(this->layerFanIn > 0);
+        THOR_THROW_IF_FALSE(this->layerFanOut > 0);
     }
 
     virtual void initialize(Stream initStream) = 0;

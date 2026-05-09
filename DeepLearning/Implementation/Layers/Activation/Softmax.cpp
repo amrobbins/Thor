@@ -2,6 +2,7 @@
 
 #include <cudnn.h>
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
 
 const float Softmax::ALPHA_NO_SCALE = 1.0f;
@@ -12,8 +13,8 @@ Softmax::Softmax() { backwardComputedExternally = false; }
 Softmax::Softmax(bool backwardComputedExternally) { this->backwardComputedExternally = backwardComputedExternally; }
 
 Optional<Tensor> Softmax::createFeatureOutputTensor() {
-    assert(featureInput.isPresent());
-    assert(featureInput.get().getDescriptor().getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(featureInput.isPresent());
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions().size() == 2);
     return featureInput.get().clone();
 }
 
@@ -36,16 +37,16 @@ void Softmax::cleanup() {
     if (compiled) {
         cudnnStatus_t cudnnStatus;
         cudnnStatus = cudnnDestroyTensorDescriptor(cudnnTensorDescriptor);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         compiled = false;
     }
 }
 
 void Softmax::infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-    assert(inputTensor.isPresent());
-    assert(outputTensor.isPresent());
+    THOR_THROW_IF_FALSE(inputTensor.isPresent());
+    THOR_THROW_IF_FALSE(outputTensor.isPresent());
     TensorPlacement placement = inputTensor.get().getPlacement();
-    assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     cudnnStatus_t cudnnStatus;
     cudnnStatus = cudnnSoftmaxForward(stream.getCudnnHandle(),
@@ -57,16 +58,16 @@ void Softmax::infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor,
                                       &BETA_CLEAR,
                                       cudnnTensorDescriptor,
                                       outputTensor.get().getMemPtr());
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
 
 void Softmax::backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-    assert(dataIn.isPresent());
-    assert(errorIn.isPresent());
-    assert(errorOut.isPresent());
-    assert(featureOutput.isPresent());
+    THOR_THROW_IF_FALSE(dataIn.isPresent());
+    THOR_THROW_IF_FALSE(errorIn.isPresent());
+    THOR_THROW_IF_FALSE(errorOut.isPresent());
+    THOR_THROW_IF_FALSE(featureOutput.isPresent());
     TensorPlacement placement = errorOut.get().getPlacement();
-    assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     if (backwardComputedExternally)
         return;
@@ -85,7 +86,7 @@ void Softmax::backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Option
                                        &BETA_CLEAR,
                                        cudnnTensorDescriptor,
                                        errorOut.get().getMemPtr());
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
 
 bool Softmax::isBackwardComputedExternally() { return backwardComputedExternally; }

@@ -1,12 +1,14 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
 namespace ThorImplementation {
 
 class TypeConversion : public Layer {
    public:
-    virtual ~TypeConversion() {}
+    ~TypeConversion() override {}
 
     TypeConversion() { uninitialized = true; }
 
@@ -15,20 +17,20 @@ class TypeConversion : public Layer {
         dataType = newDataType;
     }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isPresent());
-        assert(featureInput.get().getDescriptor().getDataType() != dataType);
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() != dataType);
         return featureInput.get().clone(dataType);
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(outputTensor.isPresent());
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(outputTensor.isPresent());
         outputTensor.get().copyFromAsync(inputTensor, stream);
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
         if (errorOut.isPresent()) {
-            assert(errorIn.isPresent());
+            THOR_THROW_IF_FALSE(errorIn.isPresent());
             errorOut.get().copyFromAsync(errorIn, stream);
         }
     }

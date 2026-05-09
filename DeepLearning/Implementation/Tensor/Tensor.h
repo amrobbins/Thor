@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "Utilities/Common/ReferenceCounted.h"
@@ -760,23 +762,23 @@ class Tensor : private ReferenceCounted {
 
     // Convenience functions to pass information from the descriptor
     TensorDescriptor::DataType getDataType() const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return descriptor.getDataType();
     }
     std::vector<uint64_t> getDimensions() const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return descriptor.getDimensions();
     }
     uint32_t getNumDimensions() const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return descriptor.getNumDimensions();
     }
     uint64_t getTotalNumElements() const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return descriptor.getTotalNumElements();
     }
     uint64_t getArraySizeInBytes() const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return descriptor.getArraySizeInBytes();
     }
 
