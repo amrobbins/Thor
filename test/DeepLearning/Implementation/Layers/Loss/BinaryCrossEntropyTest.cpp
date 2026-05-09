@@ -1,3 +1,4 @@
+#include <optional>
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 
@@ -90,18 +91,18 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
         LayerTestHelper::initializeNetwork(layers);
 
         if (inferenceOnly) {
-            ASSERT_TRUE(crossEntropy->getErrorOutput().isEmpty());
+            ASSERT_TRUE(!crossEntropy->getErrorOutput().has_value());
         }
-        ASSERT_TRUE(crossEntropy->getErrorInput().isEmpty());
+        ASSERT_TRUE(!crossEntropy->getErrorInput().has_value());
 
-        assert(lossOutput->getFeatureInput().isPresent());
-        assert(lossOutput->getFeatureOutput().isPresent());
-        Optional<Tensor> maybeFO = lossOutput->getFeatureOutput();
-        assert(maybeFO.isPresent());
-        assert(!maybeFO.isEmpty());
-        maybeFO.get();
+        assert(lossOutput->getFeatureInput().has_value());
+        assert(lossOutput->getFeatureOutput().has_value());
+        std::optional<Tensor> maybeFO = lossOutput->getFeatureOutput();
+        assert(maybeFO.has_value());
+        assert(maybeFO.has_value());
+        maybeFO.value();
 
-        Tensor outputGpu = lossOutput->getFeatureOutput();
+        Tensor outputGpu = lossOutput->getFeatureOutput().value();
 
         // Network is runnable here
         activationsInput->forward(activationsCpu, false);
@@ -114,7 +115,7 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
         Tensor errorOutputCpu;
         Tensor errorOutputGpu_h;
         if (!inferenceOnly) {
-            errorOutputGpu = sigmoid->getErrorOutput();
+            errorOutputGpu = sigmoid->getErrorOutput().value();
             errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
             errorOutputGpu_h = errorOutputCpu.clone();
             errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);

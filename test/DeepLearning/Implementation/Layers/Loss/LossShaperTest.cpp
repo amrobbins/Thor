@@ -59,15 +59,15 @@ TEST(LossShaper, NumericalBatchFp16) {
         LayerTestHelper::connectTwoLayers(noOpLayer2, lossOutput);
         LayerTestHelper::initializeNetwork(layers);
 
-        ASSERT_TRUE(lossShaper->getErrorInput().isEmpty());
-        ASSERT_TRUE(lossShaper->getErrorOutput().isEmpty());
-        ASSERT_EQ(lossOutput->getFeatureOutput().get().getDimensions(), reducedDimensions);
+        ASSERT_TRUE(!lossShaper->getErrorInput().has_value());
+        ASSERT_TRUE(!lossShaper->getErrorOutput().has_value());
+        ASSERT_EQ(lossOutput->getFeatureOutput().value().getDimensions(), reducedDimensions);
 
         // Network is runnable here
         lossInput->forward(rawLossCpu, false);
         Tensor batchLossGpu_h(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
         stream.waitEvent(lossOutput->getOutputReadyEvent());
-        batchLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().get(), stream);
+        batchLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().value(), stream);
 
         stream.waitEvent(lossOutput->getOutputReadyEvent());
         stream.synchronize();
@@ -129,15 +129,15 @@ TEST(LossShaper, NumericalElementWiseFp32) {
         LayerTestHelper::connectTwoLayers(noOpLayer2, lossOutput);
         LayerTestHelper::initializeNetwork(layers);
 
-        ASSERT_TRUE(lossShaper->getErrorInput().isEmpty());
-        ASSERT_TRUE(lossShaper->getErrorOutput().isEmpty());
-        ASSERT_EQ(lossOutput->getFeatureOutput().get().getDimensions(), reducedDimensions);
+        ASSERT_TRUE(!lossShaper->getErrorInput().has_value());
+        ASSERT_TRUE(!lossShaper->getErrorOutput().has_value());
+        ASSERT_EQ(lossOutput->getFeatureOutput().value().getDimensions(), reducedDimensions);
 
         // Network is runnable here
         lossInput->forward(rawLossCpu, false);
         Tensor elementwiseLossGpu_h(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
         stream.waitEvent(lossOutput->getOutputReadyEvent());
-        elementwiseLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().get(), stream);
+        elementwiseLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().value(), stream);
 
         stream.waitEvent(lossOutput->getOutputReadyEvent());
         stream.synchronize();
@@ -202,15 +202,15 @@ TEST(LossShaper, NumericalClassWiseFp32) {
         LayerTestHelper::connectTwoLayers(noOpLayer2, lossOutput);
         LayerTestHelper::initializeNetwork(layers);
 
-        ASSERT_TRUE(lossShaper->getErrorInput().isEmpty());
-        ASSERT_TRUE(lossShaper->getErrorOutput().isEmpty());
-        ASSERT_EQ(lossOutput->getFeatureOutput().get().getDimensions(), reducedDimensions);
+        ASSERT_TRUE(!lossShaper->getErrorInput().has_value());
+        ASSERT_TRUE(!lossShaper->getErrorOutput().has_value());
+        ASSERT_EQ(lossOutput->getFeatureOutput().value().getDimensions(), reducedDimensions);
 
         // Network is runnable here
         lossInput->forward(rawLossCpu, false);
         Tensor classwiseLossGpu_h(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
         stream.waitEvent(lossOutput->getOutputReadyEvent());
-        classwiseLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().get(), stream);
+        classwiseLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().value(), stream);
 
         stream.waitEvent(lossOutput->getOutputReadyEvent());
         stream.synchronize();

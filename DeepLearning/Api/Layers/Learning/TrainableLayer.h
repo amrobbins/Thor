@@ -14,6 +14,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <optional>
 
 namespace Thor {
 
@@ -44,7 +45,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                   bool isFirstStamp,
                                   std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
-                                  Optional<Event> sisterLayerLoadedEvent);
+                                  std::optional<Event> sisterLayerLoadedEvent);
 
     virtual uint64_t getParameterBytes() const;
 

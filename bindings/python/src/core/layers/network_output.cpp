@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
 
 #include <nanobind/stl/string.h>
+#include <optional>
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
@@ -41,11 +42,11 @@ void bind_network_output(nb::module_ &m) {
     network_output.def(
         "get_feature_output",
         [](NetworkOutput &self) -> Tensor {
-            Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            // if (!maybeFeatureOutput.isPresent())
+            std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+            // if (!maybeFeatureOutput.has_value())
             //     return nullopt;
             // Network output creates featureOutput always, straight away.
-            return maybeFeatureOutput.get();
+            return maybeFeatureOutput.value();
         },
         R"nbdoc(
             Return the output tensor produced by this layer.

@@ -8,16 +8,16 @@ namespace Thor {
 
 json GradientRivet::serialize(const string &storageDir, Stream stream) const {
     assert(initialized);
-    assert(featureInput.isPresent());
-    assert(featureOutput.isPresent());
+    assert(featureInput.has_value());
+    assert(featureOutput.has_value());
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
-    j["input_tensor"] = featureInput.get().architectureJson();
-    j["output_tensor"] = featureOutput.get().architectureJson();
+    j["input_tensor"] = featureInput.value().architectureJson();
+    j["output_tensor"] = featureOutput.value().architectureJson();
 
     return j;
 }

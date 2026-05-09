@@ -8,6 +8,7 @@
 #include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Loss/CrossEntropy.h"
+#include <optional>
 
 namespace Thor {
 
@@ -58,65 +59,65 @@ class BinaryCrossEntropy : public Loss {
 class BinaryCrossEntropy::Builder {
    public:
     virtual BinaryCrossEntropy build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(_predictions.isPresent());
-        THOR_THROW_IF_FALSE(_labels.isPresent());
-        THOR_THROW_IF_FALSE(_predictions.get() != _labels.get());
-        if (_lossShape.isEmpty())
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_predictions.has_value());
+        THOR_THROW_IF_FALSE(_labels.has_value());
+        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+        if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
 
-        std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
+        std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
         // API layer does not have a batch dimension:
         THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
 
         BinaryCrossEntropy binaryCrossEntropy;
-        if (_sigmoidAddedToNetwork.isPresent()) {
-            THOR_THROW_IF_FALSE(_sigmoidAddedToNetwork.get() == true);
+        if (_sigmoidAddedToNetwork.has_value()) {
+            THOR_THROW_IF_FALSE(_sigmoidAddedToNetwork.value() == true);
             binaryCrossEntropy.sigmoidAddedToNetwork = true;
         } else {
             binaryCrossEntropy.sigmoidAddedToNetwork = false;
         }
-        binaryCrossEntropy.predictionsTensor = _predictions.get();
-        binaryCrossEntropy.labelsTensor = _labels.get();
-        if (_lossDataType.isEmpty())
+        binaryCrossEntropy.predictionsTensor = _predictions.value();
+        binaryCrossEntropy.labelsTensor = _labels.value();
+        if (!_lossDataType.has_value())
             _lossDataType = Tensor::DataType::FP32;
-        THOR_THROW_IF_FALSE(_lossDataType == Tensor::DataType::FP16 || _lossDataType == Tensor::DataType::FP32);
-        binaryCrossEntropy.lossDataType = _lossDataType;
+        THOR_THROW_IF_FALSE(_lossDataType.value() == Tensor::DataType::FP16 || _lossDataType.value() == Tensor::DataType::FP32);
+        binaryCrossEntropy.lossDataType = _lossDataType.value();
 
-        if (_lossShape == LossShape::BATCH) {
+        if (_lossShape.value() == LossShape::BATCH) {
             binaryCrossEntropy.lossShape = LossShape::BATCH;
-        } else if (_lossShape == LossShape::ELEMENTWISE) {
+        } else if (_lossShape.value() == LossShape::ELEMENTWISE) {
             binaryCrossEntropy.lossShape = LossShape::ELEMENTWISE;
         }
         binaryCrossEntropy.initialized = true;
-        binaryCrossEntropy.network = _network;
+        binaryCrossEntropy.network = _network.value();
 
         if (binaryCrossEntropy.isMultiLayer()) {
             binaryCrossEntropy.buildSupportLayersAndAddToNetwork();
         } else {
             THOR_THROW_IF_FALSE(binaryCrossEntropy.lossShape == LossShape::ELEMENTWISE);
-            binaryCrossEntropy.lossTensor = Tensor(_lossDataType, {1});
-            binaryCrossEntropy.addToNetwork(_network.get());
+            binaryCrossEntropy.lossTensor = Tensor(_lossDataType.value(), {1});
+            binaryCrossEntropy.addToNetwork(_network.value());
         }
 
         return binaryCrossEntropy;
     }
 
     virtual BinaryCrossEntropy::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual BinaryCrossEntropy::Builder &predictions(Tensor _predictions) {
-        THOR_THROW_IF_FALSE(!this->_predictions.isPresent());
+        THOR_THROW_IF_FALSE(!this->_predictions.has_value());
         THOR_THROW_IF_FALSE(_predictions.getDimensions().size() == 1 && _predictions.getDimensions()[0] == 1);
         this->_predictions = _predictions;
         return *this;
     }
 
     virtual BinaryCrossEntropy::Builder &labels(Tensor _labels) {
-        THOR_THROW_IF_FALSE(!this->_labels.isPresent());
+        THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(_labels.getDimensions().size() == 1 && _labels.getDimensions()[0] == 1);
         this->_labels = _labels;
         return *this;
@@ -127,7 +128,7 @@ class BinaryCrossEntropy::Builder {
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
      */
     virtual BinaryCrossEntropy::Builder &reportsBatchLoss() {
-        THOR_THROW_IF_FALSE(!_lossShape.isPresent());
+        THOR_THROW_IF_FALSE(!_lossShape.has_value());
         _lossShape = LossShape::BATCH;
         return *this;
     }
@@ -137,13 +138,13 @@ class BinaryCrossEntropy::Builder {
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
      */
     virtual BinaryCrossEntropy::Builder &reportsElementwiseLoss() {
-        THOR_THROW_IF_FALSE(!_lossShape.isPresent());
+        THOR_THROW_IF_FALSE(!_lossShape.has_value());
         _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
     virtual BinaryCrossEntropy::Builder &lossDataType(Tensor::DataType _lossDataType) {
-        THOR_THROW_IF_FALSE(this->_lossDataType.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == Tensor::DataType::FP32 || _lossDataType == Tensor::DataType::FP16);
         this->_lossDataType = _lossDataType;
         return *this;
@@ -156,18 +157,18 @@ class BinaryCrossEntropy::Builder {
      * result in a single layer that can be directly built.
      */
     virtual BinaryCrossEntropy::Builder &sigmoidAddedToNetwork() {
-        THOR_THROW_IF_FALSE(!_sigmoidAddedToNetwork.isPresent());
+        THOR_THROW_IF_FALSE(!_sigmoidAddedToNetwork.has_value());
         _sigmoidAddedToNetwork = true;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _predictions;
-    Optional<Tensor> _labels;
-    Optional<LossShape> _lossShape;
-    Optional<Tensor::DataType> _lossDataType;
-    Optional<bool> _sigmoidAddedToNetwork;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _predictions;
+    std::optional<Tensor> _labels;
+    std::optional<LossShape> _lossShape;
+    std::optional<Tensor::DataType> _lossDataType;
+    std::optional<bool> _sigmoidAddedToNetwork;
 
     friend class BinaryCrossEntropy;
 };

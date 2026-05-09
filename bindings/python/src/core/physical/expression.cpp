@@ -8,6 +8,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <sstream>
+#include <optional>
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
@@ -82,11 +83,11 @@ void bind_physical_expression(nb::module_& physical) {
     expr.def_static(
         "input",
         [](const std::string& name, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
-            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            std::optional<DataType> output_dtype = std::nullopt;
             if (!output_dtype_obj.is_none()) {
                 output_dtype = nb::cast<DataType>(output_dtype_obj);
             }
-            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            std::optional<DataType> compute_dtype = std::nullopt;
             if (!compute_dtype_obj.is_none()) {
                 compute_dtype = nb::cast<DataType>(compute_dtype_obj);
             }
@@ -122,11 +123,11 @@ thor.physical.Expression
     expr.def_static(
         "runtime_scalar",
         [](const std::string& name, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
-            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            std::optional<DataType> output_dtype = std::nullopt;
             if (!output_dtype_obj.is_none()) {
                 output_dtype = nb::cast<DataType>(output_dtype_obj);
             }
-            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            std::optional<DataType> compute_dtype = std::nullopt;
             if (!compute_dtype_obj.is_none()) {
                 compute_dtype = nb::cast<DataType>(compute_dtype_obj);
             }
@@ -155,11 +156,11 @@ thor.physical.Expression
     expr.def_static(
         "tensor_runtime_scalar",
         [](const std::string& name, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
-            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            std::optional<DataType> output_dtype = std::nullopt;
             if (!output_dtype_obj.is_none()) {
                 output_dtype = nb::cast<DataType>(output_dtype_obj);
             }
-            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            std::optional<DataType> compute_dtype = std::nullopt;
             if (!compute_dtype_obj.is_none()) {
                 compute_dtype = nb::cast<DataType>(compute_dtype_obj);
             }
@@ -178,11 +179,11 @@ TensorScalarBinding (buffer, byte_offset, source_dtype).
     expr.def(
         "with_dtypes",
         [](const Expression& self, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
-            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            std::optional<DataType> output_dtype = std::nullopt;
             if (!output_dtype_obj.is_none()) {
                 output_dtype = nb::cast<DataType>(output_dtype_obj);
             }
-            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            std::optional<DataType> compute_dtype = std::nullopt;
             if (!compute_dtype_obj.is_none()) {
                 compute_dtype = nb::cast<DataType>(compute_dtype_obj);
             }
@@ -275,11 +276,11 @@ Shorthand for ``self.transpose()``.
            int32_t pad_w,
            nb::object output_dtype_obj,
            nb::object compute_dtype_obj) {
-            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            std::optional<DataType> output_dtype = std::nullopt;
             if (!output_dtype_obj.is_none()) {
                 output_dtype = nb::cast<DataType>(output_dtype_obj);
             }
-            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            std::optional<DataType> compute_dtype = std::nullopt;
             if (!compute_dtype_obj.is_none()) {
                 compute_dtype = nb::cast<DataType>(compute_dtype_obj);
             }
@@ -302,11 +303,11 @@ Shorthand for ``self.transpose()``.
            bool transpose_b,
            nb::object output_dtype_obj,
            nb::object compute_dtype_obj) {
-            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            std::optional<DataType> output_dtype = std::nullopt;
             if (!output_dtype_obj.is_none()) {
                 output_dtype = nb::cast<DataType>(output_dtype_obj);
             }
-            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            std::optional<DataType> compute_dtype = std::nullopt;
             if (!compute_dtype_obj.is_none()) {
                 compute_dtype = nb::cast<DataType>(compute_dtype_obj);
             }
@@ -331,11 +332,11 @@ Shorthand for ``self.transpose()``.
            bool transpose_c,
            nb::object output_dtype_obj,
            nb::object compute_dtype_obj) {
-            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            std::optional<DataType> output_dtype = std::nullopt;
             if (!output_dtype_obj.is_none()) {
                 output_dtype = nb::cast<DataType>(output_dtype_obj);
             }
-            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            std::optional<DataType> compute_dtype = std::nullopt;
             if (!compute_dtype_obj.is_none()) {
                 compute_dtype = nb::cast<DataType>(compute_dtype_obj);
             }
@@ -532,21 +533,21 @@ thor.physical.Expression
     };
 
     auto parse_reduction_compute_dtype = [](const std::string_view& op_name,
-                                            const std::optional<DataType>& compute_dtype) -> Optional<DataType> {
+                                            const std::optional<DataType>& compute_dtype) -> std::optional<DataType> {
         // if (compute_dtype.has_value() && compute_dtype.value() != DataType::FP32) {
         //     throw std::runtime_error(std::string(op_name) + ": currently only supports compute_dtype=thor.DataType.fp32");
         // }
         return DataType::FP32;
     };
 
-    auto parse_reduction_output_dtype = [](std::string_view op_name, std::optional<DataType> compute_dtype) -> Optional<DataType> {
+    auto parse_reduction_output_dtype = [](std::string_view op_name, std::optional<DataType> compute_dtype) -> std::optional<DataType> {
         // if (compute_dtype.has_value() && compute_dtype.value() != DataType::FP32) {
         //     throw std::runtime_error(std::string(op_name) + ": currently only supports output_dtype=thor.DataType.fp32");
         // }
         return DataType::FP32;
     };
 
-    auto parse_arg_reduction_output_dtype = [](std::string_view op_name, std::optional<DataType> output_dtype) -> Optional<DataType> {
+    auto parse_arg_reduction_output_dtype = [](std::string_view op_name, std::optional<DataType> output_dtype) -> std::optional<DataType> {
         // if (output_dtype.has_value() && output_dtype.value() != DataType::UINT32) {
         //     throw std::runtime_error(std::string(op_name) + ": currently only supports output_dtype=thor.DataType.uint32");
         // }

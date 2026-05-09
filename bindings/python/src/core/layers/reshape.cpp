@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
 #include <nanobind/stl/vector.h>
+#include <optional>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -79,8 +80,8 @@ void bind_reshape(nb::module_ &m) {
     reshape.def(
         "get_feature_output",
         [](Reshape &self) -> Tensor {
-            Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            return maybeFeatureOutput.get();
+            std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+            return maybeFeatureOutput.value();
         },
         R"nbdoc(
             Return the output tensor produced by this layer.

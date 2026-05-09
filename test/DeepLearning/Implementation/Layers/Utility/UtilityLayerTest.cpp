@@ -76,7 +76,7 @@ TEST(InOut, NoOpWorks) {
             sourceMem[i] = (half)(float)i;
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor gpuOutput = layers.back()->getFeatureOutput();
+        Tensor gpuOutput = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(cpuSource, false);
@@ -141,7 +141,7 @@ TEST(Map, MapsCorrectlyToSameNumberOfElements) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
@@ -211,7 +211,7 @@ TEST(Map, MapsCorrectlyToFewerElements) {
     layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
-    Tensor outputGpu = layers.back()->getFeatureOutput();
+    Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
     // Network is runnable here
     layers[0]->forward(sourceCpu, false);
@@ -279,7 +279,7 @@ TEST(Map, MapsCorrectlyToMoreElements) {
     layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
-    Tensor outputGpu = layers.back()->getFeatureOutput();
+    Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
     // Network is runnable here
     layers[0]->forward(sourceCpu, false);
@@ -345,7 +345,7 @@ TEST(Flatten, FlattensCorrectly) {
         Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
@@ -403,7 +403,7 @@ TEST(Reshape, ReshapesCorrectly) {
     Stream stream = layers.front()->getStream();
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
-    Tensor outputGpu = layers.back()->getFeatureOutput();
+    Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
     // Network is runnable here
     layers[0]->forward(sourceCpu, false);
@@ -459,7 +459,7 @@ TEST(TypeConversion, Converts) {
         Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
@@ -515,8 +515,8 @@ TEST(TensorFanout, CreatesFanout) {
     layers[3]->compile();
     layers[3]->initialize();
 
-    Tensor outputGpu0 = layers[2]->getFeatureOutput();
-    Tensor outputGpu1 = layers[3]->getFeatureOutput();
+    Tensor outputGpu0 = layers[2]->getFeatureOutput().value();
+    Tensor outputGpu1 = layers[3]->getFeatureOutput().value();
 
     // Network is runnable here
     layers[0]->forward(sourceCpu, false);
@@ -630,7 +630,7 @@ TEST(Concatenate, Concatenates) {
 
         LayerTestHelper::initializeNetwork(layers);
 
-        wholeGpu = layers.back()->getFeatureOutput();
+        wholeGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         for (int i = 0; i < numSplitTensors; ++i) {
@@ -770,7 +770,7 @@ TEST(Split, Splits) {
             shared_ptr<Layer> networkOutputLayer = make_shared<NetworkOutput>(gpuPlacement);
             layers.push_back(networkOutputLayer);
             noOpLayer->connectToNextLayer(networkOutputLayer.get());
-            partsGpu.push_back(networkOutputLayer->getFeatureOutput());
+            partsGpu.push_back(networkOutputLayer->getFeatureOutput().value());
             outputLayers.push_back(networkOutputLayer);
         }
 
@@ -857,7 +857,7 @@ TEST(DeviceCrossing, Crosses) {
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
-    Tensor outputGpu = layers.back()->getFeatureOutput();
+    Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
     // Network is runnable here
     layers[0]->forward(sourceCpu, false);
@@ -929,7 +929,7 @@ TEST(Pad, Pads) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
@@ -1049,7 +1049,7 @@ TEST(Extract, Extracts) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput();
+        Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);

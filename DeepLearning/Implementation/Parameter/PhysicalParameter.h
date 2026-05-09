@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
@@ -87,7 +88,7 @@ class PhysicalParameter {
     virtual void compileStorage(const Tensor &inputTensor);
     void compileInitializer(uint64_t fanIn, uint64_t fanOut);
     void compileInitializer();
-    virtual void compileOptimizer(const Optional<Stream> &gradientUpdateStream, bool inferenceOnly);
+    virtual void compileOptimizer(const std::optional<Stream> &gradientUpdateStream, bool inferenceOnly);
 
     virtual void createStorage(const StorageContext &context);
     static Tensor allocateStorage(const TensorPlacement placement,
@@ -101,17 +102,17 @@ class PhysicalParameter {
     bool applyGradient(uint32_t batchSize);
 
     bool hasOptimizer();
-    void setOptimizer(Optional<std::shared_ptr<Optimizer>> newOptimizer);
+    void setOptimizer(std::optional<std::shared_ptr<Optimizer>> newOptimizer);
     std::shared_ptr<Optimizer> getOptimizer();
     void clearOptimizer();
 
     bool hasInitializer();
-    void setInitializer(Optional<std::shared_ptr<Initializer>> newInitializer);
+    void setInitializer(std::optional<std::shared_ptr<Initializer>> newInitializer);
     std::shared_ptr<Initializer> getInitializer();
     void clearInitializer();
 
     std::string getName() const;
-    Optional<Tensor> getStorage();
+    std::optional<Tensor> getStorage();
 
     [[nodiscard]] bool isTrainable() const;
     [[nodiscard]] bool isTrainingEnabled() const;
@@ -128,7 +129,7 @@ class PhysicalParameter {
 
    protected:
     const std::string name;
-    Optional<Tensor> storage;
+    std::optional<Tensor> storage;
     const bool trainable;
     bool trainingEnabled;
     bool inferenceOnly = false;
@@ -138,12 +139,12 @@ class PhysicalParameter {
     std::shared_ptr<Optimizer> optimizer;
     std::shared_ptr<Initializer> initializer;
 
-    Optional<Stream> gradientUpdateStream;
+    std::optional<Stream> gradientUpdateStream;
 
     bool storageInitialized = false;
 
-    Optional<std::vector<uint64_t>> shape = Optional<std::vector<uint64_t>>::empty();
-    Optional<TensorDescriptor::DataType> dtype;
+    std::optional<std::vector<uint64_t>> shape = std::nullopt;
+    std::optional<TensorDescriptor::DataType> dtype;
 };
 
 }  // namespace ThorImplementation

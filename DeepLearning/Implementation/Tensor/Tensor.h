@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
@@ -99,7 +100,7 @@ class Tensor : private ReferenceCounted {
     void attachFile(const std::string &fileName, const off_t fileOffset, const FileAccess fileAccessRequirement, int32_t fileDescriptor);
     void detachFile();
     std::string getAttachedFilename() { return fileName; }
-    void loadFromFile(Stream stream, Optional<uint32_t> crc = Optional<uint32_t>::empty());
+    void loadFromFile(Stream stream, std::optional<uint32_t> crc = std::nullopt);
     void dumpToFile(Stream stream);
 
     // The values are set at the end of stream
@@ -259,7 +260,7 @@ class Tensor : private ReferenceCounted {
      * <div/>
      * A, B and C must be the same data type and must be either FP16 or FP32.
      */
-    void gemm(Tensor A, Tensor B, Optional<Tensor> C, float alpha, float beta, Stream stream);
+    void gemm(Tensor A, Tensor B, std::optional<Tensor> C, float alpha, float beta, Stream stream);
 
     /**
      * [thisTensor] = [multiplicand] * multiplier, elementwise

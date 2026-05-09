@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "Utilities/Expression/FusedEquation.h"
@@ -46,8 +47,8 @@ class CustomLayer : public TrainableLayer {
                 bool useFastMath = false);
 
     // TrainableLayer
-    void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override;
-    void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override;
+    void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override;
+    void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override;
 
     // Compute feature output on the data stream
     void computeFeatureOut(uint32_t connectionNumber) override;
@@ -56,15 +57,15 @@ class CustomLayer : public TrainableLayer {
     void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
 
     // Error-output backward work runs on the data stream.
-    Optional<Event> computeErrorOut(uint32_t connectionNumber) override;
+    std::optional<Event> computeErrorOut(uint32_t connectionNumber) override;
 
-    Optional<Tensor> createFeatureOutputTensor() override;
-    Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
+    std::optional<Tensor> createFeatureOutputTensor() override;
+    std::optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
 
     void connectToNextLayer(Layer* nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override;
-    Optional<Tensor> connectToPreviousLayer(
-        Layer* previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override;
-    void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) override;
+    std::optional<Tensor> connectToPreviousLayer(
+        Layer* previousLayer, std::optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override;
+    void replaceErrorInput(std::optional<Tensor> oldErrorInput, std::optional<Tensor> newErrorInput) override;
     void initialize() override;
 
     uint64_t flopCountForward() override;
@@ -142,7 +143,7 @@ class CustomLayer : public TrainableLayer {
     PreparedDynamicExpression::TensorMap buildBackwardAdditionalInputs(uint32_t applicationIndex) const;
     PreparedDynamicExpression::TensorMap buildBackwardInputGradOutputs(uint32_t applicationIndex) const;
 
-    Optional<Tensor> inferFeatureOutputTensor(uint32_t applicationIndex, uint32_t outputPortIndex);
+    std::optional<Tensor> inferFeatureOutputTensor(uint32_t applicationIndex, uint32_t outputPortIndex);
     void validatePreparedExpressionInputs(const PreparedDynamicExpression& prepared);
     void validateStampedOutputNames(const StampedExecutionPlan& stamped, const std::vector<std::string>& expectedNames, const char* phase);
     void synchronizeComputeStreamForForwardInputs(uint32_t applicationIndex);
@@ -169,10 +170,10 @@ class CustomLayer : public TrainableLayer {
 
     std::vector<ApplicationState> applications;
 
-    std::vector<Optional<Tensor>> featureInputsConnectedForPorts;
-    std::vector<Optional<Tensor>> featureOutputsConnectedForPorts;
-    std::vector<Optional<Tensor>> errorInputsConnectedForPorts;
-    std::vector<Optional<Tensor>> errorOutputsConnectedForPorts;
+    std::vector<std::optional<Tensor>> featureInputsConnectedForPorts;
+    std::vector<std::optional<Tensor>> featureOutputsConnectedForPorts;
+    std::vector<std::optional<Tensor>> errorInputsConnectedForPorts;
+    std::vector<std::optional<Tensor>> errorOutputsConnectedForPorts;
 };
 
 }  // namespace ThorImplementation

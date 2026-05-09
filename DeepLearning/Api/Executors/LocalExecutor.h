@@ -20,6 +20,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <optional>
 
 namespace Thor {
 
@@ -120,14 +121,14 @@ class LocalExecutor::Builder {
     }
 
     LocalExecutor::Builder visualizer(Visualizer* _visualizer) {
-        if (_visualizers.isEmpty())
+        if (!_visualizers.has_value())
             _visualizers = std::vector<Visualizer*>();
-        _visualizers.get().push_back(_visualizer);
+        _visualizers.value().push_back(_visualizer);
         return *this;
     }
 
     LocalExecutor::Builder outputDirectory(std::string _outputDirectory) {
-        THOR_THROW_IF_FALSE(this->_outputDirectory.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_outputDirectory.has_value());
         if (_outputDirectory.empty())
             _outputDirectory = "./";
         std::filesystem::path outputPath = std::filesystem::absolute(std::filesystem::path(_outputDirectory));
@@ -139,8 +140,8 @@ class LocalExecutor::Builder {
     Network* _network;
     std::shared_ptr<Loader> _loader;
     std::shared_ptr<Optimizer> _optimizer;
-    Optional<std::vector<Visualizer*>> _visualizers;
-    Optional<std::string> _outputDirectory;
+    std::optional<std::vector<Visualizer*>> _visualizers;
+    std::optional<std::string> _outputDirectory;
 };
 
 }  // namespace Thor

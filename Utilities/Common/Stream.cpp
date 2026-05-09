@@ -1,3 +1,4 @@
+#include <optional>
 #include "Utilities/Common/Stream.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
@@ -186,8 +187,8 @@ void Stream::enqueueHostFunction(cudaHostFn_t function, std::unique_ptr<HostFunc
 void Stream::construct(int gpuNum, Priority priority) {
     ReferenceCounted::initialize();
 
-    cudnnHandle = new Optional<cudnnHandle_t>;
-    cublasHandle = new Optional<cublasHandle_t>;
+    cudnnHandle = new std::optional<cudnnHandle_t>;
+    cublasHandle = new std::optional<cublasHandle_t>;
     mtx = new std::mutex;
 
     ScopedGpu scopedGpu(gpuNum);
@@ -215,19 +216,19 @@ void Stream::destroy() {
         ScopedGpu scopedGpu(gpuNum);
 
         // can't destroy the cudnn handle at the point when the static string is destroyed
-        if (cudnnHandle->isPresent()) {
+        if (cudnnHandle->has_value()) {
             numCudnnHandles -= 1;
 
             cudnnStatus_t cudnnStatus;
-            cudnnStatus = cudnnDestroy(*cudnnHandle);
+            cudnnStatus = cudnnDestroy(cudnnHandle->value());
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         }
 
-        if (cublasHandle->isPresent()) {
+        if (cublasHandle->has_value()) {
             numCublasHandles -= 1;
 
             cublasStatus_t cublasStatus;
-            cublasStatus = cublasDestroy(*cublasHandle);
+            cublasStatus = cublasDestroy(cublasHandle->value());
             assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
         }
 

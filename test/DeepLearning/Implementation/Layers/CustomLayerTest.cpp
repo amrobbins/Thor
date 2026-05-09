@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
@@ -154,23 +155,23 @@ class CountingPassthrough : public Layer {
     int forwardCalls = 0;
     int backwardCalls = 0;
 
-    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
-        if (inputTensor.isPresent() && outputTensor.isPresent())
-            outputTensor.get().copyFromAsync(inputTensor.get(), stream);
+    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {
+        if (inputTensor.has_value() && outputTensor.has_value())
+            outputTensor.value().copyFromAsync(inputTensor.value(), stream);
     }
 
-    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
+    void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override {
         (void)dataIn;
-        if (errorIn.isPresent() && errorOut.isPresent())
-            errorOut.get().copyFromAsync(errorIn.get(), stream);
+        if (errorIn.has_value() && errorOut.has_value())
+            errorOut.value().copyFromAsync(errorIn.value(), stream);
     }
 
-    void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
+    void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
         ++forwardCalls;
         Layer::forward(featureInput, validationPass, batchSize);
     }
 
-    void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {
+    void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {
         ++backwardCalls;
         Layer::backward(errorInput, batchSize);
     }
@@ -214,10 +215,10 @@ class FixedVectorParameter : public PhysicalParameter {
         Tensor init_h(cpuPlacement, TensorDescriptor(primary.getDataType(), {static_cast<unsigned long>(initialValues.size())}));
         writeCpuTensor(init_h, initialValues);
 
-        Stream initStream = gradientUpdateStream.isPresent()
-                                ? gradientUpdateStream.get()
+        Stream initStream = gradientUpdateStream.has_value()
+                                ? gradientUpdateStream.value()
                                 : Stream::getMostRecentGradientUpdateStream(primary.getPlacement().getDeviceNum());
-        storage.get().copyFromAsync(init_h, initStream);
+        storage.value().copyFromAsync(init_h, initStream);
         Event ready = initStream.putEvent();
         ready.synchronize();
     }
@@ -343,8 +344,8 @@ TEST(CustomLayer, SingleInputSingleOutputForwardCompatibility) {
     input.forward(featureIn_h, false, batchSize);
 
     ASSERT_EQ(sink.forwardCalls, 1);
-    ASSERT_TRUE(sink.getFeatureInput().isPresent());
-    Tensor result_h = copyTensorToCpu(sink.getFeatureInput().get(), custom.getStreams()[0]);
+    ASSERT_TRUE(sink.getFeatureInput().has_value());
+    Tensor result_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
     const std::vector<float> actual = readCpuTensor(result_h);
     const std::vector<float> expected{2.5f, 3.5f, 4.5f, -2.5f, 2.0f, 8.5f};
     expectAllClose(actual, expected);
@@ -389,8 +390,8 @@ TEST(CustomLayer, MultiInputMultiOutputWaitsForAllInputsAndRoutesByPortIndex) {
     ASSERT_EQ(sumSink.forwardCalls, 1);
     ASSERT_EQ(diffSink.forwardCalls, 1);
 
-    Tensor sum_h = copyTensorToCpu(sumSink.getFeatureInput().get(), custom.getStreams()[0]);
-    Tensor diff_h = copyTensorToCpu(diffSink.getFeatureInput().get(), custom.getStreams()[0]);
+    Tensor sum_h = copyTensorToCpu(sumSink.getFeatureInput().value(), custom.getStreams()[0]);
+    Tensor diff_h = copyTensorToCpu(diffSink.getFeatureInput().value(), custom.getStreams()[0]);
 
     expectAllClose(readCpuTensor(sum_h), {11.0f, 22.0f, 33.0f, 5.0f, 7.0f, 9.0f});
     expectAllClose(readCpuTensor(diff_h), {-9.0f, -18.0f, -27.0f, 3.0f, 3.0f, 3.0f});
@@ -433,16 +434,16 @@ TEST(CustomLayer, MultiInputMultiOutputBackwardWaitsForAllOutputGradients) {
     lhsIn.forward(lhs_h, false, batchSize);
     rhsIn.forward(rhs_h, false, batchSize);
 
-    ASSERT_TRUE(sumSink.getErrorOutput().isPresent());
-    ASSERT_TRUE(diffSink.getErrorOutput().isPresent());
+    ASSERT_TRUE(sumSink.getErrorOutput().has_value());
+    ASSERT_TRUE(diffSink.getErrorOutput().has_value());
 
     Tensor sumGrad_h(cpuPlacement, descriptor);
     Tensor diffGrad_h(cpuPlacement, descriptor);
     writeCpuTensor(sumGrad_h, {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f});
     writeCpuTensor(diffGrad_h, {2.0f, 2.0f, 2.0f, -1.0f, -1.0f, -1.0f});
 
-    sumSink.getErrorOutput().get().copyFromAsync(sumGrad_h, custom.getStreams()[0]);
-    diffSink.getErrorOutput().get().copyFromAsync(diffGrad_h, custom.getStreams()[0]);
+    sumSink.getErrorOutput().value().copyFromAsync(sumGrad_h, custom.getStreams()[0]);
+    diffSink.getErrorOutput().value().copyFromAsync(diffGrad_h, custom.getStreams()[0]);
     Event gradsReady = custom.getStreams()[0].putEvent();
     gradsReady.synchronize();
 
@@ -455,11 +456,11 @@ TEST(CustomLayer, MultiInputMultiOutputBackwardWaitsForAllOutputGradients) {
     ASSERT_EQ(rhsBridge.backwardCalls, 1);
 
     ASSERT_EQ(custom.getErrorOutputs().size(), 2u);
-    ASSERT_TRUE(custom.getErrorOutputs()[0].isPresent());
-    ASSERT_TRUE(custom.getErrorOutputs()[1].isPresent());
+    ASSERT_TRUE(custom.getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(custom.getErrorOutputs()[1].has_value());
 
-    Tensor lhsGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0]);
-    Tensor rhsGrad_h = copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0]);
+    Tensor lhsGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor rhsGrad_h = copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0]);
 
     // d(sum)/d(lhs)=1, d(diff)/d(lhs)=1 => lhs_grad = grad_sum + grad_diff
     expectAllClose(readCpuTensor(lhsGrad_h), {3.0f, 3.0f, 3.0f, 0.0f, 0.0f, 0.0f});
@@ -507,8 +508,8 @@ TEST(CustomLayer, MultiInputMultiOutputTwoPassForwardBackwardCycleResetsState) {
 
     compileAndInitialize({&lhsIn, &rhsIn, &gradientRivetLhs, &gradientRivetRhs, &lhsBridge, &rhsBridge, &custom, &sumSink, &diffSink});
 
-    ASSERT_TRUE(sumSink.getErrorOutput().isPresent());
-    ASSERT_TRUE(diffSink.getErrorOutput().isPresent());
+    ASSERT_TRUE(sumSink.getErrorOutput().has_value());
+    ASSERT_TRUE(diffSink.getErrorOutput().has_value());
 
     auto runPass = [&](const Tensor& lhs_h,
                        const Tensor& rhs_h,
@@ -528,8 +529,8 @@ TEST(CustomLayer, MultiInputMultiOutputTwoPassForwardBackwardCycleResetsState) {
         ASSERT_EQ(sumSink.forwardCalls, expectedForwardCalls);
         ASSERT_EQ(diffSink.forwardCalls, expectedForwardCalls);
 
-        Tensor sum_h = copyTensorToCpu(sumSink.getFeatureInput().get(), custom.getStreams()[0]);
-        Tensor diff_h = copyTensorToCpu(diffSink.getFeatureInput().get(), custom.getStreams()[0]);
+        Tensor sum_h = copyTensorToCpu(sumSink.getFeatureInput().value(), custom.getStreams()[0]);
+        Tensor diff_h = copyTensorToCpu(diffSink.getFeatureInput().value(), custom.getStreams()[0]);
         expectAllClose(readCpuTensor(sum_h), expectedSum);
         expectAllClose(readCpuTensor(diff_h), expectedDiff);
 
@@ -538,8 +539,8 @@ TEST(CustomLayer, MultiInputMultiOutputTwoPassForwardBackwardCycleResetsState) {
         writeCpuTensor(sumGrad_h, sumGradValues);
         writeCpuTensor(diffGrad_h, diffGradValues);
 
-        sumSink.getErrorOutput().get().copyFromAsync(sumGrad_h, custom.getStreams()[0]);
-        diffSink.getErrorOutput().get().copyFromAsync(diffGrad_h, custom.getStreams()[0]);
+        sumSink.getErrorOutput().value().copyFromAsync(sumGrad_h, custom.getStreams()[0]);
+        diffSink.getErrorOutput().value().copyFromAsync(diffGrad_h, custom.getStreams()[0]);
         Event gradsReady = custom.getStreams()[0].putEvent();
         gradsReady.synchronize();
 
@@ -552,11 +553,11 @@ TEST(CustomLayer, MultiInputMultiOutputTwoPassForwardBackwardCycleResetsState) {
         ASSERT_EQ(rhsBridge.backwardCalls, expectedBackwardCalls);
 
         ASSERT_EQ(custom.getErrorOutputs().size(), 2u);
-        ASSERT_TRUE(custom.getErrorOutputs()[0].isPresent());
-        ASSERT_TRUE(custom.getErrorOutputs()[1].isPresent());
+        ASSERT_TRUE(custom.getErrorOutputs()[0].has_value());
+        ASSERT_TRUE(custom.getErrorOutputs()[1].has_value());
 
-        Tensor lhsGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0]);
-        Tensor rhsGrad_h = copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0]);
+        Tensor lhsGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+        Tensor rhsGrad_h = copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0]);
         expectAllClose(readCpuTensor(lhsGrad_h), expectedLhsGrad);
         expectAllClose(readCpuTensor(rhsGrad_h), expectedRhsGrad);
     };
@@ -617,8 +618,8 @@ TEST(CustomLayer, ParameterStorageContextIncludesAllNamedInputs) {
     ASSERT_TRUE(bias->sawLhs);
     ASSERT_TRUE(bias->sawRhs);
     ASSERT_EQ(bias->rhsDimensions, descriptor.getDimensions());
-    ASSERT_TRUE(bias->getStorage().isPresent());
-    ASSERT_EQ(bias->getStorage().get().getDimensions(), (std::vector<unsigned long>{features}));
+    ASSERT_TRUE(bias->getStorage().has_value());
+    ASSERT_EQ(bias->getStorage().value().getDimensions(), (std::vector<unsigned long>{features}));
 
     cleanupLayers({&lhsIn, &rhsIn, &lhsBridge, &rhsBridge, &custom, &sink});
 }
@@ -661,8 +662,8 @@ TEST(CustomLayer, MultiInputMultiOutputTwoPassForwardBackwardCycleResetsStateWit
 
     compileAndInitialize({&lhsIn, &rhsIn, &gradientRivetLhs, &gradientRivetRhs, &lhsBridge, &rhsBridge, &custom, &sumSink, &diffSink});
 
-    ASSERT_TRUE(sumSink.getErrorOutput().isPresent());
-    ASSERT_TRUE(diffSink.getErrorOutput().isPresent());
+    ASSERT_TRUE(sumSink.getErrorOutput().has_value());
+    ASSERT_TRUE(diffSink.getErrorOutput().has_value());
 
     // Pass 1 in the ordinary arrival order.
     lhsIn.forward(lhsPass1_h, false, batchSize);
@@ -673,8 +674,8 @@ TEST(CustomLayer, MultiInputMultiOutputTwoPassForwardBackwardCycleResetsStateWit
     ASSERT_EQ(sumSink.forwardCalls, 1);
     ASSERT_EQ(diffSink.forwardCalls, 1);
 
-    Tensor sumPass1_h = copyTensorToCpu(sumSink.getFeatureInput().get(), custom.getStreams()[0]);
-    Tensor diffPass1_h = copyTensorToCpu(diffSink.getFeatureInput().get(), custom.getStreams()[0]);
+    Tensor sumPass1_h = copyTensorToCpu(sumSink.getFeatureInput().value(), custom.getStreams()[0]);
+    Tensor diffPass1_h = copyTensorToCpu(diffSink.getFeatureInput().value(), custom.getStreams()[0]);
     expectAllClose(readCpuTensor(sumPass1_h), {11.0f, 22.0f, 33.0f, 5.0f, 7.0f, 9.0f});
     expectAllClose(readCpuTensor(diffPass1_h), {-9.0f, -18.0f, -27.0f, 3.0f, 3.0f, 3.0f});
 
@@ -683,8 +684,8 @@ TEST(CustomLayer, MultiInputMultiOutputTwoPassForwardBackwardCycleResetsStateWit
     writeCpuTensor(sumGradPass1_h, {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f});
     writeCpuTensor(diffGradPass1_h, {2.0f, 2.0f, 2.0f, -1.0f, -1.0f, -1.0f});
 
-    sumSink.getErrorOutput().get().copyFromAsync(sumGradPass1_h, custom.getStreams()[0]);
-    diffSink.getErrorOutput().get().copyFromAsync(diffGradPass1_h, custom.getStreams()[0]);
+    sumSink.getErrorOutput().value().copyFromAsync(sumGradPass1_h, custom.getStreams()[0]);
+    diffSink.getErrorOutput().value().copyFromAsync(diffGradPass1_h, custom.getStreams()[0]);
     Event gradsPass1Ready = custom.getStreams()[0].putEvent();
     gradsPass1Ready.synchronize();
 
@@ -696,8 +697,8 @@ TEST(CustomLayer, MultiInputMultiOutputTwoPassForwardBackwardCycleResetsStateWit
     ASSERT_EQ(lhsBridge.backwardCalls, 1);
     ASSERT_EQ(rhsBridge.backwardCalls, 1);
 
-    Tensor lhsGradPass1_h = copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0]);
-    Tensor rhsGradPass1_h = copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0]);
+    Tensor lhsGradPass1_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor rhsGradPass1_h = copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0]);
     expectAllClose(readCpuTensor(lhsGradPass1_h), {3.0f, 3.0f, 3.0f, 0.0f, 0.0f, 0.0f});
     expectAllClose(readCpuTensor(rhsGradPass1_h), {-1.0f, -1.0f, -1.0f, 2.0f, 2.0f, 2.0f});
 
@@ -710,8 +711,8 @@ TEST(CustomLayer, MultiInputMultiOutputTwoPassForwardBackwardCycleResetsStateWit
     ASSERT_EQ(sumSink.forwardCalls, 2);
     ASSERT_EQ(diffSink.forwardCalls, 2);
 
-    Tensor sumPass2_h = copyTensorToCpu(sumSink.getFeatureInput().get(), custom.getStreams()[0]);
-    Tensor diffPass2_h = copyTensorToCpu(diffSink.getFeatureInput().get(), custom.getStreams()[0]);
+    Tensor sumPass2_h = copyTensorToCpu(sumSink.getFeatureInput().value(), custom.getStreams()[0]);
+    Tensor diffPass2_h = copyTensorToCpu(diffSink.getFeatureInput().value(), custom.getStreams()[0]);
     expectAllClose(readCpuTensor(sumPass2_h), {4.0f, 2.0f, 0.0f, 6.0f, 5.0f, 4.0f});
     expectAllClose(readCpuTensor(diffPass2_h), {-6.0f, -6.0f, -6.0f, 10.0f, 13.0f, 16.0f});
 
@@ -720,8 +721,8 @@ TEST(CustomLayer, MultiInputMultiOutputTwoPassForwardBackwardCycleResetsStateWit
     writeCpuTensor(sumGradPass2_h, {-2.0f, 0.5f, 1.5f, 3.0f, -4.0f, 2.0f});
     writeCpuTensor(diffGradPass2_h, {0.25f, -1.0f, 2.5f, -3.0f, 1.0f, 4.0f});
 
-    sumSink.getErrorOutput().get().copyFromAsync(sumGradPass2_h, custom.getStreams()[0]);
-    diffSink.getErrorOutput().get().copyFromAsync(diffGradPass2_h, custom.getStreams()[0]);
+    sumSink.getErrorOutput().value().copyFromAsync(sumGradPass2_h, custom.getStreams()[0]);
+    diffSink.getErrorOutput().value().copyFromAsync(diffGradPass2_h, custom.getStreams()[0]);
     Event gradsPass2Ready = custom.getStreams()[0].putEvent();
     gradsPass2Ready.synchronize();
 
@@ -733,8 +734,8 @@ TEST(CustomLayer, MultiInputMultiOutputTwoPassForwardBackwardCycleResetsStateWit
     ASSERT_EQ(lhsBridge.backwardCalls, 2);
     ASSERT_EQ(rhsBridge.backwardCalls, 2);
 
-    Tensor lhsGradPass2_h = copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0]);
-    Tensor rhsGradPass2_h = copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0]);
+    Tensor lhsGradPass2_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor rhsGradPass2_h = copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0]);
     expectAllClose(readCpuTensor(lhsGradPass2_h), {-1.75f, -0.5f, 4.0f, 0.0f, -3.0f, 6.0f});
     expectAllClose(readCpuTensor(rhsGradPass2_h), {-2.25f, 1.5f, -1.0f, 6.0f, -5.0f, -2.0f});
 
@@ -791,9 +792,9 @@ TEST(CustomLayer, ThreeInputThreeOutputSupportsMultipleSameShapeConnectionsByDif
     ASSERT_EQ(sinkB.forwardCalls, 1);
     ASSERT_EQ(sinkC.forwardCalls, 1);
 
-    Tensor outA_h = copyTensorToCpu(sinkA.getFeatureInput().get(), custom.getStreams()[0]);
-    Tensor outB_h = copyTensorToCpu(sinkB.getFeatureInput().get(), custom.getStreams()[0]);
-    Tensor outC_h = copyTensorToCpu(sinkC.getFeatureInput().get(), custom.getStreams()[0]);
+    Tensor outA_h = copyTensorToCpu(sinkA.getFeatureInput().value(), custom.getStreams()[0]);
+    Tensor outB_h = copyTensorToCpu(sinkB.getFeatureInput().value(), custom.getStreams()[0]);
+    Tensor outC_h = copyTensorToCpu(sinkC.getFeatureInput().value(), custom.getStreams()[0]);
 
     expectAllClose(readCpuTensor(outA_h), {2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f});
     expectAllClose(readCpuTensor(outB_h), {12.0f, 22.0f, 32.0f, 1.0f, 0.0f, -1.0f});
@@ -841,8 +842,8 @@ TEST(CustomLayer, SharedNamedParametersDriveMultipleInputAndOutputConnections) {
     ASSERT_EQ(outXSink.forwardCalls, 1);
     ASSERT_EQ(outYSink.forwardCalls, 1);
 
-    Tensor outX_h = copyTensorToCpu(outXSink.getFeatureInput().get(), custom.getStreams()[0]);
-    Tensor outY_h = copyTensorToCpu(outYSink.getFeatureInput().get(), custom.getStreams()[0]);
+    Tensor outX_h = copyTensorToCpu(outXSink.getFeatureInput().value(), custom.getStreams()[0]);
+    Tensor outY_h = copyTensorToCpu(outYSink.getFeatureInput().value(), custom.getStreams()[0]);
 
     expectAllClose(readCpuTensor(outX_h), {12.0f, 26.0f, 42.0f, 18.0f, 35.0f, 54.0f});
     expectAllClose(readCpuTensor(outY_h), {8.0f, 20.0f, 34.0f, 14.0f, 29.0f, 46.0f});
@@ -890,19 +891,19 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
     xIn.forward(x_h, false, batchSize);
     yIn.forward(y_h, false, batchSize);
 
-    ASSERT_TRUE(outXSink.getErrorOutput().isPresent());
-    ASSERT_TRUE(outYSink.getErrorOutput().isPresent());
-    ASSERT_TRUE(custom.getGradientUpdateStream().isPresent());
-    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().isPresent());
-    ASSERT_TRUE(bias->getOptimizer()->getWeightsGradient().isPresent());
+    ASSERT_TRUE(outXSink.getErrorOutput().has_value());
+    ASSERT_TRUE(outYSink.getErrorOutput().has_value());
+    ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+    ASSERT_TRUE(bias->getOptimizer()->getWeightsGradient().has_value());
 
     Tensor gradOutX_h(cpuPlacement, descriptor);
     Tensor gradOutY_h(cpuPlacement, descriptor);
     writeCpuTensor(gradOutX_h, {1.0f, 0.0f, -1.0f, 2.0f, 1.0f, 0.5f});
     writeCpuTensor(gradOutY_h, {-2.0f, 3.0f, 1.0f, 0.0f, -1.0f, 2.0f});
 
-    outXSink.getErrorOutput().get().copyFromAsync(gradOutX_h, custom.getStreams()[0]);
-    outYSink.getErrorOutput().get().copyFromAsync(gradOutY_h, custom.getStreams()[0]);
+    outXSink.getErrorOutput().value().copyFromAsync(gradOutX_h, custom.getStreams()[0]);
+    outYSink.getErrorOutput().value().copyFromAsync(gradOutY_h, custom.getStreams()[0]);
     Event gradsReady = custom.getStreams()[0].putEvent();
     gradsReady.synchronize();
 
@@ -914,10 +915,11 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
     ASSERT_EQ(xBridge.backwardCalls, 1);
     ASSERT_EQ(yBridge.backwardCalls, 1);
 
-    Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0]);
-    Tensor yGrad_h = copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0]);
-    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get());
-    Tensor biasGrad_h = copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get());
+    Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor yGrad_h = copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0]);
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor biasGrad_h = copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
 
     expectAllClose(readCpuTensor(xGrad_h), {2.0f, 0.0f, -4.0f, 4.0f, 3.0f, 2.0f});
     expectAllClose(readCpuTensor(yGrad_h), {-4.0f, 9.0f, 4.0f, 0.0f, -3.0f, 8.0f});
@@ -968,21 +970,21 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
     xIn.forward(x_h, false, batchSize);
     yIn.forward(y_h, false, batchSize);
 
-    ASSERT_TRUE(outXSink.getErrorOutput().isPresent());
-    ASSERT_TRUE(outYSink.getErrorOutput().isPresent());
-    ASSERT_TRUE(custom.getGradientUpdateStream().isPresent());
-    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().isPresent());
-    ASSERT_TRUE(bias->getOptimizer()->getWeightsGradient().isPresent());
-    ASSERT_TRUE(scale->getStorage().isPresent());
-    ASSERT_TRUE(bias->getStorage().isPresent());
+    ASSERT_TRUE(outXSink.getErrorOutput().has_value());
+    ASSERT_TRUE(outYSink.getErrorOutput().has_value());
+    ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+    ASSERT_TRUE(bias->getOptimizer()->getWeightsGradient().has_value());
+    ASSERT_TRUE(scale->getStorage().has_value());
+    ASSERT_TRUE(bias->getStorage().has_value());
 
     Tensor gradOutX_h(cpuPlacement, descriptor);
     Tensor gradOutY_h(cpuPlacement, descriptor);
     writeCpuTensor(gradOutX_h, {1.0f, 0.0f, -1.0f, 2.0f, 1.0f, 0.5f});
     writeCpuTensor(gradOutY_h, {-2.0f, 3.0f, 1.0f, 0.0f, -1.0f, 2.0f});
 
-    outXSink.getErrorOutput().get().copyFromAsync(gradOutX_h, custom.getStreams()[0]);
-    outYSink.getErrorOutput().get().copyFromAsync(gradOutY_h, custom.getStreams()[0]);
+    outXSink.getErrorOutput().value().copyFromAsync(gradOutX_h, custom.getStreams()[0]);
+    outYSink.getErrorOutput().value().copyFromAsync(gradOutY_h, custom.getStreams()[0]);
     Event gradsReady = custom.getStreams()[0].putEvent();
     gradsReady.synchronize();
 
@@ -994,12 +996,13 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
     ASSERT_EQ(xBridge.backwardCalls, 1);
     ASSERT_EQ(yBridge.backwardCalls, 1);
 
-    Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0]);
-    Tensor yGrad_h = copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0]);
-    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get());
-    Tensor biasGrad_h = copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get());
-    Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().get(), custom.getGradientUpdateStream().get());
-    Tensor biasWeights_h = copyTensorToCpu(bias->getStorage().get(), custom.getGradientUpdateStream().get());
+    Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor yGrad_h = copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0]);
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor biasGrad_h = copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
+    Tensor biasWeights_h = copyTensorToCpu(bias->getStorage().value(), gradientUpdateStream);
 
     expectAllClose(readCpuTensor(xGrad_h), {2.0f, 0.0f, -4.0f, 4.0f, 3.0f, 2.0f});
     expectAllClose(readCpuTensor(yGrad_h), {-4.0f, 9.0f, 4.0f, 0.0f, -3.0f, 8.0f});
@@ -1049,13 +1052,13 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
 
     compileAndInitialize({&xIn, &yIn, &gradientRivetX, &gradientRivetY, &xBridge, &yBridge, &custom, &outXSink, &outYSink});
 
-    ASSERT_TRUE(outXSink.getErrorOutput().isPresent());
-    ASSERT_TRUE(outYSink.getErrorOutput().isPresent());
-    ASSERT_TRUE(custom.getGradientUpdateStream().isPresent());
-    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().isPresent());
-    ASSERT_TRUE(bias->getOptimizer()->getWeightsGradient().isPresent());
-    ASSERT_TRUE(scale->getStorage().isPresent());
-    ASSERT_TRUE(bias->getStorage().isPresent());
+    ASSERT_TRUE(outXSink.getErrorOutput().has_value());
+    ASSERT_TRUE(outYSink.getErrorOutput().has_value());
+    ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+    ASSERT_TRUE(bias->getOptimizer()->getWeightsGradient().has_value());
+    ASSERT_TRUE(scale->getStorage().has_value());
+    ASSERT_TRUE(bias->getStorage().has_value());
 
     Tensor gradOutX_h(cpuPlacement, descriptor);
     Tensor gradOutY_h(cpuPlacement, descriptor);
@@ -1080,13 +1083,13 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
         ASSERT_EQ(outXSink.forwardCalls, expectedForwardCalls);
         ASSERT_EQ(outYSink.forwardCalls, expectedForwardCalls);
 
-        Tensor outX_h = copyTensorToCpu(outXSink.getFeatureInput().get(), custom.getStreams()[0]);
-        Tensor outY_h = copyTensorToCpu(outYSink.getFeatureInput().get(), custom.getStreams()[0]);
+        Tensor outX_h = copyTensorToCpu(outXSink.getFeatureInput().value(), custom.getStreams()[0]);
+        Tensor outY_h = copyTensorToCpu(outYSink.getFeatureInput().value(), custom.getStreams()[0]);
         expectAllClose(readCpuTensor(outX_h), expectedOutX);
         expectAllClose(readCpuTensor(outY_h), expectedOutY);
 
-        outXSink.getErrorOutput().get().copyFromAsync(gradOutX_h, custom.getStreams()[0]);
-        outYSink.getErrorOutput().get().copyFromAsync(gradOutY_h, custom.getStreams()[0]);
+        outXSink.getErrorOutput().value().copyFromAsync(gradOutX_h, custom.getStreams()[0]);
+        outYSink.getErrorOutput().value().copyFromAsync(gradOutY_h, custom.getStreams()[0]);
         Event gradsReady = custom.getStreams()[0].putEvent();
         gradsReady.synchronize();
 
@@ -1098,12 +1101,13 @@ TEST(CustomLayer, SharedNamedParameterGradientsAccumulateAcrossMultipleConnectio
         ASSERT_EQ(xBridge.backwardCalls, expectedBackwardCalls);
         ASSERT_EQ(yBridge.backwardCalls, expectedBackwardCalls);
 
-        Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0]);
-        Tensor yGrad_h = copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0]);
-        Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get());
-        Tensor biasGrad_h = copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get());
-        Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().get(), custom.getGradientUpdateStream().get());
-        Tensor biasWeights_h = copyTensorToCpu(bias->getStorage().get(), custom.getGradientUpdateStream().get());
+        Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+        Tensor yGrad_h = copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0]);
+        Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+        Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+        Tensor biasGrad_h = copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+        Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
+        Tensor biasWeights_h = copyTensorToCpu(bias->getStorage().value(), gradientUpdateStream);
 
         expectAllClose(readCpuTensor(xGrad_h), expectedXGrad);
         expectAllClose(readCpuTensor(yGrad_h), expectedYGrad);
@@ -1228,10 +1232,10 @@ TEST(CustomLayer, MultiInterfaceTwoInputTwoOutputForwardWaitsIndependentlyAndRou
     ASSERT_EQ(sum1Sink.forwardCalls, 1);
     ASSERT_EQ(diff1Sink.forwardCalls, 1);
 
-    Tensor sum0_h = copyTensorToCpu(sum0Sink.getFeatureInput().get(), custom.getStreams()[0]);
-    Tensor diff0_h = copyTensorToCpu(diff0Sink.getFeatureInput().get(), custom.getStreams()[0]);
-    Tensor sum1_h = copyTensorToCpu(sum1Sink.getFeatureInput().get(), custom.getStreams()[2]);
-    Tensor diff1_h = copyTensorToCpu(diff1Sink.getFeatureInput().get(), custom.getStreams()[2]);
+    Tensor sum0_h = copyTensorToCpu(sum0Sink.getFeatureInput().value(), custom.getStreams()[0]);
+    Tensor diff0_h = copyTensorToCpu(diff0Sink.getFeatureInput().value(), custom.getStreams()[0]);
+    Tensor sum1_h = copyTensorToCpu(sum1Sink.getFeatureInput().value(), custom.getStreams()[2]);
+    Tensor diff1_h = copyTensorToCpu(diff1Sink.getFeatureInput().value(), custom.getStreams()[2]);
 
     expectAllClose(readCpuTensor(sum0_h), {11.0f, 22.0f, 33.0f, 5.0f, 7.0f, 9.0f});
     expectAllClose(readCpuTensor(diff0_h), {-9.0f, -18.0f, -27.0f, 3.0f, 3.0f, 3.0f});
@@ -1318,10 +1322,10 @@ TEST(CustomLayer, MultiInterfaceSharedInputTensorMarksAliasedInterfacesAndFiresI
     ASSERT_EQ(sum1Sink.forwardCalls, 1);
     ASSERT_EQ(diff1Sink.forwardCalls, 1);
 
-    Tensor sum0_h = copyTensorToCpu(sum0Sink.getFeatureInput().get(), custom.getStreams()[0]);
-    Tensor diff0_h = copyTensorToCpu(diff0Sink.getFeatureInput().get(), custom.getStreams()[0]);
-    Tensor sum1_h = copyTensorToCpu(sum1Sink.getFeatureInput().get(), custom.getStreams()[2]);
-    Tensor diff1_h = copyTensorToCpu(diff1Sink.getFeatureInput().get(), custom.getStreams()[2]);
+    Tensor sum0_h = copyTensorToCpu(sum0Sink.getFeatureInput().value(), custom.getStreams()[0]);
+    Tensor diff0_h = copyTensorToCpu(diff0Sink.getFeatureInput().value(), custom.getStreams()[0]);
+    Tensor sum1_h = copyTensorToCpu(sum1Sink.getFeatureInput().value(), custom.getStreams()[2]);
+    Tensor diff1_h = copyTensorToCpu(diff1Sink.getFeatureInput().value(), custom.getStreams()[2]);
 
     expectAllClose(readCpuTensor(sum0_h), {11.0f, 22.0f, 33.0f, 5.0f, 7.0f, 9.0f});
     expectAllClose(readCpuTensor(diff0_h), {-9.0f, -18.0f, -27.0f, 3.0f, 3.0f, 3.0f});
@@ -1423,10 +1427,10 @@ TEST(CustomLayer, SharedParameterGradientsAccumulateAcrossTwoCompleteInterfaces)
     x1In.forward(x1_h, false, batchSize);
     y1In.forward(y1_h, false, batchSize);
 
-    outX0Sink.getErrorOutput().get().copyFromAsync(gradOutX0_h, custom.getStreams()[0]);
-    outY0Sink.getErrorOutput().get().copyFromAsync(gradOutY0_h, custom.getStreams()[0]);
-    outX1Sink.getErrorOutput().get().copyFromAsync(gradOutX1_h, custom.getStreams()[2]);
-    outY1Sink.getErrorOutput().get().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
+    outX0Sink.getErrorOutput().value().copyFromAsync(gradOutX0_h, custom.getStreams()[0]);
+    outY0Sink.getErrorOutput().value().copyFromAsync(gradOutY0_h, custom.getStreams()[0]);
+    outX1Sink.getErrorOutput().value().copyFromAsync(gradOutX1_h, custom.getStreams()[2]);
+    outY1Sink.getErrorOutput().value().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
     Event app0GradsReady = custom.getStreams()[0].putEvent();
     Event app1GradsReady = custom.getStreams()[2].putEvent();
     app0GradsReady.synchronize();
@@ -1457,12 +1461,13 @@ TEST(CustomLayer, SharedParameterGradientsAccumulateAcrossTwoCompleteInterfaces)
         featureWiseBiasGradient({gradOutX0Values, gradOutY0Values, gradOutX1Values, gradOutY1Values}, features);
 
     ASSERT_EQ(custom.getErrorOutputs().size(), 4u);
-    Tensor x0Grad_h = copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0]);
-    Tensor y0Grad_h = copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0]);
-    Tensor x1Grad_h = copyTensorToCpu(custom.getErrorOutputs()[2].get(), custom.getStreams()[2]);
-    Tensor y1Grad_h = copyTensorToCpu(custom.getErrorOutputs()[3].get(), custom.getStreams()[2]);
-    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get());
-    Tensor biasGrad_h = copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get());
+    Tensor x0Grad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor y0Grad_h = copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0]);
+    Tensor x1Grad_h = copyTensorToCpu(custom.getErrorOutputs()[2].value(), custom.getStreams()[2]);
+    Tensor y1Grad_h = copyTensorToCpu(custom.getErrorOutputs()[3].value(), custom.getStreams()[2]);
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor biasGrad_h = copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
 
     expectAllClose(readCpuTensor(x0Grad_h), scaleInputGradient(gradOutX0Values, scaleValues));
     expectAllClose(readCpuTensor(y0Grad_h), scaleInputGradient(gradOutY0Values, scaleValues));
@@ -1586,14 +1591,14 @@ TEST(CustomLayer, MultiInterfaceSharedParameterForwardBackwardThreePassesResetBo
                           &outX1Sink,
                           &outY1Sink});
 
-    ASSERT_TRUE(custom.getGradientUpdateStream().isPresent());
+    ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
     ASSERT_EQ(custom.getErrorOutputs().size(), 4u);
 
     auto copyGradientsToDevice = [&]() {
-        outX0Sink.getErrorOutput().get().copyFromAsync(gradOutX0_h, custom.getStreams()[0]);
-        outY0Sink.getErrorOutput().get().copyFromAsync(gradOutY0_h, custom.getStreams()[0]);
-        outX1Sink.getErrorOutput().get().copyFromAsync(gradOutX1_h, custom.getStreams()[2]);
-        outY1Sink.getErrorOutput().get().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
+        outX0Sink.getErrorOutput().value().copyFromAsync(gradOutX0_h, custom.getStreams()[0]);
+        outY0Sink.getErrorOutput().value().copyFromAsync(gradOutY0_h, custom.getStreams()[0]);
+        outX1Sink.getErrorOutput().value().copyFromAsync(gradOutX1_h, custom.getStreams()[2]);
+        outY1Sink.getErrorOutput().value().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
         Event app0GradsReady = custom.getStreams()[0].putEvent();
         Event app1GradsReady = custom.getStreams()[2].putEvent();
         app0GradsReady.synchronize();
@@ -1601,10 +1606,10 @@ TEST(CustomLayer, MultiInterfaceSharedParameterForwardBackwardThreePassesResetBo
     };
 
     auto expectCurrentForwardOutputs = [&]() {
-        Tensor outX0_h = copyTensorToCpu(outX0Sink.getFeatureInput().get(), custom.getStreams()[0]);
-        Tensor outY0_h = copyTensorToCpu(outY0Sink.getFeatureInput().get(), custom.getStreams()[0]);
-        Tensor outX1_h = copyTensorToCpu(outX1Sink.getFeatureInput().get(), custom.getStreams()[2]);
-        Tensor outY1_h = copyTensorToCpu(outY1Sink.getFeatureInput().get(), custom.getStreams()[2]);
+        Tensor outX0_h = copyTensorToCpu(outX0Sink.getFeatureInput().value(), custom.getStreams()[0]);
+        Tensor outY0_h = copyTensorToCpu(outY0Sink.getFeatureInput().value(), custom.getStreams()[0]);
+        Tensor outX1_h = copyTensorToCpu(outX1Sink.getFeatureInput().value(), custom.getStreams()[2]);
+        Tensor outY1_h = copyTensorToCpu(outY1Sink.getFeatureInput().value(), custom.getStreams()[2]);
 
         expectAllClose(readCpuTensor(outX0_h), scaleBiasForward(x0Values, expectedScale, expectedBias));
         expectAllClose(readCpuTensor(outY0_h), scaleBiasForward(y0Values, expectedScale, expectedBias));
@@ -1613,12 +1618,13 @@ TEST(CustomLayer, MultiInterfaceSharedParameterForwardBackwardThreePassesResetBo
     };
 
     auto expectCurrentBackwardOutputsAndWeights = [&]() {
-        Tensor x0Grad_h = copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0]);
-        Tensor y0Grad_h = copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0]);
-        Tensor x1Grad_h = copyTensorToCpu(custom.getErrorOutputs()[2].get(), custom.getStreams()[2]);
-        Tensor y1Grad_h = copyTensorToCpu(custom.getErrorOutputs()[3].get(), custom.getStreams()[2]);
-        Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get());
-        Tensor biasGrad_h = copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get());
+        Tensor x0Grad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+        Tensor y0Grad_h = copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0]);
+        Tensor x1Grad_h = copyTensorToCpu(custom.getErrorOutputs()[2].value(), custom.getStreams()[2]);
+        Tensor y1Grad_h = copyTensorToCpu(custom.getErrorOutputs()[3].value(), custom.getStreams()[2]);
+        Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+        Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+        Tensor biasGrad_h = copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
 
         expectAllClose(readCpuTensor(x0Grad_h), scaleInputGradient(gradOutX0Values, expectedScale));
         expectAllClose(readCpuTensor(y0Grad_h), scaleInputGradient(gradOutY0Values, expectedScale));
@@ -1631,8 +1637,9 @@ TEST(CustomLayer, MultiInterfaceSharedParameterForwardBackwardThreePassesResetBo
         subtractScaledInPlace(expectedScale, expectedScaleGrad, effectiveStep);
         subtractScaledInPlace(expectedBias, expectedBiasGrad, effectiveStep);
 
-        Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().get(), custom.getGradientUpdateStream().get());
-        Tensor biasWeights_h = copyTensorToCpu(bias->getStorage().get(), custom.getGradientUpdateStream().get());
+        gradientUpdateStream = custom.getGradientUpdateStream().value();
+        Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
+        Tensor biasWeights_h = copyTensorToCpu(bias->getStorage().value(), gradientUpdateStream);
         expectAllClose(readCpuTensor(scaleWeights_h), expectedScale);
         expectAllClose(readCpuTensor(biasWeights_h), expectedBias);
     };
@@ -1895,12 +1902,15 @@ TEST(CustomLayer, MultiInterfaceThreeApplicationsForwardReadinessAndEncodedRouti
     ASSERT_EQ(sum1Sink.forwardCalls, 1);
     ASSERT_EQ(diff1Sink.forwardCalls, 1);
 
-    expectAllClose(readCpuTensor(copyTensorToCpu(sum0Sink.getFeatureInput().get(), custom.getStreams()[0])), add(lhs0Values, rhs0Values));
-    expectAllClose(readCpuTensor(copyTensorToCpu(diff0Sink.getFeatureInput().get(), custom.getStreams()[0])), sub(lhs0Values, rhs0Values));
-    expectAllClose(readCpuTensor(copyTensorToCpu(sum1Sink.getFeatureInput().get(), custom.getStreams()[2])), add(lhs1Values, rhs1Values));
-    expectAllClose(readCpuTensor(copyTensorToCpu(diff1Sink.getFeatureInput().get(), custom.getStreams()[2])), sub(lhs1Values, rhs1Values));
-    expectAllClose(readCpuTensor(copyTensorToCpu(sum2Sink.getFeatureInput().get(), custom.getStreams()[4])), add(lhs2Values, rhs2Values));
-    expectAllClose(readCpuTensor(copyTensorToCpu(diff2Sink.getFeatureInput().get(), custom.getStreams()[4])), sub(lhs2Values, rhs2Values));
+    expectAllClose(readCpuTensor(copyTensorToCpu(sum0Sink.getFeatureInput().value(), custom.getStreams()[0])), add(lhs0Values, rhs0Values));
+    expectAllClose(readCpuTensor(copyTensorToCpu(diff0Sink.getFeatureInput().value(), custom.getStreams()[0])),
+                   sub(lhs0Values, rhs0Values));
+    expectAllClose(readCpuTensor(copyTensorToCpu(sum1Sink.getFeatureInput().value(), custom.getStreams()[2])), add(lhs1Values, rhs1Values));
+    expectAllClose(readCpuTensor(copyTensorToCpu(diff1Sink.getFeatureInput().value(), custom.getStreams()[2])),
+                   sub(lhs1Values, rhs1Values));
+    expectAllClose(readCpuTensor(copyTensorToCpu(sum2Sink.getFeatureInput().value(), custom.getStreams()[4])), add(lhs2Values, rhs2Values));
+    expectAllClose(readCpuTensor(copyTensorToCpu(diff2Sink.getFeatureInput().value(), custom.getStreams()[4])),
+                   sub(lhs2Values, rhs2Values));
 
     cleanupLayers({&lhs0In,
                    &rhs0In,
@@ -2006,18 +2016,18 @@ TEST(CustomLayer, MultiInterfaceSparseDownstreamBackpropWaitsOnlyForConnectedGra
                           &outX1InferenceSink,
                           &outY1Sink});
 
-    ASSERT_TRUE(outX0Sink.getErrorOutput().isPresent());
-    ASSERT_TRUE(outY0InferenceSink.getErrorOutput().isEmpty());
-    ASSERT_TRUE(outX1InferenceSink.getErrorOutput().isEmpty());
-    ASSERT_TRUE(outY1Sink.getErrorOutput().isPresent());
+    ASSERT_TRUE(outX0Sink.getErrorOutput().has_value());
+    ASSERT_TRUE(!outY0InferenceSink.getErrorOutput().has_value());
+    ASSERT_TRUE(!outX1InferenceSink.getErrorOutput().has_value());
+    ASSERT_TRUE(outY1Sink.getErrorOutput().has_value());
 
     x0In.forward(x0_h, false, batchSize);
     y0In.forward(y0_h, false, batchSize);
     x1In.forward(x1_h, false, batchSize);
     y1In.forward(y1_h, false, batchSize);
 
-    outX0Sink.getErrorOutput().get().copyFromAsync(gradOutX0_h, custom.getStreams()[0]);
-    outY1Sink.getErrorOutput().get().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
+    outX0Sink.getErrorOutput().value().copyFromAsync(gradOutX0_h, custom.getStreams()[0]);
+    outY1Sink.getErrorOutput().value().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
     Event app0GradReady = custom.getStreams()[0].putEvent();
     Event app1GradReady = custom.getStreams()[2].putEvent();
     app0GradReady.synchronize();
@@ -2034,24 +2044,24 @@ TEST(CustomLayer, MultiInterfaceSparseDownstreamBackpropWaitsOnlyForConnectedGra
     ASSERT_EQ(y1Bridge.backwardCalls, 1);
 
     const std::vector<float> zeroGradient(batchSize * features, 0.0f);
-    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0])),
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0])),
                    scaleInputGradient(gradOutX0Values, scaleValues));
-    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0])), zeroGradient);
-    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[2].get(), custom.getStreams()[2])), zeroGradient);
-    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[3].get(), custom.getStreams()[2])),
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0])), zeroGradient);
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[2].value(), custom.getStreams()[2])), zeroGradient);
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[3].value(), custom.getStreams()[2])),
                    scaleInputGradient(gradOutY1Values, scaleValues));
 
     const std::vector<float> expectedScaleGrad =
         featureWiseScaleGradient({x0Values, y1Values}, {gradOutX0Values, gradOutY1Values}, features);
     const std::vector<float> expectedBiasGrad = featureWiseBiasGradient({gradOutX0Values, gradOutY1Values}, features);
 
-    expectAllClose(
-        readCpuTensor(copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
-        expectedScaleGrad);
-    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    expectAllClose(readCpuTensor(copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
+                   expectedScaleGrad);
+    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
                    expectedBiasGrad);
-    expectAllClose(readCpuTensor(copyTensorToCpu(scale->getStorage().get(), custom.getGradientUpdateStream().get())), scaleValues);
-    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getStorage().get(), custom.getGradientUpdateStream().get())), biasValues);
+    expectAllClose(readCpuTensor(copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream)), scaleValues);
+    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getStorage().value(), gradientUpdateStream)), biasValues);
 
     cleanupLayers({&x0In,
                    &y0In,
@@ -2155,18 +2165,18 @@ TEST(CustomLayer, MultiInterfaceNoBackpropApplicationDoesNotDelaySharedWeightUpd
                           &outX1Sink,
                           &outY1Sink});
 
-    ASSERT_TRUE(outX0InferenceSink.getErrorOutput().isEmpty());
-    ASSERT_TRUE(outY0InferenceSink.getErrorOutput().isEmpty());
-    ASSERT_TRUE(outX1Sink.getErrorOutput().isPresent());
-    ASSERT_TRUE(outY1Sink.getErrorOutput().isPresent());
+    ASSERT_TRUE(!outX0InferenceSink.getErrorOutput().has_value());
+    ASSERT_TRUE(!outY0InferenceSink.getErrorOutput().has_value());
+    ASSERT_TRUE(outX1Sink.getErrorOutput().has_value());
+    ASSERT_TRUE(outY1Sink.getErrorOutput().has_value());
 
     x0In.forward(x0_h, false, batchSize);
     y0In.forward(y0_h, false, batchSize);
     x1In.forward(x1_h, false, batchSize);
     y1In.forward(y1_h, false, batchSize);
 
-    outX1Sink.getErrorOutput().get().copyFromAsync(gradOutX1_h, custom.getStreams()[2]);
-    outY1Sink.getErrorOutput().get().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
+    outX1Sink.getErrorOutput().value().copyFromAsync(gradOutX1_h, custom.getStreams()[2]);
+    outY1Sink.getErrorOutput().value().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
     Event gradsReady = custom.getStreams()[2].putEvent();
     gradsReady.synchronize();
 
@@ -2188,13 +2198,13 @@ TEST(CustomLayer, MultiInterfaceNoBackpropApplicationDoesNotDelaySharedWeightUpd
     subtractInPlace(expectedScale, expectedScaleGrad);
     subtractInPlace(expectedBias, expectedBiasGrad);
 
-    expectAllClose(
-        readCpuTensor(copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
-        expectedScaleGrad);
-    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    expectAllClose(readCpuTensor(copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
+                   expectedScaleGrad);
+    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
                    expectedBiasGrad);
-    expectAllClose(readCpuTensor(copyTensorToCpu(scale->getStorage().get(), custom.getGradientUpdateStream().get())), expectedScale);
-    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getStorage().get(), custom.getGradientUpdateStream().get())), expectedBias);
+    expectAllClose(readCpuTensor(copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream)), expectedScale);
+    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getStorage().value(), gradientUpdateStream)), expectedBias);
 
     cleanupLayers({&x0In,
                    &y0In,
@@ -2273,17 +2283,17 @@ TEST(CustomLayer, TrainingDisabledParameterDoesNotReceiveGradientOrUpdateButStil
 
     compileAndInitialize({&xIn, &yIn, &xRivet, &yRivet, &xBridge, &yBridge, &custom, &outXSink, &outYSink});
 
-    ASSERT_TRUE(outXSink.getErrorOutput().isPresent());
-    ASSERT_TRUE(outYSink.getErrorOutput().isPresent());
-    ASSERT_TRUE(custom.getGradientUpdateStream().isPresent());
-    ASSERT_TRUE(scale->getStorage().isPresent());
-    ASSERT_TRUE(bias->getStorage().isPresent());
+    ASSERT_TRUE(outXSink.getErrorOutput().has_value());
+    ASSERT_TRUE(outYSink.getErrorOutput().has_value());
+    ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
+    ASSERT_TRUE(scale->getStorage().has_value());
+    ASSERT_TRUE(bias->getStorage().has_value());
 
     xIn.forward(x_h, false, batchSize);
     yIn.forward(y_h, false, batchSize);
 
-    outXSink.getErrorOutput().get().copyFromAsync(gradOutX_h, custom.getStreams()[0]);
-    outYSink.getErrorOutput().get().copyFromAsync(gradOutY_h, custom.getStreams()[0]);
+    outXSink.getErrorOutput().value().copyFromAsync(gradOutX_h, custom.getStreams()[0]);
+    outYSink.getErrorOutput().value().copyFromAsync(gradOutY_h, custom.getStreams()[0]);
     Event gradsReady = custom.getStreams()[0].putEvent();
     gradsReady.synchronize();
 
@@ -2297,9 +2307,9 @@ TEST(CustomLayer, TrainingDisabledParameterDoesNotReceiveGradientOrUpdateButStil
 
     // Even though scale is frozen for training, it is still part of the forward expression
     // and must still be used as a constant when computing input gradients.
-    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0])),
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0])),
                    scaleInputGradient(gradOutXValues, scaleValues));
-    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0])),
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0])),
                    scaleInputGradient(gradOutYValues, scaleValues));
 
     const std::vector<float> expectedBiasGrad = featureWiseBiasGradient({gradOutXValues, gradOutYValues}, features);
@@ -2307,14 +2317,15 @@ TEST(CustomLayer, TrainingDisabledParameterDoesNotReceiveGradientOrUpdateButStil
     subtractInPlace(expectedBias, expectedBiasGrad);
 
     // bias participates in compiled training.
-    ASSERT_TRUE(bias->getOptimizer()->getWeightsGradient().isPresent());
-    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
+    ASSERT_TRUE(bias->getOptimizer()->getWeightsGradient().has_value());
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
                    expectedBiasGrad);
-    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getStorage().get(), custom.getGradientUpdateStream().get())), expectedBias);
+    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getStorage().value(), gradientUpdateStream)), expectedBias);
 
     // scale does not participate in compiled training. It must not be updated even though
     // it is mathematically needed for dx/dy.
-    expectAllClose(readCpuTensor(copyTensorToCpu(scale->getStorage().get(), custom.getGradientUpdateStream().get())), scaleValues);
+    expectAllClose(readCpuTensor(copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream)), scaleValues);
 
     cleanupLayers({&xIn, &yIn, &xRivet, &yRivet, &xBridge, &yBridge, &custom, &outXSink, &outYSink});
 }
@@ -2413,13 +2424,13 @@ TEST(CustomLayer, MultiInterfaceSparseDownstreamBackpropResetsAcrossPassesAndRev
                           &outX1InferenceSink,
                           &outY1Sink});
 
-    ASSERT_TRUE(outX0Sink.getErrorOutput().isPresent());
-    ASSERT_TRUE(outY0InferenceSink.getErrorOutput().isEmpty());
-    ASSERT_TRUE(outX1InferenceSink.getErrorOutput().isEmpty());
-    ASSERT_TRUE(outY1Sink.getErrorOutput().isPresent());
-    ASSERT_TRUE(custom.getGradientUpdateStream().isPresent());
-    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().isPresent());
-    ASSERT_TRUE(bias->getOptimizer()->getWeightsGradient().isPresent());
+    ASSERT_TRUE(outX0Sink.getErrorOutput().has_value());
+    ASSERT_TRUE(!outY0InferenceSink.getErrorOutput().has_value());
+    ASSERT_TRUE(!outX1InferenceSink.getErrorOutput().has_value());
+    ASSERT_TRUE(outY1Sink.getErrorOutput().has_value());
+    ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+    ASSERT_TRUE(bias->getOptimizer()->getWeightsGradient().has_value());
 
     const std::vector<float> zeroGradient(batchSize * features, 0.0f);
     const std::vector<float> expectedScaleGrad =
@@ -2427,8 +2438,8 @@ TEST(CustomLayer, MultiInterfaceSparseDownstreamBackpropResetsAcrossPassesAndRev
     const std::vector<float> expectedBiasGrad = featureWiseBiasGradient({gradOutX0Values, gradOutY1Values}, features);
 
     auto copySparseGradientsToDevice = [&]() {
-        outX0Sink.getErrorOutput().get().copyFromAsync(gradOutX0_h, custom.getStreams()[0]);
-        outY1Sink.getErrorOutput().get().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
+        outX0Sink.getErrorOutput().value().copyFromAsync(gradOutX0_h, custom.getStreams()[0]);
+        outY1Sink.getErrorOutput().value().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
 
         Event app0GradReady = custom.getStreams()[0].putEvent();
         Event app1GradReady = custom.getStreams()[2].putEvent();
@@ -2437,22 +2448,21 @@ TEST(CustomLayer, MultiInterfaceSparseDownstreamBackpropResetsAcrossPassesAndRev
     };
 
     auto expectSparseBackwardResults = [&]() {
-        expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0])),
+        expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0])),
                        scaleInputGradient(gradOutX0Values, scaleValues));
-        expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0])), zeroGradient);
-        expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[2].get(), custom.getStreams()[2])), zeroGradient);
-        expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[3].get(), custom.getStreams()[2])),
+        expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0])), zeroGradient);
+        expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[2].value(), custom.getStreams()[2])), zeroGradient);
+        expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[3].value(), custom.getStreams()[2])),
                        scaleInputGradient(gradOutY1Values, scaleValues));
 
-        expectAllClose(
-            readCpuTensor(copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
-            expectedScaleGrad);
-        expectAllClose(
-            readCpuTensor(copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
-            expectedBiasGrad);
+        Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+        expectAllClose(readCpuTensor(copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
+                       expectedScaleGrad);
+        expectAllClose(readCpuTensor(copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
+                       expectedBiasGrad);
 
-        expectAllClose(readCpuTensor(copyTensorToCpu(scale->getStorage().get(), custom.getGradientUpdateStream().get())), scaleValues);
-        expectAllClose(readCpuTensor(copyTensorToCpu(bias->getStorage().get(), custom.getGradientUpdateStream().get())), biasValues);
+        expectAllClose(readCpuTensor(copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream)), scaleValues);
+        expectAllClose(readCpuTensor(copyTensorToCpu(bias->getStorage().value(), gradientUpdateStream)), biasValues);
     };
 
     // Pass 1: app 0 completes first in forward and backward.
@@ -2652,18 +2662,18 @@ TEST(CustomLayer, MultiInterfaceEffectiveBatchSizeIsTrackedPerParameterForSparse
                           &outX1InferenceSink,
                           &outY1Sink});
 
-    ASSERT_TRUE(outX0Sink.getErrorOutput().isPresent());
-    ASSERT_TRUE(outY0InferenceSink.getErrorOutput().isEmpty());
-    ASSERT_TRUE(outX1InferenceSink.getErrorOutput().isEmpty());
-    ASSERT_TRUE(outY1Sink.getErrorOutput().isPresent());
+    ASSERT_TRUE(outX0Sink.getErrorOutput().has_value());
+    ASSERT_TRUE(!outY0InferenceSink.getErrorOutput().has_value());
+    ASSERT_TRUE(!outX1InferenceSink.getErrorOutput().has_value());
+    ASSERT_TRUE(outY1Sink.getErrorOutput().has_value());
 
     x0In.forward(x0_h, false, batchSize);
     y0In.forward(y0_h, false, batchSize);
     x1In.forward(x1_h, false, batchSize);
     y1In.forward(y1_h, false, batchSize);
 
-    outX0Sink.getErrorOutput().get().copyFromAsync(gradOutX0_h, custom.getStreams()[0]);
-    outY1Sink.getErrorOutput().get().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
+    outX0Sink.getErrorOutput().value().copyFromAsync(gradOutX0_h, custom.getStreams()[0]);
+    outY1Sink.getErrorOutput().value().copyFromAsync(gradOutY1_h, custom.getStreams()[2]);
     Event app0GradReady = custom.getStreams()[0].putEvent();
     Event app1GradReady = custom.getStreams()[2].putEvent();
     app0GradReady.synchronize();
@@ -2680,11 +2690,11 @@ TEST(CustomLayer, MultiInterfaceEffectiveBatchSizeIsTrackedPerParameterForSparse
     ASSERT_EQ(y1Bridge.backwardCalls, 1);
 
     const std::vector<float> zeroGradient(batchSize * features, 0.0f);
-    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[0].get(), custom.getStreams()[0])),
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0])),
                    scaleInputGradient(gradOutX0Values, scaleXValues));
-    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[1].get(), custom.getStreams()[0])), zeroGradient);
-    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[2].get(), custom.getStreams()[2])), zeroGradient);
-    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[3].get(), custom.getStreams()[2])),
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[1].value(), custom.getStreams()[0])), zeroGradient);
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[2].value(), custom.getStreams()[2])), zeroGradient);
+    expectAllClose(readCpuTensor(copyTensorToCpu(custom.getErrorOutputs()[3].value(), custom.getStreams()[2])),
                    scaleInputGradient(gradOutY1Values, scaleYValues));
 
     const std::vector<float> expectedScaleXGrad = featureWiseScaleGradient({x0Values}, {gradOutX0Values}, features);
@@ -2703,18 +2713,17 @@ TEST(CustomLayer, MultiInterfaceEffectiveBatchSizeIsTrackedPerParameterForSparse
     const std::vector<float> expectedScaleY = subtractScaled(scaleYValues, expectedScaleYGrad, 1.0f);
     const std::vector<float> expectedBias = subtractScaled(biasValues, expectedBiasGrad, 0.5f);
 
-    expectAllClose(
-        readCpuTensor(copyTensorToCpu(scaleX->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
-        expectedScaleXGrad);
-    expectAllClose(
-        readCpuTensor(copyTensorToCpu(scaleY->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
-        expectedScaleYGrad);
-    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().get(), custom.getGradientUpdateStream().get())),
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    expectAllClose(readCpuTensor(copyTensorToCpu(scaleX->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
+                   expectedScaleXGrad);
+    expectAllClose(readCpuTensor(copyTensorToCpu(scaleY->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
+                   expectedScaleYGrad);
+    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream)),
                    expectedBiasGrad);
 
-    expectAllClose(readCpuTensor(copyTensorToCpu(scaleX->getStorage().get(), custom.getGradientUpdateStream().get())), expectedScaleX);
-    expectAllClose(readCpuTensor(copyTensorToCpu(scaleY->getStorage().get(), custom.getGradientUpdateStream().get())), expectedScaleY);
-    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getStorage().get(), custom.getGradientUpdateStream().get())), expectedBias);
+    expectAllClose(readCpuTensor(copyTensorToCpu(scaleX->getStorage().value(), gradientUpdateStream)), expectedScaleX);
+    expectAllClose(readCpuTensor(copyTensorToCpu(scaleY->getStorage().value(), gradientUpdateStream)), expectedScaleY);
+    expectAllClose(readCpuTensor(copyTensorToCpu(bias->getStorage().value(), gradientUpdateStream)), expectedBias);
 
     cleanupLayers({&x0In,
                    &y0In,

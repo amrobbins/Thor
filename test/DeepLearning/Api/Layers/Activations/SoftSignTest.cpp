@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Activations/SoftSign.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
@@ -33,15 +34,15 @@ TEST(Activations, SoftSignBuilds) {
 
     ASSERT_TRUE(softSign->isInitialized());
 
-    Optional<Tensor> actualInput = softSign->getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualInput = softSign->getFeatureInput();
+    ASSERT_TRUE(actualInput.has_value());
+    ASSERT_EQ(actualInput.value().getDataType(), dataType);
+    ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> actualOutput = softSign->getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualOutput = softSign->getFeatureOutput();
+    ASSERT_TRUE(actualOutput.has_value());
+    ASSERT_EQ(actualOutput.value().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.value().getDimensions(), dimensions);
 
     shared_ptr<Layer> cloneLayer = softSign->clone();
     SoftSign *clone = dynamic_cast<SoftSign *>(cloneLayer.get());
@@ -49,15 +50,15 @@ TEST(Activations, SoftSignBuilds) {
 
     ASSERT_TRUE(clone->isInitialized());
 
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.has_value());
+    ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
-    ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.has_value());
+    ASSERT_EQ(cloneOutput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.value().getDimensions(), dimensions);
 
     ASSERT_NE(softSign->getId(), clone->getId());
     ASSERT_GT(softSign->getId(), 1u);
@@ -76,27 +77,27 @@ TEST(Activations, SoftSignSerializeDeserialize) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    SoftSign::Builder softSignBuilder = SoftSign::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    SoftSign::Builder softSignBuilder = SoftSign::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<SoftSign> softSign = dynamic_pointer_cast<SoftSign>(softSignBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(softSign->getFeatureOutput())
+                                      .inputTensor(softSign->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 
     ASSERT_TRUE(softSign->isInitialized());
 
-    Tensor featureInput = softSign->getFeatureInput();
-    Tensor featureOutput = softSign->getFeatureOutput();
+    Tensor featureInput = softSign->getFeatureInput().value();
+    Tensor featureOutput = softSign->getFeatureOutput().value();
     assert(featureInput == networkInput.getFeatureOutput());
 
-    ASSERT_TRUE(softSign->getFeatureOutput().isPresent());
-    ASSERT_EQ(softSign->getFeatureOutput().get(), featureOutput);
+    ASSERT_TRUE(softSign->getFeatureOutput().has_value());
+    ASSERT_EQ(softSign->getFeatureOutput().value(), featureOutput);
 
-    ASSERT_TRUE(softSign->getFeatureInput().isPresent());
-    assert(softSign->getFeatureInput().get() == featureInput);
+    ASSERT_TRUE(softSign->getFeatureInput().has_value());
+    assert(softSign->getFeatureInput().value() == featureInput);
 
     ASSERT_EQ(featureInput.getDataType(), dataType);
     ASSERT_EQ(featureInput.getDimensions(), inputDimensions);
@@ -194,11 +195,11 @@ TEST(Activations, SoftSignSerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
 
-    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedSoftSign->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
-    ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSoftSign->getFeatureInput().get());
-    ASSERT_EQ(stampedSoftSign->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedSoftSign->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().has_value());
+    ASSERT_EQ(stampedInput->getFeatureOutput().value(), stampedSoftSign->getFeatureInput().value());
+    ASSERT_EQ(stampedSoftSign->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
     filesystem::remove("/tmp/testModel.thor.tar");
 }
@@ -216,13 +217,13 @@ TEST(Activations, SoftSignRegistered) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    SoftSign::Builder softSignBuilder = SoftSign::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    SoftSign::Builder softSignBuilder = SoftSign::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<SoftSign> softSign = dynamic_pointer_cast<SoftSign>(softSignBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(softSign->getFeatureOutput())
+                                      .inputTensor(softSign->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 

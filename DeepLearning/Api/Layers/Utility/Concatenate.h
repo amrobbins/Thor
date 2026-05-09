@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/Concatenate.h"
+#include <optional>
 
 
 namespace Thor {
@@ -23,7 +24,7 @@ class Concatenate : public MultiConnectionLayer {
         return it->second;
     }
 
-    Optional<Tensor> getFeatureOutput() const override {
+    std::optional<Tensor> getFeatureOutput() const override {
         THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
         return featureOutputs[0];
     }
@@ -86,16 +87,16 @@ class Concatenate::Builder {
     Builder() {}
 
     virtual Concatenate build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(!_featureInputs.empty());
-        THOR_THROW_IF_FALSE(!_concatenationAxis.isEmpty());
-        THOR_THROW_IF_FALSE(_concatenationAxis.get() < _featureInputs[0].getDimensions().size());
+        THOR_THROW_IF_FALSE(_concatenationAxis.has_value());
+        THOR_THROW_IF_FALSE(_concatenationAxis.value() < _featureInputs[0].getDimensions().size());
         std::set<Tensor> uniqueFeatureInputs(_featureInputs.begin(), _featureInputs.end());
         THOR_THROW_IF_FALSE(uniqueFeatureInputs.size() == _featureInputs.size());  // No duplicate inputs
 
         Concatenate concatenate;
         concatenate.featureInputs = _featureInputs;
-        concatenate.concatenationAxis = _concatenationAxis;
+        concatenate.concatenationAxis = _concatenationAxis.value();
         concatenate.numInputConnectionsMade = 0;
 
         std::vector<uint64_t> outputDimensions = concatenate.featureInputs[0].getDimensions();
@@ -110,13 +111,13 @@ class Concatenate::Builder {
         }
 
         concatenate.initialized = true;
-        concatenate.addToNetwork(_network);
+        concatenate.addToNetwork(_network.value());
 
         return concatenate;
     }
 
     virtual Concatenate::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
@@ -130,15 +131,15 @@ class Concatenate::Builder {
     }
 
     virtual Concatenate::Builder &concatenationAxis(uint32_t _concatenationAxis) {
-        THOR_THROW_IF_FALSE(!this->_concatenationAxis.isPresent());
+        THOR_THROW_IF_FALSE(!this->_concatenationAxis.has_value());
         this->_concatenationAxis = _concatenationAxis;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
+    std::optional<Network *> _network;
     std::vector<Tensor> _featureInputs;
-    Optional<uint32_t> _concatenationAxis;
+    std::optional<uint32_t> _concatenationAxis;
 };
 
 }  // namespace Thor

@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
+#include <optional>
 
 #include "DeepLearning/Implementation/Initializers/ZerosInitializer.h"
 #include "Utilities/Expression/Expression.h"
@@ -42,7 +43,8 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
     unordered_map<string, Tensor> preallocatedOutputs;
 
     stampInputs["weights_in"] = weights;
-    stampInputs["gradient"] = weightsGradient;
+    THOR_THROW_IF_FALSE(weightsGradient.has_value());
+    stampInputs["gradient"] = weightsGradient.value();
     preallocatedOutputs["weights"] = weights;
 
     std::optional<Outputs> expressionOutputs;
@@ -56,10 +58,10 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
             momentumParameter->compileStorage(weights);
             momentumParameter->compileInitializer();
             momentumParameter->initialize(gradientUpdateStream);
-            THOR_THROW_IF_FALSE(momentumParameter->getStorage().isPresent());
+            THOR_THROW_IF_FALSE(momentumParameter->getStorage().has_value());
         }
         shared_ptr<PhysicalParameter> momentumParameter = getParameter("momentum");
-        Tensor momentumTensor = momentumParameter->getStorage();
+        Tensor momentumTensor = momentumParameter->getStorage().value();
 
         std::optional<Expression> vNext;
         std::optional<Expression> wNext;
@@ -107,9 +109,9 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
 
 void Sgd::updateWeights(uint32_t batchSize) {
     THOR_THROW_IF_FALSE(compiled);
-    THOR_THROW_IF_FALSE(weightsGradient.isPresent());
-    THOR_THROW_IF_FALSE(weightsGradient.get().isInitialized());
-    THOR_THROW_IF_FALSE(weightsGradient.get().getPlacement() == weights.getPlacement());
+    THOR_THROW_IF_FALSE(weightsGradient.has_value());
+    THOR_THROW_IF_FALSE(weightsGradient.value().isInitialized());
+    THOR_THROW_IF_FALSE(weightsGradient.value().getPlacement() == weights.getPlacement());
     THOR_THROW_IF_FALSE(updateEquationStamped != nullptr);
 
     THOR_THROW_IF_FALSE(batchSize > 0);

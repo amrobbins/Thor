@@ -340,12 +340,12 @@ TEST(Pooling, MaxPoolingWorks) {
 
         // Backward tensors must not be created, since they would be unused and would waist memory.
         if (inferenceOnly) {
-            ASSERT_TRUE(poolingLayer->getErrorOutput().isEmpty());
+            ASSERT_TRUE(!poolingLayer->getErrorOutput().has_value());
             LayerTestHelper::tearDownNetwork(layers);
             continue;
         }
 
-        featureOutGpu_h = layers.back()->getFeatureOutput();
+        featureOutGpu_h = layers.back()->getFeatureOutput().value();
 
         // Forward pass
 
@@ -390,8 +390,8 @@ TEST(Pooling, MaxPoolingWorks) {
 
         // Backward pass
         // For max pooling, if(featureOut[i] = maxInWindow) then back prop error as is. Else back prop 0.
-        Tensor errorInput = poolingLayer->getErrorInput();
-        Tensor errorOutput = poolingLayer->getErrorOutput();
+        Tensor errorInput = poolingLayer->getErrorInput().value();
+        Tensor errorOutput = poolingLayer->getErrorOutput().value();
         Tensor errorInputCpu = Tensor(cpuPlacement, errorInput.getDescriptor());
         Tensor errorOutputGpu_h = Tensor(cpuPlacement, errorOutput.getDescriptor());
         half *errorInputCpuMem = (half *)errorInputCpu.getMemPtr();
@@ -488,10 +488,10 @@ TEST(Pooling, AveragePoolingWorks) {
 
         // Backward tensors must not be created, since they would be unused and would waist memory.
         if (inferenceOnly) {
-            ASSERT_TRUE(poolingLayer->getErrorOutput().isEmpty());
+            ASSERT_TRUE(!poolingLayer->getErrorOutput().has_value());
         }
 
-        featureOutGpu_h = layers.back()->getFeatureOutput();
+        featureOutGpu_h = layers.back()->getFeatureOutput().value();
 
         // Forward pass
 
@@ -536,8 +536,8 @@ TEST(Pooling, AveragePoolingWorks) {
         }
 
         // Backward pass
-        Tensor errorInput = poolingLayer->getErrorInput();
-        Tensor errorOutput = poolingLayer->getErrorOutput();
+        Tensor errorInput = poolingLayer->getErrorInput().value();
+        Tensor errorOutput = poolingLayer->getErrorOutput().value();
         Tensor errorInputCpu = Tensor(cpuPlacement, errorInput.getDescriptor());
         Tensor errorOutputGpu_h = Tensor(cpuPlacement, errorOutput.getDescriptor());
         half *errorInputCpuMem = (half *)errorInputCpu.getMemPtr();

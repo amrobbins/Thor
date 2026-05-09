@@ -50,25 +50,25 @@
 //
 //         ASSERT_TRUE(crossEntropy.isInitialized());
 //
-//         Optional<Tensor> actualInput = crossEntropy.getFeatureInput();
-//         ASSERT_TRUE(actualInput.isPresent());
-//         ASSERT_EQ(actualInput.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(actualInput.get().getDimensions(), predictionsDimensions);
+//         std::optional<Tensor> actualInput = crossEntropy.getFeatureInput();
+//         ASSERT_TRUE(actualInput.has_value());
+//         ASSERT_EQ(actualInput.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(actualInput.value().getDimensions(), predictionsDimensions);
 //
-//         Optional<Tensor> actualLabels = crossEntropy.getLabels();
-//         ASSERT_TRUE(actualLabels.isPresent());
-//         ASSERT_EQ(actualLabels.get().getDataType(), labelsDataType);
-//         ASSERT_EQ(actualLabels.get().getDimensions(), labelDimensions);
+//         std::optional<Tensor> actualLabels = crossEntropy.getLabels();
+//         ASSERT_TRUE(actualLabels.has_value());
+//         ASSERT_EQ(actualLabels.value().getDataType(), labelsDataType);
+//         ASSERT_EQ(actualLabels.value().getDimensions(), labelDimensions);
 //
-//         Optional<Tensor> actualPredictions = crossEntropy.getPredictions();
-//         ASSERT_TRUE(actualPredictions.isPresent());
-//         ASSERT_EQ(actualPredictions.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(actualPredictions.get().getDimensions(), predictionsDimensions);
+//         std::optional<Tensor> actualPredictions = crossEntropy.getPredictions();
+//         ASSERT_TRUE(actualPredictions.has_value());
+//         ASSERT_EQ(actualPredictions.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(actualPredictions.value().getDimensions(), predictionsDimensions);
 //
-//         Optional<Tensor> actualLoss = crossEntropy.getLoss();
-//         ASSERT_TRUE(actualLoss.isPresent());
-//         ASSERT_EQ(actualLoss.get().getDataType(), lossDataType);
-//         ASSERT_EQ(actualLoss.get().getDimensions(), vector<uint64_t>(1, 1));
+//         std::optional<Tensor> actualLoss = crossEntropy.getLoss();
+//         ASSERT_TRUE(actualLoss.has_value());
+//         ASSERT_EQ(actualLoss.value().getDataType(), lossDataType);
+//         ASSERT_EQ(actualLoss.value().getDimensions(), vector<uint64_t>(1, 1));
 //
 //         shared_ptr<Layer> cloneLayer = crossEntropy.clone();
 //         CategoricalCrossEntropy *clone = dynamic_cast<CategoricalCrossEntropy *>(cloneLayer.get());
@@ -76,25 +76,25 @@
 //
 //         ASSERT_TRUE(clone->isInitialized());
 //
-//         Optional<Tensor> cloneInput = clone->getFeatureInput();
-//         ASSERT_TRUE(cloneInput.isPresent());
-//         ASSERT_EQ(cloneInput.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(cloneInput.get().getDimensions(), predictionsDimensions);
+//         std::optional<Tensor> cloneInput = clone->getFeatureInput();
+//         ASSERT_TRUE(cloneInput.has_value());
+//         ASSERT_EQ(cloneInput.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(cloneInput.value().getDimensions(), predictionsDimensions);
 //
-//         Optional<Tensor> cloneLabels = clone->getLabels();
-//         ASSERT_TRUE(cloneLabels.isPresent());
-//         ASSERT_EQ(cloneLabels.get().getDataType(), labelsDataType);
-//         ASSERT_EQ(cloneLabels.get().getDimensions(), labelDimensions);
+//         std::optional<Tensor> cloneLabels = clone->getLabels();
+//         ASSERT_TRUE(cloneLabels.has_value());
+//         ASSERT_EQ(cloneLabels.value().getDataType(), labelsDataType);
+//         ASSERT_EQ(cloneLabels.value().getDimensions(), labelDimensions);
 //
-//         Optional<Tensor> clonePredictions = clone->getPredictions();
-//         ASSERT_TRUE(clonePredictions.isPresent());
-//         ASSERT_EQ(clonePredictions.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(clonePredictions.get().getDimensions(), predictionsDimensions);
+//         std::optional<Tensor> clonePredictions = clone->getPredictions();
+//         ASSERT_TRUE(clonePredictions.has_value());
+//         ASSERT_EQ(clonePredictions.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(clonePredictions.value().getDimensions(), predictionsDimensions);
 //
-//         Optional<Tensor> cloneLoss = clone->getLoss();
-//         ASSERT_TRUE(cloneLoss.isPresent());
-//         ASSERT_EQ(cloneLoss.get().getDataType(), lossDataType);
-//         ASSERT_EQ(cloneLoss.get().getDimensions(), vector<uint64_t>(1, 1));
+//         std::optional<Tensor> cloneLoss = clone->getLoss();
+//         ASSERT_TRUE(cloneLoss.has_value());
+//         ASSERT_EQ(cloneLoss.value().getDataType(), lossDataType);
+//         ASSERT_EQ(cloneLoss.value().getDimensions(), vector<uint64_t>(1, 1));
 //
 //         ASSERT_EQ(crossEntropy.getId(), clone->getId());
 //         ASSERT_GT(crossEntropy.getId(), 1u);
@@ -144,25 +144,25 @@
 //
 //         ASSERT_TRUE(crossEntropy.isInitialized());
 //
-//         Optional<Tensor> actualInput = crossEntropy.getFeatureInput();
-//         ASSERT_TRUE(actualInput.isPresent());
-//         ASSERT_EQ(actualInput.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+//         std::optional<Tensor> actualInput = crossEntropy.getFeatureInput();
+//         ASSERT_TRUE(actualInput.has_value());
+//         ASSERT_EQ(actualInput.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> actualLabels = crossEntropy.getLabels();
-//         ASSERT_TRUE(actualLabels.isPresent());
-//         ASSERT_EQ(actualLabels.get().getDataType(), labelsDataType);
-//         ASSERT_EQ(actualLabels.get().getDimensions(), dimensions);
+//         std::optional<Tensor> actualLabels = crossEntropy.getLabels();
+//         ASSERT_TRUE(actualLabels.has_value());
+//         ASSERT_EQ(actualLabels.value().getDataType(), labelsDataType);
+//         ASSERT_EQ(actualLabels.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> actualPredictions = crossEntropy.getPredictions();
-//         ASSERT_TRUE(actualPredictions.isPresent());
-//         ASSERT_EQ(actualPredictions.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(actualPredictions.get().getDimensions(), dimensions);
+//         std::optional<Tensor> actualPredictions = crossEntropy.getPredictions();
+//         ASSERT_TRUE(actualPredictions.has_value());
+//         ASSERT_EQ(actualPredictions.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(actualPredictions.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> actualLoss = crossEntropy.getLoss();
-//         ASSERT_TRUE(actualLoss.isPresent());
-//         ASSERT_EQ(actualLoss.get().getDataType(), lossDataType);
-//         ASSERT_EQ(actualLoss.get().getDimensions(), dimensions);
+//         std::optional<Tensor> actualLoss = crossEntropy.getLoss();
+//         ASSERT_TRUE(actualLoss.has_value());
+//         ASSERT_EQ(actualLoss.value().getDataType(), lossDataType);
+//         ASSERT_EQ(actualLoss.value().getDimensions(), dimensions);
 //
 //         shared_ptr<Layer> cloneLayer = crossEntropy.clone();
 //         CategoricalCrossEntropy *clone = dynamic_cast<CategoricalCrossEntropy *>(cloneLayer.get());
@@ -170,25 +170,25 @@
 //
 //         ASSERT_TRUE(clone->isInitialized());
 //
-//         Optional<Tensor> cloneInput = clone->getFeatureInput();
-//         ASSERT_TRUE(cloneInput.isPresent());
-//         ASSERT_EQ(cloneInput.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+//         std::optional<Tensor> cloneInput = clone->getFeatureInput();
+//         ASSERT_TRUE(cloneInput.has_value());
+//         ASSERT_EQ(cloneInput.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> cloneLabels = clone->getLabels();
-//         ASSERT_TRUE(cloneLabels.isPresent());
-//         ASSERT_EQ(cloneLabels.get().getDataType(), labelsDataType);
-//         ASSERT_EQ(cloneLabels.get().getDimensions(), dimensions);
+//         std::optional<Tensor> cloneLabels = clone->getLabels();
+//         ASSERT_TRUE(cloneLabels.has_value());
+//         ASSERT_EQ(cloneLabels.value().getDataType(), labelsDataType);
+//         ASSERT_EQ(cloneLabels.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> clonePredictions = clone->getPredictions();
-//         ASSERT_TRUE(clonePredictions.isPresent());
-//         ASSERT_EQ(clonePredictions.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(clonePredictions.get().getDimensions(), dimensions);
+//         std::optional<Tensor> clonePredictions = clone->getPredictions();
+//         ASSERT_TRUE(clonePredictions.has_value());
+//         ASSERT_EQ(clonePredictions.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(clonePredictions.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> cloneLoss = clone->getLoss();
-//         ASSERT_TRUE(cloneLoss.isPresent());
-//         ASSERT_EQ(cloneLoss.get().getDataType(), lossDataType);
-//         ASSERT_EQ(cloneLoss.get().getDimensions(), dimensions);
+//         std::optional<Tensor> cloneLoss = clone->getLoss();
+//         ASSERT_TRUE(cloneLoss.has_value());
+//         ASSERT_EQ(cloneLoss.value().getDataType(), lossDataType);
+//         ASSERT_EQ(cloneLoss.value().getDimensions(), dimensions);
 //
 //         ASSERT_EQ(crossEntropy.getId(), clone->getId());
 //         ASSERT_GT(crossEntropy.getId(), 1u);
@@ -238,26 +238,26 @@
 //
 //         ASSERT_TRUE(crossEntropy.isInitialized());
 //
-//         Optional<Tensor> actualInput = crossEntropy.getFeatureInput();
-//         ASSERT_TRUE(actualInput.isPresent());
-//         ASSERT_EQ(actualInput.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+//         std::optional<Tensor> actualInput = crossEntropy.getFeatureInput();
+//         ASSERT_TRUE(actualInput.has_value());
+//         ASSERT_EQ(actualInput.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> actualLabels = crossEntropy.getLabels();
-//         ASSERT_TRUE(actualLabels.isPresent());
-//         ASSERT_EQ(actualLabels.get().getDataType(), labelsDataType);
-//         ASSERT_EQ(actualLabels.get().getDimensions(), dimensions);
+//         std::optional<Tensor> actualLabels = crossEntropy.getLabels();
+//         ASSERT_TRUE(actualLabels.has_value());
+//         ASSERT_EQ(actualLabels.value().getDataType(), labelsDataType);
+//         ASSERT_EQ(actualLabels.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> actualPredictions = crossEntropy.getPredictions();
-//         ASSERT_TRUE(actualPredictions.isPresent());
-//         ASSERT_EQ(actualPredictions.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(actualPredictions.get().getDimensions(), dimensions);
+//         std::optional<Tensor> actualPredictions = crossEntropy.getPredictions();
+//         ASSERT_TRUE(actualPredictions.has_value());
+//         ASSERT_EQ(actualPredictions.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(actualPredictions.value().getDimensions(), dimensions);
 //
 //         vector<uint64_t> batchLossDimensions = {1UL};
-//         Optional<Tensor> actualLoss = crossEntropy.getLoss();
-//         ASSERT_TRUE(actualLoss.isPresent());
-//         ASSERT_EQ(actualLoss.get().getDataType(), lossDataType);
-//         ASSERT_EQ(actualLoss.get().getDimensions(), batchLossDimensions);
+//         std::optional<Tensor> actualLoss = crossEntropy.getLoss();
+//         ASSERT_TRUE(actualLoss.has_value());
+//         ASSERT_EQ(actualLoss.value().getDataType(), lossDataType);
+//         ASSERT_EQ(actualLoss.value().getDimensions(), batchLossDimensions);
 //
 //         shared_ptr<Layer> cloneLayer = crossEntropy.clone();
 //         CategoricalCrossEntropy *clone = dynamic_cast<CategoricalCrossEntropy *>(cloneLayer.get());
@@ -265,25 +265,25 @@
 //
 //         ASSERT_TRUE(clone->isInitialized());
 //
-//         Optional<Tensor> cloneInput = clone->getFeatureInput();
-//         ASSERT_TRUE(cloneInput.isPresent());
-//         ASSERT_EQ(cloneInput.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+//         std::optional<Tensor> cloneInput = clone->getFeatureInput();
+//         ASSERT_TRUE(cloneInput.has_value());
+//         ASSERT_EQ(cloneInput.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> cloneLabels = clone->getLabels();
-//         ASSERT_TRUE(cloneLabels.isPresent());
-//         ASSERT_EQ(cloneLabels.get().getDataType(), labelsDataType);
-//         ASSERT_EQ(cloneLabels.get().getDimensions(), dimensions);
+//         std::optional<Tensor> cloneLabels = clone->getLabels();
+//         ASSERT_TRUE(cloneLabels.has_value());
+//         ASSERT_EQ(cloneLabels.value().getDataType(), labelsDataType);
+//         ASSERT_EQ(cloneLabels.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> clonePredictions = clone->getPredictions();
-//         ASSERT_TRUE(clonePredictions.isPresent());
-//         ASSERT_EQ(clonePredictions.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(clonePredictions.get().getDimensions(), dimensions);
+//         std::optional<Tensor> clonePredictions = clone->getPredictions();
+//         ASSERT_TRUE(clonePredictions.has_value());
+//         ASSERT_EQ(clonePredictions.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(clonePredictions.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> cloneLoss = clone->getLoss();
-//         ASSERT_TRUE(cloneLoss.isPresent());
-//         ASSERT_EQ(cloneLoss.get().getDataType(), lossDataType);
-//         ASSERT_EQ(cloneLoss.get().getDimensions(), batchLossDimensions);
+//         std::optional<Tensor> cloneLoss = clone->getLoss();
+//         ASSERT_TRUE(cloneLoss.has_value());
+//         ASSERT_EQ(cloneLoss.value().getDataType(), lossDataType);
+//         ASSERT_EQ(cloneLoss.value().getDimensions(), batchLossDimensions);
 //
 //         ASSERT_EQ(crossEntropy.getId(), clone->getId());
 //         ASSERT_GT(crossEntropy.getId(), 1u);
@@ -330,25 +330,25 @@
 //
 //         ASSERT_TRUE(crossEntropy.isInitialized());
 //
-//         Optional<Tensor> actualInput = crossEntropy.getFeatureInput();
-//         ASSERT_TRUE(actualInput.isPresent());
-//         ASSERT_EQ(actualInput.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(actualInput.get().getDimensions(), predictionsDimensions);
+//         std::optional<Tensor> actualInput = crossEntropy.getFeatureInput();
+//         ASSERT_TRUE(actualInput.has_value());
+//         ASSERT_EQ(actualInput.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(actualInput.value().getDimensions(), predictionsDimensions);
 //
-//         Optional<Tensor> actualLabels = crossEntropy.getLabels();
-//         ASSERT_TRUE(actualLabels.isPresent());
-//         ASSERT_EQ(actualLabels.get().getDataType(), labelsDataType);
-//         ASSERT_EQ(actualLabels.get().getDimensions(), labelDimensions);
+//         std::optional<Tensor> actualLabels = crossEntropy.getLabels();
+//         ASSERT_TRUE(actualLabels.has_value());
+//         ASSERT_EQ(actualLabels.value().getDataType(), labelsDataType);
+//         ASSERT_EQ(actualLabels.value().getDimensions(), labelDimensions);
 //
-//         Optional<Tensor> actualPredictions = crossEntropy.getPredictions();
-//         ASSERT_TRUE(actualPredictions.isPresent());
-//         ASSERT_EQ(actualPredictions.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(actualPredictions.get().getDimensions(), predictionsDimensions);
+//         std::optional<Tensor> actualPredictions = crossEntropy.getPredictions();
+//         ASSERT_TRUE(actualPredictions.has_value());
+//         ASSERT_EQ(actualPredictions.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(actualPredictions.value().getDimensions(), predictionsDimensions);
 //
-//         Optional<Tensor> actualLoss = crossEntropy.getLoss();
-//         ASSERT_TRUE(actualLoss.isPresent());
-//         ASSERT_EQ(actualLoss.get().getDataType(), lossDataType);
-//         ASSERT_EQ(actualLoss.get().getDimensions(), vector<uint64_t>(1, numClasses));
+//         std::optional<Tensor> actualLoss = crossEntropy.getLoss();
+//         ASSERT_TRUE(actualLoss.has_value());
+//         ASSERT_EQ(actualLoss.value().getDataType(), lossDataType);
+//         ASSERT_EQ(actualLoss.value().getDimensions(), vector<uint64_t>(1, numClasses));
 //
 //         shared_ptr<Layer> cloneLayer = crossEntropy.clone();
 //         CategoricalCrossEntropy *clone = dynamic_cast<CategoricalCrossEntropy *>(cloneLayer.get());
@@ -356,25 +356,25 @@
 //
 //         ASSERT_TRUE(clone->isInitialized());
 //
-//         Optional<Tensor> cloneInput = clone->getFeatureInput();
-//         ASSERT_TRUE(cloneInput.isPresent());
-//         ASSERT_EQ(cloneInput.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(cloneInput.get().getDimensions(), predictionsDimensions);
+//         std::optional<Tensor> cloneInput = clone->getFeatureInput();
+//         ASSERT_TRUE(cloneInput.has_value());
+//         ASSERT_EQ(cloneInput.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(cloneInput.value().getDimensions(), predictionsDimensions);
 //
-//         Optional<Tensor> cloneLabels = clone->getLabels();
-//         ASSERT_TRUE(cloneLabels.isPresent());
-//         ASSERT_EQ(cloneLabels.get().getDataType(), labelsDataType);
-//         ASSERT_EQ(cloneLabels.get().getDimensions(), labelDimensions);
+//         std::optional<Tensor> cloneLabels = clone->getLabels();
+//         ASSERT_TRUE(cloneLabels.has_value());
+//         ASSERT_EQ(cloneLabels.value().getDataType(), labelsDataType);
+//         ASSERT_EQ(cloneLabels.value().getDimensions(), labelDimensions);
 //
-//         Optional<Tensor> clonePredictions = clone->getPredictions();
-//         ASSERT_TRUE(clonePredictions.isPresent());
-//         ASSERT_EQ(clonePredictions.get().getDataType(), predictionsDataType);
-//         ASSERT_EQ(clonePredictions.get().getDimensions(), predictionsDimensions);
+//         std::optional<Tensor> clonePredictions = clone->getPredictions();
+//         ASSERT_TRUE(clonePredictions.has_value());
+//         ASSERT_EQ(clonePredictions.value().getDataType(), predictionsDataType);
+//         ASSERT_EQ(clonePredictions.value().getDimensions(), predictionsDimensions);
 //
-//         Optional<Tensor> cloneLoss = clone->getLoss();
-//         ASSERT_TRUE(cloneLoss.isPresent());
-//         ASSERT_EQ(cloneLoss.get().getDataType(), lossDataType);
-//         ASSERT_EQ(cloneLoss.get().getDimensions(), vector<uint64_t>(1, numClasses));
+//         std::optional<Tensor> cloneLoss = clone->getLoss();
+//         ASSERT_TRUE(cloneLoss.has_value());
+//         ASSERT_EQ(cloneLoss.value().getDataType(), lossDataType);
+//         ASSERT_EQ(cloneLoss.value().getDimensions(), vector<uint64_t>(1, numClasses));
 //
 //         ASSERT_EQ(crossEntropy.getId(), clone->getId());
 //         ASSERT_GT(crossEntropy.getId(), 1u);
@@ -650,15 +650,16 @@
 //     shared_ptr<ThorImplementation::NetworkOutput> stampedLossOutput;
 //     stampedLossOutput = stampedNetwork.getOutputs()[0];
 //
-//     ASSERT_EQ(stampedSoftmax->getFeatureInput().get(), stampedFC->getFeatureOutputs()[0].get());
-//     ASSERT_EQ(stampedCategoricalCrossEntropy->getPredictionsInput().get(), stampedSoftmax->getFeatureOutput().get());
-//     ASSERT_EQ(stampedCategoricalCrossEntropy->getLabelsInput().get(), stampedLabelsInput->getFeatureOutput().get());
+//     ASSERT_EQ(stampedSoftmax->getFeatureInput().value(), stampedFC->getFeatureOutputs()[0].value());
+//     ASSERT_EQ(stampedCategoricalCrossEntropy->getPredictionsInput().value(), stampedSoftmax->getFeatureOutput().value());
+//     ASSERT_EQ(stampedCategoricalCrossEntropy->getLabelsInput().value(), stampedLabelsInput->getFeatureOutput().value());
 //     if (lossShaper) {
-//         ASSERT_EQ(stampedCategoricalCrossEntropy->getLossOutput().get(), stampedLossShaper->getFeatureInput().get());
-//         ASSERT_EQ(stampedLossShaper->getFeatureOutput().get(), stampedLossOutput->getFeatureInput().get());
+//         ASSERT_EQ(stampedCategoricalCrossEntropy->getLossOutput().value(), stampedLossShaper->getFeatureInput().value());
+//         ASSERT_EQ(stampedLossShaper->getFeatureOutput().value(), stampedLossOutput->getFeatureInput().value());
 //     } else {
-//         ASSERT_EQ(stampedCategoricalCrossEntropy->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
+//         ASSERT_EQ(stampedCategoricalCrossEntropy->getLossOutput().value(), stampedLossOutput->getFeatureInput().value());
 //     }
 //
 //     filesystem::remove("/tmp/testModel.thor.tar");
 // }
+#include <optional>

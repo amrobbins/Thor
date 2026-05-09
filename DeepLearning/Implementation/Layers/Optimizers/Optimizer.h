@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
@@ -74,7 +75,7 @@ class Optimizer : public Parameterizable {
 
     ~Optimizer() override = default;
 
-    Optional<Tensor> getWeightsGradient() { return weightsGradient; }
+    std::optional<Tensor> getWeightsGradient() { return weightsGradient; }
 
     virtual std::shared_ptr<Optimizer> clone() const = 0;
 
@@ -83,7 +84,7 @@ class Optimizer : public Parameterizable {
     Stream gradientUpdateStream;
     bool compiled = false;
 
-    Optional<Tensor> weightsGradient;
+    std::optional<Tensor> weightsGradient;
 
     std::unique_ptr<StampedExecutionPlan> updateEquationStamped;
 

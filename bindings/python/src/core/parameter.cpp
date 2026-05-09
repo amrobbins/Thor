@@ -92,7 +92,7 @@ void bind_parameter(nb::module_& thor) {
            std::shared_ptr<Initializer> initializer,
            bool trainable,
            std::shared_ptr<Optimizer> optimizer_override,
-           optional<bool> training_initially_enabled) {
+           std::optional<bool> training_initially_enabled) {
             if (initializer == nullptr)
                 initializer = Glorot(GlorotMode::UNIFORM).clone();
             if (!training_initially_enabled.has_value())
@@ -141,7 +141,7 @@ This form is for statically-shaped parameters. For compile-time-dynamic paramete
            std::shared_ptr<Initializer> initializer,
            bool trainable,
            std::shared_ptr<Optimizer> optimizer_override,
-           optional<bool> training_initially_enabled) {
+           std::optional<bool> training_initially_enabled) {
             if (create_storage_from_context.is_none()) {
                 throw std::runtime_error("create_storage_from_context must be provided.");
             }

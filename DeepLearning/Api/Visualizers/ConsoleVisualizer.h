@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <csignal>
+#include <optional>
 
 namespace Thor {
 
@@ -106,7 +107,7 @@ class ConsoleVisualizer : public Visualizer {
 
     static std::string cudaDevicesString;
 
-    // Optional<ExecutionState> previousExecutionState;
+    // std::optional<ExecutionState> previousExecutionState;
 
     static void *win0;
     static void *win1;

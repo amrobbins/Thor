@@ -1,11 +1,11 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/CudnnHelper.h"
-#include "Utilities/Common/Optional.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/TensorOperations/Arithmetic/Average.h"
 #include "Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.h"
@@ -101,66 +101,66 @@ class Layer {
     }
 
     // Note: featureInput is guaranteed to be connected before createFeatureOutputTensor() is called.
-    virtual Optional<Tensor> createFeatureOutputTensor() {
+    virtual std::optional<Tensor> createFeatureOutputTensor() {
         // The default implementation just creates a clone of the corresponding feature input tensor,
         // this is the behavior of math layers etc that apply a function to the input tensor but do not reshape it.
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        return featureInput.get().clone();
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        return featureInput.value().clone();
     }
 
-    virtual void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
+    virtual void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
         THOR_THROW_IF_FALSE(running);
 
         infer(featureInput, featureOutput, stream);
 
-        if (nextLayer.isEmpty())
+        if (!nextLayer.has_value())
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        nextLayer.get()->forward(featureOutput, batchSize, validationPass);
+        nextLayer.value()->forward(featureOutput, validationPass, batchSize);
     }
 
-    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {
+    virtual void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) {
         THOR_THROW_IF_FALSE(running);
 
         // Experimental - back propagation stops at empty error input
         // i.e. the errorInput data is the thing necessitates processing.
         // if all errorInputs are empty for any layer that back propagation path will stop at that layer.
-        if (errorInput.isEmpty())
+        if (!errorInput.has_value())
             return;
 
         backProp(featureInput, errorInput, errorOutput, stream);
 
-        if (previousLayer.isEmpty())
+        if (!previousLayer.has_value())
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        previousLayer.get()->backward(errorOutput, batchSize);
+        previousLayer.value()->backward(errorOutput, batchSize);
     }
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
         THOR_THROW_IF_FALSE(!compiled);
 
-        THOR_THROW_IF_FALSE(this->nextLayer.isEmpty());
+        THOR_THROW_IF_FALSE(!this->nextLayer.has_value());
         this->nextLayer = nextLayer;
         if (nextLayer->hasFeatureInput())
             featureOutput = createFeatureOutputTensor();
         else
-            featureOutput = Optional<Tensor>::empty();
+            featureOutput = std::nullopt;
 
         errorInput = nextLayer->connectToPreviousLayer(
             this, featureOutput, stream, shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType);
 
         // When the next layer says that there is no error back propagation path here, then this layer removes that path
         // from itself and informs the adjacent layer in the back propagation path to do the same.
-        if (errorInput.isEmpty() && errorOutput.isPresent() && previousLayer.isPresent()) {
-            previousLayer.get()->replaceErrorInput(errorOutput, errorInput);
-            errorOutput.clear();
+        if (!errorInput.has_value() && errorOutput.has_value() && previousLayer.has_value()) {
+            previousLayer.value()->replaceErrorInput(errorOutput, errorInput);
+            errorOutput.reset();
         }
 
-        if (errorInput.isPresent() && featureOutput.isPresent()) {
-            THOR_THROW_IF_FALSE(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
-            THOR_THROW_IF_FALSE(errorInput.get().getPlacement() == featureOutput.get().getPlacement());
+        if (errorInput.has_value() && featureOutput.has_value()) {
+            THOR_THROW_IF_FALSE(errorInput.value().getDescriptor() == featureOutput.value().getDescriptor());
+            THOR_THROW_IF_FALSE(errorInput.value().getPlacement() == featureOutput.value().getPlacement());
         }
 
         ensureNoDeviceCrossing();
@@ -168,23 +168,23 @@ class Layer {
 
     virtual bool hasFeatureInput() { return true; }
 
-    virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError) {
+    virtual std::optional<Tensor> createErrorOutputTensor(bool backPropagateError) {
         // backPropagateError allows the previous layer to specify that it does not support back propagation,
         // inferenceOnly means that even though back propagation may be supported, we are not using it since we are not training.
         if (backPropagateError && !isInferenceOnly())
-            return featureInput.get().clone();
+            return featureInput.value().clone();
         else
-            return Optional<Tensor>::empty();
+            return std::nullopt;
     }
 
-    virtual Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int loaderConnectionType = 0) {
+    virtual std::optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, std::optional<Tensor> featureInput, Stream stream, bool backPropagateError, int loaderConnectionType = 0) {
         THOR_THROW_IF_FALSE(!compiled);
-        THOR_THROW_IF_FALSE(this->previousLayer.isEmpty());
-        THOR_THROW_IF_FALSE(this->featureInput.isEmpty());
-        THOR_THROW_IF_FALSE(this->errorOutput.isEmpty());
+        THOR_THROW_IF_FALSE(!this->previousLayer.has_value());
+        THOR_THROW_IF_FALSE(!this->featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->errorOutput.has_value());
         if (backPropagateError)
-            THOR_THROW_IF_FALSE(featureInput.isPresent());
+            THOR_THROW_IF_FALSE(featureInput.has_value());
 
         this->previousLayer = previousLayer;
         this->stream = stream;
@@ -197,19 +197,19 @@ class Layer {
     // For situations where the error input should just pass through to the error output,
     // this method is used to avoid duplicating the tensor and unnecessary data movement.
     // This is also used when there is a path that hits in a non-back prop layer,
-    // in that case the errorInput is set to Optional<Tensor>.empty().
-    virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
-        THOR_THROW_IF_FALSE(oldErrorInput.isPresent());
-        if (errorInput.isPresent()) {
-            THOR_THROW_IF_FALSE(oldErrorInput.get() == errorInput.get());
+    // in that case the errorInput is set to std::nullopt.
+    virtual void replaceErrorInput(std::optional<Tensor> oldErrorInput, std::optional<Tensor> newErrorInput) {
+        THOR_THROW_IF_FALSE(oldErrorInput.has_value());
+        if (errorInput.has_value()) {
+            THOR_THROW_IF_FALSE(oldErrorInput.value() == errorInput.value());
         }
 
-        if (errorOutput.isPresent()) {
+        if (errorOutput.has_value()) {
             // 1. When it was populated but now should not be, then deallocate it
             // 2. When they are fused already they need to remain fused, and pass the message to check for this condition backward.
-            if (newErrorInput.isEmpty() || (errorOutput.get() == errorInput.get())) {
-                if (previousLayer.isPresent())
-                    previousLayer.get()->replaceErrorInput(errorOutput, newErrorInput);
+            if (!newErrorInput.has_value() || (errorOutput.value() == errorInput.value())) {
+                if (previousLayer.has_value())
+                    previousLayer.value()->replaceErrorInput(errorOutput, newErrorInput);
                 errorOutput = newErrorInput;
             }
         }
@@ -217,31 +217,31 @@ class Layer {
     }
 
     virtual void ensureNoDeviceCrossing() {
-        if (featureInput.isPresent() && featureOutput.isPresent())
-            THOR_THROW_IF_FALSE(featureInput.get().getPlacement() == featureOutput.get().getPlacement());
-        if (featureInput.isPresent() && errorInput.isPresent())
-            THOR_THROW_IF_FALSE(featureInput.get().getPlacement() == errorInput.get().getPlacement());
-        if (featureInput.isPresent() && errorOutput.isPresent())
-            THOR_THROW_IF_FALSE(featureInput.get().getPlacement() == errorOutput.get().getPlacement());
+        if (featureInput.has_value() && featureOutput.has_value())
+            THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == featureOutput.value().getPlacement());
+        if (featureInput.has_value() && errorInput.has_value())
+            THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == errorInput.value().getPlacement());
+        if (featureInput.has_value() && errorOutput.has_value())
+            THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == errorOutput.value().getPlacement());
 
-        if (featureOutput.isPresent() && errorInput.isPresent())
-            THOR_THROW_IF_FALSE(featureOutput.get().getPlacement() == errorInput.get().getPlacement());
-        if (featureOutput.isPresent() && errorOutput.isPresent())
-            THOR_THROW_IF_FALSE(featureOutput.get().getPlacement() == errorOutput.get().getPlacement());
+        if (featureOutput.has_value() && errorInput.has_value())
+            THOR_THROW_IF_FALSE(featureOutput.value().getPlacement() == errorInput.value().getPlacement());
+        if (featureOutput.has_value() && errorOutput.has_value())
+            THOR_THROW_IF_FALSE(featureOutput.value().getPlacement() == errorOutput.value().getPlacement());
 
-        if (errorInput.isPresent() && errorOutput.isPresent())
-            THOR_THROW_IF_FALSE(errorInput.get().getPlacement() == errorOutput.get().getPlacement());
+        if (errorInput.has_value() && errorOutput.has_value())
+            THOR_THROW_IF_FALSE(errorInput.value().getPlacement() == errorOutput.value().getPlacement());
     }
 
     virtual TensorPlacement getPlacement() {
-        if (errorInput.isPresent()) {
-            return errorInput.get().getPlacement();
-        } else if (errorOutput.isPresent()) {
-            return errorOutput.get().getPlacement();
-        } else if (featureInput.isPresent()) {
-            return featureInput.get().getPlacement();
-        } else if (featureOutput.isPresent()) {
-            return featureOutput.get().getPlacement();
+        if (errorInput.has_value()) {
+            return errorInput.value().getPlacement();
+        } else if (errorOutput.has_value()) {
+            return errorOutput.value().getPlacement();
+        } else if (featureInput.has_value()) {
+            return featureInput.value().getPlacement();
+        } else if (featureOutput.has_value()) {
+            return featureOutput.value().getPlacement();
         } else {
             return TensorPlacement(TensorPlacement::MemDevices::CPU);
         }
@@ -259,13 +259,13 @@ class Layer {
     }
     virtual bool shouldConnectToBackPropErrorIn() { return connectToBackPropErrorIn; }
 
-    virtual bool isBackPropStub() { return errorOutput.isEmpty(); }
+    virtual bool isBackPropStub() { return !errorOutput.has_value(); }
 
-    virtual Optional<Tensor> getFeatureInput() { return featureInput; }
-    virtual Optional<Tensor> getFeatureOutput() { return featureOutput; }
-    virtual Optional<Tensor> getErrorInput() { return errorInput; }
-    virtual Optional<Tensor> getErrorOutput() { return errorOutput; }
-    virtual Optional<Layer *> getNextLayer() { return nextLayer; }
+    virtual std::optional<Tensor> getFeatureInput() { return featureInput; }
+    virtual std::optional<Tensor> getFeatureOutput() { return featureOutput; }
+    virtual std::optional<Tensor> getErrorInput() { return errorInput; }
+    virtual std::optional<Tensor> getErrorOutput() { return errorOutput; }
+    virtual std::optional<Layer *> getNextLayer() { return nextLayer; }
     virtual Stream getStream() { return stream; }
 
     static void average(half result_d[], half *sources_d[], int numElements, int numSources, Stream stream) {
@@ -300,8 +300,8 @@ class Layer {
 
     // compute the fan in for one element of a batch
     virtual uint64_t getFanIn() {
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        std::vector<uint64_t> inputDimensions = featureInput.get().getDescriptor().getDimensions();
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        std::vector<uint64_t> inputDimensions = featureInput.value().getDescriptor().getDimensions();
         uint64_t fanIn = 1;
         for (uint32_t i = 1; i < inputDimensions.size(); ++i) {
             fanIn *= inputDimensions[i];
@@ -311,14 +311,14 @@ class Layer {
 
     // compute the fan out for one element of a batch
     virtual uint64_t getFanOut() {
-        THOR_THROW_IF_FALSE(featureOutput.isPresent());
-        std::vector<uint64_t> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        std::vector<uint64_t> outputDimensions = featureOutput.value().getDescriptor().getDimensions();
         uint64_t fanOut = 1;
         for (uint32_t i = 1; i < outputDimensions.size(); ++i) {
             fanOut *= outputDimensions[i];
         }
-        if (nextLayer.isPresent()) {
-            fanOut *= nextLayer.get()->getDownStreamFanoutMultiplier();
+        if (nextLayer.has_value()) {
+            fanOut *= nextLayer.value()->getDownStreamFanoutMultiplier();
         }
         return fanOut;
     }
@@ -359,17 +359,17 @@ class Layer {
     }
 
    protected:
-    Optional<Tensor> featureInput;
-    Optional<Tensor> featureOutput;
-    Optional<Tensor> errorInput;
-    Optional<Tensor> errorOutput;
+    std::optional<Tensor> featureInput;
+    std::optional<Tensor> featureOutput;
+    std::optional<Tensor> errorInput;
+    std::optional<Tensor> errorOutput;
     Stream stream;
-    Optional<Layer *> nextLayer;
-    Optional<Layer *> previousLayer;
+    std::optional<Layer *> nextLayer;
+    std::optional<Layer *> previousLayer;
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) = 0;
+    virtual void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) = 0;
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) = 0;
+    virtual void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) = 0;
 
     // Layers can override preCompile() and must first call <Super>::preCompile()
     // Layers can override compileImpl() and must call <Super>::compileImpl() at any point during the function, usually first.

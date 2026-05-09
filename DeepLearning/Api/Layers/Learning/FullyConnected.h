@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <optional>
 
 namespace Thor {
 
@@ -23,7 +24,7 @@ class FullyConnected : public TrainableLayer {
    public:
     class Builder;
 
-    FullyConnected(const Optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
+    FullyConnected(const std::optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
 
     ~FullyConnected() override = default;
 
@@ -42,10 +43,10 @@ class FullyConnected : public TrainableLayer {
     static const char *epilogueOutputName() { return "__fully_connected_epilogue_output"; }
 
     [[nodiscard]] static ThorImplementation::Expression epilogueInput(
-        Optional<ThorImplementation::TensorDescriptor::DataType> computeDType =
-            Optional<ThorImplementation::TensorDescriptor::DataType>::empty(),
-        Optional<ThorImplementation::TensorDescriptor::DataType> outputDType =
-            Optional<ThorImplementation::TensorDescriptor::DataType>::empty()) {
+        std::optional<ThorImplementation::TensorDescriptor::DataType> computeDType =
+            std::nullopt,
+        std::optional<ThorImplementation::TensorDescriptor::DataType> outputDType =
+            std::nullopt) {
         return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
     }
 
@@ -103,8 +104,8 @@ class FullyConnected : public TrainableLayer {
     Tensor::DataType computeDataType;
     Tensor::DataType outputDataType;
 
-    const Optional<ThorImplementation::Expression> epilogue;
-    mutable Optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
+    const std::optional<ThorImplementation::Expression> epilogue;
+    mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
 
     static bool isFullyConnectedFloatingDataType(Tensor::DataType dataType);
     static std::string dataTypeName(Tensor::DataType dataType);
@@ -126,7 +127,7 @@ class FullyConnected::Builder {
     virtual FullyConnected build();
 
     virtual FullyConnected::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
@@ -142,13 +143,13 @@ class FullyConnected::Builder {
     }
 
     virtual FullyConnected::Builder &numOutputFeatures(uint32_t _numOutputFeatures) {
-        THOR_THROW_IF_FALSE(!this->_numOutputFeatures.isPresent());
+        THOR_THROW_IF_FALSE(!this->_numOutputFeatures.has_value());
         this->_numOutputFeatures = _numOutputFeatures;
         return *this;
     }
 
     virtual FullyConnected::Builder &hasBias(bool _hasBias) {
-        THOR_THROW_IF_FALSE(!this->_hasBias.isPresent());
+        THOR_THROW_IF_FALSE(!this->_hasBias.has_value());
         this->_hasBias = _hasBias;
         return *this;
     }
@@ -193,19 +194,19 @@ class FullyConnected::Builder {
     }
 
     virtual FullyConnected::Builder &weightsDataType(Tensor::DataType _weightsDataType) {
-        THOR_THROW_IF_FALSE(this->_weightsDataType.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_weightsDataType.has_value());
         this->_weightsDataType = _weightsDataType;
         return *this;
     }
 
     virtual FullyConnected::Builder &computeDataType(Tensor::DataType _computeDataType) {
-        THOR_THROW_IF_FALSE(this->_computeDataType.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_computeDataType.has_value());
         this->_computeDataType = _computeDataType;
         return *this;
     }
 
     virtual FullyConnected::Builder &outputDataType(Tensor::DataType _outputDataType) {
-        THOR_THROW_IF_FALSE(this->_outputDataType.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_outputDataType.has_value());
         this->_outputDataType = _outputDataType;
         return *this;
     }
@@ -218,7 +219,7 @@ class FullyConnected::Builder {
     }
 
     virtual FullyConnected::Builder &epilogue(const ThorImplementation::Expression &expression) {
-        THOR_THROW_IF_FALSE(this->_epilogue.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_epilogue.has_value());
         FullyConnected::validateEpilogueExpression(expression);
         _epilogue = expression;
         return *this;
@@ -239,14 +240,14 @@ class FullyConnected::Builder {
    private:
     void verifyConfig() const;
 
-    Optional<Network *> _network;
+    std::optional<Network *> _network;
     std::vector<Tensor> _featureInputs;
-    Optional<uint32_t> _numOutputFeatures;
-    Optional<bool> _hasBias;
+    std::optional<uint32_t> _numOutputFeatures;
+    std::optional<bool> _hasBias;
     std::shared_ptr<Activation> _activation;
-    Optional<Tensor::DataType> _weightsDataType;
-    Optional<Tensor::DataType> _computeDataType;
-    Optional<Tensor::DataType> _outputDataType;
+    std::optional<Tensor::DataType> _weightsDataType;
+    std::optional<Tensor::DataType> _computeDataType;
+    std::optional<Tensor::DataType> _outputDataType;
 
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasInitializer;
@@ -256,7 +257,7 @@ class FullyConnected::Builder {
 
     // FIXME: Future optimization, automatically fuse adjacent expressions from adjacent layers.
     //        For now epilogue gives access to post layer fusion, if that optimization goes in, it can remain as a convenience feature.
-    Optional<ThorImplementation::Expression> _epilogue;
+    std::optional<ThorImplementation::Expression> _epilogue;
 };
 
 }  // namespace Thor

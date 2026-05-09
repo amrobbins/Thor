@@ -3,7 +3,7 @@
 #include "ConvolutionKernelRequirement.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Cache/LruCache.h"
-#include "Utilities/Common/Optional.h"
+#include <optional>
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
@@ -61,27 +61,27 @@ class GpuConvolution {
     void convolutionForward(ConvolutionKernelRequirement convolutionKernelRequirement,
                             Tensor dataInput,
                             Tensor weights,
-                            Optional<Tensor> biases,
+                            std::optional<Tensor> biases,
                             Tensor dataOutput,
-                            Optional<Tensor> workspace,
+                            std::optional<Tensor> workspace,
                             Stream stream);
     void convolutionBackwardData(ConvolutionKernelRequirement convolutionKernelRequirement,
                                  Tensor errorInput,
                                  Tensor weights,
                                  Tensor errorOutput,
-                                 Optional<Tensor> workspace,
+                                 std::optional<Tensor> workspace,
                                  Stream stream);
     void convolutionBackwardFilter(ConvolutionKernelRequirement convolutionKernelRequirement,
                                    Tensor dataInput,
                                    Tensor errorInput,
                                    Tensor weightsGradient,
-                                   Optional<Tensor> workspace,
+                                   std::optional<Tensor> workspace,
                                    Stream stream,
                                    bool accumulateGradient);
     void convolutionBackwardBias(ConvolutionKernelRequirement convolutionKernelRequirement,
                                  Tensor errorInput,
                                  Tensor biasesGradient,
-                                 Optional<Tensor> workspace,
+                                 std::optional<Tensor> workspace,
                                  Stream stream,
                                  bool accumulateGradient);
 

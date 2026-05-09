@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Learning/Convolution3d.h"
+#include <optional>
 
 using namespace std;
 using json = nlohmann::json;
@@ -17,7 +18,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
                                                                     uint32_t padW,
                                                                     ThorImplementation::TensorPlacement placement,
                                                                     std::shared_ptr<Thor::Activation> activation,
-                                                                    Optional<ThorImplementation::Expression> epilogue) {
+                                                                    std::optional<ThorImplementation::Expression> epilogue) {
     using ImplDataType = ThorImplementation::TensorDescriptor::DataType;
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
@@ -52,7 +53,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
             (featureInputTensor.getDimensions()[3] + 2 * padH - wTensor.getDimensions()[3]) / strideH + 1;
         const uint64_t expectedOutputCols =
             (featureInputTensor.getDimensions()[4] + 2 * padW - wTensor.getDimensions()[4]) / strideW + 1;
-        Optional<ImplDataType> featureOutputDType = Optional<ImplDataType>::empty();
+        std::optional<ImplDataType> featureOutputDType = std::nullopt;
 
         if (outputs.contains("feature_output")) {
             const Tensor& featureOutputTensor = outputs.at("feature_output");
@@ -94,11 +95,11 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
         if (activation != nullptr) {
             fout = activation->toExpression(fout);
         }
-        if (epilogue.isPresent()) {
-            fout = Convolution3d::applyEpilogue(fout, epilogue.get());
+        if (epilogue.has_value()) {
+            fout = Convolution3d::applyEpilogue(fout, epilogue.value());
         }
-        if (featureOutputDType.isPresent()) {
-            fout = fout.withOutputDType(featureOutputDType.get());
+        if (featureOutputDType.has_value()) {
+            fout = fout.withOutputDType(featureOutputDType.value());
         }
 
         auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
@@ -160,7 +161,7 @@ void Convolution3d::buildSupportLayersAndAddToNetwork(Network* network) {
                                               .featureInput(currentFeatureInputs[i])
                                               .newDataType(Tensor::DataType::FP16)
                                               .build();
-            currentFeatureInputs[i] = typeConverter.getFeatureOutput();
+            currentFeatureInputs[i] = typeConverter.getFeatureOutput().value();
         }
     }
 
@@ -186,8 +187,8 @@ void Convolution3d::buildSupportLayersAndAddToNetwork(Network* network) {
     } else {
         convolution3dBuilder.noActivation();
     }
-    if (epilogue.isPresent()) {
-        convolution3dBuilder.epilogue(epilogue.get());
+    if (epilogue.has_value()) {
+        convolution3dBuilder.epilogue(epilogue.value());
     }
 
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
@@ -232,10 +233,10 @@ json Convolution3d::architectureJson() const {
     } else {
         j["activation"] = nullptr;
     }
-    if (epilogue.isPresent()) {
-        if (serializableEpilogue.isEmpty())
-            serializableEpilogue = makeEpilogueDefinition(epilogue.get());
-        j["epilogue"] = serializableEpilogue.get().architectureJson();
+    if (epilogue.has_value()) {
+        if (!serializableEpilogue.has_value())
+            serializableEpilogue = makeEpilogueDefinition(epilogue.value());
+        j["epilogue"] = serializableEpilogue.value().architectureJson();
     } else {
         j["epilogue"] = nullptr;
     }
@@ -285,13 +286,13 @@ json Convolution3d::serialize(thor_file::TarWriter& archiveWriter,
         if (hasBias) {
             const string biasesFile = layerName + "_biases.gds";
             j["biases_tensor"] = biasesFile;
-            ThorImplementation::Tensor biases = twbLayer->getParameter("biases")->getStorage().get();
+            ThorImplementation::Tensor biases = twbLayer->getParameter("biases")->getStorage().value();
             archiveWriter.addArchiveFile(biasesFile, biases);
         }
 
         const string weightsFile = layerName + "_weights.gds";
         j["weights_tensor"] = weightsFile;
-        ThorImplementation::Tensor weights = twbLayer->getParameter("weights")->getStorage();
+        ThorImplementation::Tensor weights = twbLayer->getParameter("weights")->getStorage().value();
         archiveWriter.addArchiveFile(weightsFile, weights);
     }
 

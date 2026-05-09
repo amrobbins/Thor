@@ -54,7 +54,7 @@ class HardSigmoid : public Activation {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
         std::shared_ptr<ThorImplementation::HardSigmoid> hardSigmoid = std::make_shared<ThorImplementation::HardSigmoid>();
         return hardSigmoid;
@@ -62,7 +62,7 @@ class HardSigmoid : public Activation {
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
-        return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
+        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
     }
 };
 
@@ -70,13 +70,13 @@ class HardSigmoid::Builder : public Activation::Builder {
    public:
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<HardSigmoid> hardSigmoid = std::make_shared<HardSigmoid>();
-        if (_featureInput.isPresent()) {
+        if (_featureInput.has_value()) {
             // Standalone layer support.
-            THOR_THROW_IF_FALSE(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.has_value());
             hardSigmoid->featureInput = _featureInput;
-            hardSigmoid->featureOutput = _featureInput.get().clone();
+            hardSigmoid->featureOutput = _featureInput.value().clone();
             hardSigmoid->initialized = true;
-            hardSigmoid->addToNetwork(_network.get());
+            hardSigmoid->addToNetwork(_network.value());
         } else {
             // Template activation support
             hardSigmoid->initialized = true;

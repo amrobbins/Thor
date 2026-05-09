@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Metrics/BinaryAccuracy.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -50,20 +51,20 @@ TEST(BinaryAccuracy, Builds) {
 
         ASSERT_TRUE(binaryAccuracy.isInitialized());
 
-        Optional<Tensor> actualInput = binaryAccuracy.getFeatureInput();
-        ASSERT_TRUE(actualInput.isPresent());
-        ASSERT_EQ(actualInput.get().getDataType(), predictionsDataType);
-        ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+        std::optional<Tensor> actualInput = binaryAccuracy.getFeatureInput();
+        ASSERT_TRUE(actualInput.has_value());
+        ASSERT_EQ(actualInput.value().getDataType(), predictionsDataType);
+        ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
-        Optional<Tensor> actualLabels = binaryAccuracy.getLabels();
-        ASSERT_TRUE(actualLabels.isPresent());
-        ASSERT_EQ(actualLabels.get().getDataType(), labelsDataType);
-        ASSERT_EQ(actualLabels.get().getDimensions(), dimensions);
+        std::optional<Tensor> actualLabels = binaryAccuracy.getLabels();
+        ASSERT_TRUE(actualLabels.has_value());
+        ASSERT_EQ(actualLabels.value().getDataType(), labelsDataType);
+        ASSERT_EQ(actualLabels.value().getDimensions(), dimensions);
 
-        Optional<Tensor> actualAccuracy = binaryAccuracy.getFeatureOutput();
-        ASSERT_TRUE(actualAccuracy.isPresent());
-        ASSERT_EQ(actualAccuracy.get().getDataType(), accuracyDataType);
-        ASSERT_EQ(actualAccuracy.get().getDimensions(), vector<uint64_t>({1}));
+        std::optional<Tensor> actualAccuracy = binaryAccuracy.getFeatureOutput();
+        ASSERT_TRUE(actualAccuracy.has_value());
+        ASSERT_EQ(actualAccuracy.value().getDataType(), accuracyDataType);
+        ASSERT_EQ(actualAccuracy.value().getDimensions(), vector<uint64_t>({1}));
 
         shared_ptr<Layer> cloneLayer = binaryAccuracy.clone();
         BinaryAccuracy *clone = dynamic_cast<BinaryAccuracy *>(cloneLayer.get());
@@ -71,20 +72,20 @@ TEST(BinaryAccuracy, Builds) {
 
         ASSERT_TRUE(clone->isInitialized());
 
-        Optional<Tensor> cloneInput = clone->getFeatureInput();
-        ASSERT_TRUE(cloneInput.isPresent());
-        ASSERT_EQ(cloneInput.get().getDataType(), predictionsDataType);
-        ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+        std::optional<Tensor> cloneInput = clone->getFeatureInput();
+        ASSERT_TRUE(cloneInput.has_value());
+        ASSERT_EQ(cloneInput.value().getDataType(), predictionsDataType);
+        ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
-        Optional<Tensor> cloneLabels = clone->getLabels();
-        ASSERT_TRUE(cloneLabels.isPresent());
-        ASSERT_EQ(cloneLabels.get().getDataType(), labelsDataType);
-        ASSERT_EQ(cloneLabels.get().getDimensions(), dimensions);
+        std::optional<Tensor> cloneLabels = clone->getLabels();
+        ASSERT_TRUE(cloneLabels.has_value());
+        ASSERT_EQ(cloneLabels.value().getDataType(), labelsDataType);
+        ASSERT_EQ(cloneLabels.value().getDimensions(), dimensions);
 
-        Optional<Tensor> cloneAccuracy = clone->getFeatureOutput();
-        ASSERT_TRUE(cloneAccuracy.isPresent());
-        ASSERT_EQ(cloneAccuracy.get().getDataType(), accuracyDataType);
-        ASSERT_EQ(cloneAccuracy.get().getDimensions(), vector<uint64_t>({1}));
+        std::optional<Tensor> cloneAccuracy = clone->getFeatureOutput();
+        ASSERT_TRUE(cloneAccuracy.has_value());
+        ASSERT_EQ(cloneAccuracy.value().getDataType(), accuracyDataType);
+        ASSERT_EQ(cloneAccuracy.value().getDimensions(), vector<uint64_t>({1}));
 
         ASSERT_EQ(binaryAccuracy.getId(), clone->getId());
         ASSERT_GT(binaryAccuracy.getId(), 1u);
@@ -117,8 +118,8 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
 
     BinaryAccuracy binaryAccuracy = BinaryAccuracy::Builder()
                                         .network(initialNetwork)
-                                        .predictions(predictionsNetworkInput.getFeatureOutput())
-                                        .labels(labelsNetworkInput.getFeatureOutput())
+                                        .predictions(predictionsNetworkInput.getFeatureOutput().value())
+                                        .labels(labelsNetworkInput.getFeatureOutput().value())
                                         .build();
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
@@ -133,8 +134,8 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
     Tensor predictionsInput = binaryAccuracy.getPredictions();
     Tensor labelsInput = binaryAccuracy.getLabels();
     Tensor metricTensor = binaryAccuracy.getMetric();
-    assert(predictionsInput == predictionsNetworkInput.getFeatureOutput());
-    assert(labelsInput == labelsNetworkInput.getFeatureOutput());
+    assert(predictionsInput == predictionsNetworkInput.getFeatureOutput().value());
+    assert(labelsInput == labelsNetworkInput.getFeatureOutput().value());
     assert(metricTensor == networkOutput.getFeatureInput());
 
     // Now stamp the network and test serialization
@@ -252,17 +253,17 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
 
-    ASSERT_TRUE(stampedInput0->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedInput1->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedOutput->getFeatureInput().isPresent());
+    ASSERT_TRUE(stampedInput0->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedInput1->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureInput().has_value());
 
-    if (stampedInput0->getFeatureOutput().get() == stampedBinaryAccuracy->getFeatureInput().get()) {
-        ASSERT_EQ(stampedInput1->getFeatureOutput().get(), stampedBinaryAccuracy->getLabelsInput().get());
+    if (stampedInput0->getFeatureOutput().value() == stampedBinaryAccuracy->getFeatureInput().value()) {
+        ASSERT_EQ(stampedInput1->getFeatureOutput().value(), stampedBinaryAccuracy->getLabelsInput().value());
     } else {
-        ASSERT_EQ(stampedInput0->getFeatureOutput().get(), stampedBinaryAccuracy->getLabelsInput().get());
-        ASSERT_EQ(stampedInput1->getFeatureOutput().get(), stampedBinaryAccuracy->getFeatureInput().get());
+        ASSERT_EQ(stampedInput0->getFeatureOutput().value(), stampedBinaryAccuracy->getLabelsInput().value());
+        ASSERT_EQ(stampedInput1->getFeatureOutput().value(), stampedBinaryAccuracy->getFeatureInput().value());
     }
-    ASSERT_EQ(stampedBinaryAccuracy->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+    ASSERT_EQ(stampedBinaryAccuracy->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
     filesystem::remove("/tmp/testModel.thor.tar");
 }

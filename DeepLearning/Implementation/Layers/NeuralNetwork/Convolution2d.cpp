@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2d.h"
 
 #include <stdexcept>
@@ -9,7 +10,7 @@ namespace {
 class ConvWeightsParameter : public PhysicalParameter {
    public:
     ConvWeightsParameter(std::string name,
-                         Optional<TensorDescriptor::DataType> storageDataType,
+                         std::optional<TensorDescriptor::DataType> storageDataType,
                          bool trainable,
                          bool trainingEnabled,
                          uint32_t numOutputChannels,
@@ -23,7 +24,7 @@ class ConvWeightsParameter : public PhysicalParameter {
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
-        TensorDescriptor::DataType resolvedDataType = storageDataType.isPresent() ? storageDataType.get() : inputTensor.getDataType();
+        TensorDescriptor::DataType resolvedDataType = storageDataType.has_value() ? storageDataType.value() : inputTensor.getDataType();
 
         const auto& inputDims = inputTensor.getDimensions();
         if (inputDims.size() != 4) {
@@ -38,13 +39,13 @@ class ConvWeightsParameter : public PhysicalParameter {
     const uint32_t numOutputChannels;
     const uint32_t filterWidth;
     const uint32_t filterHeight;
-    const Optional<TensorDescriptor::DataType> storageDataType;
+    const std::optional<TensorDescriptor::DataType> storageDataType;
 };
 
 class ConvBiasesParameter : public PhysicalParameter {
    public:
     ConvBiasesParameter(std::string name,
-                        Optional<TensorDescriptor::DataType> storageDataType,
+                        std::optional<TensorDescriptor::DataType> storageDataType,
                         bool trainable,
                         bool trainingEnabled,
                         uint32_t numOutputChannels)
@@ -52,13 +53,13 @@ class ConvBiasesParameter : public PhysicalParameter {
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
-        TensorDescriptor::DataType resolvedDataType = storageDataType.isPresent() ? storageDataType.get() : inputTensor.getDataType();
+        TensorDescriptor::DataType resolvedDataType = storageDataType.has_value() ? storageDataType.value() : inputTensor.getDataType();
         storage = Tensor(inputTensor.getPlacement(), TensorDescriptor(resolvedDataType, {numOutputChannels}));
     }
 
    private:
     const uint32_t numOutputChannels;
-    const Optional<TensorDescriptor::DataType> storageDataType;
+    const std::optional<TensorDescriptor::DataType> storageDataType;
 };
 }  // namespace
 
@@ -72,7 +73,7 @@ Convolution2d::Convolution2d(uint32_t filterWidth,
                              uint32_t topAndBottomPadHeight,
                              uint32_t numOutputChannels,
                              bool hasBias,
-                             Optional<DataType> weightsDataType,
+                             std::optional<DataType> weightsDataType,
                              const TensorPlacement& placement,
                              bool inferenceOnly,
                              int64_t stampedId)
@@ -159,7 +160,7 @@ std::vector<std::shared_ptr<PhysicalParameter>> Convolution2d::defineParameters(
                                                                                 bool hasBias,
                                                                                 uint32_t filterWidth,
                                                                                 uint32_t filterHeight,
-                                                                                Optional<TensorDescriptor::DataType> weightsDataType) {
+                                                                                std::optional<TensorDescriptor::DataType> weightsDataType) {
     std::vector<std::shared_ptr<PhysicalParameter>> parameters;
     parameters.push_back(
         std::make_shared<ConvWeightsParameter>("weights", weightsDataType, true, true, numOutputChannels, filterWidth, filterHeight));

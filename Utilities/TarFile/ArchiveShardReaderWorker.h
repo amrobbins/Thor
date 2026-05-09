@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "Crc32.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
@@ -46,7 +48,7 @@ class ArchiveShardReaderWorker {
         uint32_t numCompletionsToFinish[2] = {0, 0};
 
         // GPU transfer events (so we don't overwrite a bounce buffer still being uploaded)
-        Optional<Event> gpuTransferDone[2];
+        std::optional<Event> gpuTransferDone[2];
 
         // Keep the per-entry read geometry so we know what to upload when a buffer is ready
         uint64_t prefixBytesForBuffer[2] = {0, 0};
@@ -116,8 +118,8 @@ class ArchiveShardReaderWorker {
                     return;
                 }
 
-                if (gpuTransferDone[loadingBuffer].isPresent())
-                    gpuTransferDone[loadingBuffer].get().synchronize();
+                if (gpuTransferDone[loadingBuffer].has_value())
+                    gpuTransferDone[loadingBuffer].value().synchronize();
 
                 scheduleReadIntoBuffer(loadingBuffer,
                                        plan[i],
@@ -162,9 +164,9 @@ class ArchiveShardReaderWorker {
 
         // Drain all outstanding GPU transfers
         uint32_t nonLastLoadingBuffer = lastLoadingBuffer == 0 ? 1 : 0;
-        if (gpuTransferDone[nonLastLoadingBuffer].isPresent())
-            gpuTransferDone[nonLastLoadingBuffer].get().synchronize();
-        gpuTransferDone[lastLoadingBuffer].get().synchronize();
+        if (gpuTransferDone[nonLastLoadingBuffer].has_value())
+            gpuTransferDone[nonLastLoadingBuffer].value().synchronize();
+        gpuTransferDone[lastLoadingBuffer].value().synchronize();
     }
 
     // Reads [fileOffset, fileOffset+numBytes) from archive into bounce buffer (O_DIRECT constraints handled by caller).

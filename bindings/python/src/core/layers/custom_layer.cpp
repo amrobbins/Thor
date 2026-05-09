@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <optional>
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
@@ -21,7 +22,6 @@
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
-#include "Utilities/Common/Optional.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
@@ -413,8 +413,8 @@ class CustomLayerBuildContext {
                                       nb::object outputDTypeObj,
                                       nb::object computeDTypeObj,
                                       std::optional<DataType> defaultDType) {
-        Optional<DataType> outputDType = Optional<DataType>::empty();
-        Optional<DataType> computeDType = Optional<DataType>::empty();
+        std::optional<DataType> outputDType = std::nullopt;
+        std::optional<DataType> computeDType = std::nullopt;
 
         if (!outputDTypeObj.is_none()) {
             outputDType = nb::cast<DataType>(outputDTypeObj);

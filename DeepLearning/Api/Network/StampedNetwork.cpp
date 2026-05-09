@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
+#include <optional>
 
 namespace ThorImplementation {
 
@@ -63,14 +64,14 @@ void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOthe
     //             streams.push_back(trainableLayerMap[stampedId]->getStreams()[0]);
     //         }
     //         Tensor uninitializedWeights = trainableLayerMap[stampedId]->getWeights();
-    //         Optional<Tensor> uninitializedBiases = trainableLayerMap[stampedId]->getBiases();
+    //         std::optional<Tensor> uninitializedBiases = trainableLayerMap[stampedId]->getBiases();
     //         ThorImplementation::TrainableLayer *initializedLayer = otherStamp->trainableLayers[i];
     //         Tensor initializedWeights = initializedLayer->getWeights();
-    //         Optional<Tensor> initializedBiases = initializedLayer->getBiases();
+    //         std::optional<Tensor> initializedBiases = initializedLayer->getBiases();
     //         uninitializedWeights.copyFromAsync(initializedWeights, streams.back());
-    //         if (initializedBiases.isPresent()) {
-    //             THOR_THROW_IF_FALSE(uninitializedBiases.isPresent());
-    //             uninitializedBiases.get().copyFromAsync(initializedBiases.get(), stream);
+    //         if (initializedBiases.has_value()) {
+    //             THOR_THROW_IF_FALSE(uninitializedBiases.has_value());
+    //             uninitializedBiases.value().copyFromAsync(initializedBiases.value(), stream);
     //         }
     //     }
     //     for (uint32_t i = 0; i < streams.size(); ++i) {
@@ -115,7 +116,7 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
 
     // The stream from input 0 waits for all outputs to be ready
     for (uint32_t i = 0; i < outputs.size(); ++i) {
-        batchOutputs[outputs[i]->getName()] = outputs[i]->getFeatureOutput();
+        batchOutputs[outputs[i]->getName()] = outputs[i]->getFeatureOutput().value();
         Event outputReadyEvent = outputs[i]->getStream().putEvent();
         outputReadyEvents[outputs[i]->getName()] = outputReadyEvent;
         inputs[0]->getStream().waitEvent(outputReadyEvent);

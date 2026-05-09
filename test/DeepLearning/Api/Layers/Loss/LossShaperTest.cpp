@@ -47,24 +47,24 @@
 //
 //         ASSERT_TRUE(lossShaper.isInitialized());
 //
-//         Optional<Tensor> actualLossInput = lossShaper.getLossInput();
-//         ASSERT_TRUE(actualLossInput.isPresent());
-//         ASSERT_EQ(actualLossInput.get().getDataType(), dataType);
-//         ASSERT_EQ(actualLossInput.get().getDimensions(), dimensions);
+//         std::optional<Tensor> actualLossInput = lossShaper.getLossInput();
+//         ASSERT_TRUE(actualLossInput.has_value());
+//         ASSERT_EQ(actualLossInput.value().getDataType(), dataType);
+//         ASSERT_EQ(actualLossInput.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> actualLossOutput = lossShaper.getLossOutput();
-//         ASSERT_TRUE(actualLossOutput.isPresent());
-//         ASSERT_EQ(actualLossOutput.get().getDataType(), dataType);
+//         std::optional<Tensor> actualLossOutput = lossShaper.getLossOutput();
+//         ASSERT_TRUE(actualLossOutput.has_value());
+//         ASSERT_EQ(actualLossOutput.value().getDataType(), dataType);
 //         if (outputLossType == ThorImplementation::LossShaper::OutputLossType::BATCH) {
-//             ASSERT_EQ(actualLossOutput.get().getDimensions(), batchDimensions);
+//             ASSERT_EQ(actualLossOutput.value().getDimensions(), batchDimensions);
 //         } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::CLASSWISE) {
-//             ASSERT_EQ(actualLossOutput.get().getDimensions(), classwiseDimensions);
+//             ASSERT_EQ(actualLossOutput.value().getDimensions(), classwiseDimensions);
 //         } else {
 //             assert(outputLossType == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE);
-//             ASSERT_EQ(actualLossOutput.get().getDimensions(), elementwiseDimensions);
+//             ASSERT_EQ(actualLossOutput.value().getDimensions(), elementwiseDimensions);
 //         }
 //
-//         ASSERT_FALSE(actualLossInput.get() == actualLossOutput.get());
+//         ASSERT_FALSE(actualLossInput.value() == actualLossOutput.value());
 //
 //         ASSERT_TRUE(lossShaper.getLossInput() == lossShaper.getFeatureInput());
 //         ASSERT_TRUE(lossShaper.getLossOutput() == lossShaper.getFeatureOutput());
@@ -75,23 +75,23 @@
 //
 //         ASSERT_TRUE(lossShaper.isInitialized());
 //
-//         Optional<Tensor> cloneLossInput = clone->getLossInput();
-//         ASSERT_TRUE(cloneLossInput.isPresent());
-//         ASSERT_EQ(cloneLossInput.get().getDataType(), dataType);
-//         ASSERT_EQ(cloneLossInput.get().getDimensions(), dimensions);
+//         std::optional<Tensor> cloneLossInput = clone->getLossInput();
+//         ASSERT_TRUE(cloneLossInput.has_value());
+//         ASSERT_EQ(cloneLossInput.value().getDataType(), dataType);
+//         ASSERT_EQ(cloneLossInput.value().getDimensions(), dimensions);
 //
-//         Optional<Tensor> cloneLossOutput = clone->getLossOutput();
-//         ASSERT_TRUE(cloneLossOutput.isPresent());
-//         ASSERT_EQ(cloneLossOutput.get().getDataType(), dataType);
+//         std::optional<Tensor> cloneLossOutput = clone->getLossOutput();
+//         ASSERT_TRUE(cloneLossOutput.has_value());
+//         ASSERT_EQ(cloneLossOutput.value().getDataType(), dataType);
 //         if (outputLossType == ThorImplementation::LossShaper::OutputLossType::BATCH) {
-//             ASSERT_EQ(cloneLossOutput.get().getDimensions(), batchDimensions);
+//             ASSERT_EQ(cloneLossOutput.value().getDimensions(), batchDimensions);
 //         } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::CLASSWISE) {
-//             ASSERT_EQ(cloneLossOutput.get().getDimensions(), classwiseDimensions);
+//             ASSERT_EQ(cloneLossOutput.value().getDimensions(), classwiseDimensions);
 //         } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE) {
-//             ASSERT_EQ(cloneLossOutput.get().getDimensions(), elementwiseDimensions);
+//             ASSERT_EQ(cloneLossOutput.value().getDimensions(), elementwiseDimensions);
 //         }
 //
-//         ASSERT_FALSE(cloneLossInput.get() == cloneLossOutput.get());
+//         ASSERT_FALSE(cloneLossInput.value() == cloneLossOutput.value());
 //
 //         ASSERT_TRUE(clone->getLossInput() == clone->getFeatureInput());
 //         ASSERT_TRUE(clone->getLossOutput() == clone->getFeatureOutput());
@@ -146,11 +146,11 @@
 //     Tensor featureOutput = lossShaper.getFeatureOutput();
 //     assert(featureInput == networkInput.getFeatureOutput());
 //
-//     ASSERT_TRUE(lossShaper.getFeatureOutput().isPresent());
-//     ASSERT_EQ(lossShaper.getFeatureOutput().get(), featureOutput);
+//     ASSERT_TRUE(lossShaper.getFeatureOutput().has_value());
+//     ASSERT_EQ(lossShaper.getFeatureOutput().value(), featureOutput);
 //
-//     ASSERT_TRUE(lossShaper.getFeatureInput().isPresent());
-//     assert(lossShaper.getFeatureInput().get() == featureInput);
+//     ASSERT_TRUE(lossShaper.getFeatureInput().has_value());
+//     assert(lossShaper.getFeatureInput().value() == featureInput);
 //
 //     ASSERT_EQ(featureInput.getDataType(), dataType);
 //     ASSERT_EQ(featureInput.getDimensions(), inputDimensions);
@@ -263,14 +263,15 @@
 //     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput =
 //     dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]); ASSERT_NE(outputLayers[0], nullptr);
 //
-//     ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-//     ASSERT_TRUE(stampedLossShaper->getFeatureOutput().isPresent());
-//     ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
-//     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedLossShaper->getFeatureInput().get());
-//     ASSERT_EQ(stampedLossShaper->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+//     ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+//     ASSERT_TRUE(stampedLossShaper->getFeatureOutput().has_value());
+//     ASSERT_TRUE(stampedOutput->getFeatureOutput().has_value());
+//     ASSERT_EQ(stampedInput->getFeatureOutput().value(), stampedLossShaper->getFeatureInput().value());
+//     ASSERT_EQ(stampedLossShaper->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 //
-//     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedLossShaper->getFeatureInput().get());
-//     ASSERT_EQ(stampedLossShaper->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+//     ASSERT_EQ(stampedInput->getFeatureOutput().value(), stampedLossShaper->getFeatureInput().value());
+//     ASSERT_EQ(stampedLossShaper->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 //
 //     filesystem::remove("/tmp/testModel.thor.tar");
 // }
+#include <optional>

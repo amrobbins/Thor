@@ -1,5 +1,6 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <optional>
 
 #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -25,7 +26,7 @@ void bind_mean_absolute_error(nb::module_ &losses) {
            Network &network,
            Tensor predictions,
            Tensor labels,
-           optional<DataType> loss_data_type,
+           std::optional<DataType> loss_data_type,
            bool reportsElementwiseLoss) {
             MeanAbsoluteError::Builder builder;
 

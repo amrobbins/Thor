@@ -1,3 +1,4 @@
+#include <optional>
 #include <curand.h>
 #include <curand_kernel.h>
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -3082,7 +3083,7 @@ void Tensor::outerProduct(Tensor A, Tensor B, Stream stream) {
     multiply(A, B, stream);
 }
 
-void Tensor::gemm(Tensor A, Tensor B, Optional<Tensor> C, float alpha, float beta, Stream stream) {
+void Tensor::gemm(Tensor A, Tensor B, std::optional<Tensor> C, float alpha, float beta, Stream stream) {
     THOR_THROW_IF_FALSE(A.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(A.getPlacement() == B.getPlacement());
     THOR_THROW_IF_FALSE(A.getPlacement() == getPlacement());
@@ -3092,10 +3093,10 @@ void Tensor::gemm(Tensor A, Tensor B, Optional<Tensor> C, float alpha, float bet
     THOR_THROW_IF_FALSE(A.getDimensions()[0] == getDimensions()[0]);
     THOR_THROW_IF_FALSE(B.getDimensions()[1] == getDimensions()[1]);
 
-    if (C.isPresent()) {
-        THOR_THROW_IF_FALSE(A.getPlacement() == C.get().getPlacement());
-        THOR_THROW_IF_FALSE(A.getDataType() == C.get().getDataType());
-        THOR_THROW_IF_FALSE(C.get().getDimensions() == getDimensions());
+    if (C.has_value()) {
+        THOR_THROW_IF_FALSE(A.getPlacement() == C.value().getPlacement());
+        THOR_THROW_IF_FALSE(A.getDataType() == C.value().getDataType());
+        THOR_THROW_IF_FALSE(C.value().getDimensions() == getDimensions());
     } else {
         THOR_THROW_IF_FALSE(beta == 0.0f);
     }
@@ -3106,7 +3107,7 @@ void Tensor::gemm(Tensor A, Tensor B, Optional<Tensor> C, float alpha, float bet
     // When C is not present, I still need to pass a compatible tensor, in this case I pass D since it is the same size as C.
     CublasMatrixMultiply::instance().gemmUsingHeuristicKernelChoice(A,
                                                                     B,
-                                                                    C.isPresent() ? C.get() : *this,
+                                                                    C.has_value() ? C.value() : *this,
                                                                     *this,
                                                                     A.getDimensions()[0],
                                                                     A.getDimensions()[1],

@@ -6,6 +6,7 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/CudnnHelper.h"
+#include <optional>
 
 namespace Thor {
 
@@ -31,7 +32,7 @@ class DropOut : public Layer {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput());
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value());
 
         std::shared_ptr<ThorImplementation::DropOut> dropOut = std::make_shared<ThorImplementation::DropOut>(dropProportion, true);
         return dropOut;
@@ -43,8 +44,8 @@ class DropOut : public Layer {
         cudnnHandle_t cudnnHandle = ThorImplementation::CudnnHelper::getCudnnHandle(gpuNum);
         uint64_t randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(cudnnHandle);
 
-        uint64_t featureOutputSize = featureOutput.get().getTotalSizeInBytes();
-        uint64_t errorOutputSize = featureInput.get().getTotalSizeInBytes();
+        uint64_t featureOutputSize = featureOutput.value().getTotalSizeInBytes();
+        uint64_t errorOutputSize = featureInput.value().getTotalSizeInBytes();
 
         return randomStateSize + getReservedStateSizeInBytes(batchSize) + batchSize * (featureOutputSize + errorOutputSize);
     }
@@ -54,8 +55,8 @@ class DropOut : public Layer {
         ThorImplementation::TensorDescriptor::DataType dataType = ThorImplementation::TensorDescriptor::DataType::FP16;
         std::vector<uint64_t> featureInputDimensionsWithBatchSize;
         featureInputDimensionsWithBatchSize.push_back(batchSize);
-        for (uint32_t i = 0; i < featureInput.get().getDimensions().size(); ++i)
-            featureInputDimensionsWithBatchSize.push_back(featureInput.get().getDimensions()[i]);
+        for (uint32_t i = 0; i < featureInput.value().getDimensions().size(); ++i)
+            featureInputDimensionsWithBatchSize.push_back(featureInput.value().getDimensions()[i]);
         return ThorImplementation::DropOut::getReservedSpaceSizeInBytes(featureInputDimensionsWithBatchSize, dataType);
     }
 
@@ -66,43 +67,43 @@ class DropOut : public Layer {
 class DropOut::Builder {
    public:
     virtual DropOut build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(_featureInput.isPresent());
-        THOR_THROW_IF_FALSE(_dropProportion.isPresent());
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.has_value());
+        THOR_THROW_IF_FALSE(_dropProportion.has_value());
 
         DropOut dropOut;
         dropOut.featureInput = _featureInput;
-        dropOut.featureOutput = _featureInput.get().clone();
-        dropOut.dropProportion = _dropProportion;
+        dropOut.featureOutput = _featureInput.value().clone();
+        dropOut.dropProportion = _dropProportion.value();
         dropOut.initialized = true;
-        dropOut.addToNetwork(_network.get());
+        dropOut.addToNetwork(_network.value());
         return dropOut;
     }
 
     virtual DropOut::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual DropOut::Builder &featureInput(Tensor _featureInput) {
-        THOR_THROW_IF_FALSE(!this->_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
         this->_featureInput = _featureInput;
         return *this;
     }
 
     virtual DropOut::Builder &dropProportion(float _dropProportion) {
-        THOR_THROW_IF_FALSE(!this->_dropProportion.isPresent());
-        THOR_THROW_IF_FALSE(_dropProportion >= 0.0);
-        THOR_THROW_IF_FALSE(_dropProportion <= 1.0);
+        THOR_THROW_IF_FALSE(!this->_dropProportion.has_value());
+        THOR_THROW_IF_FALSE(_dropProportion >= 0.0f);
+        THOR_THROW_IF_FALSE(_dropProportion <= 1.0f);
         this->_dropProportion = _dropProportion;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _featureInput;
-    Optional<float> _dropProportion;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _featureInput;
+    std::optional<float> _dropProportion;
 };
 
 }  // namespace Thor

@@ -6,6 +6,7 @@
 #include "DeepLearning/Implementation/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Implementation/Layers/Utility/Reshape.h"
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
+#include <optional>
 
 namespace Thor {
 
@@ -23,9 +24,9 @@ class LossShaper : public Layer {
     virtual Tensor getLossInput() const { return lossInput; }
     virtual Tensor getLossOutput() const { return lossOutput; }
 
-    // getLossInput() and getLossOutput() are synonyms for getFeatureInput() and getFeatureOutput() in losses:
-    Optional<Tensor> getFeatureInput() const override { return getLossInput(); }
-    Optional<Tensor> getFeatureOutput() const override { return getLossOutput(); }
+    // getLossInput() and getLossOutput() are synonyms for getFeatureInput().value() and getFeatureOutput().value() in losses:
+    std::optional<Tensor> getFeatureInput() const override { return getLossInput(); }
+    std::optional<Tensor> getFeatureOutput() const override { return getLossOutput(); }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
@@ -123,29 +124,29 @@ class LossShaper : public Layer {
 class LossShaper::Builder {
    public:
     virtual LossShaper construct() const {
-        THOR_THROW_IF_FALSE(_lossInput.isPresent());
-        THOR_THROW_IF_FALSE(_lossInput.get().getDimensions().size() == 1);
-        THOR_THROW_IF_FALSE(_outputLossType.isPresent());
-        THOR_THROW_IF_FALSE(_outputLossType.get() == ThorImplementation::LossShaper::OutputLossType::BATCH ||
-               _outputLossType.get() == ThorImplementation::LossShaper::OutputLossType::CLASSWISE ||
-               _outputLossType.get() == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE);
+        THOR_THROW_IF_FALSE(_lossInput.has_value());
+        THOR_THROW_IF_FALSE(_lossInput.value().getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(_outputLossType.has_value());
+        THOR_THROW_IF_FALSE(_outputLossType.value() == ThorImplementation::LossShaper::OutputLossType::BATCH ||
+               _outputLossType.value() == ThorImplementation::LossShaper::OutputLossType::CLASSWISE ||
+               _outputLossType.value() == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE);
 
         LossShaper lossShaper;
-        lossShaper.lossInput = _lossInput.get();
-        lossShaper.outputLossType = _outputLossType.get();
+        lossShaper.lossInput = _lossInput.value();
+        lossShaper.outputLossType = _outputLossType.value();
 
-        std::vector<uint64_t> apiOutputLossDimensions = getApiOutputDimensions(_lossInput.get().getDimensions(), _outputLossType.get());
-        lossShaper.lossOutput = Tensor(_lossInput.get().getDataType(), apiOutputLossDimensions);
+        std::vector<uint64_t> apiOutputLossDimensions = getApiOutputDimensions(_lossInput.value().getDimensions(), _outputLossType.value());
+        lossShaper.lossOutput = Tensor(_lossInput.value().getDataType(), apiOutputLossDimensions);
 
         lossShaper.initialized = true;
         return lossShaper;
     }
 
     virtual LossShaper build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_network.has_value());
         LossShaper lossShaper;
         lossShaper = construct();
-        lossShaper.addToNetwork(_network.get());
+        lossShaper.addToNetwork(_network.value());
         return lossShaper;
     }
 
@@ -154,43 +155,43 @@ class LossShaper::Builder {
     }
 
     virtual LossShaper::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual LossShaper::Builder &lossInput(Tensor _lossInput) {
-        THOR_THROW_IF_FALSE(!this->_lossInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_lossInput.has_value());
         this->_lossInput = _lossInput;
         // Remember that API layer does not have the batch dimension
         // Batch size is set when stamping a network input
         if (_lossInput.getDimensions().size() == 0)
-            this->_lossInput.get().reshape({1});
+            this->_lossInput.value().reshape({1});
         return *this;
     }
 
     virtual LossShaper::Builder &reportsBatchLoss() {
-        THOR_THROW_IF_FALSE(_outputLossType.isEmpty());
+        THOR_THROW_IF_FALSE(!_outputLossType.has_value());
         _outputLossType = ThorImplementation::LossShaper::OutputLossType::BATCH;
         return *this;
     }
 
     virtual LossShaper::Builder &reportsClasswiseLoss() {
-        THOR_THROW_IF_FALSE(_outputLossType.isEmpty());
+        THOR_THROW_IF_FALSE(!_outputLossType.has_value());
         _outputLossType = ThorImplementation::LossShaper::OutputLossType::CLASSWISE;
         return *this;
     }
 
     virtual LossShaper::Builder &reportsElementwiseLoss() {
-        THOR_THROW_IF_FALSE(_outputLossType.isEmpty());
+        THOR_THROW_IF_FALSE(!_outputLossType.has_value());
         _outputLossType = ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE;
         return *this;
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _lossInput;
-    Optional<ThorImplementation::LossShaper::OutputLossType> _outputLossType;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _lossInput;
+    std::optional<ThorImplementation::LossShaper::OutputLossType> _outputLossType;
 };
 
 }  // namespace Thor

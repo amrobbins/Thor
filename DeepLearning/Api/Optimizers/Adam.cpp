@@ -1,6 +1,7 @@
-#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Optimizers/Adam.h"
+#include <optional>
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 using json = nlohmann::json;
@@ -58,9 +59,9 @@ void Adam::updateParameters(PlacedNetwork *placedNetwork) {
     //     uint32_t numTrainableLayers = stampedNetwork.getNumTrainableLayers();
     //     for (uint32_t j = 0; j < numTrainableLayers; ++j) {
     //         shared_ptr<ThorImplementation::TrainableLayer> &trainableLayer = stampedNetwork.getTrainableLayer(j);
-    //         Optional<shared_ptr<ThorImplementation::Optimizer>> maybePhysicalOptimizer = trainableLayer->getOptimizer();
-    //         THOR_THROW_IF_FALSE(maybePhysicalOptimizer.isPresent());
-    //         shared_ptr<ThorImplementation::Optimizer> optimizer = maybePhysicalOptimizer.get();
+    //         std::optional<shared_ptr<ThorImplementation::Optimizer>> maybePhysicalOptimizer = trainableLayer->getOptimizer();
+    //         THOR_THROW_IF_FALSE(maybePhysicalOptimizer.has_value());
+    //         shared_ptr<ThorImplementation::Optimizer> optimizer = maybePhysicalOptimizer.value();
     //         shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(optimizer);
     //         if (physicalAdam == nullptr || physicalAdam->getId() != getId())
     //             continue;
@@ -114,13 +115,14 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
 
         shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
         THOR_THROW_IF_FALSE(physicalAdam != nullptr);
-        Optional<ThorImplementation::Tensor> m = physicalAdam->getParameter("m")->getStorage();
-        if (m.isPresent())
-            archiveWriter.addArchiveFile(mFile, m);
+        std::optional<ThorImplementation::Tensor> m = physicalAdam->getParameter("m")->getStorage();
 
-        Optional<ThorImplementation::Tensor> v = physicalAdam->getParameter("v")->getStorage();
-        if (v.isPresent())
-            archiveWriter.addArchiveFile(vFile, v);
+        if (m.has_value())
+            archiveWriter.addArchiveFile(mFile, m.value());
+
+        std::optional<ThorImplementation::Tensor> v = physicalAdam->getParameter("v")->getStorage();
+        if (v.has_value())
+            archiveWriter.addArchiveFile(vFile, v.value());
 
         j["t"] = physicalAdam->getT();
     }
@@ -141,10 +143,10 @@ shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiv
     float beta2 = j.at("beta2").get<float>();
     float epsilon = j.at("epsilon").get<float>();
 
-    Optional<string> mFile;
-    Optional<string> vFile;
-    Optional<string> mBiasFile;
-    Optional<string> vBiasFile;
+    std::optional<string> mFile;
+    std::optional<string> vFile;
+    std::optional<string> mBiasFile;
+    std::optional<string> vBiasFile;
     if (j.contains("m_tensor")) {
         THOR_THROW_IF_FALSE(j.contains("v_tensor"));
         mFile = j.at("m_tensor").get<string>();
@@ -173,12 +175,12 @@ shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiv
 vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
                                bool isFirstStamp,
                                shared_ptr<ThorImplementation::Optimizer> sisterPhysicalOptimizer,
-                               Optional<Event> sisterOptimizerLoadedEvent) {
+                               std::optional<Event> sisterOptimizerLoadedEvent) {
     shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
     THOR_THROW_IF_FALSE(physicalAdam != nullptr);
 
-    ThorImplementation::Tensor m = physicalAdam->getParameter("m")->getStorage();
-    ThorImplementation::Tensor v = physicalAdam->getParameter("v")->getStorage();
+    ThorImplementation::Tensor m = physicalAdam->getParameter("m")->getStorage().value();
+    ThorImplementation::Tensor v = physicalAdam->getParameter("v")->getStorage().value();
     Stream stream = physicalAdam->getGradientUpdateStream();
 
     // Parameter values are initialized right now, based on 1 of 3 methods:
@@ -189,24 +191,26 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
     if (!isFirstStamp) {
         // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
         THOR_THROW_IF_FALSE(sisterPhysicalOptimizer != nullptr);
-        if (sisterOptimizerLoadedEvent.isPresent())
-            stream.waitEvent(sisterOptimizerLoadedEvent);
+        if (sisterOptimizerLoadedEvent.has_value())
+            stream.waitEvent(sisterOptimizerLoadedEvent.value());
         shared_ptr<ThorImplementation::Adam> sisterPhysicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(sisterPhysicalOptimizer);
         THOR_THROW_IF_FALSE(sisterPhysicalAdam != nullptr);
-        m.copyFromAsync(sisterPhysicalAdam->getParameter("m")->getStorage(), stream);
-        v.copyFromAsync(sisterPhysicalAdam->getParameter("v")->getStorage(), stream);
-    } else if (mFile.isPresent()) {
-        THOR_THROW_IF_FALSE(vFile.isPresent());
+        THOR_THROW_IF_FALSE(sisterPhysicalAdam->getParameter("m")->getStorage().has_value());
+        THOR_THROW_IF_FALSE(sisterPhysicalAdam->getParameter("v")->getStorage().has_value());
+        m.copyFromAsync(sisterPhysicalAdam->getParameter("m")->getStorage().value(), stream);
+        v.copyFromAsync(sisterPhysicalAdam->getParameter("v")->getStorage().value(), stream);
+    } else if (mFile.has_value()) {
+        THOR_THROW_IF_FALSE(vFile.has_value());
         THOR_THROW_IF_FALSE(archiveReader != nullptr);
-        archiveReader->registerReadRequest(mFile.get(), m);
-        archiveReader->registerReadRequest(vFile.get(), v);
+        archiveReader->registerReadRequest(mFile.value(), m);
+        archiveReader->registerReadRequest(vFile.value(), v);
 
         // Can't use the files later, they may not still be there
         archiveReader = nullptr;
-        mFile.clear();
-        vFile.clear();
-        mBiasFile.clear();
-        vBiasFile.clear();
+        mFile.reset();
+        vFile.reset();
+        mBiasFile.reset();
+        vBiasFile.reset();
     } else {
         m.memsetAsync(stream, 0);
         v.memsetAsync(stream, 0);

@@ -3,7 +3,7 @@
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "Event.h"
 #include "ScopedGpu.h"
-#include "Utilities/Common/Optional.h"
+#include <optional>
 #include "Utilities/Common/ReferenceCounted.h"
 #include "Utilities/Common/ThreadJoinQueue.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
@@ -93,7 +93,7 @@ class Stream : private ReferenceCounted {
     cudnnHandle_t getCudnnHandle() const {
         assert(!uninitialized());
         mtx->lock();
-        if (cudnnHandle->isEmpty()) {
+        if (!cudnnHandle->has_value()) {
             ScopedGpu scopedGpu(gpuNum);
             cudnnStatus_t cudnnStatus;
             cudnnHandle_t handle;
@@ -113,7 +113,7 @@ class Stream : private ReferenceCounted {
             *cudnnHandle = handle;
         }
         mtx->unlock();
-        return *cudnnHandle;
+        return cudnnHandle->value();
     }
 
     cudaStream_t getStream() const {
@@ -124,7 +124,7 @@ class Stream : private ReferenceCounted {
     cublasHandle_t getCublasHandle() const {
         assert(!uninitialized());
         mtx->lock();
-        if (cublasHandle->isEmpty()) {
+        if (!cublasHandle->has_value()) {
             ScopedGpu scopedGpu(gpuNum);
             cublasStatus_t cublasStatus;
             cublasHandle_t handle;
@@ -140,7 +140,7 @@ class Stream : private ReferenceCounted {
             *cublasHandle = handle;
         }
         mtx->unlock();
-        return *cublasHandle;
+        return cublasHandle->value();
     }
 
     bool operator==(const Stream &other) const { return cudaStream == other.cudaStream && cudaStream != nullptr; }
@@ -195,8 +195,8 @@ class Stream : private ReferenceCounted {
    private:
     int gpuNum;
     cudaStream_t cudaStream;
-    Optional<cudnnHandle_t> *cudnnHandle;
-    Optional<cublasHandle_t> *cublasHandle;
+    std::optional<cudnnHandle_t> *cudnnHandle;
+    std::optional<cublasHandle_t> *cublasHandle;
 
     bool isStatic = false;
     static std::unordered_map<uint32_t, Stream> staticDeviceStreams;

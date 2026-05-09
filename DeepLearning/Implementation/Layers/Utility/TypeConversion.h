@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -17,21 +18,21 @@ class TypeConversion : public Layer {
         dataType = newDataType;
     }
 
-    Optional<Tensor> createFeatureOutputTensor() override {
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() != dataType);
-        return featureInput.get().clone(dataType);
+    std::optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() != dataType);
+        return featureInput.value().clone(dataType);
     }
 
-    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
-        THOR_THROW_IF_FALSE(outputTensor.isPresent());
-        outputTensor.get().copyFromAsync(inputTensor, stream);
+    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(outputTensor.has_value());
+        outputTensor.value().copyFromAsync(inputTensor.value(), stream);
     }
 
-    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
-        if (errorOut.isPresent()) {
-            THOR_THROW_IF_FALSE(errorIn.isPresent());
-            errorOut.get().copyFromAsync(errorIn, stream);
+    void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override {
+        if (errorOut.has_value()) {
+            THOR_THROW_IF_FALSE(errorIn.has_value());
+            errorOut.value().copyFromAsync(errorIn.value(), stream);
         }
     }
 

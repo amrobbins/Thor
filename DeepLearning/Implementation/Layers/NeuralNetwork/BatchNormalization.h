@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
@@ -28,9 +29,9 @@ class BatchNormalization : public TrainableLayer {
     BatchNormalization(const TensorPlacement& placement,
                        bool inferenceOnly,
                        uint64_t numItemsObserved,
-                       Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
-                       Optional<double> epsilon = Optional<double>::empty(),
-                       Optional<TensorDescriptor::DataType> storageDataType = Optional<TensorDescriptor::DataType>::empty(),
+                       std::optional<double> exponentialRunningAverageFactor = std::nullopt,
+                       std::optional<double> epsilon = std::nullopt,
+                       std::optional<TensorDescriptor::DataType> storageDataType = std::nullopt,
                        int64_t stampedId = -1);
 
     double getExponentialRunningAverageFactor() const { return exponentialRunningAverageFactor; }
@@ -45,8 +46,8 @@ class BatchNormalization : public TrainableLayer {
 
     uint64_t getNumItemsObserved() { return itemsObserved; }
 
-    Optional<Tensor> createFeatureOutputTensor() override;
-    Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
+    std::optional<Tensor> createFeatureOutputTensor() override;
+    std::optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
 
     uint64_t flopCountForward() override;
     uint64_t flopCountBackward() override;
@@ -61,15 +62,15 @@ class BatchNormalization : public TrainableLayer {
 
    private:
     void computeFeatureOut(uint32_t connectionNumber) override;
-    Optional<Event> computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) override;
+    std::optional<Event> computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber, bool clearWeightsGradientFirstIfFused) override;
     void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
 
-    void runForward(Optional<Tensor> inputTensor,
-                    Optional<Tensor> outputTensor,
+    void runForward(std::optional<Tensor> inputTensor,
+                    std::optional<Tensor> outputTensor,
                     Stream stream,
                     unsigned int connectionNumber,
                     Tensor weights,
-                    Optional<Tensor> biases);
+                    std::optional<Tensor> biases);
 
    protected:
     Tensor weights;
@@ -92,16 +93,16 @@ class BatchNormalization : public TrainableLayer {
     std::vector<double> currentExponentialRunningAverageFactor;
     double epsilon;
 
-    Optional<cudnnTensorDescriptor_t> featureInputDescriptor;
-    Optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
-    Optional<cudnnTensorDescriptor_t> derivedBnDescriptor;
+    std::optional<cudnnTensorDescriptor_t> featureInputDescriptor;
+    std::optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
+    std::optional<cudnnTensorDescriptor_t> derivedBnDescriptor;
 
     std::vector<Tensor> resultSaveMean;
     std::vector<Tensor> resultSaveInvVariance;
 
     // Since weights gradients and error gradient is a fused operation, then when back prop is pruned
     // we still need some valid chunk of memory to write values in, which we ignore.
-    Optional<Tensor> scratchErrorOutput = Optional<Tensor>::empty();
+    std::optional<Tensor> scratchErrorOutput = std::nullopt;
 };
 
 }  // namespace ThorImplementation

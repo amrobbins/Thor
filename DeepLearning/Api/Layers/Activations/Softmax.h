@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/Activation/Softmax.h"
+#include <optional>
 
 namespace Thor {
 
@@ -54,7 +55,7 @@ class Softmax : public Activation {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
         std::shared_ptr<ThorImplementation::Softmax> softmax = std::make_shared<ThorImplementation::Softmax>(backwardComputedExternally);
         return softmax;
@@ -62,7 +63,7 @@ class Softmax : public Activation {
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
-        return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
+        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
     }
 
     bool backwardComputedExternally;
@@ -72,13 +73,13 @@ class Softmax::Builder : public Activation::Builder {
    public:
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<Softmax> softmax = std::make_shared<Softmax>();
-        if (_featureInput.isPresent()) {
+        if (_featureInput.has_value()) {
             // Standalone layer support.
-            THOR_THROW_IF_FALSE(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.has_value());
             softmax->featureInput = _featureInput;
-            softmax->featureOutput = _featureInput.get().clone();
+            softmax->featureOutput = _featureInput.value().clone();
             softmax->initialized = true;
-            softmax->addToNetwork(_network.get());
+            softmax->addToNetwork(_network.value());
         } else {
             // Template activation support
             softmax->initialized = true;
@@ -99,13 +100,13 @@ class Softmax::Builder : public Activation::Builder {
 
    protected:
     Softmax::Builder &backwardComputedExternally() {
-        THOR_THROW_IF_FALSE(!_backwardComputedExternally.isPresent());
+        THOR_THROW_IF_FALSE(!_backwardComputedExternally.has_value());
         _backwardComputedExternally = true;
         return *this;
     }
 
    private:
-    Optional<bool> _backwardComputedExternally;
+    std::optional<bool> _backwardComputedExternally;
 
     friend class Thor::CategoricalCrossEntropy;
 };

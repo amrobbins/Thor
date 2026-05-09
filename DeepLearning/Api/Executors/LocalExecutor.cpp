@@ -16,24 +16,24 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     THOR_THROW_IF_FALSE(_loader);
     THOR_THROW_IF_FALSE(_optimizer);
     // FIXME: add hyperparameter controller
-    // THOR_THROW_IF_FALSE(_hyperparameterController.isPresent());
+    // THOR_THROW_IF_FALSE(_hyperparameterController.has_value());
 
-    if (_visualizers.isEmpty()) {
+    if (!_visualizers.has_value()) {
         _visualizers = vector<Visualizer *>();
-        _visualizers.get().push_back(&ConsoleVisualizer::instance());
+        _visualizers.value().push_back(&ConsoleVisualizer::instance());
     }
 
     shared_ptr<LocalExecutor> localExecutor = make_shared<LocalExecutor>();
     localExecutor->loader = _loader;
     localExecutor->optimizer = _optimizer;
     // localExecutor->hyperparameterController = _hyperparameterController;
-    localExecutor->visualizers = _visualizers;
+    localExecutor->visualizers = _visualizers.value();
 
-    if (_outputDirectory.isEmpty()) {
+    if (!_outputDirectory.has_value()) {
         std::filesystem::path outputPath = std::filesystem::absolute(std::filesystem::path("./")).string();
         localExecutor->outputDirectory = std::filesystem::canonical(outputPath).string();
     } else {
-        localExecutor->outputDirectory = _outputDirectory;
+        localExecutor->outputDirectory = _outputDirectory.value();
     }
 
     for (uint64_t i = 0; i < localExecutor->visualizers.size(); ++i) {

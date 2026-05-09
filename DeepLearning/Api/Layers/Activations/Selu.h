@@ -52,7 +52,7 @@ class Selu : public Activation {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
         std::shared_ptr<ThorImplementation::Selu> selu = std::make_shared<ThorImplementation::Selu>();
         return selu;
@@ -60,7 +60,7 @@ class Selu : public Activation {
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
-        return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
+        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
     }
 };
 
@@ -68,13 +68,13 @@ class Selu::Builder : public Activation::Builder {
    public:
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<Selu> selu = std::make_shared<Selu>();
-        if (_featureInput.isPresent()) {
+        if (_featureInput.has_value()) {
             // Standalone layer support.
-            THOR_THROW_IF_FALSE(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.has_value());
             selu->featureInput = _featureInput;
-            selu->featureOutput = _featureInput.get().clone();
+            selu->featureOutput = _featureInput.value().clone();
             selu->initialized = true;
-            selu->addToNetwork(_network.get());
+            selu->addToNetwork(_network.value());
         } else {
             // Template activation support
             selu->initialized = true;

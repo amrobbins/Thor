@@ -52,7 +52,7 @@ class Gelu : public Activation {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
         std::shared_ptr<ThorImplementation::Gelu> gelu = std::make_shared<ThorImplementation::Gelu>();
         return gelu;
@@ -60,7 +60,7 @@ class Gelu : public Activation {
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
-        return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
+        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
     }
 };
 
@@ -68,13 +68,13 @@ class Gelu::Builder : public Activation::Builder {
    public:
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<Gelu> gelu = std::make_shared<Gelu>();
-        if (_featureInput.isPresent()) {
+        if (_featureInput.has_value()) {
             // Standalone layer support.
-            THOR_THROW_IF_FALSE(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.has_value());
             gelu->featureInput = _featureInput;
-            gelu->featureOutput = _featureInput.get().clone();
+            gelu->featureOutput = _featureInput.value().clone();
             gelu->initialized = true;
-            gelu->addToNetwork(_network.get());
+            gelu->addToNetwork(_network.value());
         } else {
             // Template activation support
             gelu->initialized = true;

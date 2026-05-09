@@ -13,7 +13,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(alexNet)
-                             .featureInput(imagesInput.getFeatureOutput())
+                             .featureInput(imagesInput.getFeatureOutput().value())
                              .numOutputChannels(48)
                              .filterHeight(11)
                              .filterWidth(11)
@@ -26,7 +26,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .biasInitializer(glorot)
                              .activation(relu)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
 
     expectedDimensions = {48, 55, 55};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
@@ -45,7 +45,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .biasInitializer(glorot)
                              .activation(relu)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
 
     expectedDimensions = {128, 55, 55};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
@@ -59,7 +59,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .verticalStride(2)
                              .horizontalStride(2)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
 
     expectedDimensions = {128, 27, 27};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
@@ -78,7 +78,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .biasInitializer(glorot)
                              .activation(relu)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
 
     expectedDimensions = {192, 27, 27};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
@@ -92,7 +92,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .verticalStride(2)
                              .horizontalStride(2)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
 
     expectedDimensions = {192, 13, 13};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
@@ -111,7 +111,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .biasInitializer(glorot)
                              .activation(relu)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
 
     expectedDimensions = {192, 13, 13};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
@@ -130,7 +130,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .biasInitializer(glorot)
                              .activation(relu)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
 
     expectedDimensions = {128, 13, 13};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
@@ -144,7 +144,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .verticalStride(2)
                              .horizontalStride(2)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
 
     expectedDimensions = {128, 6, 6};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
@@ -177,7 +177,7 @@ Network buildAlexNet() {
                                     .featureInput(bottomPathTensor)
                                     .concatenationAxis(0)
                                     .build()
-                                    .getFeatureOutput();
+                                    .getFeatureOutput().value();
 
     expectedDimensions = {256, 6, 6};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
@@ -192,7 +192,7 @@ Network buildAlexNet() {
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
 
     expectedDimensions = {4096};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
@@ -206,7 +206,7 @@ Network buildAlexNet() {
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
 
     latestOutputTensor = FullyConnected::Builder()
                              .network(alexNet)
@@ -217,7 +217,7 @@ Network buildAlexNet() {
                              .biasInitializer(glorot)
                              .noActivation()
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
 
     expectedDimensions = {NUM_CLASSES};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
@@ -228,7 +228,7 @@ Network buildAlexNet() {
                               .dimensions({NUM_CLASSES})
                               .dataType(Tensor::DataType::UINT8)
                               .build()
-                              .getFeatureOutput();
+                              .getFeatureOutput().value();
 
     CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
                                             .network(alexNet)

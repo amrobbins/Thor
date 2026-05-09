@@ -9,16 +9,16 @@ namespace Thor {
 
 json Pooling::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(featureInput.isPresent());
-    THOR_THROW_IF_FALSE(featureOutput.isPresent());
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
-    j["feature_input"] = featureInput.get().architectureJson();
-    j["feature_output"] = featureOutput.get().architectureJson();
+    j["feature_input"] = featureInput.value().architectureJson();
+    j["feature_output"] = featureOutput.value().architectureJson();
 
     j["type"] = type;
     j["window_height"] = windowHeight;

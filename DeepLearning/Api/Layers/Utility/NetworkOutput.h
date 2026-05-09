@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
+#include <optional>
 
 namespace Thor {
 
@@ -24,8 +25,8 @@ class NetworkOutput : public Layer {
     std::string getLayerType() const override { return "NetworkOutput"; }
 
     virtual bool isMultiLayer() const {
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        return featureInput.get().getDataType() != dataType;
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        return featureInput.value().getDataType() != dataType;
     }
 
     virtual void buildSupportLayersAndAddToNetwork();
@@ -41,7 +42,7 @@ class NetworkOutput : public Layer {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
         std::shared_ptr<ThorImplementation::NetworkOutput> networkOutput = std::make_shared<ThorImplementation::NetworkOutput>(placement);
         networkOutput->setName(name);
@@ -62,41 +63,41 @@ class NetworkOutput : public Layer {
 class NetworkOutput::Builder {
    public:
     virtual NetworkOutput build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(!_inputTensor.isEmpty());
-        if (_dataType.isEmpty())
-            _dataType = _inputTensor.get().getDataType();
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_inputTensor.has_value());
+        if (!_dataType.has_value())
+            _dataType = _inputTensor.value().getDataType();
 
         NetworkOutput networkOutput;
-        if (_name.isPresent())
-            networkOutput.name = _name;
+        if (_name.has_value())
+            networkOutput.name = _name.value();
         else
             networkOutput.name = std::string("NetworkOutput") + std::to_string(networkOutput.getId());
-        networkOutput.dataType = _dataType;
-        networkOutput.featureInput = _inputTensor;
+        networkOutput.dataType = _dataType.value();
+        networkOutput.featureInput = _inputTensor.value();
         networkOutput.initialized = true;
-        networkOutput.network = _network.get();
+        networkOutput.network = _network.value();
 
         if (networkOutput.isMultiLayer()) {
             // A type converter will be stamped where the new data type will take effect, when it is needed.
             networkOutput.buildSupportLayersAndAddToNetwork();
         } else {
-            networkOutput.featureOutput = Tensor(_inputTensor.get().getDataType(), _inputTensor.get().getDimensions());
-            networkOutput.addToNetwork(_network.get());
+            networkOutput.featureOutput = Tensor(_inputTensor.value().getDataType(), _inputTensor.value().getDimensions());
+            networkOutput.addToNetwork(_network.value());
         }
 
         return networkOutput;
     }
 
     virtual NetworkOutput::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual NetworkOutput::Builder &name(const std::string &_name) {
         THOR_THROW_IF_FALSE(!_name.empty());
-        THOR_THROW_IF_FALSE(this->_name.isEmpty());
+        THOR_THROW_IF_FALSE(!this->_name.has_value());
         this->_name = _name;
         return *this;
     }
@@ -114,10 +115,10 @@ class NetworkOutput::Builder {
     }
 
    private:
-    Optional<std::string> _name;
-    Optional<Network *> _network;
-    Optional<Tensor> _inputTensor;
-    Optional<Tensor::DataType> _dataType;
+    std::optional<std::string> _name;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _inputTensor;
+    std::optional<Tensor::DataType> _dataType;
 };
 
 }  // namespace Thor

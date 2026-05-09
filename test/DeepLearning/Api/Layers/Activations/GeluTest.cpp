@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Activations/Gelu.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
@@ -33,15 +34,15 @@ TEST(Activations, GeluBuilds) {
 
     ASSERT_TRUE(gelu->isInitialized());
 
-    Optional<Tensor> actualInput = gelu->getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualInput = gelu->getFeatureInput();
+    ASSERT_TRUE(actualInput.has_value());
+    ASSERT_EQ(actualInput.value().getDataType(), dataType);
+    ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> actualOutput = gelu->getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualOutput = gelu->getFeatureOutput();
+    ASSERT_TRUE(actualOutput.has_value());
+    ASSERT_EQ(actualOutput.value().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.value().getDimensions(), dimensions);
 
     shared_ptr<Layer> cloneLayer = gelu->clone();
     Gelu *clone = dynamic_cast<Gelu *>(cloneLayer.get());
@@ -49,15 +50,15 @@ TEST(Activations, GeluBuilds) {
 
     ASSERT_TRUE(clone->isInitialized());
 
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.has_value());
+    ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
-    ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.has_value());
+    ASSERT_EQ(cloneOutput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.value().getDimensions(), dimensions);
 
     ASSERT_NE(gelu->getId(), clone->getId());
     ASSERT_GT(gelu->getId(), 1u);
@@ -76,27 +77,27 @@ TEST(Activations, GeluSerializeDeserialize) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    Gelu::Builder geluBuilder = Gelu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    Gelu::Builder geluBuilder = Gelu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<Gelu> gelu = dynamic_pointer_cast<Gelu>(geluBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(gelu->getFeatureOutput())
+                                      .inputTensor(gelu->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 
     ASSERT_TRUE(gelu->isInitialized());
 
-    Tensor featureInput = gelu->getFeatureInput();
-    Tensor featureOutput = gelu->getFeatureOutput();
+    Tensor featureInput = gelu->getFeatureInput().value();
+    Tensor featureOutput = gelu->getFeatureOutput().value();
     assert(featureInput == networkInput.getFeatureOutput());
 
-    ASSERT_TRUE(gelu->getFeatureOutput().isPresent());
-    ASSERT_EQ(gelu->getFeatureOutput().get(), featureOutput);
+    ASSERT_TRUE(gelu->getFeatureOutput().has_value());
+    ASSERT_EQ(gelu->getFeatureOutput().value(), featureOutput);
 
-    ASSERT_TRUE(gelu->getFeatureInput().isPresent());
-    assert(gelu->getFeatureInput().get() == featureInput);
+    ASSERT_TRUE(gelu->getFeatureInput().has_value());
+    assert(gelu->getFeatureInput().value() == featureInput);
 
     ASSERT_EQ(featureInput.getDataType(), dataType);
     ASSERT_EQ(featureInput.getDimensions(), inputDimensions);
@@ -194,11 +195,11 @@ TEST(Activations, GeluSerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
 
-    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedGelu->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
-    ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedGelu->getFeatureInput().get());
-    ASSERT_EQ(stampedGelu->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedGelu->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().has_value());
+    ASSERT_EQ(stampedInput->getFeatureOutput().value(), stampedGelu->getFeatureInput().value());
+    ASSERT_EQ(stampedGelu->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
     filesystem::remove("/tmp/testModel.thor.tar");
 }
@@ -216,13 +217,13 @@ TEST(Activations, GeluRegistered) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    Gelu::Builder geluBuilder = Gelu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    Gelu::Builder geluBuilder = Gelu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<Gelu> gelu = dynamic_pointer_cast<Gelu>(geluBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(gelu->getFeatureOutput())
+                                      .inputTensor(gelu->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 

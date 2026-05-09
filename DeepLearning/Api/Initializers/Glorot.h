@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Initializers/Glorot.h"
+#include <optional>
 
 
 namespace Thor {
@@ -32,15 +33,15 @@ class Glorot::Builder : public Initializer::Builder {
     ~Builder() override = default;
 
     std::shared_ptr<Initializer> build() override {
-        if (_mode.isEmpty())
+        if (!_mode.has_value())
             _mode = ThorImplementation::Glorot::Mode::UNIFORM;
 
-        Glorot glorotInitializer(_mode);
+        Glorot glorotInitializer(_mode.value());
         return glorotInitializer.clone();
     }
 
     virtual Glorot::Builder &mode(ThorImplementation::Glorot::Mode _mode) {
-        THOR_THROW_IF_FALSE(!this->_mode.isPresent());
+        THOR_THROW_IF_FALSE(!this->_mode.has_value());
         this->_mode = _mode;
         return *this;
     }
@@ -48,7 +49,7 @@ class Glorot::Builder : public Initializer::Builder {
     std::shared_ptr<Initializer::Builder> clone() override { return std::make_shared<Glorot::Builder>(*this); }
 
    protected:
-    Optional<ThorImplementation::Glorot::Mode> _mode;
+    std::optional<ThorImplementation::Glorot::Mode> _mode;
 };
 
 }  // namespace Thor

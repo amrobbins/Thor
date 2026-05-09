@@ -1,3 +1,4 @@
+#include <optional>
 #include "Utilities/Expression/CudaSourceEmitter.h"
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
@@ -237,24 +238,24 @@ static std::vector<uint32_t> orderedRequiredNodesForGroup(const CompiledExecutio
 }
 
 static DataType requireNodeOutputDType(const ExprNode& node) {
-    if (!node.output_dtype.isPresent()) {
+    if (!node.output_dtype.has_value()) {
         throw runtime_error("Fused stage node is missing resolved output_dtype.");
     }
-    return node.output_dtype.get();
+    return node.output_dtype.value();
 }
 
 static DataType requireNodeInputTensorDType(const ExprNode& node) {
-    if (!node.input_tensor_dtype.isPresent()) {
+    if (!node.input_tensor_dtype.has_value()) {
         throw runtime_error("Fused stage INPUT node is missing resolved input_tensor_dtype.");
     }
-    return node.input_tensor_dtype.get();
+    return node.input_tensor_dtype.value();
 }
 
 static DataType requireNodeComputeDType(const ExprNode& node) {
-    if (!node.compute_dtype.isPresent()) {
+    if (!node.compute_dtype.has_value()) {
         throw runtime_error("Fused stage node is missing resolved compute_dtype.");
     }
-    return node.compute_dtype.get();
+    return node.compute_dtype.value();
 }
 
 static std::string scalarStorageType(DataType dtype) {
@@ -435,14 +436,14 @@ static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstre
     };
 
     for (const ExprNode& node : expr.nodes) {
-        if (node.input_tensor_dtype.isPresent()) {
-            note_dtype(node.input_tensor_dtype.get());
+        if (node.input_tensor_dtype.has_value()) {
+            note_dtype(node.input_tensor_dtype.value());
         }
-        if (node.output_dtype.isPresent()) {
-            note_dtype(node.output_dtype.get());
+        if (node.output_dtype.has_value()) {
+            note_dtype(node.output_dtype.value());
         }
-        if (node.compute_dtype.isPresent()) {
-            note_dtype(node.compute_dtype.get());
+        if (node.compute_dtype.has_value()) {
+            note_dtype(node.compute_dtype.value());
         }
     }
 
@@ -571,40 +572,40 @@ static const CompiledStageOutput& requireSingleTransposedMaterializedOutput(cons
     return output;
 }
 
-static Optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpression& expr,
+static std::optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpression& expr,
                                                              const std::vector<DataType>& input_dtypes,
                                                              const std::vector<DataType>& output_dtypes) {
     if (input_dtypes.empty() || output_dtypes.empty()) {
-        return Optional<DataType>::empty();
+        return std::nullopt;
     }
 
-    Optional<DataType> maybe_stage_dtype = Optional<DataType>::empty();
+    std::optional<DataType> maybe_stage_dtype = std::nullopt;
     for (uint32_t slot = 0; slot < expr.inputs.size(); ++slot) {
         if (expr.inputs[slot].kind != NamedInput::Kind::Tensor) {
             continue;
         }
 
         const DataType dtype = input_dtypes.at(slot);
-        if (!maybe_stage_dtype.isPresent()) {
+        if (!maybe_stage_dtype.has_value()) {
             maybe_stage_dtype = dtype;
-        } else if (maybe_stage_dtype.get() != dtype) {
-            return Optional<DataType>::empty();
+        } else if (maybe_stage_dtype.value() != dtype) {
+            return std::nullopt;
         }
     }
 
-    if (!maybe_stage_dtype.isPresent()) {
-        return Optional<DataType>::empty();
+    if (!maybe_stage_dtype.has_value()) {
+        return std::nullopt;
     }
 
-    const DataType stage_dtype = maybe_stage_dtype.get();
+    const DataType stage_dtype = maybe_stage_dtype.value();
     if (stage_dtype != DataType::FP16 && stage_dtype != DataType::BF16 && stage_dtype != DataType::FP8_E4M3 &&
         stage_dtype != DataType::FP8_E5M2) {
-        return Optional<DataType>::empty();
+        return std::nullopt;
     }
 
     for (DataType dtype : output_dtypes) {
         if (dtype != stage_dtype) {
-            return Optional<DataType>::empty();
+            return std::nullopt;
         }
     }
 
@@ -617,17 +618,17 @@ static Optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpre
 
         if (node.op == ExprOp::INPUT) {
             if (requireNodeInputTensorDType(node) != stage_dtype) {
-                return Optional<DataType>::empty();
+                return std::nullopt;
             }
         }
 
         if (requireNodeOutputDType(node) != stage_dtype) {
-            return Optional<DataType>::empty();
+            return std::nullopt;
         }
 
         if (node.op != ExprOp::INPUT) {
             if (requireNodeComputeDType(node) != expected_compute_dtype) {
-                return Optional<DataType>::empty();
+                return std::nullopt;
             }
         }
     }
@@ -635,22 +636,22 @@ static Optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpre
     return stage_dtype;
 }
 
-Optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const PhysicalExecutionStage& stage) {
+std::optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const PhysicalExecutionStage& stage) {
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
-        return Optional<DataType>::empty();
+        return std::nullopt;
     }
     return getVectorizedStageStorageDTypeImpl(stage.expr, collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
 }
 
-Optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const CompiledExecutionStage& stage) {
+std::optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const CompiledExecutionStage& stage) {
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
-        return Optional<DataType>::empty();
+        return std::nullopt;
     }
     return getVectorizedStageStorageDTypeImpl(stage.expr, collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
 }
 
-static Optional<DataType> getSingleTensorInputStorageDType(const PhysicalExpression& expr, const std::vector<DataType>& input_dtypes) {
-    Optional<DataType> maybe_tensor_dtype = Optional<DataType>::empty();
+static std::optional<DataType> getSingleTensorInputStorageDType(const PhysicalExpression& expr, const std::vector<DataType>& input_dtypes) {
+    std::optional<DataType> maybe_tensor_dtype = std::nullopt;
 
     for (uint32_t slot = 0; slot < expr.inputs.size(); ++slot) {
         if (expr.inputs[slot].kind != NamedInput::Kind::Tensor) {
@@ -658,10 +659,10 @@ static Optional<DataType> getSingleTensorInputStorageDType(const PhysicalExpress
         }
 
         const DataType dtype = input_dtypes.at(slot);
-        if (!maybe_tensor_dtype.isPresent()) {
+        if (!maybe_tensor_dtype.has_value()) {
             maybe_tensor_dtype = dtype;
-        } else if (maybe_tensor_dtype.get() != dtype) {
-            return Optional<DataType>::empty();
+        } else if (maybe_tensor_dtype.value() != dtype) {
+            return std::nullopt;
         }
     }
 
@@ -819,12 +820,12 @@ static bool supportsFp8ToBf16Float2TransposedVectorization(const PhysicalExpress
     return true;
 }
 
-static bool shouldUseDecoupledLineVectorizedTranspose(const Optional<DataType>& maybe_tensor_input_dtype, DataType output_dtype) {
-    if (!maybe_tensor_input_dtype.isPresent()) {
+static bool shouldUseDecoupledLineVectorizedTranspose(const std::optional<DataType>& maybe_tensor_input_dtype, DataType output_dtype) {
+    if (!maybe_tensor_input_dtype.has_value()) {
         return false;
     }
 
-    const uint32_t input_pack_scalars = transposePackScalars(maybe_tensor_input_dtype.get());
+    const uint32_t input_pack_scalars = transposePackScalars(maybe_tensor_input_dtype.value());
     const uint32_t output_pack_scalars = transposePackScalars(output_dtype);
     return (input_pack_scalars != output_pack_scalars) && (std::max(input_pack_scalars, output_pack_scalars) > 1U);
 }
@@ -865,9 +866,9 @@ uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& 
         return 1;
     }
 
-    const Optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
-    if (vectorized_dtype.isPresent()) {
-        switch (vectorized_dtype.get()) {
+    const std::optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
+    if (vectorized_dtype.has_value()) {
+        switch (vectorized_dtype.value()) {
             case DataType::FP16:
             case DataType::BF16:
                 return 8;
@@ -890,7 +891,7 @@ uint32_t CudaSourceEmitter::tiledTransposePackScalars(const PhysicalExecutionSta
     const CompiledStageOutput& output = requireSingleTransposedMaterializedOutput(stage);
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
-    const Optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
+    const std::optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
     if (shouldUseDecoupledLineVectorizedTranspose(maybe_tensor_input_dtype, output_dtype)) {
         return 1;
     }
@@ -905,7 +906,7 @@ uint32_t CudaSourceEmitter::tiledTransposePackScalars(const CompiledExecutionSta
     const CompiledStageOutput& output = requireSingleTransposedMaterializedOutput(stage);
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
-    const Optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
+    const std::optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
     if (shouldUseDecoupledLineVectorizedTranspose(maybe_tensor_input_dtype, output_dtype)) {
         return 1;
     }
@@ -2883,25 +2884,25 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
     const std::string output_type = scalarStorageType(output_dtype);
-    const Optional<DataType> maybe_vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
-    const Optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
+    const std::optional<DataType> maybe_vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
+    const std::optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
     const bool emit_packed_low_precision_path = transposePackScalars(output_dtype) > 1;
     const bool emit_homogeneous_packed_vectorized_path =
-        maybe_vectorized_dtype.isPresent() && maybe_vectorized_dtype.get() == output_dtype && transposePackScalars(output_dtype) > 1;
+        maybe_vectorized_dtype.has_value() && maybe_vectorized_dtype.value() == output_dtype && transposePackScalars(output_dtype) > 1;
     const bool emit_mixed_two_byte_float2_path =
-        maybe_tensor_input_dtype.isPresent() &&
-        supportsMixedTwoByteFloat2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
+        maybe_tensor_input_dtype.has_value() &&
+        supportsMixedTwoByteFloat2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.value(), output_dtype);
     const bool emit_mixed_fp8_vectorized_path =
-        maybe_tensor_input_dtype.isPresent() &&
-        supportsMixedFp8TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
+        maybe_tensor_input_dtype.has_value() &&
+        supportsMixedFp8TransposedVectorization(stage.expr, maybe_tensor_input_dtype.value(), output_dtype);
     const bool emit_cross_width_float2_path =
-        maybe_tensor_input_dtype.isPresent() &&
-        supportsFloat2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
-    const bool emit_cross_width_half2_path = maybe_tensor_input_dtype.isPresent() &&
-                                             supportsHalf2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
+        maybe_tensor_input_dtype.has_value() &&
+        supportsFloat2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.value(), output_dtype);
+    const bool emit_cross_width_half2_path = maybe_tensor_input_dtype.has_value() &&
+                                             supportsHalf2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.value(), output_dtype);
     const bool emit_fp8_to_bf16_float2_path =
-        maybe_tensor_input_dtype.isPresent() &&
-        supportsFp8ToBf16Float2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.get(), output_dtype);
+        maybe_tensor_input_dtype.has_value() &&
+        supportsFp8ToBf16Float2TransposedVectorization(stage.expr, maybe_tensor_input_dtype.value(), output_dtype);
     const bool emit_packed_vectorized_path = emit_homogeneous_packed_vectorized_path || emit_mixed_two_byte_float2_path ||
                                              emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path ||
                                              emit_cross_width_half2_path || emit_fp8_to_bf16_float2_path;
@@ -2933,7 +2934,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols) {\n";
 
     if (emit_decoupled_line_vectorized_path) {
-        const DataType input_dtype = maybe_tensor_input_dtype.get();
+        const DataType input_dtype = maybe_tensor_input_dtype.value();
         const uint32_t read_pack_scalars = transposePackScalars(input_dtype);
         const uint32_t write_pack_scalars = transposePackScalars(output_dtype);
         const std::string input_type = scalarStorageType(input_dtype);
@@ -3120,7 +3121,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                                              emit_mixed_fp8_vectorized_path || emit_cross_width_float2_path ||
                                              emit_cross_width_half2_path || emit_fp8_to_bf16_float2_path;
         const DataType vector_input_dtype =
-            needs_input_vector_type ? (maybe_tensor_input_dtype.isPresent() ? maybe_tensor_input_dtype.get() : output_dtype) : output_dtype;
+            needs_input_vector_type ? (maybe_tensor_input_dtype.has_value() ? maybe_tensor_input_dtype.value() : output_dtype) : output_dtype;
         const uint32_t pack_scalars = transposePackScalars(dtype);
         const uint32_t pairs_per_pack = pack_scalars / 2;
         const std::string pack_type = transposePackType(dtype);
@@ -3342,9 +3343,9 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
         return emitTiledTransposeMaterializedFused(stage, kernel_name, use_uint32_index_math);
     }
 
-    Optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
-    if (vectorized_dtype.isPresent()) {
-        return emitVector2Flat(stage, vectorized_dtype.get(), kernel_name, use_uint32_index_math);
+    std::optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
+    if (vectorized_dtype.has_value()) {
+        return emitVector2Flat(stage, vectorized_dtype.value(), kernel_name, use_uint32_index_math);
     }
 
     const uint32_t elements_per_thread = flatElementsPerThread(stage);
@@ -3434,11 +3435,11 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
     const std::string output_type = scalarStorageType(output_dtype);
     const bool emit_packed_low_precision_path = transposePackScalars(output_dtype) > 1;
-    const Optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
+    const std::optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
     const bool emit_decoupled_line_vectorized_path = shouldUseDecoupledLineVectorizedTranspose(maybe_tensor_input_dtype, output_dtype);
-    const Optional<DataType> maybe_vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
+    const std::optional<DataType> maybe_vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
     const bool emit_fp8_vectorized_pair_path = emit_packed_low_precision_path && isFp8DType(output_dtype) &&
-                                               maybe_vectorized_dtype.isPresent() && maybe_vectorized_dtype.get() == output_dtype;
+                                               maybe_vectorized_dtype.has_value() && maybe_vectorized_dtype.value() == output_dtype;
     const bool use_uint32_index_math = groupSupportsUInt32IndexMath(group);
     const std::string index_type = emittedIndexType(use_uint32_index_math);
 
@@ -3482,7 +3483,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols) {\n";
 
     if (emit_decoupled_line_vectorized_path) {
-        const DataType input_dtype = maybe_tensor_input_dtype.get();
+        const DataType input_dtype = maybe_tensor_input_dtype.value();
         const uint32_t read_pack_scalars = transposePackScalars(input_dtype);
         const uint32_t write_pack_scalars = transposePackScalars(output_dtype);
         const std::string input_type = scalarStorageType(input_dtype);
@@ -3917,9 +3918,9 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
         return emitTiledTransposeMaterializedSpecializedBroadcast(stage, groups, kernel_name);
     }
 
-    Optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
-    if (vectorized_dtype.isPresent()) {
-        return emitVector2SpecializedBroadcast(stage, groups, vectorized_dtype.get(), kernel_name);
+    std::optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
+    if (vectorized_dtype.has_value()) {
+        return emitVector2SpecializedBroadcast(stage, groups, vectorized_dtype.value(), kernel_name);
     }
 
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);

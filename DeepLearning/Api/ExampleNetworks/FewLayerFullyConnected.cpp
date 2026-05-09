@@ -23,13 +23,13 @@ Network buildFewLayerFullyConnected() {
     // Input tensor is automatically flattened when sent to a fully connected layer.
     latestOutputTensor = FullyConnected::Builder()
                              .network(fewLayerFullyConnected)
-                             .featureInput(imagesInput.getFeatureOutput())
+                             .featureInput(imagesInput.getFeatureOutput().value())
                              .numOutputFeatures(128)
                              .hasBias(true)
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
     expectedDimensions = {128};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -41,7 +41,7 @@ Network buildFewLayerFullyConnected() {
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
     expectedDimensions = {128};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -53,7 +53,7 @@ Network buildFewLayerFullyConnected() {
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
     expectedDimensions = {1000};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -63,7 +63,7 @@ Network buildFewLayerFullyConnected() {
                               .dimensions({1000})
                               .dataType(Tensor::DataType::FP16)
                               .build()
-                              .getFeatureOutput();
+                              .getFeatureOutput().value();
 
     CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
                                             .network(fewLayerFullyConnected)

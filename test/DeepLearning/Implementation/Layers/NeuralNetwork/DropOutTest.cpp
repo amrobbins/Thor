@@ -60,7 +60,7 @@ TEST(DropOut, InferenceWorks) {
         Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput();
+        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
@@ -118,7 +118,7 @@ TEST(DropOut, TrainingNoDropOut) {
         Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput();
+        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
@@ -134,8 +134,8 @@ TEST(DropOut, TrainingNoDropOut) {
         }
 
         // Backward pass
-        Tensor errorInput = dropOutLayer->getErrorInput();
-        Tensor errorOutput = dropOutLayer->getErrorOutput();
+        Tensor errorInput = dropOutLayer->getErrorInput().value();
+        Tensor errorOutput = dropOutLayer->getErrorOutput().value();
         Tensor errorInputCpu = Tensor(cpuPlacement, errorInput.getDescriptor());
         Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutput.getDescriptor());
         half *errorInputMem = (half *)errorInputCpu.getMemPtr();
@@ -198,7 +198,7 @@ TEST(DropOut, TrainingAllDropOut) {
         Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput();
+        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
@@ -214,8 +214,8 @@ TEST(DropOut, TrainingAllDropOut) {
         }
 
         // Backward pass
-        Tensor errorInput = dropOutLayer->getErrorInput();
-        Tensor errorOutput = dropOutLayer->getErrorOutput();
+        Tensor errorInput = dropOutLayer->getErrorInput().value();
+        Tensor errorOutput = dropOutLayer->getErrorOutput().value();
         Tensor errorInputCpu = Tensor(cpuPlacement, errorInput.getDescriptor());
         Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutput.getDescriptor());
         half *errorInputMem = (half *)errorInputCpu.getMemPtr();
@@ -284,7 +284,7 @@ TEST(DropOut, TrainingSomeDropOut) {
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput();
+        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput().value();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
@@ -308,8 +308,8 @@ TEST(DropOut, TrainingSomeDropOut) {
         }
 
         // Backward pass
-        Tensor errorInput = dropOutLayer->getErrorInput();
-        Tensor errorOutput = dropOutLayer->getErrorOutput();
+        Tensor errorInput = dropOutLayer->getErrorInput().value();
+        Tensor errorOutput = dropOutLayer->getErrorOutput().value();
         Tensor errorInputCpu = Tensor(cpuPlacement, errorInput.getDescriptor());
         Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutput.getDescriptor());
         half *errorInputMem = (half *)errorInputCpu.getMemPtr();

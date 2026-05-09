@@ -10,6 +10,7 @@
 #include <unordered_map>
 
 #include <nlohmann/json.hpp>
+#include <optional>
 
 namespace thor_file {
 class TarWriter;
@@ -50,7 +51,7 @@ class Initializer {
     virtual std::string getVersion() const;
 
    protected:
-    Optional<Event> initDoneEvent;
+    std::optional<Event> initDoneEvent;
 
     // Referring to the initializer object, not the tensor that gets initialized:
     bool initialized;

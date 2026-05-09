@@ -18,7 +18,7 @@ Network buildSingleLayerFullyConnected() {
                                     .dimensions({28 * 28})
                                     .dataType(Tensor::DataType::FP32)
                                     .build()
-                                    .getFeatureOutput();
+                                    .getFeatureOutput().value();
 
     latestOutputTensor = FullyConnected::Builder()
                              .network(singleLayerFullyConnected)
@@ -29,7 +29,7 @@ Network buildSingleLayerFullyConnected() {
                              .biasInitializer(glorot)
                              .activation(relu)
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
     expectedDimensions = {128};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -42,7 +42,7 @@ Network buildSingleLayerFullyConnected() {
                              .biasInitializer(glorot)
                              .noActivation()
                              .build()
-                             .getFeatureOutput();
+                             .getFeatureOutput().value();
     expectedDimensions = {10};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -52,7 +52,7 @@ Network buildSingleLayerFullyConnected() {
                               .dimensions({10})
                               .dataType(Tensor::DataType::UINT8)
                               .build()
-                              .getFeatureOutput();
+                              .getFeatureOutput().value();
 
     CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
                                             .network(singleLayerFullyConnected)

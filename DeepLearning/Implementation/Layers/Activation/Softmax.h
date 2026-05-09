@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/Layers/Activation/Activation.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
@@ -12,15 +13,15 @@ class Softmax : public Activation {
 
     ~Softmax() override {}
 
-    Optional<Tensor> createFeatureOutputTensor() override;
+    std::optional<Tensor> createFeatureOutputTensor() override;
 
     void postCompile() override;
 
     void cleanup();
 
-    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override;
+    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override;
 
-    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override;
+    void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override;
 
     std::string getType() override;
 

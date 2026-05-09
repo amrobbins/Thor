@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include <iostream>
 #include <variant>
 #include <utility>
@@ -105,12 +107,12 @@ struct CompiledReduction {
                       std::vector<uint64_t> squeeze_axes,
                       TensorDescriptor::DataType input_dtype,
                       TensorDescriptor::DataType output_dtype,
-                      Optional<TensorDescriptor::DataType> compute_dtype)
+                      std::optional<TensorDescriptor::DataType> compute_dtype)
         : op(op),
           reduction_axes(std::move(reduction_axes)),
           squeeze_axes(std::move(squeeze_axes)),
           input_dtype(input_dtype),
-          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : output_dtype),
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : output_dtype),
           output_dtype(output_dtype) {
         // Canonical representation: sorted and uniquified
         std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
@@ -152,13 +154,13 @@ struct CompiledArgMinMax {
                       std::vector<uint64_t> squeeze_axes,
                       TensorDescriptor::DataType input_dtype,
                       TensorDescriptor::DataType output_dtype,
-                      Optional<TensorDescriptor::DataType> compute_dtype)
+                      std::optional<TensorDescriptor::DataType> compute_dtype)
         : op(op),
           reduction_axes(std::move(reduction_axes)),
           squeeze_axes(std::move(squeeze_axes)),
           input_dtype(input_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : TensorDescriptor::DataType::FP32) {
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : TensorDescriptor::DataType::FP32) {
         std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
         this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
 
@@ -184,14 +186,14 @@ struct CompiledReduceMinMaxBackward {
                                  TensorDescriptor::DataType input_dtype,
                                  TensorDescriptor::DataType grad_output_dtype,
                                  TensorDescriptor::DataType output_dtype,
-                                 Optional<TensorDescriptor::DataType> compute_dtype)
+                                 std::optional<TensorDescriptor::DataType> compute_dtype)
         : op(op),
           reduction_axes(std::move(reduction_axes)),
           squeeze_axes(std::move(squeeze_axes)),
           input_dtype(input_dtype),
           grad_output_dtype(grad_output_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : TensorDescriptor::DataType::FP32) {
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : TensorDescriptor::DataType::FP32) {
         std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
         this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
 
@@ -223,7 +225,7 @@ struct CompiledConvolution {
                         int32_t pad_w,
                         TensorDescriptor::DataType input_dtype,
                         TensorDescriptor::DataType output_dtype,
-                        Optional<TensorDescriptor::DataType> compute_dtype)
+                        std::optional<TensorDescriptor::DataType> compute_dtype)
         : is_3d(is_3d),
           stride_d(stride_d),
           stride_h(stride_h),
@@ -233,7 +235,7 @@ struct CompiledConvolution {
           pad_w(pad_w),
           input_dtype(input_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : output_dtype) {}
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : output_dtype) {}
 };
 
 struct CompiledConvolutionBackward {
@@ -262,7 +264,7 @@ struct CompiledConvolutionBackward {
                                 TensorDescriptor::DataType input_dtype,
                                 TensorDescriptor::DataType grad_output_dtype,
                                 TensorDescriptor::DataType output_dtype,
-                                Optional<TensorDescriptor::DataType> compute_dtype,
+                                std::optional<TensorDescriptor::DataType> compute_dtype,
                                 std::vector<uint64_t> explicit_output_dims = {})
         : op(op),
           stride_d(stride_d),
@@ -274,7 +276,7 @@ struct CompiledConvolutionBackward {
           input_dtype(input_dtype),
           grad_output_dtype(grad_output_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : output_dtype),
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : output_dtype),
           explicit_output_dims(std::move(explicit_output_dims)) {}
 };
 
@@ -310,7 +312,7 @@ struct CompiledMatmul {
                    TensorDescriptor::DataType rhs_dtype,
                    TensorDescriptor::DataType aux_dtype,
                    TensorDescriptor::DataType output_dtype,
-                   Optional<TensorDescriptor::DataType> compute_dtype)
+                   std::optional<TensorDescriptor::DataType> compute_dtype)
         : op(op),
           transpose_lhs(transpose_lhs),
           transpose_rhs(transpose_rhs),
@@ -324,7 +326,7 @@ struct CompiledMatmul {
           rhs_dtype(rhs_dtype),
           aux_dtype(aux_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : output_dtype) {}
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : output_dtype) {}
 };
 
 }  // namespace ThorImplementation

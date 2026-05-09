@@ -1,5 +1,6 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <optional>
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
@@ -52,8 +53,8 @@ void bind_batch_normalization(nb::module_ &m) {
     batch_normalization.def(
         "get_feature_output",
         [](BatchNormalization &self) -> Tensor {
-            Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            return maybeFeatureOutput.get();
+            std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+            return maybeFeatureOutput.value();
         },
         R"nbdoc(
             Return the output tensor produced by this layer.
@@ -64,18 +65,18 @@ void bind_batch_normalization(nb::module_ &m) {
                 The feature output tensor handle.
             )nbdoc");
 
-    batch_normalization.def("get_exponential_running_average_factor", [](BatchNormalization &self) -> optional<float> {
-        Optional<double> maybe_eraf = self.getExponentialRunningAverageFactor();
-        if (maybe_eraf.isPresent())
-            return maybe_eraf.get();
-        return optional<float>();
+    batch_normalization.def("get_exponential_running_average_factor", [](BatchNormalization &self) -> std::optional<float> {
+        std::optional<double> maybe_eraf = self.getExponentialRunningAverageFactor();
+        if (maybe_eraf.has_value())
+            return maybe_eraf.value();
+        return std::nullopt;
     });
 
-    batch_normalization.def("get_epsilon", [](BatchNormalization &self) -> optional<float> {
-        Optional<double> maybe_epsilon = self.getEpsilon();
-        if (maybe_epsilon.isPresent())
-            return maybe_epsilon.get();
-        return optional<float>();
+    batch_normalization.def("get_epsilon", [](BatchNormalization &self) -> std::optional<float> {
+        std::optional<double> maybe_epsilon = self.getEpsilon();
+        if (maybe_epsilon.has_value())
+            return maybe_epsilon.value();
+        return std::nullopt;
     });
 
     batch_normalization.attr("__doc__") = R"nbdoc(

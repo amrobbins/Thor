@@ -2,6 +2,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
+#include <optional>
 
 // Attach Stub to output tensors that would be dangling and are not wanted as NetworkOutputs.
 namespace Thor {
@@ -47,18 +48,18 @@ class Stub : public Layer {
 class Stub::Builder {
    public:
     virtual Stub build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(!_inputTensor.isEmpty());
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_inputTensor.has_value());
 
         Stub stub;
         stub.featureInput = _inputTensor;
         stub.initialized = true;
-        stub.addToNetwork(_network.get());
+        stub.addToNetwork(_network.value());
         return stub;
     }
 
     virtual Stub::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
@@ -70,8 +71,8 @@ class Stub::Builder {
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _inputTensor;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _inputTensor;
 };
 
 }  // namespace Thor

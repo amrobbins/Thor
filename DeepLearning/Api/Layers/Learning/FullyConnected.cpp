@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <optional>
 
 using namespace std;
 using json = nlohmann::json;
@@ -52,7 +53,7 @@ cudaDataType_t cublasLtCudaDataTypeForFullyConnected(Tensor::DataType dataType) 
     }
 }
 
-Optional<cublasComputeType_t> cublasLtComputeTypeForFullyConnected(Tensor::DataType computeDataType) {
+std::optional<cublasComputeType_t> cublasLtComputeTypeForFullyConnected(Tensor::DataType computeDataType) {
     switch (computeDataType) {
         case Tensor::DataType::FP32:
             return CUBLAS_COMPUTE_32F;
@@ -61,7 +62,7 @@ Optional<cublasComputeType_t> cublasLtComputeTypeForFullyConnected(Tensor::DataT
         case Tensor::DataType::BF16:
             return CUBLAS_COMPUTE_32F_FAST_16BF;
         default:
-            return Optional<cublasComputeType_t>::empty();
+            return std::nullopt;
     }
 }
 
@@ -74,8 +75,8 @@ bool isSupportedCublasLtMatmulDataTypesForFullyConnected(
         return false;
     }
 
-    const Optional<cublasComputeType_t> computeType = cublasLtComputeTypeForFullyConnected(dataTypes.compute);
-    if (computeType.isEmpty()) {
+    const std::optional<cublasComputeType_t> computeType = cublasLtComputeTypeForFullyConnected(dataTypes.compute);
+    if (!computeType.has_value()) {
         return false;
     }
 
@@ -84,7 +85,7 @@ bool isSupportedCublasLtMatmulDataTypesForFullyConnected(
     const cudaDataType_t CDataType = cublasLtCudaDataTypeForFullyConnected(dataTypes.C);
     const cudaDataType_t DDataType = cublasLtCudaDataTypeForFullyConnected(dataTypes.D);
 
-    return isSupportedCublasLtOperationType(computeType.get(), CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
+    return isSupportedCublasLtOperationType(computeType.value(), CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
 }
 
 ThorImplementation::CublasMatrixMultiply::MatmulDataTypes cublasLtMatmulDataTypesForFullyConnected(
@@ -118,7 +119,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                                                                     Tensor::DataType computeDataType,
                                                                     Tensor::DataType outputDataType,
                                                                     std::shared_ptr<Thor::Activation> activation,
-                                                                    Optional<ThorImplementation::Expression> epilogue) {
+                                                                    std::optional<ThorImplementation::Expression> epilogue) {
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
     using ThorImplementation::Expression;
@@ -243,8 +244,8 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
             if (activation != nullptr) {
                 fout = activation->toExpression(fout);
             }
-            if (epilogue.isPresent()) {
-                fout = FullyConnected::applyEpilogue(fout, epilogue.get());
+            if (epilogue.has_value()) {
+                fout = FullyConnected::applyEpilogue(fout, epilogue.value());
             }
 
             // The API layer's declared output tensor dtype is authoritative.
@@ -306,7 +307,7 @@ void FullyConnected::verifyFullyConnectedDataType(Tensor::DataType dataType, con
 }
 
 void FullyConnected::verifyFullyConnectedComputeDataType(Tensor::DataType dataType) {
-    if (cublasLtComputeTypeForFullyConnected(dataType).isEmpty()) {
+    if (!cublasLtComputeTypeForFullyConnected(dataType).has_value()) {
         throw std::invalid_argument(
             "FullyConnected computeDataType must be fp32, fp16, or bf16 for Thor's current cuBLASLt floating GEMM path. Got " +
             dataTypeName(dataType) + ".");
@@ -314,10 +315,10 @@ void FullyConnected::verifyFullyConnectedComputeDataType(Tensor::DataType dataTy
 }
 
 FullyConnected FullyConnected::Builder::build() {
-    THOR_THROW_IF_FALSE(_network.isPresent());
+    THOR_THROW_IF_FALSE(_network.has_value());
     THOR_THROW_IF_FALSE(!_featureInputs.empty());
-    THOR_THROW_IF_FALSE(_numOutputFeatures.isPresent());
-    if (_hasBias.isEmpty())
+    THOR_THROW_IF_FALSE(_numOutputFeatures.has_value());
+    if (!_hasBias.has_value())
         _hasBias = false;
     if (_weightsInitializer == nullptr)
         _weightsInitializer = Glorot::Builder().build();
@@ -331,11 +332,11 @@ FullyConnected FullyConnected::Builder::build() {
             throw std::runtime_error("FullyConnected activation clone did not produce an Activation.");
         }
     }
-    if (_weightsDataType.isEmpty())
+    if (!_weightsDataType.has_value())
         _weightsDataType = _featureInputs[0].getDataType();
-    if (_computeDataType.isEmpty())
+    if (!_computeDataType.has_value())
         _computeDataType = _featureInputs[0].getDataType();
-    if (_outputDataType.isEmpty())
+    if (!_outputDataType.has_value())
         _outputDataType = _featureInputs[0].getDataType();
 
     verifyConfig();
@@ -343,19 +344,19 @@ FullyConnected FullyConnected::Builder::build() {
     FullyConnected fullyConnected(_epilogue);
 
     fullyConnected.featureInputs = _featureInputs;
-    fullyConnected.numOutputFeatures = _numOutputFeatures.get();
+    fullyConnected.numOutputFeatures = _numOutputFeatures.value();
 
-    fullyConnected.hasBias = _hasBias.get();
+    fullyConnected.hasBias = _hasBias.value();
     if (_activation != nullptr)
         fullyConnected.activation = _activation;
-    fullyConnected.weightsDataType = _weightsDataType.get();
-    fullyConnected.computeDataType = _computeDataType.get();
-    fullyConnected.outputDataType = _outputDataType.get();
+    fullyConnected.weightsDataType = _weightsDataType.value();
+    fullyConnected.computeDataType = _computeDataType.value();
+    fullyConnected.outputDataType = _outputDataType.value();
 
     // Own parameter intent at the API layer. The stamped implementation layer is now the generic
     // CustomLayer, so there is no implementation FullyConnected class left to define parameters.
     std::shared_ptr<Initializer> weightsInitializer = _weightsInitializer->clone();
-    std::shared_ptr<Initializer> biasInitializer = _hasBias.get() ? _biasInitializer->clone() : nullptr;
+    std::shared_ptr<Initializer> biasInitializer = _hasBias.value() ? _biasInitializer->clone() : nullptr;
     const uint64_t inputFeatures = FullyConnected::checkedFeatureCount(_featureInputs.front().getDimensions(), "feature input");
 
     ParameterSpecification::Builder weightsParameterBuilder;
@@ -390,50 +391,50 @@ FullyConnected FullyConnected::Builder::build() {
         fullyConnected.inputTensorFromOutputTensor[out] = fullyConnected.featureInputs[i];
     }
 
-    fullyConnected.addToNetwork(_network.get());
+    fullyConnected.addToNetwork(_network.value());
 
     return fullyConnected;
 }
 
 void FullyConnected::Builder::verifyConfig() const {
-    if (!_network.isPresent()) {
+    if (!_network.has_value()) {
         throw std::invalid_argument("FullyConnected::Builder requires network().");
     }
     if (_featureInputs.empty()) {
         throw std::invalid_argument("FullyConnected::Builder requires at least one featureInput().");
     }
-    if (!_numOutputFeatures.isPresent()) {
+    if (!_numOutputFeatures.has_value()) {
         throw std::invalid_argument("FullyConnected::Builder requires numOutputFeatures().");
     }
-    if (_numOutputFeatures.get() == 0) {
+    if (_numOutputFeatures.value() == 0) {
         throw std::invalid_argument("FullyConnected numOutputFeatures must be non-zero.");
     }
-    if (_numOutputFeatures.get() > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+    if (_numOutputFeatures.value() > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument("FullyConnected numOutputFeatures exceeds the int32 cuBLASLt interface limit.");
     }
     if (_weightsInitializer == nullptr) {
         throw std::invalid_argument("FullyConnected weightsInitializer must be non-null.");
     }
-    if (_hasBias.get() && _biasInitializer == nullptr) {
+    if (_hasBias.value() && _biasInitializer == nullptr) {
         throw std::invalid_argument("FullyConnected biasInitializer must be non-null when hasBias is true.");
     }
     if (!_activationExplicitlyRemoved && _activation == nullptr) {
         throw std::invalid_argument("FullyConnected activation must be non-null unless noActivation() was requested.");
     }
-    if (_epilogue.isPresent()) {
-        FullyConnected::validateEpilogueExpression(_epilogue.get());
+    if (_epilogue.has_value()) {
+        FullyConnected::validateEpilogueExpression(_epilogue.value());
     }
 
     const Tensor::DataType inputDataType = _featureInputs.front().getDataType();
     const std::vector<uint64_t> inputDimensions = _featureInputs.front().getDimensions();
     FullyConnected::checkedFeatureCount(inputDimensions, "feature input");
     FullyConnected::verifyFullyConnectedDataType(inputDataType, "feature input data type");
-    FullyConnected::verifyFullyConnectedDataType(_weightsDataType.get(), "weightsDataType");
-    FullyConnected::verifyFullyConnectedComputeDataType(_computeDataType.get());
-    FullyConnected::verifyFullyConnectedDataType(_outputDataType.get(), "outputDataType");
+    FullyConnected::verifyFullyConnectedDataType(_weightsDataType.value(), "weightsDataType");
+    FullyConnected::verifyFullyConnectedComputeDataType(_computeDataType.value());
+    FullyConnected::verifyFullyConnectedDataType(_outputDataType.value(), "outputDataType");
 
     // Validate the matmul data-type plan against the same cuBLASLt support table used by CublasMatrixMultiply.
-    (void)cublasLtMatmulDataTypesForFullyConnected(inputDataType, _weightsDataType.get(), _computeDataType.get(), _outputDataType.get());
+    (void)cublasLtMatmulDataTypesForFullyConnected(inputDataType, _weightsDataType.value(), _computeDataType.value(), _outputDataType.value());
 
     for (uint32_t i = 0; i < _featureInputs.size(); ++i) {
         const Tensor& featureInput = _featureInputs[i];
@@ -501,10 +502,10 @@ json FullyConnected::architectureJson() const {
     } else {
         j["activation"] = nullptr;
     }
-    if (epilogue.isPresent()) {
-        if (serializableEpilogue.isEmpty())
-            serializableEpilogue = makeEpilogueDefinition(epilogue.get());
-        j["epilogue"] = serializableEpilogue.get().architectureJson();
+    if (epilogue.has_value()) {
+        if (!serializableEpilogue.has_value())
+            serializableEpilogue = makeEpilogueDefinition(epilogue.value());
+        j["epilogue"] = serializableEpilogue.value().architectureJson();
     } else {
         j["epilogue"] = nullptr;
     }
@@ -543,7 +544,7 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
     if (j.at("layer_type").get<std::string>() != "fully_connected")
         throw runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
 
-    Optional<ThorImplementation::Expression> epilogue = Optional<ThorImplementation::Expression>::empty();
+    std::optional<ThorImplementation::Expression> epilogue = std::nullopt;
     if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
         ThorImplementation::ExpressionDefinition epilogueDefinition =
             ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));

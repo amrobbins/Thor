@@ -25,7 +25,7 @@ void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
 
     if (lossShape == LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
-        lossTensor = lossShaper.getFeatureOutput();
+        lossTensor = lossShaper.getFeatureOutput().value();
     } else {
         // No loss shaper needed in this case
         THOR_THROW_IF_FALSE(lossShape == LossShape::ELEMENTWISE);

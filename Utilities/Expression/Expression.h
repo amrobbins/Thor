@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -130,13 +132,13 @@ struct ExprNode {
     cudnnSoftmaxMode_t softmax_mode = CUDNN_SOFTMAX_MODE_CHANNEL;
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
-    Optional<TensorDescriptor::DataType> input_tensor_dtype = Optional<TensorDescriptor::DataType>::empty();
+    std::optional<TensorDescriptor::DataType> input_tensor_dtype = std::nullopt;
 
     // Value semantics for this node.
-    Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty();
-    Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty();
-    Optional<TensorDescriptor::DataType> backward_output_dtype = Optional<TensorDescriptor::DataType>::empty();
-    Optional<TensorDescriptor::DataType> backward_compute_dtype = Optional<TensorDescriptor::DataType>::empty();
+    std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt;
+    std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt;
+    std::optional<TensorDescriptor::DataType> backward_output_dtype = std::nullopt;
+    std::optional<TensorDescriptor::DataType> backward_compute_dtype = std::nullopt;
 
     // for shape/reduction nodes only
     std::vector<uint64_t> reduction_axes;
@@ -243,16 +245,16 @@ class Expression {
 
     [[nodiscard]] static Expression input(
         const std::string& name,
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
-        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
     [[nodiscard]] static Expression runtimeScalar(
         const std::string& name,
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
-        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
     [[nodiscard]] static Expression tensorRuntimeScalar(
         const std::string& name,
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
-        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
     [[nodiscard]] static Expression constantScalar(double value);
 
     [[nodiscard]] static Expression fromPhysicalNode(std::shared_ptr<PhysicalExpression> expr, uint32_t nodeIndex) {
@@ -310,8 +312,8 @@ class Expression {
         const Expression& rhs,
         bool transpose_lhs = false,
         bool transpose_rhs = false,
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
-        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
     [[nodiscard]] static Expression gemm(const Expression& lhs,
                                          const Expression& rhs,
                                          const Expression& addend,
@@ -320,8 +322,8 @@ class Expression {
                                          bool transpose_lhs = false,
                                          bool transpose_rhs = false,
                                          bool transpose_addend = false,
-                                         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                                         Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+                                         std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                                         std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
     [[nodiscard]] static Expression gemm(const Expression& lhs,
                                          const Expression& rhs,
                                          const Expression& addend,
@@ -330,8 +332,8 @@ class Expression {
                                          bool transpose_lhs = false,
                                          bool transpose_rhs = false,
                                          bool transpose_addend = false,
-                                         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                                         Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+                                         std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                                         std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
     [[nodiscard]] static Expression conv2d(
         const Expression& input,
         const Expression& filter,
@@ -339,8 +341,8 @@ class Expression {
         int32_t stride_w = 1,
         int32_t pad_h = 0,
         int32_t pad_w = 0,
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
-        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
     [[nodiscard]] static Expression conv3d(
         const Expression& input,
         const Expression& filter,
@@ -350,56 +352,56 @@ class Expression {
         int32_t pad_d = 0,
         int32_t pad_h = 0,
         int32_t pad_w = 0,
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
-        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
 
     [[nodiscard]] Expression reduction(ExprOp op,
                                        const std::vector<uint64_t>& reduction_axes,
                                        const std::vector<uint64_t>& squeeze_axes,
-                                       Optional<TensorDescriptor::DataType> compute_dtype) const;
+                                       std::optional<TensorDescriptor::DataType> compute_dtype) const;
     [[nodiscard]] Expression reduce_sum(
         const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
     [[nodiscard]] Expression reduce_prod(
         const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
     [[nodiscard]] Expression reduce_min(
         const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
     [[nodiscard]] Expression reduce_max(
         const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
     [[nodiscard]] Expression argmin(
         const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
     [[nodiscard]] Expression argmax(
         const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
     [[nodiscard]] Expression reduce_mean(
         const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
     [[nodiscard]] Expression reduce_norm1(
         const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
     [[nodiscard]] Expression reduce_norm2(
         const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
 
     [[nodiscard]] Expression min(const Expression& other) const;
     [[nodiscard]] Expression max(const Expression& other) const;
 
     [[nodiscard]] Expression withDTypes(
-        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
-        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt) const;
     [[nodiscard]] Expression withComputeDType(TensorDescriptor::DataType compute_dtype) const;
     [[nodiscard]] Expression withOutputDType(TensorDescriptor::DataType output_dtype) const;
 

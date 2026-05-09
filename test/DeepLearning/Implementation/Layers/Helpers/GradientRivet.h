@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
@@ -10,44 +11,44 @@ class GradientRivet : public Layer {
 
     GradientRivet() {}
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isPresent());
-        featureOutput = featureInput.get().clone();
+    virtual std::optional<Tensor> createFeatureOutputTensor() {
+        assert(featureInput.has_value());
+        featureOutput = featureInput.value().clone();
         return featureOutput;
     }
 
-    virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {}
+    virtual void replaceErrorInput(std::optional<Tensor> oldErrorInput, std::optional<Tensor> newErrorInput) {}
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
         assert(!compiled);
 
-        assert(this->nextLayer.isEmpty());
+        assert(!this->nextLayer.has_value());
         this->nextLayer = nextLayer;
         if (nextLayer->hasFeatureInput())
             featureOutput = createFeatureOutputTensor();
         else
-            featureOutput = Optional<Tensor>::empty();
+            featureOutput = std::nullopt;
 
         errorInput = nextLayer->connectToPreviousLayer(this, featureOutput, stream, true, loaderConnectionType);
 
-        if (errorInput.isPresent() && featureOutput.isPresent()) {
-            assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
-            assert(errorInput.get().getPlacement() == featureOutput.get().getPlacement());
+        if (errorInput.has_value() && featureOutput.has_value()) {
+            assert(errorInput.value().getDescriptor() == featureOutput.value().getDescriptor());
+            assert(errorInput.value().getPlacement() == featureOutput.value().getPlacement());
         }
 
         ensureNoDeviceCrossing();
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(inputTensor.isPresent());
-        assert(outputTensor.isPresent());
-        outputTensor.get().copyFromAsync(inputTensor.get(), stream);
+    virtual void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) {
+        assert(inputTensor.has_value());
+        assert(outputTensor.has_value());
+        outputTensor.value().copyFromAsync(inputTensor.value(), stream);
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-        assert(errorIn.isPresent());
-        if (errorOut.isPresent())
-            errorOut.get().copyFromAsync(errorIn.get(), stream);
+    virtual void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) {
+        assert(errorIn.has_value());
+        if (errorOut.has_value())
+            errorOut.value().copyFromAsync(errorIn.value(), stream);
     }
 };
 

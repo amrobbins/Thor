@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <optional>
 
 namespace Thor {
 class CustomLayer : public TrainableLayer {
@@ -73,7 +74,7 @@ class CustomLayer : public TrainableLayer {
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                   bool isFirstStamp,
                                   std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
-                                  Optional<Event> sisterLayerLoadedEvent) {
+                                  std::optional<Event> sisterLayerLoadedEvent) {
         (void)isFirstStamp;
         (void)sisterLayer;
         (void)sisterLayerLoadedEvent;
@@ -135,7 +136,7 @@ class CustomLayer::Builder {
     virtual ~Builder() = default;
 
     virtual CustomLayer build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
+        THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(_expr != nullptr);
         THOR_THROW_IF_FALSE(!_inputInterfaces.empty());
         if (_inputNames.empty())
@@ -150,12 +151,12 @@ class CustomLayer::Builder {
         if (_layerOptimizer != nullptr)
             customLayer.attachDefaultOptimizer(_layerOptimizer);
 
-        customLayer.addToNetwork(_network.get());
+        customLayer.addToNetwork(_network.value());
         return customLayer;
     }
 
     virtual CustomLayer::Builder& network(Network& _network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
@@ -228,7 +229,7 @@ class CustomLayer::Builder {
     }
 
    private:
-    Optional<Network*> _network;
+    std::optional<Network*> _network;
     std::shared_ptr<ThorImplementation::DynamicExpression> _expr;
     std::vector<std::string> _inputNames;
     std::vector<std::string> _outputNames;

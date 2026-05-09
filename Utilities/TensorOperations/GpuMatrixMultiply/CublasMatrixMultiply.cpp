@@ -1,3 +1,4 @@
+#include <optional>
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
@@ -324,7 +325,7 @@ void createLtMatrixLayoutsForRowMajorGemm(cublasLtMatrixLayout_t *ADesc,
 void CublasMatrixMultiply::multiply(Tensor A,
                                     Tensor B,
                                     Tensor C,
-                                    Optional<Tensor> workspace,
+                                    std::optional<Tensor> workspace,
                                     const int32_t A_rows,
                                     const int32_t A_cols,
                                     const int32_t B_rows,
@@ -354,7 +355,7 @@ void CublasMatrixMultiply::multiply(Tensor A,
 void CublasMatrixMultiply::multiply(Tensor A,
                                     Tensor B,
                                     Tensor C,
-                                    Optional<Tensor> workspace,
+                                    std::optional<Tensor> workspace,
                                     const int32_t A_rows,
                                     const int32_t A_cols,
                                     const int32_t B_rows,
@@ -391,7 +392,7 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                 Tensor B,
                                 Tensor C,
                                 Tensor D,
-                                Optional<Tensor> workspace,
+                                std::optional<Tensor> workspace,
                                 const int32_t A_rows,
                                 const int32_t A_cols,
                                 const int32_t B_rows,
@@ -427,7 +428,7 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                 Tensor B,
                                 Tensor C,
                                 Tensor D,
-                                Optional<Tensor> workspace,
+                                std::optional<Tensor> workspace,
                                 const int32_t A_rows,
                                 const int32_t A_cols,
                                 const int32_t B_rows,
@@ -464,7 +465,7 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                 Tensor B,
                                 Tensor C,
                                 Tensor D,
-                                Optional<Tensor> workspace,
+                                std::optional<Tensor> workspace,
                                 const int32_t A_rows,
                                 const int32_t A_cols,
                                 const int32_t B_rows,
@@ -541,12 +542,12 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                         ld_B,
                                         ld_C,
                                         ld_D,
-                                        workspace.isPresent());
+                                        workspace.has_value());
 
     OperationType operationType = makeOperationType(dataTypes);
     validateFp8RowMajorGemmShapeAndLayoutOrThrow(
         operationType, A_rows, A_cols, B_rows, B_cols, ld_A, ld_B, ld_C, ld_D, transposeA, transposeB, "CublasMatrixMultiply::gemm");
-    if (!workspace.isPresent() && fp8NeedsRowMajorTransposeWorkspace(operationType, transposeA, transposeB)) {
+    if (!workspace.has_value() && fp8NeedsRowMajorTransposeWorkspace(operationType, transposeA, transposeB)) {
         throw std::runtime_error("CublasMatrixMultiply::gemm FP8 row-major path requires a workspace tensor for temporary A/B transposes.");
     }
 
@@ -557,14 +558,14 @@ void CublasMatrixMultiply::gemm(Tensor A,
     CublasKernel cublasKernel = maybeCublasKernel.value();
 
     // Check byte size of workspace
-    if (workspace.isPresent()) {
+    if (workspace.has_value()) {
         bool kernelWillRunOnGpu;
         size_t workspaceSizeInBytes = cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales);
         assert(kernelWillRunOnGpu);
 
         if (workspaceSizeInBytes > 0)
             assert(cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales) <=
-                   workspace.get().getDescriptor().getArraySizeInBytes());
+                   workspace.value().getDescriptor().getArraySizeInBytes());
     }
 
     cublasKernel.executeKernel(A, B, C, D, ld_A, ld_B, ld_C, ld_D, workspace, alpha, beta, stream, pointerMode, fp8Scales);
@@ -590,7 +591,7 @@ cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(TensorDescriptor::DataT
     }
 }
 
-Optional<cublasComputeType_t> CublasMatrixMultiply::mapToCublasComputeType(TensorDescriptor::DataType dataType) {
+std::optional<cublasComputeType_t> CublasMatrixMultiply::mapToCublasComputeType(TensorDescriptor::DataType dataType) {
     switch (dataType) {
         case TensorDescriptor::DataType::FP32:
             return CUBLAS_COMPUTE_32F;
@@ -601,7 +602,7 @@ Optional<cublasComputeType_t> CublasMatrixMultiply::mapToCublasComputeType(Tenso
         case TensorDescriptor::DataType::INT32:
             return CUBLAS_COMPUTE_32I;
         default:
-            return Optional<cublasComputeType_t>::empty();
+            return std::nullopt;
     }
 }
 
@@ -659,11 +660,11 @@ bool CublasMatrixMultiply::isSupportedMatmulDataTypes(MatmulDataTypes dataTypes)
     const cudaDataType_t CDataType = mapToCublasDataType(dataTypes.C);
     const cudaDataType_t DDataType = mapToCublasDataType(dataTypes.D);
 
-    const Optional<cublasComputeType_t> computeType = mapToCublasComputeType(dataTypes.compute);
-    if (computeType.isEmpty()) {
+    const std::optional<cublasComputeType_t> computeType = mapToCublasComputeType(dataTypes.compute);
+    if (!computeType.has_value()) {
         return false;
     }
-    return isSupportedCublasLtOperationType(computeType.get(), CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
+    return isSupportedCublasLtOperationType(computeType.value(), CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
 }
 
 bool CublasMatrixMultiply::isSupportedSameDataTypeMatmul(TensorDescriptor::DataType ABCDDataType) {
@@ -682,13 +683,13 @@ OperationType CublasMatrixMultiply::makeOperationType(MatmulDataTypes dataTypes)
     const cudaDataType_t CDataType = mapToCublasDataType(dataTypes.C);
     const cudaDataType_t DDataType = mapToCublasDataType(dataTypes.D);
 
-    const Optional<cublasComputeType_t> computeType = mapToCublasComputeType(dataTypes.compute);
-    if (computeType.isEmpty()) {
+    const std::optional<cublasComputeType_t> computeType = mapToCublasComputeType(dataTypes.compute);
+    if (!computeType.has_value()) {
         throw std::invalid_argument("Unsupported Thor compute dtype for cuBLASLt GEMM: " + dataTypeToString(dataTypes.compute));
     }
 
     // Thor's GEMM scale plumbing passes alpha/beta as float host/device pointers, so the cublasLt scale type is CUDA_R_32F.
-    return OperationType(computeType.get(), CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
+    return OperationType(computeType.value(), CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
 }
 
 std::string CublasMatrixMultiply::dataTypeToString(TensorDescriptor::DataType dataType) {

@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.h"
+#include <optional>
 
 namespace Thor {
 
@@ -18,7 +19,7 @@ class Pooling : public Layer {
 
     enum class Type { AVERAGE = 3, MAX };
 
-    std::vector<uint64_t> getOutputDimensions() { return featureOutput.get().getDimensions(); }
+    std::vector<uint64_t> getOutputDimensions() { return featureOutput.value().getDimensions(); }
     Type getPoolingType() { return type; }
     uint32_t getWindowHeight() { return windowHeight; }
     uint32_t getWindowWidth() { return windowWidth; }
@@ -40,7 +41,7 @@ class Pooling : public Layer {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput());
+        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value());
 
         ThorImplementation::Pooling::Type implementationPoolingType;
         implementationPoolingType =
@@ -52,7 +53,7 @@ class Pooling : public Layer {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        return batchSize * featureOutput.get().getTotalSizeInBytes();
+        return batchSize * featureOutput.value().getTotalSizeInBytes();
     }
 
    private:
@@ -71,72 +72,72 @@ class Pooling : public Layer {
 class Pooling::Builder {
    public:
     virtual Pooling build() {
-        THOR_THROW_IF_FALSE(_network.isPresent());
-        THOR_THROW_IF_FALSE(_featureInput.isPresent());
-        THOR_THROW_IF_FALSE(_type.isPresent());
-        THOR_THROW_IF_FALSE(_featureInput.get().getDimensions().size() == 3);
-        THOR_THROW_IF_FALSE(_windowHeight.isPresent());
-        THOR_THROW_IF_FALSE(_windowWidth.isPresent());
+        THOR_THROW_IF_FALSE(_network.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.has_value());
+        THOR_THROW_IF_FALSE(_type.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.value().getDimensions().size() == 3);
+        THOR_THROW_IF_FALSE(_windowHeight.has_value());
+        THOR_THROW_IF_FALSE(_windowWidth.has_value());
 
-        if (_verticalStride.isEmpty())
+        if (!_verticalStride.has_value())
             _verticalStride = 1;
-        if (_horizontalStride.isEmpty())
+        if (!_horizontalStride.has_value())
             _horizontalStride = 1;
-        if (_computeVerticalSamePadding.isEmpty())
+        if (!_computeVerticalSamePadding.has_value())
             _computeVerticalSamePadding = false;
-        if (_verticalPadding.isEmpty() && !_computeVerticalSamePadding.get())
+        if (!_verticalPadding.has_value() && !_computeVerticalSamePadding.value())
             _verticalPadding = 0;
-        if (_computeHorizontalSamePadding.isEmpty())
+        if (!_computeHorizontalSamePadding.has_value())
             _computeHorizontalSamePadding = false;
-        if (_horizontalPadding.isEmpty() && !_computeHorizontalSamePadding.get())
+        if (!_horizontalPadding.has_value() && !_computeHorizontalSamePadding.value())
             _horizontalPadding = 0;
 
         Pooling pooling;
 
         pooling.featureInput = _featureInput;
-        pooling.type = _type;
-        pooling.windowHeight = _windowHeight;
-        pooling.windowWidth = _windowWidth;
-        pooling.verticalStride = _verticalStride;
-        pooling.horizontalStride = _horizontalStride;
-        if (_computeVerticalSamePadding) {
+        pooling.type = _type.value();
+        pooling.windowHeight = _windowHeight.value();
+        pooling.windowWidth = _windowWidth.value();
+        pooling.verticalStride = _verticalStride.value();
+        pooling.horizontalStride = _horizontalStride.value();
+        if (_computeVerticalSamePadding.value()) {
             THOR_THROW_IF_FALSE(pooling.verticalStride == 1);
             pooling.verticalPadding =
-                computeSamePadding(pooling.featureInput.get().getDimensions()[1], pooling.verticalStride, pooling.windowHeight);
+                computeSamePadding(pooling.featureInput.value().getDimensions()[1], pooling.verticalStride, pooling.windowHeight);
         } else {
-            pooling.verticalPadding = _verticalPadding;
+            pooling.verticalPadding = _verticalPadding.value();
         }
-        if (_computeHorizontalSamePadding) {
+        if (_computeHorizontalSamePadding.value()) {
             THOR_THROW_IF_FALSE(pooling.horizontalStride == 1);
             pooling.horizontalPadding =
-                computeSamePadding(pooling.featureInput.get().getDimensions()[2], pooling.horizontalStride, pooling.windowWidth);
+                computeSamePadding(pooling.featureInput.value().getDimensions()[2], pooling.horizontalStride, pooling.windowWidth);
         } else {
-            pooling.horizontalPadding = _horizontalPadding;
+            pooling.horizontalPadding = _horizontalPadding.value();
         }
 
         THOR_THROW_IF_FALSE(pooling.verticalPadding < pooling.windowHeight);
         THOR_THROW_IF_FALSE(pooling.horizontalPadding < pooling.windowWidth);
 
         uint32_t outputHeight = computeOutputDimension(
-            pooling.featureInput.get().getDimensions()[1], pooling.verticalStride, pooling.windowHeight, pooling.verticalPadding);
+            pooling.featureInput.value().getDimensions()[1], pooling.verticalStride, pooling.windowHeight, pooling.verticalPadding);
         uint32_t outputWidth = computeOutputDimension(
-            pooling.featureInput.get().getDimensions()[2], pooling.horizontalStride, pooling.windowWidth, pooling.horizontalPadding);
+            pooling.featureInput.value().getDimensions()[2], pooling.horizontalStride, pooling.windowWidth, pooling.horizontalPadding);
         pooling.featureOutput =
-            Tensor(pooling.featureInput.get().getDataType(), {pooling.featureInput.get().getDimensions()[0], outputHeight, outputWidth});
+            Tensor(pooling.featureInput.value().getDataType(), {pooling.featureInput.value().getDimensions()[0], outputHeight, outputWidth});
 
         pooling.initialized = true;
-        pooling.addToNetwork(_network.get());
+        pooling.addToNetwork(_network.value());
         return pooling;
     }
 
     virtual Pooling::Builder &network(Network &_network) {
-        THOR_THROW_IF_FALSE(!this->_network.isPresent());
+        THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
     virtual Pooling::Builder &featureInput(Tensor _featureInput) {
-        THOR_THROW_IF_FALSE(!this->_featureInput.isPresent());
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
         this->_featureInput = _featureInput;
         return *this;
     }
@@ -148,50 +149,50 @@ class Pooling::Builder {
     }
 
     virtual Pooling::Builder &windowHeight(uint32_t _windowHeight) {
-        THOR_THROW_IF_FALSE(!this->_windowHeight.isPresent());
+        THOR_THROW_IF_FALSE(!this->_windowHeight.has_value());
         this->_windowHeight = _windowHeight;
         return *this;
     }
 
     virtual Pooling::Builder &windowWidth(uint32_t _windowWidth) {
-        THOR_THROW_IF_FALSE(!this->_windowWidth.isPresent());
+        THOR_THROW_IF_FALSE(!this->_windowWidth.has_value());
         this->_windowWidth = _windowWidth;
         return *this;
     }
 
     virtual Pooling::Builder &verticalStride(uint32_t _verticalStride) {
         THOR_THROW_IF_FALSE(_verticalStride != 0);
-        THOR_THROW_IF_FALSE(!this->_verticalStride.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalStride.has_value());
         this->_verticalStride = _verticalStride;
         return *this;
     }
 
     virtual Pooling::Builder &horizontalStride(uint32_t _horizontalStride) {
         THOR_THROW_IF_FALSE(_horizontalStride != 0);
-        THOR_THROW_IF_FALSE(!this->_horizontalStride.isPresent());
+        THOR_THROW_IF_FALSE(!this->_horizontalStride.has_value());
         this->_horizontalStride = _horizontalStride;
         return *this;
     }
 
     virtual Pooling::Builder &verticalPadding(uint32_t _verticalPadding) {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
         this->_verticalPadding = _verticalPadding;
         return *this;
     }
 
     virtual Pooling::Builder &horizontalPadding(uint32_t _horizontalPadding) {
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
         this->_horizontalPadding = _horizontalPadding;
         return *this;
     }
 
     virtual Pooling::Builder &samePadding() {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
         this->_verticalPadding = 0;
         this->_horizontalPadding = 0;
         this->_computeHorizontalSamePadding = true;
@@ -200,26 +201,26 @@ class Pooling::Builder {
     }
 
     virtual Pooling::Builder &verticalSamePadding() {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
         this->_verticalPadding = 0;
         this->_computeVerticalSamePadding = true;
         return *this;
     }
 
     virtual Pooling::Builder &horizontalSamePadding() {
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
         this->_horizontalPadding = 0;
         this->_computeHorizontalSamePadding = true;
         return *this;
     }
 
     virtual Pooling::Builder &noPadding() {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.isPresent());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.isPresent());
+        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
+        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
         this->_verticalPadding = 0;
         this->_horizontalPadding = 0;
         return *this;
@@ -245,17 +246,17 @@ class Pooling::Builder {
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _featureInput;
-    Optional<Pooling::Type> _type;
-    Optional<uint32_t> _windowHeight;
-    Optional<uint32_t> _windowWidth;
-    Optional<uint32_t> _verticalStride;
-    Optional<uint32_t> _horizontalStride;
-    Optional<bool> _computeVerticalSamePadding;
-    Optional<bool> _computeHorizontalSamePadding;
-    Optional<uint32_t> _verticalPadding;
-    Optional<uint32_t> _horizontalPadding;
+    std::optional<Network *> _network;
+    std::optional<Tensor> _featureInput;
+    std::optional<Pooling::Type> _type;
+    std::optional<uint32_t> _windowHeight;
+    std::optional<uint32_t> _windowWidth;
+    std::optional<uint32_t> _verticalStride;
+    std::optional<uint32_t> _horizontalStride;
+    std::optional<bool> _computeVerticalSamePadding;
+    std::optional<bool> _computeHorizontalSamePadding;
+    std::optional<uint32_t> _verticalPadding;
+    std::optional<uint32_t> _horizontalPadding;
 };
 
 NLOHMANN_JSON_SERIALIZE_ENUM(Pooling::Type,

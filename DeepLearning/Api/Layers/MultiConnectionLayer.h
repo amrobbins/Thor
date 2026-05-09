@@ -5,6 +5,7 @@
 
 #include <map>
 #include <vector>
+#include <optional>
 
 namespace Thor {
 
@@ -13,12 +14,12 @@ class MultiConnectionLayer : public Layer {
     ~MultiConnectionLayer() override {}
 
     // When there is only one connection, you may use the following version:
-    Optional<Tensor> getFeatureOutput() const override {
+    std::optional<Tensor> getFeatureOutput() const override {
         THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
         return featureOutputs[0];
     }
 
-    Optional<Tensor> getFeatureInput() const override {
+    std::optional<Tensor> getFeatureInput() const override {
         THOR_THROW_IF_FALSE(featureInputs.size() == 1);
         return featureInputs[0];
     }

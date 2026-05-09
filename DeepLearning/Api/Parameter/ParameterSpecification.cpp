@@ -7,7 +7,7 @@
 
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
-#include "Utilities/Common/Optional.h"
+#include <optional>
 #include "Utilities/TarFile/TarReader.h"
 
 #include <stdexcept>
@@ -34,11 +34,11 @@ class ApiBackedImplementationParameter : public ThorImplementation::PhysicalPara
         if (storageContextCreateStorage) {
             storage = storageContextCreateStorage(context);
         } else {
-            if (dtype.isEmpty())
+            if (!dtype.has_value())
                 throw runtime_error("Parameter.dtype was not set for parameter " + name +
                                     " and create_storage_from_context(StorageContext context) was not bound. You need to pick one of those "
                                     "routes to allocate parameter storage.");
-            if (shape.isEmpty())
+            if (!shape.has_value())
                 throw runtime_error("Parameter.shape was not set for parameter " + name +
                                     " and create_storage_from_context(StorageContext context) was not bound. You need to pick one of those "
                                     "routes to allocate parameter storage.");
@@ -135,7 +135,7 @@ void ParameterSpecification::validateReadyForUse() const {
 }
 
 void ParameterSpecification::validateStorageFactoryReadyForStamping() const {
-    if (dtype.isPresent() && shape.isPresent())
+    if (dtype.has_value() && shape.has_value())
         return;
 
     const bool hasStorageContextFactory = static_cast<bool>(storageContextCreateStorage);
@@ -153,9 +153,9 @@ json ParameterSpecification::architectureJson() const {
     j["name"] = name;
     if (storage.isInitialized()) {
         j["storage"] = storage.architectureJson();
-    } else if (shape.isPresent() && dtype.isPresent()) {
-        j["shape"] = shape.get();
-        j["dtype"] = json(dtype.get());
+    } else if (shape.has_value() && dtype.has_value()) {
+        j["shape"] = shape.value();
+        j["dtype"] = json(dtype.value());
     } else {
         // shape and dtype should always be present by the time serialize is called,
         // because the layer has been connected to the network, and that is when this info is determined,
@@ -248,15 +248,15 @@ std::shared_ptr<ThorImplementation::PhysicalParameter> ParameterSpecification::s
     if (storageContextCreateStorage) {
         physicalParameter = std::make_shared<ApiBackedImplementationParameter>(name, trainable, storageContextCreateStorage);
     } else {
-        THOR_THROW_IF_FALSE(shape.isPresent());
-        THOR_THROW_IF_FALSE(dtype.isPresent());
+        THOR_THROW_IF_FALSE(shape.has_value());
+        THOR_THROW_IF_FALSE(dtype.has_value());
 
-        physicalParameter = std::make_shared<ThorImplementation::PhysicalParameter>(name, trainable, shape.get(), dtype.get());
+        physicalParameter = std::make_shared<ThorImplementation::PhysicalParameter>(name, trainable, shape.value(), dtype.value());
     }
 
-    if (storageFile.isPresent()) {
+    if (storageFile.has_value()) {
         std::shared_ptr<ThorImplementation::Initializer> archiveInitializer =
-            std::make_shared<ArchiveTensorInitializer>(archiveReader, storageFile.get());
+            std::make_shared<ArchiveTensorInitializer>(archiveReader, storageFile.value());
         physicalParameter->setInitializer(archiveInitializer);
     } else if (initializer != nullptr) {
         physicalParameter->setInitializer(initializer->stamp());
@@ -283,21 +283,21 @@ bool ParameterSpecification::setOptimizer(const std::shared_ptr<Optimizer> &opti
 
 ParameterSpecification ParameterSpecification::Builder::build() {
     THOR_THROW_IF_FALSE(!_name.empty());
-    THOR_THROW_IF_FALSE(_trainable.isPresent());
+    THOR_THROW_IF_FALSE(_trainable.has_value());
     THOR_THROW_IF_FALSE(_initializer != nullptr);
 
     ParameterSpecification p;
     p.initialized = true;
     p.name = _name;
-    p.trainable = _trainable;
+    p.trainable = _trainable.value();
     p.initializer = _initializer->clone();
     if (p.trainable) {
-        if (_trainingInitiallyEnabled.isEmpty() || _trainingInitiallyEnabled.get() == true)
+        if (!_trainingInitiallyEnabled.has_value() || _trainingInitiallyEnabled.value() == true)
             p.trainingInitiallyEnabled = true;
         else
             p.trainingInitiallyEnabled = false;
     } else {
-        if (_trainingInitiallyEnabled.isPresent() && _trainingInitiallyEnabled.get() == true)
+        if (_trainingInitiallyEnabled.has_value() && _trainingInitiallyEnabled.value() == true)
             throw runtime_error("trainingInitiallyEnabled set to true for parameter named " + p.name +
                                 " but the parameter has trainable == false");
         p.trainingInitiallyEnabled = false;
@@ -308,7 +308,7 @@ ParameterSpecification ParameterSpecification::Builder::build() {
         p.optimizer = _optimizerOverride.get()->clone();
     }
     if (!_storageContextCreateStorage) {
-        if (_dtype.isEmpty()) {
+        if (!_dtype.has_value()) {
             throw runtime_error(
                 "ParameterSpecification::Builder when createStorage(StorageContextStorageFactory) is not bound, then a dtype is required, "
                 "but no dtype was specified.");
@@ -318,7 +318,7 @@ ParameterSpecification ParameterSpecification::Builder::build() {
                 "ParameterSpecification::Builder when createStorage(StorageContextStorageFactory) is not bound, then a shape is required, "
                 "but no shape was specified.");
         }
-        p.dtype = _dtype;
+        p.dtype = _dtype.value();
         p.shape = _shape;
     } else {
         p.storageContextCreateStorage = _storageContextCreateStorage;
@@ -350,13 +350,13 @@ ParameterSpecification::Builder &ParameterSpecification::Builder::initializer(st
 }
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::trainable(const bool _trainable) {
-    THOR_THROW_IF_FALSE(!this->_trainable.isPresent());
+    THOR_THROW_IF_FALSE(!this->_trainable.has_value());
     this->_trainable = _trainable;
     return *this;
 }
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::trainingInitiallyEnabled(const bool enabled) {
-    if (this->_trainingInitiallyEnabled.isPresent()) {
+    if (this->_trainingInitiallyEnabled.has_value()) {
         throw runtime_error("ParameterSpecification::Builder trainingInitiallyEnabled may only be specified once.");
     }
     this->_trainingInitiallyEnabled = enabled;
@@ -402,7 +402,7 @@ ParameterSpecification::Builder &ParameterSpecification::Builder::shape(const st
 }
 
 ParameterSpecification::Builder &ParameterSpecification::Builder::dtype(const DataType _dtype) {
-    if (this->_dtype.isPresent()) {
+    if (this->_dtype.has_value()) {
         throw runtime_error("ParameterSpecification::Builder dtype may only be specified once.");
     }
     this->_dtype = _dtype;

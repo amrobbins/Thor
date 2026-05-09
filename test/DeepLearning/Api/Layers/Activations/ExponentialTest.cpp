@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Activations/Exponential.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
@@ -33,15 +34,15 @@ TEST(Activations, ExponentialBuilds) {
 
     ASSERT_TRUE(exponential->isInitialized());
 
-    Optional<Tensor> actualInput = exponential->getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualInput = exponential->getFeatureInput();
+    ASSERT_TRUE(actualInput.has_value());
+    ASSERT_EQ(actualInput.value().getDataType(), dataType);
+    ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> actualOutput = exponential->getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualOutput = exponential->getFeatureOutput();
+    ASSERT_TRUE(actualOutput.has_value());
+    ASSERT_EQ(actualOutput.value().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.value().getDimensions(), dimensions);
 
     shared_ptr<Layer> cloneLayer = exponential->clone();
     Exponential *clone = dynamic_cast<Exponential *>(cloneLayer.get());
@@ -49,15 +50,15 @@ TEST(Activations, ExponentialBuilds) {
 
     ASSERT_TRUE(clone->isInitialized());
 
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.has_value());
+    ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
-    ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.has_value());
+    ASSERT_EQ(cloneOutput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.value().getDimensions(), dimensions);
 
     ASSERT_NE(exponential->getId(), clone->getId());
     ASSERT_GT(exponential->getId(), 1u);
@@ -76,27 +77,28 @@ TEST(Activations, ExponentialSerializeDeserialize) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    Exponential::Builder exponentialBuilder = Exponential::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    Exponential::Builder exponentialBuilder =
+        Exponential::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<Exponential> exponential = dynamic_pointer_cast<Exponential>(exponentialBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(exponential->getFeatureOutput())
+                                      .inputTensor(exponential->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 
     ASSERT_TRUE(exponential->isInitialized());
 
-    Tensor featureInput = exponential->getFeatureInput();
-    Tensor featureOutput = exponential->getFeatureOutput();
+    Tensor featureInput = exponential->getFeatureInput().value();
+    Tensor featureOutput = exponential->getFeatureOutput().value();
     assert(featureInput == networkInput.getFeatureOutput());
 
-    ASSERT_TRUE(exponential->getFeatureOutput().isPresent());
-    ASSERT_EQ(exponential->getFeatureOutput().get(), featureOutput);
+    ASSERT_TRUE(exponential->getFeatureOutput().has_value());
+    ASSERT_EQ(exponential->getFeatureOutput().value(), featureOutput);
 
-    ASSERT_TRUE(exponential->getFeatureInput().isPresent());
-    assert(exponential->getFeatureInput().get() == featureInput);
+    ASSERT_TRUE(exponential->getFeatureInput().has_value());
+    assert(exponential->getFeatureInput().value() == featureInput);
 
     ASSERT_EQ(featureInput.getDataType(), dataType);
     ASSERT_EQ(featureInput.getDimensions(), inputDimensions);
@@ -194,11 +196,11 @@ TEST(Activations, ExponentialSerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
 
-    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedExponential->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
-    ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedExponential->getFeatureInput().get());
-    ASSERT_EQ(stampedExponential->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedExponential->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().has_value());
+    ASSERT_EQ(stampedInput->getFeatureOutput().value(), stampedExponential->getFeatureInput().value());
+    ASSERT_EQ(stampedExponential->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
     filesystem::remove("/tmp/testModel.thor.tar");
 }
@@ -216,13 +218,14 @@ TEST(Activations, ExponentialRegistered) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    Exponential::Builder exponentialBuilder = Exponential::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    Exponential::Builder exponentialBuilder =
+        Exponential::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<Exponential> exponential = dynamic_pointer_cast<Exponential>(exponentialBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(exponential->getFeatureOutput())
+                                      .inputTensor(exponential->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 

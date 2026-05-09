@@ -2,7 +2,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Tensor/Tensor.h"
-#include "Utilities/Common/Optional.h"
+#include <optional>
 #include "Utilities/TarFile/TarReader.h"
 #include "Utilities/TarFile/TarWriter.h"
 
@@ -34,14 +34,14 @@ class Layer {
     uint64_t getId() const { return id; }
     virtual std::string getLayerVersion() const { return "1.0.0"; }
 
-    virtual Optional<Tensor> getFeatureOutput() const { return featureOutput; }
-    virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
+    virtual std::optional<Tensor> getFeatureOutput() const { return featureOutput; }
+    virtual std::optional<Tensor> getFeatureInput() const { return featureInput; }
 
     virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
-        THOR_THROW_IF_FALSE(getFeatureInput().isPresent());
-        THOR_THROW_IF_FALSE(getFeatureOutput().isPresent());
-        THOR_THROW_IF_FALSE(inputTensor == getFeatureInput().get());
-        return {getFeatureOutput().get()};
+        THOR_THROW_IF_FALSE(getFeatureInput().has_value());
+        THOR_THROW_IF_FALSE(getFeatureOutput().has_value());
+        THOR_THROW_IF_FALSE(inputTensor == getFeatureInput().value());
+        return {getFeatureOutput().value()};
     }
 
     virtual bool mustConnectAllInputsToDriveOutput() { return false; }
@@ -52,9 +52,9 @@ class Layer {
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {}
 
     [[nodiscard]] virtual uint64_t getOutputTensorBytes(uint32_t batchSize) const {
-        if (featureOutput.isEmpty())
+        if (!featureOutput.has_value())
             return 0UL;
-        return featureOutput.get().getTotalSizeInBytes() * batchSize;
+        return featureOutput.value().getTotalSizeInBytes() * batchSize;
     }
     [[nodiscard]] virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
                                                                          ThorImplementation::TensorPlacement tensorPlacement) const {
@@ -72,11 +72,11 @@ class Layer {
     bool operator>(const Layer &other) const { return id > other.id; }
 
     virtual int getConnectionType(Tensor connectingTensor) const {
-        THOR_THROW_IF_FALSE(connectingTensor == getFeatureInput() || connectingTensor == getFeatureOutput());
+        THOR_THROW_IF_FALSE(connectingTensor == getFeatureInput().value() || connectingTensor == getFeatureOutput().value());
         return 0;
     }
 
-    virtual std::vector<Tensor> getAllOutputTensors() const { return {getFeatureOutput().get()}; }
+    virtual std::vector<Tensor> getAllOutputTensors() const { return {getFeatureOutput().value()}; }
 
     virtual std::shared_ptr<Layer> clone() const = 0;
 
@@ -123,8 +123,8 @@ class Layer {
     };
 
    protected:
-    Optional<Tensor> featureInput;
-    Optional<Tensor> featureOutput;
+    std::optional<Tensor> featureInput;
+    std::optional<Tensor> featureOutput;
 
     // stamp (constructor) -> connect (by Network) -> compile (allocate) -> initialize (set state async)
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,

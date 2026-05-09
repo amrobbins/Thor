@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Api/Layers/Activations/Selu.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
@@ -33,15 +34,15 @@ TEST(Activations, SeluBuilds) {
 
     ASSERT_TRUE(selu->isInitialized());
 
-    Optional<Tensor> actualInput = selu->getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualInput = selu->getFeatureInput();
+    ASSERT_TRUE(actualInput.has_value());
+    ASSERT_EQ(actualInput.value().getDataType(), dataType);
+    ASSERT_EQ(actualInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> actualOutput = selu->getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> actualOutput = selu->getFeatureOutput();
+    ASSERT_TRUE(actualOutput.has_value());
+    ASSERT_EQ(actualOutput.value().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.value().getDimensions(), dimensions);
 
     shared_ptr<Layer> cloneLayer = selu->clone();
     Selu *clone = dynamic_cast<Selu *>(cloneLayer.get());
@@ -49,15 +50,15 @@ TEST(Activations, SeluBuilds) {
 
     ASSERT_TRUE(clone->isInitialized());
 
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.has_value());
+    ASSERT_EQ(cloneInput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.value().getDimensions(), dimensions);
 
-    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
-    ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+    std::optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.has_value());
+    ASSERT_EQ(cloneOutput.value().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.value().getDimensions(), dimensions);
 
     ASSERT_NE(selu->getId(), clone->getId());
     ASSERT_GT(selu->getId(), 1u);
@@ -76,27 +77,27 @@ TEST(Activations, SeluSerializeDeserialize) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    Selu::Builder seluBuilder = Selu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    Selu::Builder seluBuilder = Selu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<Selu> selu = dynamic_pointer_cast<Selu>(seluBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(selu->getFeatureOutput())
+                                      .inputTensor(selu->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 
     ASSERT_TRUE(selu->isInitialized());
 
-    Tensor featureInput = selu->getFeatureInput();
-    Tensor featureOutput = selu->getFeatureOutput();
+    Tensor featureInput = selu->getFeatureInput().value();
+    Tensor featureOutput = selu->getFeatureOutput().value();
     assert(featureInput == networkInput.getFeatureOutput());
 
-    ASSERT_TRUE(selu->getFeatureOutput().isPresent());
-    ASSERT_EQ(selu->getFeatureOutput().get(), featureOutput);
+    ASSERT_TRUE(selu->getFeatureOutput().has_value());
+    ASSERT_EQ(selu->getFeatureOutput().value(), featureOutput);
 
-    ASSERT_TRUE(selu->getFeatureInput().isPresent());
-    assert(selu->getFeatureInput().get() == featureInput);
+    ASSERT_TRUE(selu->getFeatureInput().has_value());
+    assert(selu->getFeatureInput().value() == featureInput);
 
     ASSERT_EQ(featureInput.getDataType(), dataType);
     ASSERT_EQ(featureInput.getDimensions(), inputDimensions);
@@ -194,11 +195,11 @@ TEST(Activations, SeluSerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
 
-    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedSelu->getFeatureOutput().isPresent());
-    ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
-    ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSelu->getFeatureInput().get());
-    ASSERT_EQ(stampedSelu->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedSelu->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().has_value());
+    ASSERT_EQ(stampedInput->getFeatureOutput().value(), stampedSelu->getFeatureInput().value());
+    ASSERT_EQ(stampedSelu->getFeatureOutput().value(), stampedOutput->getFeatureInput().value());
 
     filesystem::remove("/tmp/testModel.thor.tar");
 }
@@ -216,13 +217,13 @@ TEST(Activations, SeluRegistered) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    Selu::Builder seluBuilder = Selu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    Selu::Builder seluBuilder = Selu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput().value());
     shared_ptr<Selu> selu = dynamic_pointer_cast<Selu>(seluBuilder.build());
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(selu->getFeatureOutput())
+                                      .inputTensor(selu->getFeatureOutput().value())
                                       .dataType(dataType)
                                       .build();
 

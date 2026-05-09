@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 
@@ -22,7 +23,7 @@ class Convolution3d : public CustomLayer {
                   uint32_t frontAndBackPadDepth,
                   uint32_t numOutputChannels,
                   bool hasBias,
-                  Optional<TensorDescriptor::DataType> weightsDataType,
+                  std::optional<TensorDescriptor::DataType> weightsDataType,
                   const TensorPlacement& placement,
                   bool inferenceOnly,
                   int64_t stampedId = -1);
@@ -30,10 +31,10 @@ class Convolution3d : public CustomLayer {
     std::string getLayerType() override { return "Convolution3d"; }
 
     Tensor getWeights() { return getParameterStorage("weights"); }
-    Optional<Tensor> getBiases() {
+    std::optional<Tensor> getBiases() {
         const auto params = getParameters();
         if (!params.contains("biases")) {
-            return Optional<Tensor>::empty();
+            return std::nullopt;
         }
         return params.at("biases")->getStorage();
     }
@@ -43,7 +44,7 @@ class Convolution3d : public CustomLayer {
                                                                              uint32_t filterWidth,
                                                                              uint32_t filterHeight,
                                                                              uint32_t filterDepth,
-                                                                             Optional<TensorDescriptor::DataType> weightsDataType);
+                                                                             std::optional<TensorDescriptor::DataType> weightsDataType);
 
    private:
     static DynamicExpression buildExpression(bool hasBias,

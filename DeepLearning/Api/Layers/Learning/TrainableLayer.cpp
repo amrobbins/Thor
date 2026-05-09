@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <iterator>
 #include <stdexcept>
+#include <optional>
 
 using namespace Thor;
 using namespace std;
@@ -103,7 +104,7 @@ void TrainableLayer::compile(std::shared_ptr<ThorImplementation::Layer> physical
 std::vector<Event> TrainableLayer::initialize(std::shared_ptr<ThorImplementation::TrainableLayer> layer,
                                               bool isFirstStamp,
                                               std::shared_ptr<ThorImplementation::TrainableLayer> sisterLayer,
-                                              Optional<Event> sisterLayerLoadedEvent) {
+                                              std::optional<Event> sisterLayerLoadedEvent) {
     THOR_THROW_IF_FALSE(layer != nullptr);
 
     std::vector<Event> initDoneEvents = MultiConnectionLayer::initialize(layer);
@@ -114,10 +115,10 @@ std::vector<Event> TrainableLayer::initialize(std::shared_ptr<ThorImplementation
             continue;
         }
 
-        Optional<ThorImplementation::Tensor> storage = parameter->getStorage();
-        THOR_THROW_IF_FALSE(storage.isPresent());
+        std::optional<ThorImplementation::Tensor> storage = parameter->getStorage();
+        THOR_THROW_IF_FALSE(storage.has_value());
 
-        const ThorImplementation::TensorPlacement placement = storage.get().getPlacement();
+        const ThorImplementation::TensorPlacement placement = storage.value().getPlacement();
         const int gpuNum = placement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU ? placement.getDeviceNum() : 0;
         Stream initStream = Stream::getNextUploadStream(gpuNum);
         parameter->initialize(initStream);

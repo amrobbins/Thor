@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -37,11 +38,11 @@ class Pooling : public Layer {
         Layer::compileImpl();
         cudnnStatus_t cudnnStatus;
 
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
-        THOR_THROW_IF_FALSE(featureOutput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
 
         // Dimensions are NCHW
-        std::vector<unsigned long> inputDimensions = featureInput.get().getDescriptor().getDimensions();
+        std::vector<unsigned long> inputDimensions = featureInput.value().getDescriptor().getDimensions();
         THOR_THROW_IF_FALSE(inputDimensions.size() == 4);
         batchSize = inputDimensions[0];
         numFeatures = inputDimensions[1];
@@ -61,20 +62,20 @@ class Pooling : public Layer {
         // Ensure that cudnnHandle is preallocated
         stream.getCudnnHandle();
 
-        std::vector<unsigned long> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
+        std::vector<unsigned long> outputDimensions = featureOutput.value().getDescriptor().getDimensions();
         THOR_THROW_IF_FALSE(outputDimensions.size() == 4);
         THOR_THROW_IF_FALSE(outputDimensions[0] == (uint32_t)batchSize);
         THOR_THROW_IF_FALSE(outputDimensions[1] == (uint32_t)numFeatures);
         THOR_THROW_IF_FALSE(outputDimensions[2] == (uint32_t)outputHeight);
         THOR_THROW_IF_FALSE(outputDimensions[3] == (uint32_t)outputWidth);
 
-        ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
+        ScopedGpu scopedGpu(featureInput.value().getPlacement().getDeviceNum());
 
         poolingDescriptor = cudnnPoolingDescriptor_t();
-        cudnnStatus = cudnnCreatePoolingDescriptor(&poolingDescriptor.get());
+        cudnnStatus = cudnnCreatePoolingDescriptor(&poolingDescriptor.value());
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus =
-            cudnnSetPooling2dDescriptor(poolingDescriptor,
+            cudnnSetPooling2dDescriptor(poolingDescriptor.value(),
                                         poolingType == Type::MAX ? CUDNN_POOLING_MAX : CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING,
                                         CUDNN_NOT_PROPAGATE_NAN,
                                         windowHeight,
@@ -86,24 +87,24 @@ class Pooling : public Layer {
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         featureInputDescriptor = cudnnTensorDescriptor_t();
-        cudnnStatus = cudnnCreateTensorDescriptor(&featureInputDescriptor.get());
+        cudnnStatus = cudnnCreateTensorDescriptor(&featureInputDescriptor.value());
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus = cudnnSetTensor4dDescriptor(
-            featureInputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numFeatures, inputHeight, inputWidth);
+            featureInputDescriptor.value(), CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numFeatures, inputHeight, inputWidth);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         featureOutputDescriptor = cudnnTensorDescriptor_t();
-        cudnnStatus = cudnnCreateTensorDescriptor(&featureOutputDescriptor.get());
+        cudnnStatus = cudnnCreateTensorDescriptor(&featureOutputDescriptor.value());
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus = cudnnSetTensor4dDescriptor(
-            featureOutputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numFeatures, outputHeight, outputWidth);
+            featureOutputDescriptor.value(), CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numFeatures, outputHeight, outputWidth);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
-    Optional<Tensor> createFeatureOutputTensor() override {
-        THOR_THROW_IF_FALSE(featureInput.isPresent());
+    std::optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.has_value());
 
-        std::vector<unsigned long> inputDimensions = featureInput.get().getDescriptor().getDimensions();
+        std::vector<unsigned long> inputDimensions = featureInput.value().getDescriptor().getDimensions();
         THOR_THROW_IF_FALSE(inputDimensions.size() == 4);
         batchSize = inputDimensions[0];
         numFeatures = inputDimensions[1];
@@ -123,66 +124,66 @@ class Pooling : public Layer {
         featureOutputDimensions.push_back(numFeatures);
         featureOutputDimensions.push_back(outputHeight);
         featureOutputDimensions.push_back(outputWidth);
-        TensorDescriptor featureOutputDescriptor(featureInput.get().getDescriptor().getDataType(), featureOutputDimensions);
-        return Tensor(featureInput.get().getPlacement(), featureOutputDescriptor);
+        TensorDescriptor featureOutputDescriptor(featureInput.value().getDescriptor().getDataType(), featureOutputDimensions);
+        return Tensor(featureInput.value().getPlacement(), featureOutputDescriptor);
     }
 
     void cleanup() {
         cudnnStatus_t cudnnStatus;
 
-        if (poolingDescriptor.isPresent()) {
-            cudnnStatus = cudnnDestroyPoolingDescriptor(poolingDescriptor.get());
+        if (poolingDescriptor.has_value()) {
+            cudnnStatus = cudnnDestroyPoolingDescriptor(poolingDescriptor.value());
             THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            poolingDescriptor.clear();
+            poolingDescriptor.reset();
         }
 
-        if (featureInputDescriptor.isPresent()) {
-            cudnnStatus = cudnnDestroyTensorDescriptor(featureInputDescriptor.get());
+        if (featureInputDescriptor.has_value()) {
+            cudnnStatus = cudnnDestroyTensorDescriptor(featureInputDescriptor.value());
             THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            featureInputDescriptor.clear();
+            featureInputDescriptor.reset();
         }
 
-        if (featureOutputDescriptor.isPresent()) {
-            cudnnStatus = cudnnDestroyTensorDescriptor(featureOutputDescriptor.get());
+        if (featureOutputDescriptor.has_value()) {
+            cudnnStatus = cudnnDestroyTensorDescriptor(featureOutputDescriptor.value());
             THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            featureOutputDescriptor.clear();
+            featureOutputDescriptor.reset();
         }
     }
 
-    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
-        THOR_THROW_IF_FALSE(inputTensor.isPresent());
-        THOR_THROW_IF_FALSE(outputTensor.isPresent());
+    void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(inputTensor.has_value());
+        THOR_THROW_IF_FALSE(outputTensor.has_value());
 
         cudnnStatus_t cudnnStatus;
         cudnnStatus = cudnnPoolingForward(stream.getCudnnHandle(),
-                                          poolingDescriptor,
+                                          poolingDescriptor.value(),
                                           &ALPHA_NO_SCALE,
-                                          featureInputDescriptor,
-                                          inputTensor.get().getMemPtr(),
+                                          featureInputDescriptor.value(),
+                                          inputTensor.value().getMemPtr(),
                                           &BETA_CLEAR,
-                                          featureOutputDescriptor,
-                                          outputTensor.get().getMemPtr());
+                                          featureOutputDescriptor.value(),
+                                          outputTensor.value().getMemPtr());
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
-    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
-        if (errorOut.isEmpty())
+    void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override {
+        if (!errorOut.has_value())
             return;
-        THOR_THROW_IF_FALSE(errorIn.isPresent());
+        THOR_THROW_IF_FALSE(errorIn.has_value());
 
         cudnnStatus_t cudnnStatus;
         cudnnStatus = cudnnPoolingBackward(stream.getCudnnHandle(),
-                                           poolingDescriptor,
+                                           poolingDescriptor.value(),
                                            &ALPHA_NO_SCALE,
-                                           featureOutputDescriptor,
-                                           featureOutput.get().getMemPtr(),
-                                           featureOutputDescriptor,
-                                           errorIn.get().getMemPtr(),
-                                           featureInputDescriptor,
-                                           dataIn.get().getMemPtr(),
+                                           featureOutputDescriptor.value(),
+                                           featureOutput.value().getMemPtr(),
+                                           featureOutputDescriptor.value(),
+                                           errorIn.value().getMemPtr(),
+                                           featureInputDescriptor.value(),
+                                           dataIn.value().getMemPtr(),
                                            &BETA_CLEAR,
-                                           featureInputDescriptor,
-                                           errorOut.get().getMemPtr());
+                                           featureInputDescriptor.value(),
+                                           errorOut.value().getMemPtr());
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
@@ -226,9 +227,9 @@ class Pooling : public Layer {
     uint32_t outputHeight;
     uint32_t outputWidth;
 
-    Optional<cudnnPoolingDescriptor_t> poolingDescriptor;
-    Optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
-    Optional<cudnnTensorDescriptor_t> featureInputDescriptor;
+    std::optional<cudnnPoolingDescriptor_t> poolingDescriptor;
+    std::optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
+    std::optional<cudnnTensorDescriptor_t> featureInputDescriptor;
 };
 
 }  // namespace ThorImplementation

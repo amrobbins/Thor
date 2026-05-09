@@ -1,3 +1,4 @@
+#include <optional>
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 
@@ -102,18 +103,18 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
         LayerTestHelper::initializeNetwork(layers);
 
         if (inferenceOnly) {
-            ASSERT_TRUE(crossEntropy->getErrorOutput().isEmpty());
+            ASSERT_TRUE(!crossEntropy->getErrorOutput().has_value());
         }
-        ASSERT_TRUE(crossEntropy->getErrorInput().isEmpty());
+        ASSERT_TRUE(!crossEntropy->getErrorInput().has_value());
 
-        assert(lossOutput->getFeatureInput().isPresent());
-        assert(lossOutput->getFeatureOutput().isPresent());
-        Optional<Tensor> maybeFO = lossOutput->getFeatureOutput();
-        assert(maybeFO.isPresent());
-        assert(!maybeFO.isEmpty());
-        maybeFO.get();
+        assert(lossOutput->getFeatureInput().has_value());
+        assert(lossOutput->getFeatureOutput().has_value());
+        std::optional<Tensor> maybeFO = lossOutput->getFeatureOutput();
+        assert(maybeFO.has_value());
+        assert(maybeFO.has_value());
+        maybeFO.value();
 
-        Tensor outputGpu = lossOutput->getFeatureOutput();
+        Tensor outputGpu = lossOutput->getFeatureOutput().value();
 
         // Network is runnable here
         activationsInput->forward(activationsCpu, false);
@@ -126,7 +127,7 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
         Tensor errorOutputCpu;
         Tensor errorOutputGpu_h;
         if (!inferenceOnly) {
-            errorOutputGpu = crossEntropy->getErrorOutput();
+            errorOutputGpu = crossEntropy->getErrorOutput().value();
             errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
             errorOutputGpu_h = errorOutputCpu.clone();
             errorOutputGpu_h.copyFromAsync(errorOutputGpu, labelsStream);
@@ -208,8 +209,8 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
         }
 
         // Verify the loss gradient passes through the softmax layer unchanged
-        Tensor softmaxErrorOutputFromGpu_h = softmax->getErrorOutput().get().clone(cpuPlacement);
-        softmaxErrorOutputFromGpu_h.copyFromAsync(softmax->getErrorOutput().get(), stream);
+        Tensor softmaxErrorOutputFromGpu_h = softmax->getErrorOutput().value().clone(cpuPlacement);
+        softmaxErrorOutputFromGpu_h.copyFromAsync(softmax->getErrorOutput().value(), stream);
         stream.synchronize();
         half *softmaxErrorOutputFromGpu = (half *)softmaxErrorOutputFromGpu_h.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -284,11 +285,11 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
         LayerTestHelper::initializeNetwork(layers);
 
         if (inferenceOnly) {
-            ASSERT_TRUE(crossEntropy->getErrorOutput().isEmpty());
+            ASSERT_TRUE(!crossEntropy->getErrorOutput().has_value());
         }
-        ASSERT_TRUE(crossEntropy->getErrorInput().isEmpty());
+        ASSERT_TRUE(!crossEntropy->getErrorInput().has_value());
 
-        Tensor outputGpu = lossOutput->getFeatureOutput();
+        Tensor outputGpu = lossOutput->getFeatureOutput().value();
 
         // Network is runnable here
         activationsInput->forward(activationsCpu, false);
@@ -301,7 +302,7 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
         Tensor errorOutputCpu;
         Tensor errorOutputGpu_h;
         if (!inferenceOnly) {
-            errorOutputGpu = crossEntropy->getErrorOutput();
+            errorOutputGpu = crossEntropy->getErrorOutput().value();
             errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
             errorOutputGpu_h = errorOutputCpu.clone();
             errorOutputGpu_h.copyFromAsync(errorOutputGpu, labelsStream);
@@ -391,8 +392,8 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
         }
 
         // Verify the loss gradient passes through the softmax layer unchanged
-        Tensor softmaxErrorOutputFromGpu_h = softmax->getErrorOutput().get().clone(cpuPlacement);
-        softmaxErrorOutputFromGpu_h.copyFromAsync(softmax->getErrorOutput().get(), stream);
+        Tensor softmaxErrorOutputFromGpu_h = softmax->getErrorOutput().value().clone(cpuPlacement);
+        softmaxErrorOutputFromGpu_h.copyFromAsync(softmax->getErrorOutput().value(), stream);
         stream.synchronize();
         half *softmaxErrorOutputFromGpu = (half *)softmaxErrorOutputFromGpu_h.getMemPtr();
         for (uint32_t b = 0; b < batchSize; ++b) {

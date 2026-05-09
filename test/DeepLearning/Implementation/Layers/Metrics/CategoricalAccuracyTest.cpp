@@ -93,11 +93,11 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_indicatorPerClassLabe
         }
         LayerTestHelper::initializeNetwork(layers);
 
-        ASSERT_TRUE(categoricalAccuracy->getErrorOutput().isEmpty());
-        ASSERT_TRUE(categoricalAccuracy->getErrorInput().isEmpty());
+        ASSERT_TRUE(!categoricalAccuracy->getErrorOutput().has_value());
+        ASSERT_TRUE(!categoricalAccuracy->getErrorInput().has_value());
 
         if (inferenceOnly) {
-            assert(categoricalAccuracy->getFeatureOutput().isEmpty());
+            assert(!categoricalAccuracy->getFeatureOutput().has_value());
             continue;
         }
 
@@ -105,8 +105,8 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_indicatorPerClassLabe
         predictionsInput->forward(predictionsCpu, false);
         labelsInput->forward(labelsCpu, false);
 
-        Tensor accuracyGpu_h = accuracyOutput->getFeatureOutput().get().clone(cpuPlacement);
-        accuracyGpu_h.copyFromAsync(accuracyOutput->getFeatureOutput(), stream);
+        Tensor accuracyGpu_h = accuracyOutput->getFeatureOutput().value().clone(cpuPlacement);
+        accuracyGpu_h.copyFromAsync(accuracyOutput->getFeatureOutput().value(), stream);
 
         stream.synchronize();
 
@@ -205,11 +205,11 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_classIndexLabels) {
         }
         LayerTestHelper::initializeNetwork(layers);
 
-        ASSERT_TRUE(categoricalAccuracy->getErrorOutput().isEmpty());
-        ASSERT_TRUE(categoricalAccuracy->getErrorInput().isEmpty());
+        ASSERT_TRUE(!categoricalAccuracy->getErrorOutput().has_value());
+        ASSERT_TRUE(!categoricalAccuracy->getErrorInput().has_value());
 
         if (inferenceOnly) {
-            assert(categoricalAccuracy->getFeatureOutput().isEmpty());
+            assert(!categoricalAccuracy->getFeatureOutput().has_value());
             continue;
         }
 
@@ -217,8 +217,8 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_classIndexLabels) {
         predictionsInput->forward(predictionsCpu, false);
         labelsInput->forward(labelsCpu, false);
 
-        Tensor accuracyGpu_h = accuracyOutput->getFeatureOutput().get().clone(cpuPlacement);
-        accuracyGpu_h.copyFromAsync(accuracyOutput->getFeatureOutput(), stream);
+        Tensor accuracyGpu_h = accuracyOutput->getFeatureOutput().value().clone(cpuPlacement);
+        accuracyGpu_h.copyFromAsync(accuracyOutput->getFeatureOutput().value(), stream);
 
         stream.synchronize();
 

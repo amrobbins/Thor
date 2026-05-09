@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/Activation/Elu.h"
+#include <optional>
 
 namespace Thor {
 
@@ -59,7 +60,7 @@ class Elu : public Activation {
                                                      const bool inferenceOnly) const override {
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.get());
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
         std::shared_ptr<ThorImplementation::Elu> elu = std::make_shared<ThorImplementation::Elu>(alpha);
         return elu;
@@ -67,7 +68,7 @@ class Elu : public Activation {
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         // feature out and error out
-        return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
+        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
     }
 
     const float alpha;
@@ -77,17 +78,17 @@ class Elu::Builder : public Activation::Builder {
    public:
     std::shared_ptr<Activation> build() override {
         float alpha = 1.0f;
-        if (_alpha.isPresent())
-            alpha = _alpha;
+        if (_alpha.has_value())
+            alpha = _alpha.value();
 
         std::shared_ptr<Elu> elu = std::make_shared<Elu>(alpha);
-        if (_featureInput.isPresent()) {
+        if (_featureInput.has_value()) {
             // Standalone layer support.
-            THOR_THROW_IF_FALSE(_network.isPresent());
+            THOR_THROW_IF_FALSE(_network.has_value());
             elu->featureInput = _featureInput;
-            elu->featureOutput = _featureInput.get().clone();
+            elu->featureOutput = _featureInput.value().clone();
             elu->initialized = true;
-            elu->addToNetwork(_network.get());
+            elu->addToNetwork(_network.value());
         } else {
             // Template activation support
             elu->initialized = true;
@@ -97,7 +98,7 @@ class Elu::Builder : public Activation::Builder {
     }
 
     virtual Elu::Builder &alpha(float _alpha) {
-        THOR_THROW_IF_FALSE(!this->_alpha.isPresent());
+        THOR_THROW_IF_FALSE(!this->_alpha.has_value());
         THOR_THROW_IF_FALSE(_alpha >= 0);
         this->_alpha = _alpha;
         return *this;
@@ -114,7 +115,7 @@ class Elu::Builder : public Activation::Builder {
     }
 
    private:
-    Optional<float> _alpha;
+    std::optional<float> _alpha;
 };
 
 }  // namespace Thor

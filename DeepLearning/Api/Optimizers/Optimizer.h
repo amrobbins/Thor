@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <optional>
 
 // Note: The interface here is what the end user can use, and should include only all of the functionality that the user may want,
 //       that is common to all (or the vast majority) of optimizers.
@@ -35,7 +36,7 @@ class Optimizer {
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
-                                          Optional<Event> sisterOptimizerLoadedEvent) {
+                                          std::optional<Event> sisterOptimizerLoadedEvent) {
         return {};
     };
 

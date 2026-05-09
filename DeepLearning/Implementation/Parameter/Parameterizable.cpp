@@ -47,7 +47,7 @@ Tensor Parameterizable::getParameterStorage(const string &name) {
     auto it = parameterIndexByName.find(name);
     if (it == parameterIndexByName.end())
         throw runtime_error("Parameter " + name + " is not a parameter of the parameterizable layer.");
-    return parameters[it->second]->getStorage();
+    return parameters[it->second]->getStorage().value();
 }
 
 unordered_map<string, shared_ptr<PhysicalParameter>> Parameterizable::getParameters() {

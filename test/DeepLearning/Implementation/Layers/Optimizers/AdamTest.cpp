@@ -1,3 +1,4 @@
+#include <optional>
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -117,10 +118,10 @@ void applyAdamReferenceStep(AdamReferenceState& state,
 }
 
 void runAdamStep(Adam& adam, const std::vector<float>& rawGradient, uint32_t batchSize, Stream& stream) {
-    Optional<Tensor> gradientOpt = adam.getWeightsGradient();
-    ASSERT_TRUE(gradientOpt.isPresent());
+    std::optional<Tensor> gradientOpt = adam.getWeightsGradient();
+    ASSERT_TRUE(gradientOpt.has_value());
 
-    Tensor gradient = gradientOpt.get();
+    Tensor gradient = gradientOpt.value();
     copyValuesToGpuFp32Tensor(gradient, rawGradient, stream);
 
     adam.updateWeights(batchSize);
@@ -216,10 +217,10 @@ void applyAdamReferenceStepE5M2Weights(AdamReferenceState& state,
 }
 
 void runAdamStepFp8E5M2Gradient(Adam& adam, const std::vector<float>& rawGradient, uint32_t batchSize, Stream& stream) {
-    Optional<Tensor> gradientOpt = adam.getWeightsGradient();
-    ASSERT_TRUE(gradientOpt.isPresent());
+    std::optional<Tensor> gradientOpt = adam.getWeightsGradient();
+    ASSERT_TRUE(gradientOpt.has_value());
 
-    Tensor gradient = gradientOpt.get();
+    Tensor gradient = gradientOpt.value();
     ASSERT_EQ(gradient.getDataType(), DataType::FP8_E5M2);
 
     copyValuesToGpuFp8E5M2Tensor(gradient, rawGradient, stream);
@@ -279,10 +280,10 @@ TEST(AdamTest, CompileCreatesGradientMomentsAndNamedOutputs) {
 
     EXPECT_TRUE(adam.isCompiled());
 
-    Optional<Tensor> gradientOpt = adam.getWeightsGradient();
-    ASSERT_TRUE(gradientOpt.isPresent());
+    std::optional<Tensor> gradientOpt = adam.getWeightsGradient();
+    ASSERT_TRUE(gradientOpt.has_value());
 
-    Tensor gradient = gradientOpt.get();
+    Tensor gradient = gradientOpt.value();
     EXPECT_EQ(gradient.getPlacement(), gpuPlacement);
     EXPECT_EQ(gradient.getDataType(), DataType::FP16);
     EXPECT_EQ(gradient.getDimensions(), weights.getDimensions());
@@ -459,9 +460,9 @@ TEST(AdamTest, ThreeStepsWithFp8E5M2WeightsCarryMomentsAndQuantizeWeights) {
     adam.compile(weights, stream);
     stream.synchronize();
 
-    Optional<Tensor> gradientOpt = adam.getWeightsGradient();
-    ASSERT_TRUE(gradientOpt.isPresent());
-    EXPECT_EQ(gradientOpt.get().getDataType(), DataType::FP8_E5M2);
+    std::optional<Tensor> gradientOpt = adam.getWeightsGradient();
+    ASSERT_TRUE(gradientOpt.has_value());
+    EXPECT_EQ(gradientOpt.value().getDataType(), DataType::FP8_E5M2);
 
     Tensor m = adam.getOptimizerParameterTensor("m");
     Tensor v = adam.getOptimizerParameterTensor("v");

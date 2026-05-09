@@ -48,19 +48,19 @@
 // void expectSingleInputOutput(const Api::Convolution2d& convolution,
 //                              const Api::Tensor& featureInput,
 //                              const std::vector<uint64_t>& expectedOutputDims) {
-//     Optional<Api::Tensor> actualInput = convolution.getFeatureInput();
-//     ASSERT_TRUE(actualInput.isPresent());
-//     EXPECT_EQ(actualInput.get(), featureInput);
-//     EXPECT_EQ(actualInput.get().getDataType(), featureInput.getDataType());
-//     EXPECT_EQ(actualInput.get().getDimensions(), featureInput.getDimensions());
+//     std::optional<Api::Tensor> actualInput = convolution.getFeatureInput();
+//     ASSERT_TRUE(actualInput.has_value());
+//     EXPECT_EQ(actualInput.value(), featureInput);
+//     EXPECT_EQ(actualInput.value().getDataType(), featureInput.getDataType());
+//     EXPECT_EQ(actualInput.value().getDimensions(), featureInput.getDimensions());
 //
-//     Optional<Api::Tensor> actualOutput = convolution.getFeatureOutput();
-//     ASSERT_TRUE(actualOutput.isPresent());
-//     EXPECT_EQ(actualOutput.get().getDataType(), ApiDataType::FP16);
-//     EXPECT_EQ(actualOutput.get().getDimensions(), expectedOutputDims);
+//     std::optional<Api::Tensor> actualOutput = convolution.getFeatureOutput();
+//     ASSERT_TRUE(actualOutput.has_value());
+//     EXPECT_EQ(actualOutput.value().getDataType(), ApiDataType::FP16);
+//     EXPECT_EQ(actualOutput.value().getDimensions(), expectedOutputDims);
 //
-//     EXPECT_EQ(convolution.getFeatureOutput(featureInput), actualOutput.get());
-//     EXPECT_EQ(convolution.getFeatureInput(actualOutput.get()), featureInput);
+//     EXPECT_EQ(convolution.getFeatureOutput(featureInput), actualOutput.value());
+//     EXPECT_EQ(convolution.getFeatureInput(actualOutput.value()), featureInput);
 // }
 //
 // std::shared_ptr<Api::Convolution2d> findOnlyApiConvolution(Api::Network& network) {
@@ -340,19 +340,19 @@
 //
 //     ASSERT_TRUE(convolution.isInitialized());
 //
-//     Optional<Api::Tensor> publicInput = convolution.getFeatureInput();
-//     ASSERT_TRUE(publicInput.isPresent());
-//     EXPECT_EQ(publicInput.get(), fp32FeatureInput);
-//     EXPECT_EQ(publicInput.get().getDataType(), ApiDataType::FP32);
-//     EXPECT_EQ(publicInput.get().getDimensions(), inputDims);
+//     std::optional<Api::Tensor> publicInput = convolution.getFeatureInput();
+//     ASSERT_TRUE(publicInput.has_value());
+//     EXPECT_EQ(publicInput.value(), fp32FeatureInput);
+//     EXPECT_EQ(publicInput.value().getDataType(), ApiDataType::FP32);
+//     EXPECT_EQ(publicInput.value().getDimensions(), inputDims);
 //
-//     Optional<Api::Tensor> publicOutput = convolution.getFeatureOutput();
-//     ASSERT_TRUE(publicOutput.isPresent());
-//     EXPECT_EQ(publicOutput.get().getDataType(), ApiDataType::FP16);
-//     EXPECT_EQ(publicOutput.get().getDimensions(), (std::vector<uint64_t>{numOutputChannels, inputDims[1], inputDims[2]}));
+//     std::optional<Api::Tensor> publicOutput = convolution.getFeatureOutput();
+//     ASSERT_TRUE(publicOutput.has_value());
+//     EXPECT_EQ(publicOutput.value().getDataType(), ApiDataType::FP16);
+//     EXPECT_EQ(publicOutput.value().getDimensions(), (std::vector<uint64_t>{numOutputChannels, inputDims[1], inputDims[2]}));
 //
-//     EXPECT_EQ(convolution.getFeatureOutput(fp32FeatureInput), publicOutput.get());
-//     EXPECT_EQ(convolution.getFeatureInput(publicOutput.get()), fp32FeatureInput);
+//     EXPECT_EQ(convolution.getFeatureOutput(fp32FeatureInput), publicOutput.value());
+//     EXPECT_EQ(convolution.getFeatureInput(publicOutput.value()), fp32FeatureInput);
 //
 //     // The public compound layer should have added support layers plus the standalone convolution.
 //     EXPECT_GT(network.getNumLayers(), 1u);
@@ -470,10 +470,10 @@
 //     EXPECT_EQ(deserialized->getVerticalPadding(), 1u);
 //     EXPECT_EQ(deserialized->getHoriztonalPadding(), 1u);
 //
-//     Optional<Api::Tensor> output = deserialized->getFeatureOutput();
-//     ASSERT_TRUE(output.isPresent());
-//     EXPECT_EQ(output.get().getDataType(), ApiDataType::FP16);
-//     EXPECT_EQ(output.get().getDimensions(), (std::vector<uint64_t>{4, 8, 9}));
+//     std::optional<Api::Tensor> output = deserialized->getFeatureOutput();
+//     ASSERT_TRUE(output.has_value());
+//     EXPECT_EQ(output.value().getDataType(), ApiDataType::FP16);
+//     EXPECT_EQ(output.value().getDimensions(), (std::vector<uint64_t>{4, 8, 9}));
 //
 //     ASSERT_TRUE(deserialized->hasOptimizer());
 //     std::shared_ptr<Api::Sgd> deserializedSgd = std::dynamic_pointer_cast<Api::Sgd>(deserialized->getOptimizer());
@@ -528,16 +528,16 @@
 //     ASSERT_NE(physicalConvolution, nullptr);
 //
 //     Impl::Tensor weights = physicalConvolution->getWeights();
-//     Optional<Impl::Tensor> biases = physicalConvolution->getBiases();
+//     std::optional<Impl::Tensor> biases = physicalConvolution->getBiases();
 //
 //     EXPECT_EQ(weights.getPlacement(), gpuPlacement);
 //     EXPECT_EQ(weights.getDataType(), ImplDataType::FP16);
 //     EXPECT_EQ(weights.getDimensions(), (std::vector<uint64_t>{5, 3, 3, 3}));
 //
-//     ASSERT_TRUE(biases.isPresent());
-//     EXPECT_EQ(biases.get().getPlacement(), gpuPlacement);
-//     EXPECT_EQ(biases.get().getDataType(), ImplDataType::FP16);
-//     EXPECT_EQ(biases.get().getDimensions(), (std::vector<uint64_t>{5}));
+//     ASSERT_TRUE(biases.has_value());
+//     EXPECT_EQ(biases.value().getPlacement(), gpuPlacement);
+//     EXPECT_EQ(biases.value().getDataType(), ImplDataType::FP16);
+//     EXPECT_EQ(biases.value().getDimensions(), (std::vector<uint64_t>{5}));
 //
 //     ASSERT_TRUE(physicalConvolution->getParameter("weights")->hasOptimizer());
 //     ASSERT_TRUE(physicalConvolution->getParameter("biases")->hasOptimizer());
@@ -555,14 +555,14 @@
 //     EXPECT_TRUE(weightsOptimizer->isCompiled());
 //     EXPECT_TRUE(biasesOptimizer->isCompiled());
 //
-//     Optional<Impl::Tensor> weightsGradient = weightsOptimizer->getWeightsGradient();
-//     Optional<Impl::Tensor> biasesGradient = biasesOptimizer->getWeightsGradient();
+//     std::optional<Impl::Tensor> weightsGradient = weightsOptimizer->getWeightsGradient();
+//     std::optional<Impl::Tensor> biasesGradient = biasesOptimizer->getWeightsGradient();
 //
-//     ASSERT_TRUE(weightsGradient.isPresent());
-//     ASSERT_TRUE(biasesGradient.isPresent());
+//     ASSERT_TRUE(weightsGradient.has_value());
+//     ASSERT_TRUE(biasesGradient.has_value());
 //
-//     EXPECT_EQ(weightsGradient.get().getDimensions(), weights.getDimensions());
-//     EXPECT_EQ(biasesGradient.get().getDimensions(), biases.get().getDimensions());
+//     EXPECT_EQ(weightsGradient.value().getDimensions(), weights.getDimensions());
+//     EXPECT_EQ(biasesGradient.value().getDimensions(), biases.value().getDimensions());
 // }
 //
 // TEST(Convolution2dApi, SerializePlacedLayerIncludesStateFilesAndPerParameterOptimizers) {
@@ -636,3 +636,4 @@
 //     EXPECT_FLOAT_EQ(j.at("weights_optimizer").at("initial_learning_rate").get<float>(), 0.2f);
 //     EXPECT_FLOAT_EQ(j.at("biases_optimizer").at("initial_learning_rate").get<float>(), 0.2f);
 // }
+#include <optional>

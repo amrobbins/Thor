@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 
 #include "Utilities/TensorOperations/GpuConvolution/ConvolutionKernelRequirement.h"
 
@@ -33,7 +34,7 @@ class ConvolutionTestHelper {
 
     static void cpuConvolutionForward(Tensor inputFeatures,
                                       Tensor weights,
-                                      Optional<Tensor> bias,
+                                      std::optional<Tensor> bias,
                                       Tensor outputFeatures,
                                       ConvolutionKernelRequirement convolutionKernelRequirement) {
         // Validate input tensor
@@ -114,8 +115,8 @@ class ConvolutionTestHelper {
                             }
                         }
 
-                        if (bias.isPresent())
-                            accum += (float)bias.get().getElement<half>({(uint64_t)outputChannel});
+                        if (bias.has_value())
+                            accum += (float)bias.value().getElement<half>({(uint64_t)outputChannel});
 
                         std::vector<unsigned long> outputImageIndex{(uint64_t)batch,
                                                                     (uint64_t)outputChannel,

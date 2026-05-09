@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <utility>
+#include <optional>
 
 namespace Thor {
 
@@ -32,14 +33,14 @@ class Metric : public Layer {
         THOR_THROW_IF_FALSE(numInputConnectionsMade < 3);
     }
 
-    virtual Tensor getPredictions() const { return getFeatureInput(); }
+    virtual Tensor getPredictions() const { return getFeatureInput().value(); }
     virtual Tensor getLabels() const { return labelsTensor; }
     virtual Tensor getMetric() const { return metricTensor; }
-    Optional<Tensor> getFeatureOutput() const override { return getMetric(); }
-    std::vector<Tensor> getAllOutputTensors() const override { return {getFeatureOutput()}; }
+    std::optional<Tensor> getFeatureOutput() const override { return getMetric(); }
+    std::vector<Tensor> getAllOutputTensors() const override { return {getFeatureOutput().value()}; }
 
     int getConnectionType(Tensor connectingTensor) const override {
-        if (connectingTensor == getFeatureInput())
+        if (connectingTensor == getFeatureInput().value())
             return (int)ThorImplementation::Metric::ConnectionType::FORWARD;
         else if (connectingTensor == getLabels())
             return (int)ThorImplementation::Metric::ConnectionType::LABELS;
@@ -49,7 +50,7 @@ class Metric : public Layer {
     }
 
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override {
-        THOR_THROW_IF_FALSE(inputTensor == getFeatureInput() || inputTensor == getLabels());
+        THOR_THROW_IF_FALSE(inputTensor == getFeatureInput().value() || inputTensor == getLabels());
         if (numInputConnectionsMade == 2)
             return {metricTensor};
         else

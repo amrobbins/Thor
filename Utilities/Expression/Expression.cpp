@@ -1,3 +1,4 @@
+#include <optional>
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
@@ -260,25 +261,25 @@ ExprOp exprOpFromExternalName(const std::string& op) {
     return it->second;
 }
 
-json optionalDTypeJson(const Optional<DataType>& dtype) {
-    if (!dtype.isPresent()) {
+json optionalDTypeJson(const std::optional<DataType>& dtype) {
+    if (!dtype.has_value()) {
         return nullptr;
     }
-    return json(dtype.get());
+    return json(dtype.value());
 }
 
-Optional<DataType> optionalDTypeFromJson(const json& value) {
+std::optional<DataType> optionalDTypeFromJson(const json& value) {
     if (value.is_null()) {
-        return Optional<DataType>::empty();
+        return std::nullopt;
     }
     return value.get<DataType>();
 }
 
-void setOptionalDTypeJson(json& dst, const char* key, const Optional<DataType>& dtype) { dst[key] = optionalDTypeJson(dtype); }
+void setOptionalDTypeJson(json& dst, const char* key, const std::optional<DataType>& dtype) { dst[key] = optionalDTypeJson(dtype); }
 
-void parseOptionalDTypeField(const json& src, const char* key, Optional<DataType>& dst) {
+void parseOptionalDTypeField(const json& src, const char* key, std::optional<DataType>& dst) {
     if (!src.contains(key)) {
-        dst = Optional<DataType>::empty();
+        dst = std::nullopt;
         return;
     }
     dst = optionalDTypeFromJson(src.at(key));
@@ -513,11 +514,11 @@ static std::string formatUIntVectorCanonical(const std::vector<uint64_t>& values
     return ss.str();
 }
 
-static std::string formatOptionalDTypeCanonical(const Optional<DataType>& dtype) {
-    if (!dtype.isPresent()) {
+static std::string formatOptionalDTypeCanonical(const std::optional<DataType>& dtype) {
+    if (!dtype.has_value()) {
         return "none";
     }
-    return TensorDescriptor::getElementTypeName(dtype.get());
+    return TensorDescriptor::getElementTypeName(dtype.value());
 }
 
 static void appendNodeDTypeMetadata(std::string& out, const ExprNode& n) {
@@ -1305,7 +1306,7 @@ uint32_t cloneSubtreeWithInputSubstitution(const PhysicalExpression& src,
 
 }  // namespace
 
-Expression Expression::input(const std::string& name, Optional<DataType> compute_dtype, Optional<DataType> output_dtype) {
+Expression Expression::input(const std::string& name, std::optional<DataType> compute_dtype, std::optional<DataType> output_dtype) {
     validateUserInputName(name);
     auto out = std::make_shared<PhysicalExpression>();
 
@@ -1315,11 +1316,11 @@ Expression Expression::input(const std::string& name, Optional<DataType> compute
 
     // output_dtype means the graph value produced by this input defaults to that dtype,
     // even though the actual bound runtime tensor may have a different dtype.
-    if (output_dtype.isPresent()) {
-        node.output_dtype = output_dtype.get();
+    if (output_dtype.has_value()) {
+        node.output_dtype = output_dtype.value();
     }
-    if (compute_dtype.isPresent()) {
-        node.compute_dtype = compute_dtype.get();
+    if (compute_dtype.has_value()) {
+        node.compute_dtype = compute_dtype.value();
     }
 
     out->nodes.push_back(node);
@@ -1328,7 +1329,7 @@ Expression Expression::input(const std::string& name, Optional<DataType> compute
     return Expression(out, 0);
 }
 
-Expression Expression::runtimeScalar(const std::string& name, Optional<DataType> compute_dtype, Optional<DataType> output_dtype) {
+Expression Expression::runtimeScalar(const std::string& name, std::optional<DataType> compute_dtype, std::optional<DataType> output_dtype) {
     validateUserInputName(name);
     auto out = std::make_shared<PhysicalExpression>();
 
@@ -1336,11 +1337,11 @@ Expression Expression::runtimeScalar(const std::string& name, Optional<DataType>
     node.op = ExprOp::RUNTIME_SCALAR;
     node.input_slot = out->getOrCreateInputSlot(name, NamedInput::Kind::RuntimeScalarFp32);
 
-    if (output_dtype.isPresent()) {
-        node.output_dtype = output_dtype.get();
+    if (output_dtype.has_value()) {
+        node.output_dtype = output_dtype.value();
     }
-    if (compute_dtype.isPresent()) {
-        node.compute_dtype = compute_dtype.get();
+    if (compute_dtype.has_value()) {
+        node.compute_dtype = compute_dtype.value();
     }
 
     out->nodes.push_back(node);
@@ -1349,7 +1350,7 @@ Expression Expression::runtimeScalar(const std::string& name, Optional<DataType>
     return Expression(out, 0);
 }
 
-Expression Expression::tensorRuntimeScalar(const std::string& name, Optional<DataType> compute_dtype, Optional<DataType> output_dtype) {
+Expression Expression::tensorRuntimeScalar(const std::string& name, std::optional<DataType> compute_dtype, std::optional<DataType> output_dtype) {
     validateUserInputName(name);
     auto out = std::make_shared<PhysicalExpression>();
 
@@ -1357,11 +1358,11 @@ Expression Expression::tensorRuntimeScalar(const std::string& name, Optional<Dat
     node.op = ExprOp::TENSOR_RUNTIME_SCALAR;
     node.input_slot = out->getOrCreateInputSlot(name, NamedInput::Kind::TensorRuntimeScalar);
 
-    if (output_dtype.isPresent()) {
-        node.output_dtype = output_dtype.get();
+    if (output_dtype.has_value()) {
+        node.output_dtype = output_dtype.value();
     }
-    if (compute_dtype.isPresent()) {
-        node.compute_dtype = compute_dtype.get();
+    if (compute_dtype.has_value()) {
+        node.compute_dtype = compute_dtype.value();
     }
 
     out->nodes.push_back(node);
@@ -1668,17 +1669,17 @@ Expression Expression::matmul(const Expression& lhs,
                               const Expression& rhs,
                               bool transpose_lhs,
                               bool transpose_rhs,
-                              Optional<DataType> compute_dtype,
-                              Optional<DataType> output_dtype) {
+                              std::optional<DataType> compute_dtype,
+                              std::optional<DataType> output_dtype) {
     Expression out = binaryOp(lhs, rhs, ExprOp::MATMUL);
     ExprNode& node = out.expr->nodes[out.nodeIndex];
     node.transpose_lhs = transpose_lhs;
     node.transpose_rhs = transpose_rhs;
-    if (compute_dtype.isPresent()) {
-        node.compute_dtype = compute_dtype.get();
+    if (compute_dtype.has_value()) {
+        node.compute_dtype = compute_dtype.value();
     }
-    if (output_dtype.isPresent()) {
-        node.output_dtype = output_dtype.get();
+    if (output_dtype.has_value()) {
+        node.output_dtype = output_dtype.value();
     }
     return out;
 }
@@ -1747,8 +1748,8 @@ Expression Expression::gemm(const Expression& lhs,
                             bool transpose_lhs,
                             bool transpose_rhs,
                             bool transpose_addend,
-                            Optional<DataType> compute_dtype,
-                            Optional<DataType> output_dtype) {
+                            std::optional<DataType> compute_dtype,
+                            std::optional<DataType> output_dtype) {
     return gemm(lhs,
                 rhs,
                 addend,
@@ -1769,8 +1770,8 @@ Expression Expression::gemm(const Expression& lhs,
                             bool transpose_lhs,
                             bool transpose_rhs,
                             bool transpose_addend,
-                            Optional<DataType> compute_dtype,
-                            Optional<DataType> output_dtype) {
+                            std::optional<DataType> compute_dtype,
+                            std::optional<DataType> output_dtype) {
     if (!lhs.expr || !rhs.expr || !addend.expr || !alpha.expr || !beta.expr) {
         throw std::runtime_error("Cannot build GEMM from empty expressions.");
     }
@@ -1799,11 +1800,11 @@ Expression Expression::gemm(const Expression& lhs,
     node.transpose_lhs = transpose_lhs;
     node.transpose_rhs = transpose_rhs;
     node.transpose_aux = transpose_addend;
-    if (compute_dtype.isPresent()) {
-        node.compute_dtype = compute_dtype.get();
+    if (compute_dtype.has_value()) {
+        node.compute_dtype = compute_dtype.value();
     }
-    if (output_dtype.isPresent()) {
-        node.output_dtype = output_dtype.get();
+    if (output_dtype.has_value()) {
+        node.output_dtype = output_dtype.value();
     }
 
     const uint32_t new_index = static_cast<uint32_t>(out->nodes.size());
@@ -1818,8 +1819,8 @@ Expression Expression::conv2d(const Expression& input,
                               int32_t stride_w,
                               int32_t pad_h,
                               int32_t pad_w,
-                              Optional<DataType> compute_dtype,
-                              Optional<DataType> output_dtype) {
+                              std::optional<DataType> compute_dtype,
+                              std::optional<DataType> output_dtype) {
     if (stride_h <= 0 || stride_w <= 0) {
         throw std::runtime_error("conv2d stride must be positive.");
     }
@@ -1833,11 +1834,11 @@ Expression Expression::conv2d(const Expression& input,
     node.conv_stride_w = stride_w;
     node.conv_pad_h = pad_h;
     node.conv_pad_w = pad_w;
-    if (compute_dtype.isPresent()) {
-        node.compute_dtype = compute_dtype.get();
+    if (compute_dtype.has_value()) {
+        node.compute_dtype = compute_dtype.value();
     }
-    if (output_dtype.isPresent()) {
-        node.output_dtype = output_dtype.get();
+    if (output_dtype.has_value()) {
+        node.output_dtype = output_dtype.value();
     }
     return out;
 }
@@ -1850,8 +1851,8 @@ Expression Expression::conv3d(const Expression& input,
                               int32_t pad_d,
                               int32_t pad_h,
                               int32_t pad_w,
-                              Optional<DataType> compute_dtype,
-                              Optional<DataType> output_dtype) {
+                              std::optional<DataType> compute_dtype,
+                              std::optional<DataType> output_dtype) {
     if (stride_d <= 0 || stride_h <= 0 || stride_w <= 0) {
         throw std::runtime_error("conv3d stride must be positive.");
     }
@@ -1867,18 +1868,18 @@ Expression Expression::conv3d(const Expression& input,
     node.conv_pad_d = pad_d;
     node.conv_pad_h = pad_h;
     node.conv_pad_w = pad_w;
-    if (compute_dtype.isPresent()) {
-        node.compute_dtype = compute_dtype.get();
+    if (compute_dtype.has_value()) {
+        node.compute_dtype = compute_dtype.value();
     }
-    if (output_dtype.isPresent()) {
-        node.output_dtype = output_dtype.get();
+    if (output_dtype.has_value()) {
+        node.output_dtype = output_dtype.value();
     }
     return out;
 }
 
 // Reductions
-DataType validate_reduction_compute_type(Optional<DataType> compute_dtype) {
-    const DataType requested_compute_dtype = compute_dtype.isPresent() ? compute_dtype.get() : DataType::FP32;
+DataType validate_reduction_compute_type(std::optional<DataType> compute_dtype) {
+    const DataType requested_compute_dtype = compute_dtype.has_value() ? compute_dtype.value() : DataType::FP32;
     return toSupportedComputeDType(ExprOp::REDUCE_SUM, requested_compute_dtype);
 }
 
@@ -1887,7 +1888,7 @@ static bool isArgReductionOp(ExprOp op) { return op == ExprOp::REDUCE_ARGMIN || 
 Expression Expression::reduction(ExprOp op,
                                  const std::vector<uint64_t>& reduction_axes,
                                  const std::vector<uint64_t>& squeeze_axes,
-                                 Optional<DataType> compute_dtype) const {
+                                 std::optional<DataType> compute_dtype) const {
     Expression out = unaryOp(*this, op);
 
     out.expr->nodes[out.nodeIndex].reduction_axes = reduction_axes;
@@ -1903,59 +1904,59 @@ Expression Expression::reduction(ExprOp op,
 
 Expression Expression::reduce_sum(const std::vector<uint64_t>& reduction_axes,
                                   const std::vector<uint64_t>& squeeze_axes,
-                                  Optional<DataType> compute_dtype) const {
+                                  std::optional<DataType> compute_dtype) const {
     return reduction(ExprOp::REDUCE_SUM, reduction_axes, squeeze_axes, compute_dtype);
 }
 
 Expression Expression::reduce_prod(const std::vector<uint64_t>& reduction_axes,
                                    const std::vector<uint64_t>& squeeze_axes,
-                                   Optional<DataType> compute_dtype) const {
+                                   std::optional<DataType> compute_dtype) const {
     return reduction(ExprOp::REDUCE_PROD, reduction_axes, squeeze_axes, compute_dtype);
 }
 
 Expression Expression::reduce_min(const std::vector<uint64_t>& reduction_axes,
                                   const std::vector<uint64_t>& squeeze_axes,
-                                  Optional<DataType> compute_dtype) const {
+                                  std::optional<DataType> compute_dtype) const {
     return reduction(ExprOp::REDUCE_MIN, reduction_axes, squeeze_axes, compute_dtype);
 }
 
 Expression Expression::reduce_max(const std::vector<uint64_t>& reduction_axes,
                                   const std::vector<uint64_t>& squeeze_axes,
-                                  Optional<DataType> compute_dtype) const {
+                                  std::optional<DataType> compute_dtype) const {
     return reduction(ExprOp::REDUCE_MAX, reduction_axes, squeeze_axes, compute_dtype);
 }
 
 Expression Expression::argmin(const std::vector<uint64_t>& reduction_axes,
                               const std::vector<uint64_t>& squeeze_axes,
-                              Optional<DataType> compute_dtype) const {
+                              std::optional<DataType> compute_dtype) const {
     return reduction(ExprOp::REDUCE_ARGMIN, reduction_axes, squeeze_axes, compute_dtype);
 }
 
 Expression Expression::argmax(const std::vector<uint64_t>& reduction_axes,
                               const std::vector<uint64_t>& squeeze_axes,
-                              Optional<DataType> compute_dtype) const {
+                              std::optional<DataType> compute_dtype) const {
     return reduction(ExprOp::REDUCE_ARGMAX, reduction_axes, squeeze_axes, compute_dtype);
 }
 
 Expression Expression::reduce_mean(const std::vector<uint64_t>& reduction_axes,
                                    const std::vector<uint64_t>& squeeze_axes,
-                                   Optional<DataType> compute_dtype) const {
+                                   std::optional<DataType> compute_dtype) const {
     return reduction(ExprOp::REDUCE_AVG, reduction_axes, squeeze_axes, compute_dtype);
 }
 
 Expression Expression::reduce_norm1(const std::vector<uint64_t>& reduction_axes,
                                     const std::vector<uint64_t>& squeeze_axes,
-                                    Optional<DataType> compute_dtype) const {
+                                    std::optional<DataType> compute_dtype) const {
     return reduction(ExprOp::REDUCE_NORM1, reduction_axes, squeeze_axes, compute_dtype);
 }
 
 Expression Expression::reduce_norm2(const std::vector<uint64_t>& reduction_axes,
                                     const std::vector<uint64_t>& squeeze_axes,
-                                    Optional<DataType> compute_dtype) const {
+                                    std::optional<DataType> compute_dtype) const {
     return reduction(ExprOp::REDUCE_NORM2, reduction_axes, squeeze_axes, compute_dtype);
 }
 
-Expression Expression::withDTypes(Optional<DataType> compute_dtype, Optional<DataType> output_dtype) const {
+Expression Expression::withDTypes(std::optional<DataType> compute_dtype, std::optional<DataType> output_dtype) const {
     if (!expr)
         throw std::runtime_error("Cannot override dtypes on an empty expression");
     if (nodeIndex >= expr->nodes.size())
@@ -1969,19 +1970,19 @@ Expression Expression::withDTypes(Optional<DataType> compute_dtype, Optional<Dat
     out->output_node = newRootIndex;
 
     ExprNode& root = out->nodes[newRootIndex];
-    if (compute_dtype.isPresent()) {
-        root.compute_dtype = compute_dtype.get();
+    if (compute_dtype.has_value()) {
+        root.compute_dtype = compute_dtype.value();
     }
-    if (output_dtype.isPresent()) {
-        root.output_dtype = output_dtype.get();
+    if (output_dtype.has_value()) {
+        root.output_dtype = output_dtype.value();
     }
 
     return Expression(out, newRootIndex);
 }
 
-Expression Expression::withComputeDType(DataType compute_dtype) const { return withDTypes(compute_dtype, Optional<DataType>::empty()); }
+Expression Expression::withComputeDType(DataType compute_dtype) const { return withDTypes(compute_dtype, std::nullopt); }
 
-Expression Expression::withOutputDType(DataType output_dtype) const { return withDTypes(Optional<DataType>::empty(), output_dtype); }
+Expression Expression::withOutputDType(DataType output_dtype) const { return withDTypes(std::nullopt, output_dtype); }
 
 Expression Expression::ln() const { return unaryOp(*this, ExprOp::LN); }
 Expression Expression::log2() const { return unaryOp(*this, ExprOp::LOG2); }
