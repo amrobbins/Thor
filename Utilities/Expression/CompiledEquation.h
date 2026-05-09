@@ -235,7 +235,7 @@ struct CompiledConvolution {
           pad_w(pad_w),
           input_dtype(input_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : output_dtype) {}
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : TensorDescriptor::DataType::FP32) {}
 };
 
 struct CompiledConvolutionBackward {
@@ -276,7 +276,7 @@ struct CompiledConvolutionBackward {
           input_dtype(input_dtype),
           grad_output_dtype(grad_output_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : output_dtype),
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : TensorDescriptor::DataType::FP32),
           explicit_output_dims(std::move(explicit_output_dims)) {}
 };
 

@@ -127,7 +127,12 @@ std::shared_ptr<ThorImplementation::Layer> Convolution3d::stamp(ThorImplementati
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
-    Tensor::DataType weightsDataType = Tensor::DataType::FP16;
+    std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>> physicalParameters;
+    for (const auto& parameter : getParameters()) {
+        THOR_THROW_IF_FALSE(parameter != nullptr);
+        physicalParameters.push_back(parameter->stamp());
+    }
+
     std::shared_ptr<ThorImplementation::CustomLayer> physicalConvolution3d = std::make_shared<ThorImplementation::CustomLayer>(
         buildConvolution3dExpression(hasBias,
                                      depthStride,
@@ -140,7 +145,7 @@ std::shared_ptr<ThorImplementation::Layer> Convolution3d::stamp(ThorImplementati
                                      activation,
                                      epilogue),
         placement,
-        ThorImplementation::Convolution3d::defineParameters(numOutputChannels, hasBias, filterWidth, filterHeight, filterDepth, weightsDataType),
+        physicalParameters,
         inferenceOnly,
         getId(),
         false);
@@ -253,19 +258,7 @@ json Convolution3d::architectureJson() const {
     }
     j["outputs"] = outputs;
 
-    if (weightsInitializer != nullptr) {
-        j["weights_initializer"] = weightsInitializer->architectureJson();
-    }
-    if (biasInitializer != nullptr) {
-        j["biases_initializer"] = biasInitializer->architectureJson();
-    }
-
-    if (hasOptimizer()) {
-        j["weights_optimizer"] = weightsOptimizer->architectureJson();
-        if (hasBias) {
-            j["biases_optimizer"] = biasesOptimizer->architectureJson();
-        }
-    }
+    j["parameters"] = getParametersArchitectureJson()["parameters"];
 
     return j;
 }
@@ -275,50 +268,82 @@ json Convolution3d::serialize(thor_file::TarWriter& archiveWriter,
                               bool saveOptimizerState,
                               ThorImplementation::StampedNetwork& stampedNetwork) const {
     json j = architectureJson();
-    string layerName = string("layer") + to_string(getId());
-
-    shared_ptr<ThorImplementation::TrainableLayer> twbLayer = nullptr;
-    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-    twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableLayer>(physicalLayer);
-    THOR_THROW_IF_FALSE(twbLayer != nullptr);
-
-    if (twbLayer != nullptr) {
-        if (hasBias) {
-            const string biasesFile = layerName + "_biases.gds";
-            j["biases_tensor"] = biasesFile;
-            ThorImplementation::Tensor biases = twbLayer->getParameter("biases")->getStorage().value();
-            archiveWriter.addArchiveFile(biasesFile, biases);
-        }
-
-        const string weightsFile = layerName + "_weights.gds";
-        j["weights_tensor"] = weightsFile;
-        ThorImplementation::Tensor weights = twbLayer->getParameter("weights")->getStorage().value();
-        archiveWriter.addArchiveFile(weightsFile, weights);
-    }
-
-    if (hasOptimizer()) {
-        j["weights_optimizer"] = weightsOptimizer->serialize(archiveWriter,
-                                                             stream,
-                                                             twbLayer->getParameter("weights")->getOptimizer(),
-                                                             string("layer") + to_string(getId()),
-                                                             saveOptimizerState);
-        if (hasBias) {
-            j["biases_optimizer"] = biasesOptimizer->serialize(archiveWriter,
-                                                               stream,
-                                                               twbLayer->getParameter("biases")->getOptimizer(),
-                                                               string("layer") + to_string(getId()),
-                                                               saveOptimizerState);
-        }
-    }
-
+    Parameterizable::serializeParameters(j["parameters"], archiveWriter, stream, saveOptimizerState, stampedNetwork, "layer" + to_string(getId()));
     return j;
 }
 
 void Convolution3d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
-    (void)archiveReader;
-    (void)j;
-    (void)network;
+    if (j.at("version").get<std::string>() != "1.0.0")
+        throw runtime_error("Unsupported version in Convolution3d::deserialize: " + j["version"].get<std::string>());
+    if (j.at("layer_type").get<std::string>() != "convolution_3d")
+        throw runtime_error("Layer type mismatch in Convolution3d::deserialize: " + j.at("layer_type").get<std::string>());
+    if (j.at("data_layout").get<string>() != "NCDHW")
+        throw runtime_error("Convolution3d only supports serialized NCDHW data_layout, got " + j.at("data_layout").get<string>());
+
+    std::optional<ThorImplementation::Expression> epilogue = std::nullopt;
+    if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
+        ThorImplementation::ExpressionDefinition epilogueDefinition =
+            ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
+        epilogue = epilogueExpressionFromDefinition(epilogueDefinition);
+    }
+
+    Convolution3d convolution3d(epilogue);
+    convolution3d.filterWidth = j.at("filter_width").get<uint32_t>();
+    convolution3d.filterHeight = j.at("filter_height").get<uint32_t>();
+    convolution3d.filterDepth = j.at("filter_depth").get<uint32_t>();
+    convolution3d.horizontalStride = j.at("horizontal_stride").get<uint32_t>();
+    convolution3d.verticalStride = j.at("vertical_stride").get<uint32_t>();
+    convolution3d.depthStride = j.at("depth_stride").get<uint32_t>();
+    convolution3d.horizontalPadding = j.at("horizontal_padding").get<uint32_t>();
+    convolution3d.verticalPadding = j.at("vertical_padding").get<uint32_t>();
+    convolution3d.depthPadding = j.at("depth_padding").get<uint32_t>();
+    convolution3d.numOutputChannels = j.at("num_output_channels").get<uint32_t>();
+    convolution3d.hasBias = j.at("has_bias").get<bool>();
+
+    if (j.contains("activation") && !j.at("activation").is_null()) {
+        convolution3d.activation = Activation::deserializeTemplate(j.at("activation"));
+    }
+
+    for (const json& inputJson : j.at("inputs")) {
+        uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();
+        convolution3d.featureInputs.push_back(network->getApiTensorByOriginalId(originalTensorId));
+        convolution3d.standaloneLayerFeatureInputs.push_back(convolution3d.featureInputs.back());
+    }
+    for (const json& outputJson : j.at("outputs")) {
+        Tensor output = Tensor::deserialize(outputJson, archiveReader.get());
+        convolution3d.featureOutputs.push_back(output);
+        convolution3d.standaloneLayerFeatureOutputs.push_back(output);
+    }
+    if (convolution3d.featureInputs.size() != convolution3d.featureOutputs.size()) {
+        throw runtime_error("Convolution3d deserialize expected equal numbers of inputs and outputs.");
+    }
+    for (uint32_t i = 0; i < convolution3d.featureInputs.size(); ++i) {
+        convolution3d.outputTensorFromInputTensor[convolution3d.featureInputs[i]] = convolution3d.featureOutputs[i];
+        convolution3d.inputTensorFromOutputTensor[convolution3d.featureOutputs[i]] = convolution3d.featureInputs[i];
+    }
+
+    if (j.contains("parameters")) {
+        const json& parametersJson = j.at("parameters");
+        if (!parametersJson.is_object()) {
+            throw runtime_error("Convolution3d parameters must be an object keyed by parameter name.");
+        }
+        for (auto it = parametersJson.begin(); it != parametersJson.end(); ++it) {
+            ParameterSpecification parameter = ParameterSpecification::deserialize(it.value(), archiveReader);
+            convolution3d.addParameter(std::make_shared<ParameterSpecification>(std::move(parameter)));
+        }
+    }
+
+    if (!convolution3d.hasParameter("weights")) {
+        throw runtime_error("Convolution3d deserialize did not find required weights parameter.");
+    }
+    if (convolution3d.hasBias && !convolution3d.hasParameter("biases")) {
+        throw runtime_error("Convolution3d deserialize did not find required biases parameter.");
+    }
+
+    convolution3d.initialized = true;
+    convolution3d.addToNetwork(network);
 }
+
 
 }  // namespace Thor
 

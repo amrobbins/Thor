@@ -19,16 +19,9 @@ class ConvolutionTestHelper {
 
     static inline half getWeightElement(
         Tensor weights, uint64_t outputChannel, uint64_t inputChannel, uint64_t filterRow, uint64_t filterCol) {
-        std::vector<uint64_t> weightDimensions = weights.getDescriptor().getDimensions();
-        uint64_t filterHeight = weightDimensions[2];
-        uint64_t filterWidth = weightDimensions[3];
-
-        // Note: From below, it appears that cuDNN sets the bottom right of the filter as (0,0).
-        // Seems odd, but the math matches up that way.
-        std::vector<unsigned long> weightIndex{(uint64_t)outputChannel,
-                                               (uint64_t)inputChannel,
-                                               (uint64_t)((filterHeight - 1) - filterRow),
-                                               (uint64_t)((filterWidth - 1) - filterCol)};
+        // Match cuDNN's deep-learning convention: convolution layers use cross-correlation,
+        // so the filter is addressed in natural KCRS order.
+        std::vector<unsigned long> weightIndex{(uint64_t)outputChannel, (uint64_t)inputChannel, (uint64_t)filterRow, (uint64_t)filterCol};
         return weights.getElement<half>({weightIndex});
     }
 
@@ -227,12 +220,11 @@ class ConvolutionTestHelper {
                                                                              verticalStride * errorInputRow + filterRow,
                                                                              horizontalStride * errorInputCol + filterCol});
                                     float errorElement = errorInput.getElement<half>({batch, outputChannel, errorInputRow, errorInputCol});
-                                    float weightsGradientElement = weightsGradientFloat.getElement<float>(
-                                        {outputChannel, inputChannel, (filterHeight - 1) - filterRow, (filterWidth - 1) - filterCol});
+                                    float weightsGradientElement =
+                                        weightsGradientFloat.getElement<float>({outputChannel, inputChannel, filterRow, filterCol});
                                     weightsGradientElement += featureElement * errorElement;
-                                    weightsGradientFloat.setElement<float>(
-                                        {outputChannel, inputChannel, (filterHeight - 1) - filterRow, (filterWidth - 1) - filterCol},
-                                        weightsGradientElement);
+                                    weightsGradientFloat.setElement<float>({outputChannel, inputChannel, filterRow, filterCol},
+                                                                           weightsGradientElement);
                                 }
                             }
                         }
@@ -307,10 +299,8 @@ class ConvolutionTestHelper {
                                                     {(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
                                                 float errorInputElement =
                                                     errorInput.getElement<half>({(uint64_t)n, (uint64_t)f, (uint64_t)k, (uint64_t)l});
-                                                float weightElement = weights.getElement<half>({(uint64_t)f,
-                                                                                                (uint64_t)c,
-                                                                                                (uint64_t)((filterHeight - 1) - p),
-                                                                                                (uint64_t)((filterWidth - 1) - q)});
+                                                float weightElement =
+                                                    weights.getElement<half>({(uint64_t)f, (uint64_t)c, (uint64_t)p, (uint64_t)q});
                                                 *errorOutputElement += errorInputElement * weightElement;
                                             }
                                         }

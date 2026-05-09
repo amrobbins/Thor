@@ -7,7 +7,6 @@
 #include <cuda_fp16.h>
 #include <cudnn.h>
 
-
 #include <atomic>
 #include <string>
 #include <utility>
@@ -84,7 +83,7 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
                                                       filterHorizontalStride,
                                                       1,
                                                       1,
-                                                      CUDNN_CONVOLUTION,
+                                                      CUDNN_CROSS_CORRELATION,
                                                       CUDNN_DATA_FLOAT);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
