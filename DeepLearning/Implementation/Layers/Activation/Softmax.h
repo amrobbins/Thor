@@ -10,19 +10,19 @@ class Softmax : public Activation {
     Softmax();
     Softmax(bool backwardComputedExternally);
 
-    virtual ~Softmax() {}
+    ~Softmax() override {}
 
-    virtual Optional<Tensor> createFeatureOutputTensor();
+    Optional<Tensor> createFeatureOutputTensor() override;
 
-    virtual void postCompile();
+    void postCompile() override;
 
     void cleanup();
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream);
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override;
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream);
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override;
 
-    virtual std::string getType();
+    std::string getType() override;
 
     virtual bool isBackwardComputedExternally();
 

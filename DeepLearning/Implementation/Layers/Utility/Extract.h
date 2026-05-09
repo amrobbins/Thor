@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Misc/Extract.h"
 #include "Utilities/TensorOperations/Misc/Pad.h"
@@ -12,28 +14,28 @@ namespace ThorImplementation {
  */
 class Extract : public Layer {
    public:
-    virtual ~Extract() {}
+    ~Extract() override {}
 
     // The dimensionSpans map key is the dimension number (starting from dimension 0 - the most significant dimension)
     // i.e. if there is a c++ array data[x][y][z] then dimensionSpans[0] represents dimensionSpans[x].
     // The span for a dimension is represented as pair(indexOfFirstElementInSpan, indexOfLastElementInSpan)
     Extract(std::vector<std::pair<unsigned int, unsigned int>> dimensionSpans) {
-        assert(!dimensionSpans.empty());
+        THOR_THROW_IF_FALSE(!dimensionSpans.empty());
         this->dimensionSpans = dimensionSpans;
     }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isPresent());
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         std::vector<unsigned long> outputTensorDimensions = getExtractedTensorDimensions(dimensionSpans);
-        assert(featureInput.get().getDescriptor().getDimensions().size() == outputTensorDimensions.size());
+        THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions().size() == outputTensorDimensions.size());
         return Tensor(featureInput.get().getPlacement(),
                       TensorDescriptor(featureInput.get().getDescriptor().getDataType(), outputTensorDimensions));
     }
 
-    virtual void compileImpl() {
+    void compileImpl() override {
         Layer::compileImpl();
-        assert(featureInput.isPresent());
-        assert(featureOutput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureOutput.isPresent());
 
         TensorPlacement placement = featureInput.get().getPlacement();
         std::vector<unsigned long> strideArrayDimensions;
@@ -79,17 +81,17 @@ class Extract : public Layer {
                 padBeforeCpu[i] = dimensionPadding.first;
                 padAfterCpu[i] = padBeforeCpu[i] + inputDimensionSize - 1;
                 unsigned long outputDimensionSize = featureOutput.get().getDescriptor().getDimensions()[i];
-                assert(inputDimensionSize - (outputDimensionSize + dimensionPadding.first) == dimensionPadding.second);
+                THOR_THROW_IF_FALSE(inputDimensionSize - (outputDimensionSize + dimensionPadding.first) == dimensionPadding.second);
             }
         }
         padBefore_d.copyFromAsync(padBefore, stream);
         padAfter_d.copyFromAsync(padAfter, stream);
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(inputTensor.isPresent());
-        assert(outputTensor.isPresent());
-        assert(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(inputTensor.isPresent());
+        THOR_THROW_IF_FALSE(outputTensor.isPresent());
+        THOR_THROW_IF_FALSE(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(inputTensor.get().getPlacement().getDeviceNum());
 
         launchExtract((half *)outputTensor.get().getMemPtr(),
@@ -103,12 +105,12 @@ class Extract : public Layer {
                       stream);
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
         if (errorOut.isEmpty())
             return;
 
-        assert(errorIn.isPresent());
-        assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(errorIn.isPresent());
+        THOR_THROW_IF_FALSE(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(errorIn.get().getPlacement().getDeviceNum());
 
         launchPad((half *)errorOut.get().getMemPtr(),

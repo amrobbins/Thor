@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Misc/Map.h"
 
@@ -10,7 +12,7 @@ namespace ThorImplementation {
 template <typename INDEX_TYPE>
 class Map : public Layer {
    public:
-    virtual ~Map() {}
+    ~Map() override {}
 
     Map() { uninitialized = true; }
 
@@ -35,26 +37,26 @@ class Map : public Layer {
         backwardPassMappingOfNTo1Device = backwardPassMappingDevice;
     }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(!uninitialized);
-        assert(featureInput.isPresent());
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(!uninitialized);
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
 
         TensorDescriptor newDescriptor = TensorDescriptor(featureInput.get().getDescriptor().getDataType(),
                                                           mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
         return Tensor(featureInput.get().getPlacement(), newDescriptor);
     }
 
-    virtual void compileImpl() {
+    void compileImpl() override {
         Layer::compileImpl();
-        assert(featureInput.isPresent());
-        assert(featureInput.get().getDescriptor().getDimensions() == sourceDimensions);
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions() == sourceDimensions);
 
-        assert(mappingOfSourceTensorIntoDestTensor.getPlacement() == featureInput.get().getPlacement());
-        assert(featureOutput.get().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
+        THOR_THROW_IF_FALSE(mappingOfSourceTensorIntoDestTensor.getPlacement() == featureInput.get().getPlacement());
+        THOR_THROW_IF_FALSE(featureOutput.get().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
         if (errorInput.isPresent())
-            assert(errorInput.get().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
+            THOR_THROW_IF_FALSE(errorInput.get().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
         if (errorOutput.isPresent() && backwardPassMappingOfNTo1Device.empty()) {
-            assert(!backwardPassMappingOfNTo1Host.empty());
+            THOR_THROW_IF_FALSE(!backwardPassMappingOfNTo1Host.empty());
             for (auto it = backwardPassMappingOfNTo1Host.begin(); it != backwardPassMappingOfNTo1Host.end(); ++it) {
                 uint64_t N = it->first;
                 Tensor mappingTensorHost = it->second;
@@ -65,10 +67,10 @@ class Map : public Layer {
         }
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(!uninitialized);
-        assert(inputTensor.isPresent());
-        assert(outputTensor.isPresent());
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(!uninitialized);
+        THOR_THROW_IF_FALSE(inputTensor.isPresent());
+        THOR_THROW_IF_FALSE(outputTensor.isPresent());
 
         ScopedGpu scopedGpu(inputTensor.get().getPlacement().getDeviceNum());
         launchMap<INDEX_TYPE>((half *)outputTensor.get().getMemPtr(),
@@ -78,18 +80,18 @@ class Map : public Layer {
                               stream);
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-        assert(!uninitialized);
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
+        THOR_THROW_IF_FALSE(!uninitialized);
         if (errorOut.isEmpty())
             return;
-        assert(errorIn.isPresent());
+        THOR_THROW_IF_FALSE(errorIn.isPresent());
 
         ScopedGpu scopedGpu(errorIn.get().getPlacement().getDeviceNum());
 
         for (auto it = backwardPassMappingOfNTo1Device.begin(); it != backwardPassMappingOfNTo1Device.end(); ++it) {
             int N = it->first;
             Tensor nMappingTensor = it->second;
-            assert(nMappingTensor.getDescriptor().getTotalNumElements() % (N + 1) == 0);
+            THOR_THROW_IF_FALSE(nMappingTensor.getDescriptor().getTotalNumElements() % (N + 1) == 0);
             launchMapNInto1<INDEX_TYPE>(N,
                                         (half *)errorOut.get().getMemPtr(),
                                         (half *)errorIn.get().getMemPtr(),
@@ -100,12 +102,12 @@ class Map : public Layer {
     }
 
     std::map<unsigned int, Tensor> getBackwardPassMappingOnHost() {
-        assert(!uninitialized);
+        THOR_THROW_IF_FALSE(!uninitialized);
         return backwardPassMappingOfNTo1Host;
     }
 
     std::map<unsigned int, Tensor> getBackwardPassMappingOnDevice() {
-        assert(!uninitialized);
+        THOR_THROW_IF_FALSE(!uninitialized);
         return backwardPassMappingOfNTo1Device;
     }
 
@@ -119,14 +121,14 @@ class Map : public Layer {
     std::vector<unsigned long> sourceDimensions;
 
     void setup(Tensor mappingOfSourceTensorIntoDestTensor, std::vector<unsigned long> sourceDimensions) {
-        assert(std::is_integral<INDEX_TYPE>());
-        assert(!std::is_signed<INDEX_TYPE>());
+        THOR_THROW_IF_FALSE(std::is_integral<INDEX_TYPE>());
+        THOR_THROW_IF_FALSE(!std::is_signed<INDEX_TYPE>());
         if (sizeof(INDEX_TYPE) < sizeof(uint64_t)) {
             uint64_t numSourceElements = TensorDescriptor(TensorDescriptor::DataType::BOOLEAN, sourceDimensions).getTotalNumElements();
             uint64_t numDestElements = mappingOfSourceTensorIntoDestTensor.getDescriptor().getTotalNumElements();
             uint64_t maxElementsForIndexType = 1l << (8 * sizeof(INDEX_TYPE));
-            assert(numSourceElements < maxElementsForIndexType);
-            assert(numDestElements < maxElementsForIndexType);
+            THOR_THROW_IF_FALSE(numSourceElements < maxElementsForIndexType);
+            THOR_THROW_IF_FALSE(numDestElements < maxElementsForIndexType);
         }
 
         uninitialized = false;
@@ -138,7 +140,7 @@ class Map : public Layer {
     // then all errorInputs that map to a given errorOutput are summed and passed as the value of the errorOutput.
     // When there are 0 errorInputs that map to a given errorOutput, a 0 is back propagated as the value of that errorOutput.
     void createBackwardPassMapping(Tensor mappingOfSourceTensorIntoDestTensor) {
-        assert(!uninitialized);
+        THOR_THROW_IF_FALSE(!uninitialized);
 
         Stream stream(0);
 

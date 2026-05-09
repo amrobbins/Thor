@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
 namespace ThorImplementation {
@@ -8,7 +10,7 @@ class Pooling : public Layer {
    public:
     enum class Type { MAX = 11, AVERAGE = 12 };
 
-    virtual ~Pooling() {}
+    ~Pooling() override {}
 
     Pooling(Type poolingType,
             uint32_t windowHeight,
@@ -24,35 +26,35 @@ class Pooling : public Layer {
           horizontalStride(horizontalStride),
           verticalPadding(verticalPadding),
           horizontalPadding(horizontalPadding) {
-        assert(poolingType == Type::MAX || poolingType == Type::AVERAGE);
-        assert(windowHeight > 0);
-        assert(windowWidth > 0);
-        assert(verticalStride > 0);
-        assert(horizontalStride > 0);
+        THOR_THROW_IF_FALSE(poolingType == Type::MAX || poolingType == Type::AVERAGE);
+        THOR_THROW_IF_FALSE(windowHeight > 0);
+        THOR_THROW_IF_FALSE(windowWidth > 0);
+        THOR_THROW_IF_FALSE(verticalStride > 0);
+        THOR_THROW_IF_FALSE(horizontalStride > 0);
     }
 
-    virtual void compileImpl() {
+    void compileImpl() override {
         Layer::compileImpl();
         cudnnStatus_t cudnnStatus;
 
-        assert(featureInput.isPresent());
-        assert(featureOutput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureOutput.isPresent());
 
         // Dimensions are NCHW
         std::vector<unsigned long> inputDimensions = featureInput.get().getDescriptor().getDimensions();
-        assert(inputDimensions.size() == 4);
+        THOR_THROW_IF_FALSE(inputDimensions.size() == 4);
         batchSize = inputDimensions[0];
         numFeatures = inputDimensions[1];
         inputHeight = inputDimensions[2];
         inputWidth = inputDimensions[3];
-        assert(batchSize > 0);
-        assert(numFeatures > 0);
-        assert(inputHeight > 0);
-        assert(inputWidth > 0);
-        assert(inputHeight >= windowHeight);
-        assert(inputWidth >= windowWidth);
-        assert(verticalPadding < windowHeight);
-        assert(horizontalPadding < windowWidth);
+        THOR_THROW_IF_FALSE(batchSize > 0);
+        THOR_THROW_IF_FALSE(numFeatures > 0);
+        THOR_THROW_IF_FALSE(inputHeight > 0);
+        THOR_THROW_IF_FALSE(inputWidth > 0);
+        THOR_THROW_IF_FALSE(inputHeight >= windowHeight);
+        THOR_THROW_IF_FALSE(inputWidth >= windowWidth);
+        THOR_THROW_IF_FALSE(verticalPadding < windowHeight);
+        THOR_THROW_IF_FALSE(horizontalPadding < windowWidth);
         outputHeight = computeOutputDimensionSize(inputHeight, verticalPadding, windowHeight, verticalStride);
         outputWidth = computeOutputDimensionSize(inputWidth, horizontalPadding, windowWidth, horizontalStride);
 
@@ -60,17 +62,17 @@ class Pooling : public Layer {
         stream.getCudnnHandle();
 
         std::vector<unsigned long> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
-        assert(outputDimensions.size() == 4);
-        assert(outputDimensions[0] == (uint32_t)batchSize);
-        assert(outputDimensions[1] == (uint32_t)numFeatures);
-        assert(outputDimensions[2] == (uint32_t)outputHeight);
-        assert(outputDimensions[3] == (uint32_t)outputWidth);
+        THOR_THROW_IF_FALSE(outputDimensions.size() == 4);
+        THOR_THROW_IF_FALSE(outputDimensions[0] == (uint32_t)batchSize);
+        THOR_THROW_IF_FALSE(outputDimensions[1] == (uint32_t)numFeatures);
+        THOR_THROW_IF_FALSE(outputDimensions[2] == (uint32_t)outputHeight);
+        THOR_THROW_IF_FALSE(outputDimensions[3] == (uint32_t)outputWidth);
 
         ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
 
         poolingDescriptor = cudnnPoolingDescriptor_t();
         cudnnStatus = cudnnCreatePoolingDescriptor(&poolingDescriptor.get());
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus =
             cudnnSetPooling2dDescriptor(poolingDescriptor,
                                         poolingType == Type::MAX ? CUDNN_POOLING_MAX : CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING,
@@ -81,38 +83,38 @@ class Pooling : public Layer {
                                         horizontalPadding,
                                         verticalStride,
                                         horizontalStride);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         featureInputDescriptor = cudnnTensorDescriptor_t();
         cudnnStatus = cudnnCreateTensorDescriptor(&featureInputDescriptor.get());
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus = cudnnSetTensor4dDescriptor(
             featureInputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numFeatures, inputHeight, inputWidth);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         featureOutputDescriptor = cudnnTensorDescriptor_t();
         cudnnStatus = cudnnCreateTensorDescriptor(&featureOutputDescriptor.get());
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus = cudnnSetTensor4dDescriptor(
             featureOutputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numFeatures, outputHeight, outputWidth);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isPresent());
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
 
         std::vector<unsigned long> inputDimensions = featureInput.get().getDescriptor().getDimensions();
-        assert(inputDimensions.size() == 4);
+        THOR_THROW_IF_FALSE(inputDimensions.size() == 4);
         batchSize = inputDimensions[0];
         numFeatures = inputDimensions[1];
         inputHeight = inputDimensions[2];
         inputWidth = inputDimensions[3];
-        assert(batchSize > 0);
-        assert(numFeatures > 0);
-        assert(inputHeight > 0);
-        assert(inputWidth > 0);
-        assert(inputHeight >= windowHeight);
-        assert(inputWidth >= windowWidth);
+        THOR_THROW_IF_FALSE(batchSize > 0);
+        THOR_THROW_IF_FALSE(numFeatures > 0);
+        THOR_THROW_IF_FALSE(inputHeight > 0);
+        THOR_THROW_IF_FALSE(inputWidth > 0);
+        THOR_THROW_IF_FALSE(inputHeight >= windowHeight);
+        THOR_THROW_IF_FALSE(inputWidth >= windowWidth);
         outputHeight = computeOutputDimensionSize(inputHeight, verticalPadding, windowHeight, verticalStride);
         outputWidth = computeOutputDimensionSize(inputWidth, horizontalPadding, windowWidth, horizontalStride);
 
@@ -130,26 +132,26 @@ class Pooling : public Layer {
 
         if (poolingDescriptor.isPresent()) {
             cudnnStatus = cudnnDestroyPoolingDescriptor(poolingDescriptor.get());
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
             poolingDescriptor.clear();
         }
 
         if (featureInputDescriptor.isPresent()) {
             cudnnStatus = cudnnDestroyTensorDescriptor(featureInputDescriptor.get());
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
             featureInputDescriptor.clear();
         }
 
         if (featureOutputDescriptor.isPresent()) {
             cudnnStatus = cudnnDestroyTensorDescriptor(featureOutputDescriptor.get());
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
             featureOutputDescriptor.clear();
         }
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(inputTensor.isPresent());
-        assert(outputTensor.isPresent());
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(inputTensor.isPresent());
+        THOR_THROW_IF_FALSE(outputTensor.isPresent());
 
         cudnnStatus_t cudnnStatus;
         cudnnStatus = cudnnPoolingForward(stream.getCudnnHandle(),
@@ -160,13 +162,13 @@ class Pooling : public Layer {
                                           &BETA_CLEAR,
                                           featureOutputDescriptor,
                                           outputTensor.get().getMemPtr());
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
         if (errorOut.isEmpty())
             return;
-        assert(errorIn.isPresent());
+        THOR_THROW_IF_FALSE(errorIn.isPresent());
 
         cudnnStatus_t cudnnStatus;
         cudnnStatus = cudnnPoolingBackward(stream.getCudnnHandle(),
@@ -181,7 +183,7 @@ class Pooling : public Layer {
                                            &BETA_CLEAR,
                                            featureInputDescriptor,
                                            errorOut.get().getMemPtr());
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
     static uint32_t computeOutputDimensionSize(uint32_t inputDimensionSize,
@@ -189,9 +191,9 @@ class Pooling : public Layer {
                                                uint32_t windowSize,
                                                uint32_t windowStride) {
         uint32_t paddedSize = inputDimensionSize + 2 * perSidePadding;
-        assert(windowSize <= paddedSize);
+        THOR_THROW_IF_FALSE(windowSize <= paddedSize);
         uint32_t outputSize = 1 + ((paddedSize - windowSize) / windowStride);
-        assert(outputSize > 0);
+        THOR_THROW_IF_FALSE(outputSize > 0);
         return outputSize;
     }
 

@@ -1,17 +1,19 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
 namespace ThorImplementation {
 
 class Reshape : public Layer {
    public:
-    virtual ~Reshape() {}
+    ~Reshape() override {}
 
     Reshape(std::vector<unsigned long> outputDimensions) : outputDimensions(outputDimensions) {}
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isPresent());
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
 
         // When the first dimension is 0, this is a flag to use the batch size from the incoming featureInput
         if (outputDimensions[0] == 0)
@@ -23,7 +25,7 @@ class Reshape : public Layer {
         return outputTensor;
     }
 
-    virtual void postCompile() {
+    void postCompile() override {
         // ErrorInput to the previous layer is the errorInput coming to this layer,
         // then backProp is a no op
         if (errorInput.isPresent() && errorOutput.isPresent() && previousLayer.isPresent()) {
@@ -33,11 +35,11 @@ class Reshape : public Layer {
         Layer::postCompile();
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
         // No op
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
         // No op
     }
 

@@ -1,5 +1,6 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
 using namespace std;
 
@@ -143,29 +144,30 @@ Tensor::~Tensor() {
 }
 
 bool Tensor::operator==(const Tensor &other) const {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
     return instanceId == other.instanceId;
 }
 
 bool Tensor::operator!=(const Tensor &other) const {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
     return instanceId != other.instanceId;
 }
 
 bool Tensor::operator<(const Tensor &other) const {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
     return instanceId < other.instanceId;
 }
 
 void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes) {
     ReferenceCounted::initialize();
 
-    assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU || placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(placement.getDeviceNum() >= 0);
+    THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
+                        placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(placement.getDeviceNum() >= 0);
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU)
-        assert(placement.getDeviceNum() == 0);
+        THOR_THROW_IF_FALSE(placement.getDeviceNum() == 0);
     else
-        assert(placement.getDeviceNum() < (int)MachineEvaluator::instance().getNumGpus());
+        THOR_THROW_IF_FALSE(placement.getDeviceNum() < (int)MachineEvaluator::instance().getNumGpus());
     this->placement = placement;
 
     this->descriptor = descriptor;
@@ -182,10 +184,10 @@ void Tensor::allocateMemory(uint32_t alignmentBytes) {
     cudaError_t cudaStatus;
 
     unsigned long numElements = descriptor.getTotalNumElements();
-    assert(numElements > 0);
+    THOR_THROW_IF_FALSE(numElements > 0);
 
     if (alignmentBytes != 0)
-        assert(isPow2(alignmentBytes));
+        THOR_THROW_IF_FALSE(isPow2(alignmentBytes));
 
     unsigned long memBytes;
     memBytes = descriptor.getArraySizeInBytes();
@@ -196,7 +198,7 @@ void Tensor::allocateMemory(uint32_t alignmentBytes) {
         if (alignmentBytes <= 256) {
             // Cuda gives this natively
             cudaStatus = cudaHostAlloc(&mem, memBytes, cudaHostAllocPortable);
-            assert(cudaStatus == cudaSuccess);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         } else {
             void *p = nullptr;
             int prc = posix_memalign(&p, alignmentBytes, memBytes);
@@ -220,20 +222,20 @@ void Tensor::allocateMemory(uint32_t alignmentBytes) {
             printf("%s\n", cudaGetErrorString(cudaStatus));
             fflush(stdout);
         }
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
     } else {
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
-               placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
+                            placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     }
 }
 
 void Tensor::attachFile(const std::string &fileName, const off_t fileOffset, const FileAccess fileAccessRequirement, bool createEmptyFile) {
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
-           getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
+                        getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     if (!this->fileName.empty())
         detachFile();
-    assert(this->fileName.empty());
+    THOR_THROW_IF_FALSE(this->fileName.empty());
     this->fileName = fileName;
 
     this->fileAccessRequirement = fileAccessRequirement;
@@ -264,7 +266,7 @@ void Tensor::attachFile(const std::string &fileName, const off_t fileOffset, con
                (int)createEmptyFile,
                (int)fileAccessRequirement);
         fflush(stdout);
-        assert(fileDescriptor >= 0);
+        THOR_THROW_IF_FALSE(fileDescriptor >= 0);
     }
     ownsFileDescriptor = true;
 
@@ -277,12 +279,12 @@ void Tensor::attachFile(const std::string &fileName,
                         const off_t fileOffset,
                         const FileAccess fileAccessRequirement,
                         int32_t fileDescriptor) {
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
-           getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
+                        getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     if (!this->fileName.empty())
         detachFile();
-    assert(this->fileName.empty());
+    THOR_THROW_IF_FALSE(this->fileName.empty());
     this->fileName = fileName;
 
     this->fileAccessRequirement = fileAccessRequirement;
@@ -333,25 +335,25 @@ void Tensor::destroy() {
                 printf("cuda status %d\n", cudaStatus);
                 fflush(stdout);
             }
-            assert(cudaStatus == cudaSuccess);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         }
 
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         ScopedGpu scopedGpu(getPlacement().getDeviceNum());
 
         cudaError_t cudaStatus = cudaFree(mem);
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
     } else {
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
-               placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
+                            placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     }
     mem = nullptr;
 }
 
 template <typename ElementDataType>
 ElementDataType *Tensor::getMemPtr() {
-    assert(isInitialized());
-    assert(mem != nullptr);
+    THOR_THROW_IF_FALSE(isInitialized());
+    THOR_THROW_IF_FALSE(mem != nullptr);
 
     using BaseT = std::remove_cv_t<ElementDataType>;
     static_assert(!std::is_const_v<ElementDataType>, "Non-const getMemPtr() should not return const pointer type");
@@ -359,80 +361,80 @@ ElementDataType *Tensor::getMemPtr() {
     // Ensure that if the convenience template parameter ElementDataType is used that it agrees with the descriptor
     if (!(is_same<BaseT, void>::value)) {
         if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
-            assert((is_same<BaseT, half>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, half>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
-            assert((is_same<BaseT, float>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, float>::value));
         else if (is_same<BaseT, char>::value)
-            assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
-                   descriptor.getDataType() == TensorDescriptor::DataType::INT8);
+            THOR_THROW_IF_FALSE(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
+                                descriptor.getDataType() == TensorDescriptor::DataType::INT8);
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
-            assert((is_same<BaseT, int8_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, int8_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
-            assert((is_same<BaseT, int16_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, int16_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
-            assert((is_same<BaseT, int32_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, int32_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
-            assert((is_same<BaseT, uint8_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
-            assert((is_same<BaseT, uint16_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, uint16_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
-            assert((is_same<BaseT, uint32_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, uint32_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
-            assert((is_same<BaseT, bool>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, bool>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
-            assert((is_same<BaseT, uint8_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
-            assert((is_same<BaseT, __nv_bfloat16>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, __nv_bfloat16>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
-            assert((is_same<BaseT, __nv_fp8_e4m3>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, __nv_fp8_e4m3>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
-            assert((is_same<BaseT, __nv_fp8_e5m2>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, __nv_fp8_e5m2>::value));
         else
-            assert(false);
+            THOR_UNREACHABLE();
     }
     return reinterpret_cast<ElementDataType *>(mem);
 }
 
 template <typename ElementDataType>
 const ElementDataType *Tensor::getMemPtr() const {
-    assert(isInitialized());
-    assert(mem != nullptr);
+    THOR_THROW_IF_FALSE(isInitialized());
+    THOR_THROW_IF_FALSE(mem != nullptr);
 
     using BaseT = std::remove_cv_t<ElementDataType>;
 
     // Ensure that if the convenience template parameter ElementDataType is used that it agrees with the descriptor
     if (!(is_same<BaseT, void>::value)) {
         if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
-            assert((is_same<BaseT, half>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, half>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
-            assert((is_same<BaseT, float>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, float>::value));
         else if (is_same<BaseT, char>::value)
-            assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
-                   descriptor.getDataType() == TensorDescriptor::DataType::INT8);
+            THOR_THROW_IF_FALSE(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
+                                descriptor.getDataType() == TensorDescriptor::DataType::INT8);
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
-            assert((is_same<BaseT, int8_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, int8_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
-            assert((is_same<BaseT, int16_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, int16_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
-            assert((is_same<BaseT, int32_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, int32_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
-            assert((is_same<BaseT, uint8_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
-            assert((is_same<BaseT, uint16_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, uint16_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
-            assert((is_same<BaseT, uint32_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, uint32_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
-            assert((is_same<BaseT, bool>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, bool>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
-            assert((is_same<BaseT, uint8_t>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
-            assert((is_same<BaseT, __nv_bfloat16>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, __nv_bfloat16>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
-            assert((is_same<BaseT, __nv_fp8_e4m3>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, __nv_fp8_e4m3>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
-            assert((is_same<BaseT, __nv_fp8_e5m2>::value));
+            THOR_THROW_IF_FALSE((is_same<BaseT, __nv_fp8_e5m2>::value));
         else
-            assert(false);
+            THOR_UNREACHABLE();
     }
 
     return reinterpret_cast<const ElementDataType *>(mem);
@@ -440,121 +442,121 @@ const ElementDataType *Tensor::getMemPtr() const {
 
 template <typename ElementDataType>
 ElementDataType Tensor::getElement(vector<unsigned long> dimensionIndex) {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
 
 #ifdef THOR_DEBUG
     // This seems like too much overhead to get just one element, so it is explicitly removed for release.
     if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
-        assert((is_same<ElementDataType, half>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, half>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
-        assert((is_same<ElementDataType, float>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, float>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
-        assert((is_same<ElementDataType, int8_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
-        assert((is_same<ElementDataType, int16_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
-        assert((is_same<ElementDataType, int32_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int32_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
-        assert((is_same<ElementDataType, uint8_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
-        assert((is_same<ElementDataType, uint16_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
-        assert((is_same<ElementDataType, uint32_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint32_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
-        assert((is_same<ElementDataType, bool>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
-        assert((is_same<ElementDataType, uint8_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
-        assert((is_same<ElementDataType, __nv_bfloat16>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_bfloat16>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
-        assert((is_same<ElementDataType, __nv_fp8_e4m3>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e4m3>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
-        assert((is_same<ElementDataType, __nv_fp8_e5m2>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e5m2>::value));
     else
-        assert(false);
+        THOR_UNREACHABLE();
 #endif
 
-    assert(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
+    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
     return *((ElementDataType *)getDescriptor().getChunkAddress(dimensionIndex, mem));
 }
 
 template <typename ElementDataType>
 void Tensor::setElement(std::vector<unsigned long> dimensionIndex, const ElementDataType &value) {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
 
 #ifdef THOR_DEBUG
     // This seems like too much overhead to get just one element, so it is explicitly removed for release.
     if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
-        assert((is_same<ElementDataType, half>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, half>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
-        assert((is_same<ElementDataType, float>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, float>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
-        assert((is_same<ElementDataType, int8_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
-        assert((is_same<ElementDataType, int16_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
-        assert((is_same<ElementDataType, int32_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int32_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
-        assert((is_same<ElementDataType, uint8_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
-        assert((is_same<ElementDataType, uint16_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
-        assert((is_same<ElementDataType, uint32_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint32_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
-        assert((is_same<ElementDataType, bool>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
-        assert((is_same<ElementDataType, uint8_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
-        assert((is_same<ElementDataType, __nv_bfloat16>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_bfloat16>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
-        assert((is_same<ElementDataType, __nv_fp8_e4m3>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e4m3>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
-        assert((is_same<ElementDataType, __nv_fp8_e5m2>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e5m2>::value));
     else
-        assert(false);
+        THOR_UNREACHABLE();
 #endif
 
-    assert(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
+    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
     *((ElementDataType *)getDescriptor().getChunkAddress(dimensionIndex, mem)) = value;
 }
 
 template <typename ElementDataType>
 ElementDataType *Tensor::getElementPointer(std::vector<unsigned long> dimensionIndex) {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
 
 #ifdef THOR_DEBUG
     // This seems like too much overhead to get just one element, so it is explicitly removed for release.
     if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
-        assert((is_same<ElementDataType, half>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, half>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
-        assert((is_same<ElementDataType, float>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, float>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
-        assert((is_same<ElementDataType, int8_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
-        assert((is_same<ElementDataType, int16_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
-        assert((is_same<ElementDataType, int32_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int32_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
-        assert((is_same<ElementDataType, uint8_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
-        assert((is_same<ElementDataType, uint16_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
-        assert((is_same<ElementDataType, uint32_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint32_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
-        assert((is_same<ElementDataType, bool>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
-        assert((is_same<ElementDataType, uint8_t>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
-        assert((is_same<ElementDataType, __nv_bfloat16>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_bfloat16>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
-        assert((is_same<ElementDataType, __nv_fp8_e4m3>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e4m3>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
-        assert((is_same<ElementDataType, __nv_fp8_e5m2>::value));
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e5m2>::value));
     else
-        assert(false);
+        THOR_UNREACHABLE();
 #endif
 
-    assert(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
+    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
     return (ElementDataType *)getDescriptor().getChunkAddress(dimensionIndex, mem);
 }
 
@@ -571,61 +573,62 @@ void Tensor::resize(vector<unsigned long> dimensions) {
 
 // Stream is on either the source or dest device
 void Tensor::copyFromAsync(Tensor source, Stream stream) {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
     vector<int> devicesInvolved;
     if (source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
         devicesInvolved.push_back(source.getPlacement().getDeviceNum());
     if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
         devicesInvolved.push_back(getPlacement().getDeviceNum());
     if (!devicesInvolved.empty())
-        assert(stream.getGpuNum() == devicesInvolved[0] || (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
+        THOR_THROW_IF_FALSE(stream.getGpuNum() == devicesInvolved[0] ||
+                            (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
     copyFromAsync(source, stream, true);
 }
 
 void Tensor::downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes) {
     if (source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        assert(stream.getGpuNum() == source.getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(stream.getGpuNum() == source.getPlacement().getDeviceNum());
     }
 
     // Check that access is within range
     uint64_t destArraySizeBytes = descriptor.getArraySizeInBytes();
     uint64_t sourceArraySizeBytes = source.descriptor.getArraySizeInBytes();
-    assert(destOffset + sizeBytes <= destArraySizeBytes);
-    assert(sourceOffset + sizeBytes <= sourceArraySizeBytes);
+    THOR_THROW_IF_FALSE(destOffset + sizeBytes <= destArraySizeBytes);
+    THOR_THROW_IF_FALSE(sourceOffset + sizeBytes <= sourceArraySizeBytes);
 
     uint8_t *destMemBytes = static_cast<uint8_t *>(getMemPtr<void>());
     uint8_t *sourceMemBytes = static_cast<uint8_t *>(source.getMemPtr<void>());
     cudaError_t cudaStatus =
         cudaMemcpyAsync(destMemBytes + destOffset, sourceMemBytes + sourceOffset, sizeBytes, cudaMemcpyDeviceToHost, stream.getStream());
-    assert(cudaStatus == cudaSuccess);
+    THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
 }
 
 void Tensor::uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes) {
     if (dest.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        assert(stream.getGpuNum() == dest.getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(stream.getGpuNum() == dest.getPlacement().getDeviceNum());
     }
 
     // Check that access is within range
     uint64_t sourceArraySizeBytes = descriptor.getArraySizeInBytes();
     uint64_t destArraySizeBytes = dest.descriptor.getArraySizeInBytes();
-    assert(sourceOffset + sizeBytes <= sourceArraySizeBytes);
-    assert(destOffset + sizeBytes <= destArraySizeBytes);
+    THOR_THROW_IF_FALSE(sourceOffset + sizeBytes <= sourceArraySizeBytes);
+    THOR_THROW_IF_FALSE(destOffset + sizeBytes <= destArraySizeBytes);
 
     uint8_t *sourceMemBytes = static_cast<uint8_t *>(getMemPtr<void>());
     uint8_t *destMemBytes = static_cast<uint8_t *>(dest.getMemPtr<void>());
     cudaError_t cudaStatus =
         cudaMemcpyAsync(destMemBytes + destOffset, sourceMemBytes + sourceOffset, sizeBytes, cudaMemcpyHostToDevice, stream.getStream());
-    assert(cudaStatus == cudaSuccess);
+    THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
 }
 
 // If the tensor changes datatypes such that the size changes, then stream must be on the device with the larger tensor size.
 // Otherwise stream may be on either device
 void Tensor::moveFromAsync(Tensor source, Stream stream) {
-    assert(!uninitialized());
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
-           getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(!fileName.empty());
-    assert(fileAccessRequirement != FileAccess::READ_ONLY);
+    THOR_THROW_IF_FALSE(!uninitialized());
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
+                        getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(!fileName.empty());
+    THOR_THROW_IF_FALSE(fileAccessRequirement != FileAccess::READ_ONLY);
 
     vector<int> devicesInvolved;
     if (source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
@@ -633,7 +636,8 @@ void Tensor::moveFromAsync(Tensor source, Stream stream) {
     if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
         devicesInvolved.push_back(getPlacement().getDeviceNum());
     if (!devicesInvolved.empty())
-        assert(stream.getGpuNum() == devicesInvolved[0] || (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
+        THOR_THROW_IF_FALSE(stream.getGpuNum() == devicesInvolved[0] ||
+                            (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
     copyFromAsync(source, stream, false);
 }
 
@@ -645,9 +649,9 @@ struct CheckIoBytesParams : HostFunctionArgsBase {
 
 void checkBytesIoOp(void *params) {
     HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
-    assert(baseParams != nullptr);
+    THOR_THROW_IF_FALSE(baseParams != nullptr);
     CheckIoBytesParams *checkIoBytesParams = dynamic_cast<CheckIoBytesParams *>(baseParams);
-    assert(checkIoBytesParams != nullptr);
+    THOR_THROW_IF_FALSE(checkIoBytesParams != nullptr);
 
     if (*(checkIoBytesParams->actualBytes) != checkIoBytesParams->expectedBytes) {
         string errorString;
@@ -700,9 +704,9 @@ static void read_exact_at(int fd, uint8_t *p, size_t total, off_t offset, const 
 
 void performRead(void *params) {
     HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
-    assert(baseParams != nullptr);
+    THOR_THROW_IF_FALSE(baseParams != nullptr);
     PerformReadParams *performReadParams = dynamic_cast<PerformReadParams *>(baseParams);
-    assert(performReadParams != nullptr);
+    THOR_THROW_IF_FALSE(performReadParams != nullptr);
 
     uint8_t *memPtr = (uint8_t *)performReadParams->memPtr;
     const size_t totalBytesToRead = performReadParams->totalBytesToRead;
@@ -729,9 +733,9 @@ struct PerformWriteParams : HostFunctionArgsBase {
 
 void performWrite(void *params) {
     HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
-    assert(baseParams != nullptr);
+    THOR_THROW_IF_FALSE(baseParams != nullptr);
     PerformWriteParams *performWriteParams = dynamic_cast<PerformWriteParams *>(baseParams);
-    assert(performWriteParams != nullptr);
+    THOR_THROW_IF_FALSE(performWriteParams != nullptr);
 
     const void *memPtr = performWriteParams->memPtr;
     const size_t totalBytesToWrite = performWriteParams->totalBytesToWrite;
@@ -763,13 +767,14 @@ void performWrite(void *params) {
 }
 
 void Tensor::loadFromFile(Stream stream, Optional<uint32_t> crc) {
-    assert(crc.isEmpty());  // Need to solve for this. Not using GDS now so not solving it. ArchiveReader checks crc internally now.
+    THOR_THROW_IF_FALSE(
+        crc.isEmpty());  // Need to solve for this. Not using GDS now so not solving it. ArchiveReader checks crc internally now.
 
-    assert(!uninitialized());
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
-           getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(!fileName.empty());
-    assert(fileAccessRequirement != FileAccess::WRITE_ONLY);
+    THOR_THROW_IF_FALSE(!uninitialized());
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
+                        getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(!fileName.empty());
+    THOR_THROW_IF_FALSE(fileAccessRequirement != FileAccess::WRITE_ONLY);
 
     if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
         // Can't deallocate the bounce buffer in stream.enqueueHostFunction(), so this process is synchronous.
@@ -790,11 +795,11 @@ void Tensor::loadFromFile(Stream stream, Optional<uint32_t> crc) {
 }
 
 void Tensor::dumpToFile(Stream stream) {
-    assert(!uninitialized());
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
-           getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(!fileName.empty());
-    assert(fileAccessRequirement != FileAccess::READ_ONLY);
+    THOR_THROW_IF_FALSE(!uninitialized());
+    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
+                        getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(!fileName.empty());
+    THOR_THROW_IF_FALSE(fileAccessRequirement != FileAccess::READ_ONLY);
 
     if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
         // Since no gpu direct, allocate a cpu buffer, copy data into that buffer, copy data from buffer to gpu.
@@ -820,7 +825,7 @@ void Tensor::dumpToFile(Stream stream) {
 }
 
 TensorDescriptor Tensor::getDescriptor() const {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
 
     if (descriptorOverridden)
         return overriddenDescriptor;
@@ -828,27 +833,27 @@ TensorDescriptor Tensor::getDescriptor() const {
 }
 
 void Tensor::overrideDescriptor(TensorDescriptor overrideDescriptor) {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
 
     descriptorOverridden = true;
     overriddenDescriptor = overrideDescriptor;
 }
 
 void Tensor::clearDescriptorOverride() {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
     descriptorOverridden = false;
 }
 
 void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue) {
-    assert(!uninitialized());
-    assert(!source.uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
+    THOR_THROW_IF_FALSE(!source.uninitialized());
 
     if (source.getTensorId() == getTensorId() && source.getDescriptor().getDataType() == getDescriptor().getDataType()) {
         return;
     }
 
     cudaError_t cudaStatus;
-    assert(copyStream.isInitialized());
+    THOR_THROW_IF_FALSE(copyStream.isInitialized());
 
     // must have the same number of elements
     TensorDescriptor sourceDescriptor = source.getDescriptor();
@@ -859,7 +864,7 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
                dimensionsToString().c_str());
         fflush(stdout);
     }
-    assert(sourceDescriptor.getTotalNumElements() == destDescriptor.getTotalNumElements());
+    THOR_THROW_IF_FALSE(sourceDescriptor.getTotalNumElements() == destDescriptor.getTotalNumElements());
 
     int sourceDeviceNum = source.placement.getDeviceNum();
     int destDeviceNum = placement.getDeviceNum();
@@ -874,7 +879,7 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
     if (sourceDescriptor.getDataType() != destDescriptor.getDataType() && source.placement != placement) {
         if (sourceDescriptor.getArraySizeInBytes() <= destDescriptor.getArraySizeInBytes()) {
             if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU)
-                assert(placement.getDeviceNum() == copyStream.getGpuNum());
+                THOR_THROW_IF_FALSE(placement.getDeviceNum() == copyStream.getGpuNum());
 
             Tensor meWithSourceDataType = *this;
             meWithSourceDataType.overrideDescriptor(sourceDescriptor);
@@ -891,10 +896,10 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
 
             return;
         } else {
-            assert(!mustPreserveSourceValue);
+            THOR_THROW_IF_FALSE(!mustPreserveSourceValue);
 
             if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU)
-                assert(source.placement.getDeviceNum() == copyStream.getGpuNum());
+                THOR_THROW_IF_FALSE(source.placement.getDeviceNum() == copyStream.getGpuNum());
 
             TypeConverter::convertType(
                 source.mem,
@@ -923,7 +928,7 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
         if (sourceDescriptor.getDataType() == destDescriptor.getDataType()) {
             cudaStatus =
                 cudaMemcpyAsync(mem, source.mem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyHostToHost, copyStream.getStream());
-            assert(cudaStatus == cudaSuccess);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         } else {
             // Convert between data types on cpu.
             // Note that this may be an in-place conversion
@@ -941,14 +946,14 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
 
         cudaStatus =
             cudaMemcpyAsync(mem, source.mem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyHostToDevice, copyStream.getStream());
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
     } else if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
                placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         ScopedGpu scopedGpu(sourceDeviceNum);
 
         cudaStatus =
             cudaMemcpyAsync(mem, source.mem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyDeviceToHost, copyStream.getStream());
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
     } else if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
                placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         if (destDeviceNum == sourceDeviceNum) {
@@ -958,7 +963,7 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
             if (sourceDescriptor.getDataType() == destDescriptor.getDataType()) {
                 cudaStatus = cudaMemcpyAsync(
                     mem, source.mem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyDeviceToDevice, copyStream.getStream());
-                assert(cudaStatus == cudaSuccess);
+                THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             } else {
                 // Convert between data types on device.
                 // Note that this may be an in-place conversion
@@ -976,27 +981,27 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
 
             cudaStatus = cudaMemcpyPeerAsync(
                 mem, destDeviceNum, source.mem, sourceDeviceNum, sourceDescriptor.getArraySizeInBytes(), copyStream.getStream());
-            assert(cudaStatus == cudaSuccess);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         }
     } else {
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
-               placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
-               source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
+                            placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
+                            source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     }
 }
 
 void Tensor::memset(int8_t value, uint64_t numElements) {
     // On GPU this would require device synchronization so this is not supported.
-    assert(placement.getMemDevice() != TensorPlacement::MemDevices::GPU);
-    assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(placement.getMemDevice() != TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU);
 
     uint64_t numBytes;
     if (numElements == 0) {
         numBytes = getArraySizeInBytes();
     } else {
         if (getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN) {
-            assert(numElements % 8 == 0);
+            THOR_THROW_IF_FALSE(numElements % 8 == 0);
             numBytes = numElements / 8;
         } else {
             numBytes = numElements * (getArraySizeInBytes() / getTotalNumElements());
@@ -1014,11 +1019,11 @@ struct IdentityMatrixArgs : HostFunctionArgsBase {
 
 void fillCpuIdentityMatrixOnes(void *data) {
     HostFunctionArgsBase *baseArgs = static_cast<HostFunctionArgsBase *>(data);
-    assert(baseArgs != nullptr);
+    THOR_THROW_IF_FALSE(baseArgs != nullptr);
     IdentityMatrixArgs *args = dynamic_cast<IdentityMatrixArgs *>(baseArgs);
-    assert(args != nullptr);
+    THOR_THROW_IF_FALSE(args != nullptr);
 
-    assert(args->tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(args->tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     TensorDescriptor::DataType dataType = args->tensor.getDataType();
 
     uint64_t N = args->tensor.getDimensions()[0];
@@ -1034,7 +1039,7 @@ void fillCpuIdentityMatrixOnes(void *data) {
 }
 
 Tensor Tensor::identityMatrix(uint32_t N, TensorPlacement placement, TensorDescriptor::DataType dataType, Stream stream) {
-    assert(dataType == TensorDescriptor::DataType::FP16 || dataType == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(dataType == TensorDescriptor::DataType::FP16 || dataType == TensorDescriptor::DataType::FP32);
     Tensor tensor(placement, TensorDescriptor(dataType, {N, N}));
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
@@ -1076,9 +1081,9 @@ struct MemsetArgs : HostFunctionArgsBase {
 
 void callMemsetOnTensor(void *data) {
     HostFunctionArgsBase *baseArgs = static_cast<HostFunctionArgsBase *>(data);
-    assert(baseArgs != nullptr);
+    THOR_THROW_IF_FALSE(baseArgs != nullptr);
     MemsetArgs *args = dynamic_cast<MemsetArgs *>(baseArgs);
-    assert(args != nullptr);
+    THOR_THROW_IF_FALSE(args != nullptr);
     args->tensor.memset(args->value, args->numElements);
 }
 
@@ -1090,7 +1095,7 @@ void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
         } else {
             // If you need to set part of the last packed boolean to 0, you will need 2 calls to memset, one for zeros one for last value.
             if (getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN) {
-                assert(numElements % 8 == 0);
+                THOR_THROW_IF_FALSE(numElements % 8 == 0);
                 numBytes = numElements / 8;
             } else {
                 numBytes = numElements * (getArraySizeInBytes() / getTotalNumElements());
@@ -1100,7 +1105,7 @@ void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
         ScopedGpu scopedGpu(placement.getDeviceNum());
         cudaError_t cudaStatus;
         cudaStatus = cudaMemsetAsync(mem, value, numBytes, stream);
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
     } else {
         std::unique_ptr<HostFunctionArgsBase> args(new MemsetArgs(*this, value, numElements));
         stream.enqueueHostFunction(callMemsetOnTensor, std::move(args));
@@ -1128,11 +1133,11 @@ struct FillRandomArgs : HostFunctionArgsBase {
 
 void fillCpuRandom(void *data) {
     HostFunctionArgsBase *baseArgs = static_cast<HostFunctionArgsBase *>(data);
-    assert(baseArgs != nullptr);
+    THOR_THROW_IF_FALSE(baseArgs != nullptr);
     FillRandomArgs *args = dynamic_cast<FillRandomArgs *>(baseArgs);
-    assert(args != nullptr);
+    THOR_THROW_IF_FALSE(args != nullptr);
 
-    assert(args->tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(args->tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     TensorDescriptor::DataType dataType = args->tensor.getDataType();
 
     Tensor tensor = args->tensor;
@@ -1484,9 +1489,9 @@ struct CpuFillParams : HostFunctionArgsBase {
 
 void fillValue(void *params) {
     HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
-    assert(baseParams != nullptr);
+    THOR_THROW_IF_FALSE(baseParams != nullptr);
     CpuFillParams *cpuFillParams = dynamic_cast<CpuFillParams *>(baseParams);
-    assert(cpuFillParams != nullptr);
+    THOR_THROW_IF_FALSE(cpuFillParams != nullptr);
 
     uint64_t numElements = cpuFillParams->tensor.getTotalNumElements();
     const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
@@ -1665,7 +1670,7 @@ void Tensor::fill(double value, Stream stream) {
             uint64_t numPackedBytes = (getTotalNumElements() + 7) / 8;
             launchFillValueGpuKernel<uint8_t>(packedValue, (uint8_t *)getMemPtr(), numPackedBytes, getPlacement().getDeviceNum(), stream);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 }
@@ -1674,7 +1679,7 @@ Tensor Tensor::transposeMatrix(Stream stream) {
     vector<uint64_t> dimensions = getDimensions();
     // Generally the transpose of a higher order tensor would be any permutation of the tensor's dimensions, in that case the particular
     // permutation would also need to be specified. I'm not doing that now and unless some need arises I probably won't implement that.
-    assert(dimensions.size() == 2);
+    THOR_THROW_IF_FALSE(dimensions.size() == 2);
     vector<uint64_t> transposedDimensions;
     transposedDimensions.push_back(dimensions[1]);
     transposedDimensions.push_back(dimensions[0]);
@@ -1685,7 +1690,7 @@ Tensor Tensor::transposeMatrix(Stream stream) {
     } else if (getDataType() == TensorDescriptor::DataType::FP32) {
         matrixTranspose((float *)transposedTensor.getMemPtr(), (float *)getMemPtr(), dimensions[0], dimensions[1], stream);
     } else {
-        assert(false);  // TODO
+        THOR_UNREACHABLE();  // TODO
     }
 
     return transposedTensor;
@@ -1695,15 +1700,15 @@ Tensor Tensor::transposeMatrix(Stream stream) {
 //     vector<uint64_t> dimensions = getDimensions();
 //     // Generally the transpose of a higher order tensor would be any permutation of the tensor's dimensions, in that case the particular
 //     // permutation would also need to be specified. I'm not doing that now and unless some need arises I probably won't implement that.
-//     assert(dimensions.size() == 2);
-//     assert(dimensions[0] == dimensions[1]);
+//     THOR_THROW_IF_FALSE(dimensions.size() == 2);
+//     THOR_THROW_IF_FALSE(dimensions[0] == dimensions[1]);
 //
 //     if (getDataType() == TensorDescriptor::DataType::FP16) {
 //         matrixTransposeSquare((half *)getMemPtr(), (half *)getMemPtr(), dimensions[0], stream);
 //     } else if (getDataType() == TensorDescriptor::DataType::FP32) {
 //         matrixTransposeSquare((float *)getMemPtr(), (float *)getMemPtr(), dimensions[0], stream);
 //     } else {
-//         assert(false);  // TODO
+//         THOR_UNREACHABLE();  // TODO
 //     }
 // }
 

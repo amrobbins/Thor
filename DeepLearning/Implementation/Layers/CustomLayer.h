@@ -15,7 +15,7 @@
 namespace ThorImplementation {
 class CustomLayer : public TrainableLayer {
    public:
-    virtual ~CustomLayer() = default;
+    ~CustomLayer() override = default;
 
     // Backward-compatible single-input single-output form.
     CustomLayer(DynamicExpression expr,

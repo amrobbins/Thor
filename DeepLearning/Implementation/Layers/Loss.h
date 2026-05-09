@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/Common/Optional.h"
 
@@ -32,20 +34,20 @@ namespace ThorImplementation {
 class Loss : public Layer {
    public:
     Loss(TensorDescriptor::DataType lossDataType) {
-        assert(lossDataType == TensorDescriptor::DataType::FP16 || lossDataType == TensorDescriptor::DataType::FP32);
+        THOR_THROW_IF_FALSE(lossDataType == TensorDescriptor::DataType::FP16 || lossDataType == TensorDescriptor::DataType::FP32);
         this->lossDataType = lossDataType;
     }
 
     // Note: featureInput is guaranteed to be connected before createFeatureOutputTensor() is called.
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isPresent());
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         return featureInput.get().clone(lossDataType);
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
-        assert(!compiled);
+    void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
+        THOR_THROW_IF_FALSE(!compiled);
 
-        assert(this->nextLayer.isEmpty());
+        THOR_THROW_IF_FALSE(this->nextLayer.isEmpty());
         this->nextLayer = nextLayer;
         if (nextLayer->hasFeatureInput())
             featureOutput = createFeatureOutputTensor();
@@ -61,14 +63,14 @@ class Loss : public Layer {
     }
 
     // The feature input to this layer is the likelihood predictions per batch item per classification class
-    virtual Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) {
+    Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) override {
         if (connectionType == (int)ConnectionType::FORWARD_BACKWARD) {
             return connectToPredictionsInputLayer(previousLayer, featureInput, stream, backPropagateError);
         } else if (connectionType == (int)ConnectionType::LABELS) {
             return connectToLabelsInputLayer(previousLayer, featureInput, stream);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 
@@ -76,13 +78,13 @@ class Loss : public Layer {
                                                             Optional<Tensor> featureInput,
                                                             Stream stream,
                                                             bool backPropagateError) {
-        assert(featureInput.isPresent());
-        assert(featureInput.get().getDescriptor().getDimensions().size() >= 1);
-        assert(this->featureInput.isEmpty());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions().size() >= 1);
+        THOR_THROW_IF_FALSE(this->featureInput.isEmpty());
 
         if (labelsInput.isPresent()) {
-            assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-            assert(featureInput.get().getPlacement() == labelsInput.get().getPlacement());
+            THOR_THROW_IF_FALSE(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            THOR_THROW_IF_FALSE(featureInput.get().getPlacement() == labelsInput.get().getPlacement());
         }
 
         // Allocates this->featureInput and this->errorOutput
@@ -92,13 +94,13 @@ class Loss : public Layer {
     }
 
     virtual Optional<Tensor> connectToLabelsInputLayer(Layer *labelsLayer, Optional<Tensor> labels, Stream labelsStream) {
-        assert(this->labelsInput.isEmpty());
+        THOR_THROW_IF_FALSE(this->labelsInput.isEmpty());
 
-        assert(labels.isPresent());
+        THOR_THROW_IF_FALSE(labels.isPresent());
 
         if (this->featureInput.isPresent()) {
-            assert(this->featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-            assert(this->featureInput.get().getPlacement() == labels.get().getPlacement());
+            THOR_THROW_IF_FALSE(this->featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            THOR_THROW_IF_FALSE(this->featureInput.get().getPlacement() == labels.get().getPlacement());
         }
 
         this->labelsInput = labels;
@@ -108,28 +110,28 @@ class Loss : public Layer {
         return Optional<Tensor>::empty();
     }
 
-    virtual ~Loss() {}
+    ~Loss() override {}
 
-    virtual void initialize() {
+    void initialize() override {
         Layer::initialize();
         featureInputReceived = false;
         labelsReceived = false;
     }
 
-    virtual void forward(Optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) {
-        assert(running);
+    void forward(Optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override {
+        THOR_THROW_IF_FALSE(running);
         if (!isInferenceOnly()) {
-            assert(labelsStream.isInitialized());
-            assert(labelsInput.isPresent());
-            assert(errorOutput.isPresent());
-            assert(errorOutput.get().isInitialized());
+            THOR_THROW_IF_FALSE(labelsStream.isInitialized());
+            THOR_THROW_IF_FALSE(labelsInput.isPresent());
+            THOR_THROW_IF_FALSE(errorOutput.isPresent());
+            THOR_THROW_IF_FALSE(errorOutput.get().isInitialized());
         }
         if (labelsStream.isInitialized()) {
-            assert(labelsInput.isPresent());
-            assert(labelsInput.get().isInitialized());
+            THOR_THROW_IF_FALSE(labelsInput.isPresent());
+            THOR_THROW_IF_FALSE(labelsInput.get().isInitialized());
         }
-        assert(featureOutput.isPresent());
-        assert(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureOutput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
 
         // After all inputs have been received an empty input tensor is sent to indicate
         // that the layer is ready to perform the forward pass.
@@ -139,11 +141,11 @@ class Loss : public Layer {
             else if (inputTensor.get() == labelsInput.get())
                 forwardLabels(inputTensor, validationPass);
             else
-                assert(false);
+                THOR_UNREACHABLE();
         } else {
-            assert(inputTensor.isEmpty());
-            assert(featureInputReceived);
-            assert(labelsReceived);
+            THOR_THROW_IF_FALSE(inputTensor.isEmpty());
+            THOR_THROW_IF_FALSE(featureInputReceived);
+            THOR_THROW_IF_FALSE(labelsReceived);
             featureInputReceived = false;
             labelsReceived = false;
 
@@ -155,31 +157,31 @@ class Loss : public Layer {
     }
 
     virtual void forwardFeatures(Tensor featureInput, bool validationPass) {
-        assert(this->featureInput.get() == featureInput);
+        THOR_THROW_IF_FALSE(this->featureInput.get() == featureInput);
 
-        assert(featureInputReceived == false);
+        THOR_THROW_IF_FALSE(featureInputReceived == false);
         featureInputReceived = true;
 
         advanceDataIfReady(validationPass);
     }
 
     virtual void forwardLabels(Tensor labelsInput, bool validationPass) {
-        assert(this->labelsInput.get() == labelsInput);
+        THOR_THROW_IF_FALSE(this->labelsInput.get() == labelsInput);
 
-        assert(labelsReceived == false);
+        THOR_THROW_IF_FALSE(labelsReceived == false);
         labelsReceived = true;
 
         advanceDataIfReady(validationPass);
     }
 
-    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {
-        assert(running);
-        assert(labelsInput.isPresent());
-        assert(labelsInput.get().isInitialized());
-        assert(errorOutput.isPresent());
-        assert(errorOutput.get().isInitialized());
-        assert(labelsStream.isInitialized());
-        assert(errorInput.isEmpty());
+    void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {
+        THOR_THROW_IF_FALSE(running);
+        THOR_THROW_IF_FALSE(labelsInput.isPresent());
+        THOR_THROW_IF_FALSE(labelsInput.get().isInitialized());
+        THOR_THROW_IF_FALSE(errorOutput.isPresent());
+        THOR_THROW_IF_FALSE(errorOutput.get().isInitialized());
+        THOR_THROW_IF_FALSE(labelsStream.isInitialized());
+        THOR_THROW_IF_FALSE(errorInput.isEmpty());
 
         if (errorOutput.isPresent()) {
             backProp(labelsInput, featureInput, errorOutput, stream);
@@ -194,18 +196,18 @@ class Loss : public Layer {
         previousLayer.get()->backward(errorOutput);
     }
 
-    virtual void ensureNoDeviceCrossing() {
+    void ensureNoDeviceCrossing() override {
         if (featureInput.isPresent()) {
             if (labelsInput.isPresent())
-                assert(labelsInput.get().getPlacement() == featureInput.get().getPlacement());
+                THOR_THROW_IF_FALSE(labelsInput.get().getPlacement() == featureInput.get().getPlacement());
             if (featureOutput.isPresent())
-                assert(featureOutput.get().getPlacement() == featureInput.get().getPlacement());
+                THOR_THROW_IF_FALSE(featureOutput.get().getPlacement() == featureInput.get().getPlacement());
             if (errorOutput.isPresent())
-                assert(errorOutput.get().getPlacement() == featureInput.get().getPlacement());
+                THOR_THROW_IF_FALSE(errorOutput.get().getPlacement() == featureInput.get().getPlacement());
         }
     }
 
-    virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {}
+    void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) override {}
 
     virtual Optional<Tensor> getLabelsInput() { return labelsInput; }
     virtual Optional<Tensor> getPredictionsInput() { return getFeatureInput(); }
@@ -245,7 +247,7 @@ class Loss : public Layer {
             return;
 
         // Initiate back propagation
-        assert(previousLayer.isPresent());
+        THOR_THROW_IF_FALSE(previousLayer.isPresent());
         backward(Optional<Tensor>().empty());
     }
 };

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Activation/Activation.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Activation/SoftSign.h"
@@ -8,30 +10,30 @@ namespace ThorImplementation {
 
 class SoftSign : public Activation {
    public:
-    virtual ~SoftSign() {}
+    ~SoftSign() override {}
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isPresent());
+    Optional<Tensor> createFeatureOutputTensor() override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         return featureInput.get().clone();
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(inputTensor.isPresent());
-        assert(outputTensor.isPresent());
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(inputTensor.isPresent());
+        THOR_THROW_IF_FALSE(outputTensor.isPresent());
         TensorPlacement placement = inputTensor.get().getPlacement();
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         launchSoftSign((half*)outputTensor.get().getMemPtr(),
                        (half*)inputTensor.get().getMemPtr(),
                        inputTensor.get().getDescriptor().getTotalNumElements(),
                        stream);
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-        assert(dataIn.isPresent());
-        assert(errorIn.isPresent());
-        assert(errorOut.isPresent());
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
+        THOR_THROW_IF_FALSE(dataIn.isPresent());
+        THOR_THROW_IF_FALSE(errorIn.isPresent());
+        THOR_THROW_IF_FALSE(errorOut.isPresent());
         TensorPlacement placement = errorOut.get().getPlacement();
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         launchSoftSignBackward((half*)errorOut.get().getMemPtr(),
                                (half*)dataIn.get().getMemPtr(),
                                (half*)errorIn.get().getMemPtr(),

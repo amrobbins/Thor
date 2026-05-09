@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
 namespace ThorImplementation {
@@ -25,14 +27,14 @@ class Metric : public Layer {
    public:
     Metric() {}
 
-    virtual Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) {
+    Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) override {
         if (connectionType == (int)ConnectionType::FORWARD) {
             return connectToFeatureInputLayer(previousLayer, featureInput, stream, backPropagateError);
         } else if (connectionType == (int)ConnectionType::LABELS) {
             return connectToLabelsInputLayer(previousLayer, featureInput, stream);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 
@@ -40,14 +42,14 @@ class Metric : public Layer {
                                                         Optional<Tensor> featureInput,
                                                         Stream stream,
                                                         bool backPropagateError) {
-        assert(featureInput.isPresent());
-        assert(featureInput.get().getDescriptor().getDimensions().size() >= 2);
-        assert(this->featureInput.isEmpty());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions().size() >= 2);
+        THOR_THROW_IF_FALSE(this->featureInput.isEmpty());
 
         if (labelsInput.isPresent()) {
-            assert(featureInput.get().getDescriptor().getDimensions() == labelsInput.get().getDescriptor().getDimensions());
-            assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-            assert(featureInput.get().getPlacement() == labelsInput.get().getPlacement());
+            THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions() == labelsInput.get().getDescriptor().getDimensions());
+            THOR_THROW_IF_FALSE(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            THOR_THROW_IF_FALSE(featureInput.get().getPlacement() == labelsInput.get().getPlacement());
         }
 
         // Allocates this->featureInput and sets this->errorOutput to empty
@@ -58,13 +60,13 @@ class Metric : public Layer {
     }
 
     virtual Optional<Tensor> connectToLabelsInputLayer(Layer *labelsLayer, Optional<Tensor> labels, Stream labelsStream) {
-        assert(this->labelsInput.isEmpty());
+        THOR_THROW_IF_FALSE(this->labelsInput.isEmpty());
 
-        assert(labels.isPresent());
+        THOR_THROW_IF_FALSE(labels.isPresent());
 
         if (this->featureInput.isPresent()) {
-            assert(this->featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-            assert(this->featureInput.get().getPlacement() == labels.get().getPlacement());
+            THOR_THROW_IF_FALSE(this->featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            THOR_THROW_IF_FALSE(this->featureInput.get().getPlacement() == labels.get().getPlacement());
         }
 
         this->labelsInput = labels;
@@ -74,72 +76,72 @@ class Metric : public Layer {
         return Optional<Tensor>::empty();
     }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
+    Optional<Tensor> createFeatureOutputTensor() override {
         if (isInferenceOnly()) {
             return Optional<Tensor>::empty();
         } else {
-            assert(featureInput.isPresent());
+            THOR_THROW_IF_FALSE(featureInput.isPresent());
             return Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
         }
     }
 
     virtual std::string toDisplayString(Tensor metric_h) = 0;
 
-    virtual ~Metric() {}
+    ~Metric() override {}
 
-    virtual void initialize() {
+    void initialize() override {
         Layer::initialize();
         featureInputReceived = false;
         labelsReceived = false;
     }
 
-    virtual void forward(Optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) {
-        assert(running);
+    void forward(Optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override {
+        THOR_THROW_IF_FALSE(running);
         if (isInferenceOnly())
             return;
 
-        assert(labelsStream.isInitialized());
-        assert(labelsInput.isPresent());
-        assert(labelsStream.isInitialized());
-        assert(labelsInput.get().isInitialized());
-        assert(featureOutput.isPresent());
-        assert(featureInput.isPresent());
-        assert(inputTensor.isPresent());
+        THOR_THROW_IF_FALSE(labelsStream.isInitialized());
+        THOR_THROW_IF_FALSE(labelsInput.isPresent());
+        THOR_THROW_IF_FALSE(labelsStream.isInitialized());
+        THOR_THROW_IF_FALSE(labelsInput.get().isInitialized());
+        THOR_THROW_IF_FALSE(featureOutput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(inputTensor.isPresent());
 
         if (inputTensor.get() == featureInput.get())
             forwardFeatures(inputTensor, validationPass);
         else if (inputTensor.get() == labelsInput.get())
             forwardLabels(inputTensor, validationPass);
         else
-            assert(false);
+            THOR_UNREACHABLE();
     }
 
     virtual void forwardFeatures(Tensor featureInput, bool validationPass) {
-        assert(this->featureInput.get() == featureInput);
+        THOR_THROW_IF_FALSE(this->featureInput.get() == featureInput);
 
-        assert(featureInputReceived == false);
+        THOR_THROW_IF_FALSE(featureInputReceived == false);
         featureInputReceived = true;
 
         advanceDataIfReady(validationPass);
     }
 
     virtual void forwardLabels(Tensor labelsInput, bool validationPass) {
-        assert(this->labelsInput.get() == labelsInput);
+        THOR_THROW_IF_FALSE(this->labelsInput.get() == labelsInput);
 
-        assert(labelsReceived == false);
+        THOR_THROW_IF_FALSE(labelsReceived == false);
         labelsReceived = true;
 
         advanceDataIfReady(validationPass);
     }
 
-    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) { assert(false); }
+    void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override { THOR_UNREACHABLE(); }
 
-    virtual void ensureNoDeviceCrossing() {
+    void ensureNoDeviceCrossing() override {
         if (featureInput.isPresent()) {
             if (labelsInput.isPresent())
-                assert(labelsInput.get().getPlacement() == featureInput.get().getPlacement());
+                THOR_THROW_IF_FALSE(labelsInput.get().getPlacement() == featureInput.get().getPlacement());
             if (featureOutput.isPresent())
-                assert(featureOutput.get().getPlacement() == featureInput.get().getPlacement());
+                THOR_THROW_IF_FALSE(featureOutput.get().getPlacement() == featureInput.get().getPlacement());
         }
     }
 
@@ -156,7 +158,7 @@ class Metric : public Layer {
     bool featureInputReceived;
     bool labelsReceived;
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
         // Metrics use computeMetric(...) instead, due to different parameter requirements.
     }
 
@@ -177,7 +179,7 @@ class Metric : public Layer {
             nextLayer.get()->forward(featureOutput, validationPass);
     }
 
-    virtual void backProp(Optional<Tensor>, Optional<Tensor>, Optional<Tensor>, Stream) { assert(false); }
+    void backProp(Optional<Tensor>, Optional<Tensor>, Optional<Tensor>, Stream) override { THOR_UNREACHABLE(); }
 };
 
 }  // namespace ThorImplementation

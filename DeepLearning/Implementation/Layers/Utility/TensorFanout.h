@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
 #include <unordered_set>
@@ -12,9 +14,9 @@ class TensorFanout : public MultiConnectionLayer {
    public:
     TensorFanout() {}
 
-    virtual ~TensorFanout() {}
+    ~TensorFanout() override {}
 
-    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
+    void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
         // If this is not the first connection
         if (errorInputs.size() == streams.size()) {
             streams.emplace_back(streams[0].getGpuNum());
@@ -25,14 +27,14 @@ class TensorFanout : public MultiConnectionLayer {
         nextLayers.push_back(nextLayer);
     }
 
-    virtual Optional<Tensor> connectToPreviousLayer(
-        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
+    Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override {
         // This special case layer can only be connected to on a single input feature tensor
-        assert(featureInputs.empty());
-        assert(featureInput.isPresent());
-        assert(errorOutputs.empty());
-        assert(streams.empty());
-        assert(previousLayers.empty());
+        THOR_THROW_IF_FALSE(featureInputs.empty());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(errorOutputs.empty());
+        THOR_THROW_IF_FALSE(streams.empty());
+        THOR_THROW_IF_FALSE(previousLayers.empty());
         featureInputs.push_back(featureInput);
         featureOutputs.push_back(featureInput);
         if (backPropagateError && !isInferenceOnly())
@@ -45,19 +47,19 @@ class TensorFanout : public MultiConnectionLayer {
         return errorOutputs[0];
     }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() { return Optional<Tensor>::empty(); }
+    Optional<Tensor> createFeatureOutputTensor() override { return Optional<Tensor>::empty(); }
 
     // allocate anything needed for execution, choose optimal kernels, etc.
-    virtual void compileImpl() {
+    void compileImpl() override {
         MultiConnectionLayer::compileImpl();
-        assert(featureInputs.size() == 1);
-        assert(featureInputs[0].isPresent());
+        THOR_THROW_IF_FALSE(featureInputs.size() == 1);
+        THOR_THROW_IF_FALSE(featureInputs[0].isPresent());
         TensorPlacement placement = featureInputs[0].get().getPlacement();
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].get().getPlacement().getDeviceNum());
         cudaError_t cudaStatus;
         cudaStatus = cudaMalloc(&errorInputArray_d, numPresentTensors(errorInputs) * sizeof(half *));
-        assert(cudaStatus == cudaSuccess);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
 
         if (numPresentTensors(errorInputs) > 0) {
             half **errorInputArray = new half *[numPresentTensors(errorInputs)];
@@ -71,7 +73,7 @@ class TensorFanout : public MultiConnectionLayer {
             }
             cudaStatus =
                 cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(half *), cudaMemcpyHostToDevice);
-            assert(cudaStatus == cudaSuccess);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             delete[] errorInputArray;
         }
 
@@ -81,20 +83,20 @@ class TensorFanout : public MultiConnectionLayer {
         // The third option is that there are multiple present errorInputs, in that case they will be summed together and passed as errorOut
         if (numPresentTensors(errorInputs) == 1 && numPresentTensors(errorOutputs) == 1) {
             // Fuse
-            assert(previousLayers[0].isPresent());
+            THOR_THROW_IF_FALSE(previousLayers[0].isPresent());
             previousLayers[0].get()->replaceErrorInput(errorOutputs[0], getFirstPresentTensor(errorInputs));
             errorOutputs[0] = getFirstPresentTensor(errorInputs);
         } else if (numPresentTensors(errorInputs) == 0 && numPresentTensors(errorOutputs) == 1) {
             // Prune
             Optional<Tensor> newErrorOutput = Optional<Tensor>::empty();
-            assert(previousLayers[0].isPresent());
+            THOR_THROW_IF_FALSE(previousLayers[0].isPresent());
             previousLayers[0].get()->replaceErrorInput(errorOutputs[0], newErrorOutput);
             errorOutputs[0] = newErrorOutput;
         }
     }
 
-    virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
-        assert(oldErrorInput.isPresent());
+    void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) override {
+        THOR_THROW_IF_FALSE(oldErrorInput.isPresent());
         bool replacementHappend = false;
         for (unsigned int i = 0; i < errorInputs.size(); ++i) {
             if (errorInputs[i].isEmpty() || errorInputs[i].get() != oldErrorInput.get())
@@ -106,30 +108,30 @@ class TensorFanout : public MultiConnectionLayer {
             // 2. There are no populated errorInputs to tensorFanout, in this case the path can be pruned.
             errorInputs[i] = newErrorInput;
         }
-        assert(replacementHappend);
+        THOR_THROW_IF_FALSE(replacementHappend);
     }
 
     // release any resources that are used for execution and need to be released
-    virtual void cleanup() {
-        assert(featureInputs.size() == 1);
-        assert(featureInputs[0].isPresent());
+    void cleanup() override {
+        THOR_THROW_IF_FALSE(featureInputs.size() == 1);
+        THOR_THROW_IF_FALSE(featureInputs[0].isPresent());
         TensorPlacement placement = featureInputs[0].get().getPlacement();
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].get().getPlacement().getDeviceNum());
         if (errorInputArray_d != nullptr) {
             cudaError_t cudaStatus = cudaFree(errorInputArray_d);
-            assert(cudaStatus == cudaSuccess);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
         }
         errorInputArray_d = nullptr;
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) {}
-    virtual void backProp(
-        Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) {}
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) override {}
+    void backProp(
+        Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) override {}
 
-    virtual void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
-        assert(featureInput.isPresent());
-        assert(featureInput.get() == featureInputs[0]);
+    void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.get() == featureInputs[0]);
 
         // Synchronize all streams at the point at which inputTensor is populated.
         Event inputReadyEvent = streams[0].putEvent();
@@ -146,7 +148,7 @@ class TensorFanout : public MultiConnectionLayer {
         }
     }
 
-    virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {
+    void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {
         if (errorOutputs[0].isEmpty())
             return;
 
@@ -168,7 +170,7 @@ class TensorFanout : public MultiConnectionLayer {
             std::unique_lock<std::mutex> lck(mtx);
 
             if (errorInput.isPresent()) {
-                assert(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
+                THOR_THROW_IF_FALSE(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
                 stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
             }
             if (!stillWaitingForErrorInputTensors.empty())
@@ -190,7 +192,7 @@ class TensorFanout : public MultiConnectionLayer {
         previousLayers[0].get()->backward(errorOutputs[0]);
     }
 
-    virtual uint32_t getDownStreamFanoutMultiplier() {
+    uint32_t getDownStreamFanoutMultiplier() override {
         uint32_t multiplier = 0;
         for (uint32_t i = 0; i < nextLayers.size(); ++i) {
             if (nextLayers[i].isPresent()) {

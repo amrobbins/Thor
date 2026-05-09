@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 
+#include "DeepLearning/Implementation/ThorError.h"
 namespace ThorImplementation {
 
 namespace {
@@ -111,7 +112,7 @@ DynamicExpression Convolution3d::buildExpression(bool hasBias,
 
         const Tensor& featureInputTensor = inputs.at("feature_input");
         const Tensor& wTensor = inputs.at("weights");
-        assert(wTensor.getPlacement() == placement);
+        THOR_THROW_IF_FALSE(wTensor.getPlacement() == placement);
 
         if (featureInputTensor.getDimensions().size() != 5) {
             throw std::runtime_error("Convolution3d expects feature_input to be 5D NCDHW.");
@@ -122,7 +123,7 @@ DynamicExpression Convolution3d::buildExpression(bool hasBias,
         if (featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
             throw std::runtime_error("Convolution3d input channels must match weight channels.");
         }
-        assert(featureInputTensor.getPlacement() == placement);
+        THOR_THROW_IF_FALSE(featureInputTensor.getPlacement() == placement);
 
         const uint64_t expectedOutputDepth =
             (featureInputTensor.getDimensions()[2] + 2 * padD - wTensor.getDimensions()[2]) / strideD + 1;
@@ -143,7 +144,7 @@ DynamicExpression Convolution3d::buildExpression(bool hasBias,
                 featureOutputTensor.getDimensions()[4] != expectedOutputCols) {
                 throw std::runtime_error("Convolution3d feature_output shape does not match the implied convolution output shape.");
             }
-            assert(featureOutputTensor.getPlacement() == placement);
+            THOR_THROW_IF_FALSE(featureOutputTensor.getPlacement() == placement);
         }
 
         const DataType weightsDType = wTensor.getDescriptor().getDataType();

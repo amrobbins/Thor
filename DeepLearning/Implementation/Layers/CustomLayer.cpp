@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace std;
 
 namespace ThorImplementation {
@@ -103,12 +104,12 @@ void CustomLayer::validatePortNames(const std::vector<std::string>& names, const
 }
 
 uint32_t CustomLayer::inputFlatIndex(uint32_t applicationIndex, uint32_t inputPortIndex) const {
-    assert(inputPortIndex < inputNames.size());
+    THOR_THROW_IF_FALSE(inputPortIndex < inputNames.size());
     return applicationIndex * inputNames.size() + inputPortIndex;
 }
 
 uint32_t CustomLayer::outputFlatIndex(uint32_t applicationIndex, uint32_t outputPortIndex) const {
-    assert(outputPortIndex < outputNames.size());
+    THOR_THROW_IF_FALSE(outputPortIndex < outputNames.size());
     return applicationIndex * outputNames.size() + outputPortIndex;
 }
 
@@ -144,13 +145,13 @@ uint32_t CustomLayer::primaryInputFlatIndex(uint32_t applicationIndex) const {
 
 Stream& CustomLayer::computeStream(uint32_t applicationIndex) {
     const uint32_t flat = primaryInputFlatIndex(applicationIndex);
-    assert(flat < streams.size());
+    THOR_THROW_IF_FALSE(flat < streams.size());
     return streams[flat];
 }
 
 const Stream& CustomLayer::computeStream(uint32_t applicationIndex) const {
     const uint32_t flat = primaryInputFlatIndex(applicationIndex);
-    assert(flat < streams.size());
+    THOR_THROW_IF_FALSE(flat < streams.size());
     return streams[flat];
 }
 
@@ -233,7 +234,7 @@ void CustomLayer::requireApplicationInputInterfaceConnected(uint32_t application
 }
 
 void CustomLayer::clearForwardArrivalBookkeeping(uint32_t applicationIndex) {
-    assert(applicationIndex < applications.size());
+    THOR_THROW_IF_FALSE(applicationIndex < applications.size());
     ApplicationState& app = applications[applicationIndex];
     app.allForwardInputTensorIds.clear();
     app.stillWaitingForForwardInputTensorIds.clear();
@@ -255,7 +256,7 @@ void CustomLayer::clearForwardArrivalBookkeeping() {
 }
 
 void CustomLayer::clearBackwardArrivalBookkeeping(uint32_t applicationIndex) {
-    assert(applicationIndex < applications.size());
+    THOR_THROW_IF_FALSE(applicationIndex < applications.size());
     ApplicationState& app = applications[applicationIndex];
     app.allBackwardErrorInputTensorIds.clear();
     app.stillWaitingForBackwardErrorInputTensorIds.clear();
@@ -365,7 +366,7 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t ap
         }
 
         Optional<Tensor> paramStorage = param->getStorage();
-        assert(paramStorage.isPresent());
+        THOR_THROW_IF_FALSE(paramStorage.isPresent());
         inputs[param->getName()] = paramStorage.get();
     }
 
@@ -477,12 +478,12 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildBackwardInputGradOutputs(
 }
 
 std::string CustomLayer::errorInputNameForOutput(uint32_t outputPortIndex) const {
-    assert(outputPortIndex < outputNames.size());
+    THOR_THROW_IF_FALSE(outputPortIndex < outputNames.size());
     return "__grad_" + outputNames[outputPortIndex];
 }
 
 std::string CustomLayer::errorOutputNameForInput(uint32_t inputPortIndex) const {
-    assert(inputPortIndex < inputNames.size());
+    THOR_THROW_IF_FALSE(inputPortIndex < inputNames.size());
     return inputNames[inputPortIndex] + "_grad";
 }
 
@@ -553,7 +554,7 @@ Optional<Tensor> CustomLayer::inferFeatureOutputTensor(uint32_t applicationIndex
 void CustomLayer::compileImpl() {
     TrainableLayer::compileImpl();
 
-    assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     if (applications.empty()) {
         throw runtime_error("CustomLayer must have at least one connected input interface.");
@@ -700,10 +701,10 @@ void CustomLayer::compileImpl() {
                 continue;
             }
 
-            assert(parameter->hasOptimizer());
+            THOR_THROW_IF_FALSE(parameter->hasOptimizer());
             const shared_ptr<Optimizer>& parameterOptimizer = parameter->getOptimizer();
-            assert(parameterOptimizer != nullptr);
-            assert(parameterOptimizer->getWeightsGradient().isPresent());
+            THOR_THROW_IF_FALSE(parameterOptimizer != nullptr);
+            THOR_THROW_IF_FALSE(parameterOptimizer->getWeightsGradient().isPresent());
 
             const std::string gradName = parameter->getName() + "_grad";
             Tensor gradientTensor = parameterOptimizer->getWeightsGradient().get();
@@ -714,7 +715,7 @@ void CustomLayer::compileImpl() {
         }
 
         if (!allTrainableParameterTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
-            assert(gradientUpdateStream.isPresent());
+            THOR_THROW_IF_FALSE(gradientUpdateStream.isPresent());
 
             PreparedDynamicExpression gradientPrepared =
                 layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, gradientUpdateStream.get());
@@ -754,7 +755,7 @@ Optional<Tensor> CustomLayer::createFeatureOutputTensor() {
         throw runtime_error("CustomLayer::createFeatureOutputTensor() without a connection type is only valid for single-output layers.");
     }
     Optional<Tensor> featureOutput = inferFeatureOutputTensor(0, 0);
-    assert(featureOutput.isPresent());
+    THOR_THROW_IF_FALSE(featureOutput.isPresent());
     return featureOutput;
 }
 
@@ -765,23 +766,23 @@ Optional<Tensor> CustomLayer::createErrorOutputTensor(bool backPropagateError, u
 
     DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
     const uint32_t flat = inputFlatIndex(decoded.applicationIndex, decoded.portIndex);
-    assert(flat < featureInputs.size());
-    assert(featureInputs[flat].isPresent());
+    THOR_THROW_IF_FALSE(flat < featureInputs.size());
+    THOR_THROW_IF_FALSE(featureInputs[flat].isPresent());
     return featureInputs[flat].get().clone();
 }
 
 Optional<Tensor> CustomLayer::connectToPreviousLayer(
     Layer* previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) {
-    assert(!compiled);
+    THOR_THROW_IF_FALSE(!compiled);
 
     const DecodedConnection decoded = decodeInputConnectionType(connectionType);
     ensureApplicationStorageAllocated(decoded.applicationIndex);
     const uint32_t flat = inputFlatIndex(decoded.applicationIndex, decoded.portIndex);
 
-    assert(featureInput.isPresent());
-    assert(previousLayers[flat].isEmpty());
-    assert(featureInputs[flat].isEmpty());
-    assert(errorOutputs[flat].isEmpty());
+    THOR_THROW_IF_FALSE(featureInput.isPresent());
+    THOR_THROW_IF_FALSE(previousLayers[flat].isEmpty());
+    THOR_THROW_IF_FALSE(featureInputs[flat].isEmpty());
+    THOR_THROW_IF_FALSE(errorOutputs[flat].isEmpty());
 
     previousLayers[flat] = previousLayer;
     featureInputs[flat] = featureInput;
@@ -795,7 +796,7 @@ Optional<Tensor> CustomLayer::connectToPreviousLayer(
 }
 
 void CustomLayer::connectToNextLayer(Layer* nextLayer, int driverConnectionType, int loaderConnectionType) {
-    assert(!compiled);
+    THOR_THROW_IF_FALSE(!compiled);
 
     const DecodedConnection decoded = decodeOutputConnectionType(driverConnectionType);
     ensureApplicationStorageAllocated(decoded.applicationIndex);
@@ -803,7 +804,7 @@ void CustomLayer::connectToNextLayer(Layer* nextLayer, int driverConnectionType,
 
     if (featureOutputs[flat].isEmpty()) {
         Optional<Tensor> outputTensor = inferFeatureOutputTensor(decoded.applicationIndex, decoded.portIndex);
-        assert(outputTensor.isPresent());
+        THOR_THROW_IF_FALSE(outputTensor.isPresent());
         featureOutputs[flat] = outputTensor;
         featureOutputsConnectedForPorts[flat] = outputTensor;
     }
@@ -836,7 +837,7 @@ void CustomLayer::pruneUpstreamErrorOutputsForApplication(uint32_t applicationIn
 }
 
 void CustomLayer::replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
-    assert(oldErrorInput.isPresent());
+    THOR_THROW_IF_FALSE(oldErrorInput.isPresent());
 
     bool replacementHappened = false;
     std::set<uint32_t> affectedApplications;
@@ -849,7 +850,7 @@ void CustomLayer::replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Ten
         affectedApplications.insert(flat / outputNames.size());
         replacementHappened = true;
     }
-    assert(replacementHappened);
+    THOR_THROW_IF_FALSE(replacementHappened);
 
     for (uint32_t applicationIndex : affectedApplications) {
         if (applicationHasAnyDownstreamBackprop(applicationIndex)) {
@@ -884,8 +885,8 @@ void CustomLayer::synchronizeComputeStreamForForwardInputs(uint32_t applicationI
 }
 
 void CustomLayer::forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize) {
-    assert(running);
-    assert(featureInput.isPresent());
+    THOR_THROW_IF_FALSE(running);
+    THOR_THROW_IF_FALSE(featureInput.isPresent());
 
     // If training was enabled or disabled, expression will need to be recompiled
     // because the set of gradients changed.
@@ -905,7 +906,7 @@ void CustomLayer::forward(Optional<Tensor> featureInput, bool validationPass, ui
             candidateApplications.insert(flat / inputNames.size());
         }
     }
-    assert(!candidateApplications.empty());
+    THOR_THROW_IF_FALSE(!candidateApplications.empty());
 
     if (isStartOfForward) {
         if (weightsAreUpToDateEvent.isPresent()) {
@@ -949,7 +950,7 @@ void CustomLayer::forward(Optional<Tensor> featureInput, bool validationPass, ui
 }
 
 void CustomLayer::backward(Optional<Tensor> errorInput, uint32_t batchSize) {
-    assert(running);
+    THOR_THROW_IF_FALSE(running);
 
     if (errorInput.isEmpty())
         return;
@@ -960,7 +961,7 @@ void CustomLayer::backward(Optional<Tensor> errorInput, uint32_t batchSize) {
             candidateApplications.insert(flat / outputNames.size());
         }
     }
-    assert(!candidateApplications.empty());
+    THOR_THROW_IF_FALSE(!candidateApplications.empty());
 
     if (isStartOfBackward) {
         clearBackwardArrivalBookkeeping();

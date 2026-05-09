@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include <assert.h>
 #include <string>
 
@@ -11,9 +13,9 @@ class TensorPlacement {
 
     TensorPlacement() { memDevice = MemDevices::INVALID; }
     explicit TensorPlacement(MemDevices memDevice, int deviceNum = 0) : memDevice(memDevice), deviceNum(deviceNum) {
-        assert(memDevice == MemDevices::CPU || memDevice == MemDevices::GPU);
+        THOR_THROW_IF_FALSE(memDevice == MemDevices::CPU || memDevice == MemDevices::GPU);
         if (memDevice == MemDevices::CPU)
-            assert(deviceNum == 0);
+            THOR_THROW_IF_FALSE(deviceNum == 0);
     }
 
     MemDevices getMemDevice() const { return memDevice; }
@@ -23,7 +25,7 @@ class TensorPlacement {
     bool operator!=(const TensorPlacement& rhs) const { return !((*this) == rhs); }
 
     std::string toString() {
-        assert(memDevice == MemDevices::CPU || memDevice == MemDevices::GPU);
+        THOR_THROW_IF_FALSE(memDevice == MemDevices::CPU || memDevice == MemDevices::GPU);
         std::string s;
         if (memDevice == MemDevices::CPU)
             return std::string("CPU");

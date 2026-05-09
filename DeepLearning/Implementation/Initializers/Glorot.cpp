@@ -1,10 +1,11 @@
 #include "Glorot.h"
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace std;
 
 namespace ThorImplementation {
 
-Glorot::Glorot(Mode mode) : mode(mode) { assert(mode == Mode::UNIFORM || mode == Mode::NORMAL); }
+Glorot::Glorot(Mode mode) : mode(mode) { THOR_THROW_IF_FALSE(mode == Mode::UNIFORM || mode == Mode::NORMAL); }
 
 void Glorot::initialize(Stream initStream) {
     if (mode == Mode::UNIFORM) {
@@ -25,7 +26,7 @@ void Glorot::initializeUniform(Stream initStream) {
     uint64_t maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
     if (numProcessors > maxDesiredProcessors)
         numProcessors = maxDesiredProcessors;
-    assert(numProcessors >= 1);
+    THOR_THROW_IF_FALSE(numProcessors >= 1);
     omp_set_num_threads(static_cast<int>(numProcessors));
     const uint64_t chunk = (totalNumWeights + (numProcessors - 1)) / numProcessors;
     omp_set_dynamic(0);
@@ -53,7 +54,7 @@ void Glorot::initializeUniform(Stream initStream) {
                 bufferMem[i] = value;
             }
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 
@@ -75,7 +76,7 @@ void Glorot::initializeNormal(Stream initStream) {
     uint64_t maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
     if (numProcessors > maxDesiredProcessors)
         numProcessors = maxDesiredProcessors;
-    assert(numProcessors >= 1);
+    THOR_THROW_IF_FALSE(numProcessors >= 1);
     const uint64_t chunk = (totalNumWeights + (numProcessors - 1)) / numProcessors;
     omp_set_dynamic(0);
 #pragma omp parallel num_threads(numProcessors)
@@ -98,7 +99,7 @@ void Glorot::initializeNormal(Stream initStream) {
                 bufferMem[i] = distribution(generator);
             }
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
     weights.copyFromAsync(buffer, initStream);

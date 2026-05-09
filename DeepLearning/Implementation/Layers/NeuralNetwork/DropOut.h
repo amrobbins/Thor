@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
@@ -18,13 +20,13 @@ namespace ThorImplementation {
 
 class DropOut : public Layer {
    public:
-    virtual ~DropOut() {}
+    ~DropOut() override {}
 
     void setTrainingMode(bool training) { this->training = training; }
 
     DropOut(float probabilityOfDroppingOut, bool training) {
-        assert(probabilityOfDroppingOut >= 0.0f);
-        assert(probabilityOfDroppingOut <= 1.0f);
+        THOR_THROW_IF_FALSE(probabilityOfDroppingOut >= 0.0f);
+        THOR_THROW_IF_FALSE(probabilityOfDroppingOut <= 1.0f);
         this->probabilityOfDroppingOut = probabilityOfDroppingOut;
         this->training = training;
         std::random_device rd;
@@ -32,7 +34,7 @@ class DropOut : public Layer {
     }
 
     void seed(uint64_t seed) {
-        assert(!compiled);
+        THOR_THROW_IF_FALSE(!compiled);
         this->randomSeed = seed;
     }
 
@@ -41,27 +43,27 @@ class DropOut : public Layer {
 
         cudnnTensorDescriptor_t descriptor = createCudnnTensorDescriptor(featureInputDimensions, dataType);
         cudnnStatus_t cudnnStatus = cudnnDropoutGetReserveSpaceSize(descriptor, &numBytes);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus = cudnnDestroyTensorDescriptor(descriptor);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         return numBytes;
     }
 
     static size_t getRandomStateSizeInBytes(cudnnHandle_t cudnnHandle) {
         size_t numBytes;
         cudnnStatus_t cudnnStatus = cudnnDropoutGetStatesSize(cudnnHandle, &numBytes);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         return numBytes;
     }
 
-    virtual void compileImpl() {
+    void compileImpl() override {
         Layer::compileImpl();
 
         cudnnStatus_t cudnnStatus;
 
         // The random state may not change between calls of cudnnDropoutForward(...) and cudnnDropoutBackward(...),
         // so this dropout layer can only be used for 1 input/output pair.
-        assert(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
 
         ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
 
@@ -69,7 +71,7 @@ class DropOut : public Layer {
         randomState = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {randomStateBytes}));
 
         cudnnStatus = cudnnCreateDropoutDescriptor(&dropoutDescriptor);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         cudnnTensorDescriptor = createCudnnTensorDescriptor(featureInput.get().getDescriptor().getDimensions(),
                                                             featureInput.get().getDescriptor().getDataType());
@@ -80,7 +82,7 @@ class DropOut : public Layer {
         mtx.lock();
         cudnnStatus = cudnnSetDropoutDescriptor(
             dropoutDescriptor, stream.getCudnnHandle(), probabilityOfDroppingOut, randomState.getMemPtr(), randomStateBytes, randomSeed);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         mtx.unlock();
     }
@@ -90,19 +92,19 @@ class DropOut : public Layer {
             cudnnStatus_t cudnnStatus;
 
             cudnnStatus = cudnnDestroyDropoutDescriptor(dropoutDescriptor);
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
             cudnnStatus = cudnnDestroyTensorDescriptor(cudnnTensorDescriptor);
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         }
         compiled = false;
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(inputTensor.isPresent());
-        assert(outputTensor.isPresent());
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) override {
+        THOR_THROW_IF_FALSE(inputTensor.isPresent());
+        THOR_THROW_IF_FALSE(outputTensor.isPresent());
 
         if (training) {
-            assert(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            THOR_THROW_IF_FALSE(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
             ScopedGpu scopedGpu(inputTensor.get().getPlacement().getDeviceNum());
 
             cudnnStatus_t cudnnStatus;
@@ -114,19 +116,19 @@ class DropOut : public Layer {
                                               outputTensor.get().getMemPtr(),
                                               reserveSpace.getMemPtr(),
                                               reserveSpaceBytes);
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         } else {
             outputTensor.get().copyFromAsync(inputTensor, stream);
         }
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
+    void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) override {
         if (errorOut.isEmpty())
             return;
-        assert(errorIn.isPresent());
-        assert(training);
+        THOR_THROW_IF_FALSE(errorIn.isPresent());
+        THOR_THROW_IF_FALSE(training);
 
-        assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(errorIn.get().getPlacement().getDeviceNum());
 
         cudnnStatus_t cudnnStatus;
@@ -138,7 +140,7 @@ class DropOut : public Layer {
                                            errorOut.get().getMemPtr(),
                                            reserveSpace.getMemPtr(),
                                            reserveSpaceBytes);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
     bool isTrainingMode() { return training; }

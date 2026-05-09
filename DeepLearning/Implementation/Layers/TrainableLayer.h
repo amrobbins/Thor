@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
@@ -26,7 +28,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     }
 
     void setOptimizer(const std::string &parameterName, const std::shared_ptr<Optimizer> &optimizer) {
-        assert(parameterIndexByName.contains(parameterName));
+        THOR_THROW_IF_FALSE(parameterIndexByName.contains(parameterName));
         parameters[parameterIndexByName[parameterName]]->setOptimizer(optimizer);
     }
     void compileImpl() override {
@@ -54,8 +56,8 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
         // Compile happens after all inputs and outputs are connected
         Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
-        assert(aFeatureInput.isPresent());
-        assert(aFeatureInput.get().getPlacement() == placement);
+        THOR_THROW_IF_FALSE(aFeatureInput.isPresent());
+        THOR_THROW_IF_FALSE(aFeatureInput.get().getPlacement() == placement);
 
         numBackwardConnections = 0;
         for (const auto &errorInput : errorInputs) {
@@ -72,14 +74,14 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
 
    public:
     void forward(Optional<Tensor> featureInput, bool isValidation, uint32_t batchSize = 0) override {
-        assert(running);
+        THOR_THROW_IF_FALSE(running);
 
         unsigned int connectionNumber = 0;
         for (; connectionNumber < featureInputs.size(); ++connectionNumber) {
             if (featureInputs[connectionNumber].isPresent() && featureInput.get() == featureInputs[connectionNumber].get())
                 break;
         }
-        assert(connectionNumber != featureInputs.size());
+        THOR_THROW_IF_FALSE(connectionNumber != featureInputs.size());
 
         if (isStartOfForward) {
             if (weightsAreUpToDateEvent.isPresent()) {
@@ -104,14 +106,14 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
     }
 
     void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) override {
-        assert(running);
+        THOR_THROW_IF_FALSE(running);
 
         unsigned int connectionNumber = 0;
         for (; connectionNumber < errorInputs.size(); ++connectionNumber) {
             if (errorInputs[connectionNumber].isPresent() && errorInput.get() == errorInputs[connectionNumber].get())
                 break;
         }
-        assert(connectionNumber != errorInputs.size());
+        THOR_THROW_IF_FALSE(connectionNumber != errorInputs.size());
 
         bool clearGradientFirst = false;
         if (isStartOfBackward) {
@@ -188,7 +190,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
             gradientComplete = true;
             numBackwardConnectionsMade = 0;
         }
-        assert(numBackwardConnectionsMade < numBackwardConnections);
+        THOR_THROW_IF_FALSE(numBackwardConnectionsMade < numBackwardConnections);
 
         if (gradientComplete) {
             weightsAreUpToDateEvent.clear();
@@ -258,7 +260,7 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
    protected:
     virtual PhysicalParameter::StorageContext buildParameterStorageContext() const {
         Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
-        assert(aFeatureInput.isPresent());
+        THOR_THROW_IF_FALSE(aFeatureInput.isPresent());
 
         std::vector<Tensor> connectedFeatureInputs;
         connectedFeatureInputs.reserve(featureInputs.size());
@@ -310,14 +312,14 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
    private:
     // Using a pattern that includes gradient updates, rather than this one that is wired through MultiConnectionLayer:
     void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) override {
-        assert(false);
+        THOR_UNREACHABLE();
     }
     void backProp(Optional<Tensor> dataIn,
                   Optional<Tensor> errorIn,
                   Optional<Tensor> errorOut,
                   Stream stream,
                   unsigned int connectionNumber) override {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 };
 

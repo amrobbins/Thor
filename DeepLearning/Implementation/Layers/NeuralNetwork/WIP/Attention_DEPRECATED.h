@@ -90,8 +90,8 @@
 //           postAttentionDropOutProbability(postAttentionDropOutProbability) {}
 //
 //     virtual Optional<Tensor> createFeatureOutputTensor() {
-//         assert(!featureInputs.empty());
-//         assert(featureInputs.back().isPresent());
+//         THOR_THROW_IF_FALSE(!featureInputs.empty());
+//         THOR_THROW_IF_FALSE(featureInputs.back().isPresent());
 //
 //         return Tensor(featureInputs.back().get().getPlacement(),
 //                       TensorDescriptor(TensorDescriptor::DataType::FP16,
@@ -102,9 +102,9 @@
 //         if (!usingSharedWeights && !weights.isInitialized()) {
 //             std::vector<unsigned long> weightsDimensions;
 //             Optional<Tensor> maybeAFeatureInput = getFirstPresentTensor(featureInputs);
-//             assert(maybeAFeatureInput.isPresent());
+//             THOR_THROW_IF_FALSE(maybeAFeatureInput.isPresent());
 //             Tensor aFeatureInput = maybeAFeatureInput.get();
-//             assert(aFeatureInput.getDimensions().size() == 2);
+//             THOR_THROW_IF_FALSE(aFeatureInput.getDimensions().size() == 2);
 //             weightsDimensions.push_back(aFeatureInput.getDescriptor().getDimensions()[1]);
 //             weightsDimensions.push_back(numOutputFeatures);
 //             TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
@@ -117,10 +117,10 @@
 //
 //     virtual void compile() {
 //         int gpuNum;
-//         assert(!featureInputs.empty());
-//         assert(featureInputs[0].isPresent());
-//         assert(featureInputs[0].get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-//         assert(!streams.empty());
+//         THOR_THROW_IF_FALSE(!featureInputs.empty());
+//         THOR_THROW_IF_FALSE(featureInputs[0].isPresent());
+//         THOR_THROW_IF_FALSE(featureInputs[0].get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+//         THOR_THROW_IF_FALSE(!streams.empty());
 //         gpuNum = featureInputs[0].get().getPlacement().getDeviceNum();
 //         ScopedGpu scopedGpu(gpuNum);
 //
@@ -161,9 +161,9 @@
 //         TrainableWeightsBiasesLayer::setOptimizer(optimizer);
 //
 //         if (!isInferenceOnly()) {
-//             assert(optimizer.isPresent());
+//             THOR_THROW_IF_FALSE(optimizer.isPresent());
 //             Optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
-//             assert(anErrorInput.isPresent());
+//             THOR_THROW_IF_FALSE(anErrorInput.isPresent());
 //             biasBatchReduce = std::unique_ptr<BatchReduce>(new BatchReduce(batchSize,
 //                                                                            batchSize,
 //                                                                            anErrorInput.get().getDimensions()[1],
@@ -182,9 +182,9 @@
 //                        unsigned int connectionNumber,
 //                        Tensor weights,
 //                        Optional<Tensor> biases) {
-//         assert(inputTensor.isPresent());
-//         assert(outputTensor.isPresent());
-//         assert(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+//         THOR_THROW_IF_FALSE(inputTensor.isPresent());
+//         THOR_THROW_IF_FALSE(outputTensor.isPresent());
+//         THOR_THROW_IF_FALSE(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 //
 //         CublasMatrixMultiply::instance().multiply(inputTensor,
 //                                                   weights,
@@ -202,9 +202,9 @@
 //                                                   stream);
 //
 //         if (hasBias) {
-//             assert(biases.isPresent());
-//             assert(cudnnBiasDescriptor.isPresent());
-//             assert(cudnnFeatureOutputDescriptor.isPresent());
+//             THOR_THROW_IF_FALSE(biases.isPresent());
+//             THOR_THROW_IF_FALSE(cudnnBiasDescriptor.isPresent());
+//             THOR_THROW_IF_FALSE(cudnnFeatureOutputDescriptor.isPresent());
 //
 //             cudnnAddTensor(stream.getCudnnHandle(),
 //                            &ALPHA_NO_SCALE,
@@ -223,11 +223,11 @@
 //                           Stream dataStream,
 //                           unsigned int connectionNumber,
 //                           bool accumulateGradient) {
-//         assert(errorIn.isPresent());
-//         assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+//         THOR_THROW_IF_FALSE(errorIn.isPresent());
+//         THOR_THROW_IF_FALSE(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 //
 //         if (errorOut.isPresent()) {
-//             assert(dataStream.isInitialized());
+//             THOR_THROW_IF_FALSE(dataStream.isInitialized());
 //
 //             CublasMatrixMultiply::instance().multiply(errorIn,
 //                                                       weights,
@@ -246,7 +246,7 @@
 //         }
 //
 //         if (!isInferenceOnly()) {
-//             assert(optimizer.isPresent());
+//             THOR_THROW_IF_FALSE(optimizer.isPresent());
 //
 //             // backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient
 //             stream optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
@@ -277,23 +277,23 @@
 //                                         Stream gradientUpdateStream,
 //                                         bool accumulateGradient) {
 //         // Ensure all memory properly allocated
-//         assert(weightsGradient.isPresent());
-//         assert(weightsGradient.get().getDescriptor() == weights.getDescriptor());
-//         assert(weightsGradient.get().getPlacement() == weights.getPlacement());
-//         assert(weightsGradient.get().getMemPtr() != weights.getMemPtr());
+//         THOR_THROW_IF_FALSE(weightsGradient.isPresent());
+//         THOR_THROW_IF_FALSE(weightsGradient.get().getDescriptor() == weights.getDescriptor());
+//         THOR_THROW_IF_FALSE(weightsGradient.get().getPlacement() == weights.getPlacement());
+//         THOR_THROW_IF_FALSE(weightsGradient.get().getMemPtr() != weights.getMemPtr());
 //         if (hasBias) {
-//             assert(biasesGradient.isPresent());
-//             assert(biases.isPresent());
-//             assert(biasesGradient.get().getDescriptor() == biasesGradient.get().getDescriptor());
-//             assert(biasesGradient.get().getMemPtr() != biases.get().getMemPtr());
-//             assert(biasesGradient.get().getPlacement() == biases.get().getPlacement());
+//             THOR_THROW_IF_FALSE(biasesGradient.isPresent());
+//             THOR_THROW_IF_FALSE(biases.isPresent());
+//             THOR_THROW_IF_FALSE(biasesGradient.get().getDescriptor() == biasesGradient.get().getDescriptor());
+//             THOR_THROW_IF_FALSE(biasesGradient.get().getMemPtr() != biases.get().getMemPtr());
+//             THOR_THROW_IF_FALSE(biasesGradient.get().getPlacement() == biases.get().getPlacement());
 //         } else {
-//             assert(biasesGradient.isEmpty());
+//             THOR_THROW_IF_FALSE(biasesGradient.isEmpty());
 //         }
 //
 //         if (errorIn.isEmpty())
 //             return;
-//         assert(featureIn.isPresent());
+//         THOR_THROW_IF_FALSE(featureIn.isPresent());
 //
 //         CublasMatrixMultiply::instance().multiply(featureIn,
 //                                                   errorIn,
@@ -318,8 +318,8 @@
 //     uint64_t flopsPerConnectionPerExample() {
 //         Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
 //         Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-//         assert(anyFeatureInput.isPresent());
-//         assert(anyFeatureOutput.isPresent());
+//         THOR_THROW_IF_FALSE(anyFeatureInput.isPresent());
+//         THOR_THROW_IF_FALSE(anyFeatureOutput.isPresent());
 //         uint64_t flops = 2 * numInputFeatures * numOutputFeatures - numOutputFeatures;
 //         if (hasBias)
 //             flops += numOutputFeatures;
@@ -329,8 +329,8 @@
 //     uint64_t flopsPerGradientUpdatePerExample() {
 //         Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
 //         Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-//         assert(anyFeatureInput.isPresent());
-//         assert(anyFeatureOutput.isPresent());
+//         THOR_THROW_IF_FALSE(anyFeatureInput.isPresent());
+//         THOR_THROW_IF_FALSE(anyFeatureOutput.isPresent());
 //         uint64_t flops = numInputFeatures * numOutputFeatures;
 //         if (hasBias)
 //             flops += numOutputFeatures;
@@ -367,7 +367,7 @@
 //         }
 //
 //         Optional<Tensor> anyErrorInput = getFirstPresentTensor(errorInputs);
-//         assert(anyErrorInput.isPresent());
+//         THOR_THROW_IF_FALSE(anyErrorInput.isPresent());
 //
 //         return connectionMultiplier * flopsPerConnectionPerExample() +
 //                (sums * anyErrorInput.get().getDescriptor().getTotalNumElements()) / batchSize + flopsPerGradientUpdatePerExample();
@@ -402,12 +402,12 @@
 //         cudnnTensorDescriptor_t descriptor;
 //
 //         cudnnStatus = cudnnCreateTensorDescriptor(&descriptor);
-//         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+//         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 //         Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-//         assert(anyFeatureOutput.isPresent());
+//         THOR_THROW_IF_FALSE(anyFeatureOutput.isPresent());
 //         uint32_t numOutputFeatures = anyFeatureOutput.get().getDescriptor().getDimensions()[1];
 //         cudnnStatus = cudnnSetTensor4dDescriptor(descriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, 1, numOutputFeatures, 1, 1);
-//         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+//         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 //
 //         cudnnBiasDescriptor = descriptor;
 //     }
@@ -417,12 +417,12 @@
 //         cudnnTensorDescriptor_t descriptor;
 //
 //         cudnnStatus = cudnnCreateTensorDescriptor(&descriptor);
-//         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+//         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 //         Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-//         assert(anyFeatureOutput.isPresent());
+//         THOR_THROW_IF_FALSE(anyFeatureOutput.isPresent());
 //         std::vector<uint64_t> dimensions = anyFeatureOutput.get().getDescriptor().getDimensions();
 //         cudnnStatus = cudnnSetTensor4dDescriptor(descriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, dimensions[0], dimensions[1], 1, 1);
-//         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+//         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 //
 //         cudnnFeatureOutputDescriptor = descriptor;
 //     }

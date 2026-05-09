@@ -6,6 +6,7 @@
 #include <chrono>
 #include <thread>
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
 using namespace std;
 
@@ -15,27 +16,27 @@ MeanAbsoluteError::MeanAbsoluteError(TensorDescriptor::DataType lossDataType) : 
 
 void MeanAbsoluteError::compileImpl() {
     Layer::compileImpl();
-    assert(featureInput.isPresent());
-    assert(featureOutput.isPresent());
-    assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(featureInput.get().getDescriptor().getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(featureInput.isPresent());
+    THOR_THROW_IF_FALSE(featureOutput.isPresent());
+    THOR_THROW_IF_FALSE(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDimensions().size() == 2);
 
     if (!isInferenceOnly()) {
-        assert(errorOutput.isPresent());
-        assert(errorOutput.get().isInitialized());
-        assert(errorOutput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(errorOutput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
-        assert(errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 ||
+        THOR_THROW_IF_FALSE(errorOutput.isPresent());
+        THOR_THROW_IF_FALSE(errorOutput.get().isInitialized());
+        THOR_THROW_IF_FALSE(errorOutput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(errorOutput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 ||
                errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
 
-        assert(labelsInput.isPresent());
-        assert(labelsInput.get().isInitialized());
-        assert(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(labelsInput.isPresent());
+        THOR_THROW_IF_FALSE(labelsInput.get().isInitialized());
+        THOR_THROW_IF_FALSE(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
 
         vector<uint64_t> labelDimensions = labelsInput.get().getDescriptor().getDimensions();
         vector<uint64_t> featureInputDimensions = featureInput.get().getDescriptor().getDimensions();
-        assert(featureInputDimensions == labelDimensions);
+        THOR_THROW_IF_FALSE(featureInputDimensions == labelDimensions);
 
         errorOutputCudnnTensorDescriptor =
             createCudnnTensorDescriptor(errorOutput.get().getDescriptor().getDimensions(), errorOutput.get().getDescriptor().getDataType());
@@ -45,17 +46,17 @@ void MeanAbsoluteError::compileImpl() {
 }
 
 void MeanAbsoluteError::infer(Optional<Tensor> predictions, Optional<Tensor> elementLoss, Stream stream) {
-    assert(predictions.isPresent());
-    assert(elementLoss.isPresent());
-    assert(labelsInput.isPresent());
-    assert(elementLoss.get().getDescriptor().getDimensions() == predictions.get().getDescriptor().getDimensions());
+    THOR_THROW_IF_FALSE(predictions.isPresent());
+    THOR_THROW_IF_FALSE(elementLoss.isPresent());
+    THOR_THROW_IF_FALSE(labelsInput.isPresent());
+    THOR_THROW_IF_FALSE(elementLoss.get().getDescriptor().getDimensions() == predictions.get().getDescriptor().getDimensions());
     if (!isInferenceOnly())
-        assert(errorOutput.isPresent());
+        THOR_THROW_IF_FALSE(errorOutput.isPresent());
 
     ScopedGpu scopedGpu(predictions.get().getPlacement().getDeviceNum());
 
-    assert(compiled);
-    assert(predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 ||
+    THOR_THROW_IF_FALSE(compiled);
+    THOR_THROW_IF_FALSE(predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 ||
            predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
 
     stream.waitEvent(labelsStream.putEvent());
@@ -65,7 +66,7 @@ void MeanAbsoluteError::infer(Optional<Tensor> predictions, Optional<Tensor> ele
     } else if (predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
         launchMeanAbsoluteErrorWithFP32Predictions();
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
@@ -74,8 +75,8 @@ void MeanAbsoluteError::backProp(Optional<Tensor> labels,
                                  Optional<Tensor> lossGradient,
                                  Stream stream) {
     // Mean absolute loss gradient is pre-computed during infer() for efficiency
-    assert(lossGradient.isPresent());
-    assert(lossGradient.get().getDataType() == TensorDescriptor::DataType::FP32 ||
+    THOR_THROW_IF_FALSE(lossGradient.isPresent());
+    THOR_THROW_IF_FALSE(lossGradient.get().getDataType() == TensorDescriptor::DataType::FP32 ||
            lossGradient.get().getDataType() == TensorDescriptor::DataType::FP16);
 
     if (lossScalingFactor != 1) {
@@ -83,35 +84,35 @@ void MeanAbsoluteError::backProp(Optional<Tensor> labels,
         float lsffloat = (float)lossScalingFactor;
 
         cudnnStatus = cudnnScaleTensor(stream.getCudnnHandle(), errorOutputCudnnTensorDescriptor, errorOutput.get().getMemPtr(), &lsffloat);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 }
 
 void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP16Predictions() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
     if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
         launchMeanAbsoluteErrorWithFP16PredictionsAndFP16Loss();
     else if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
         launchMeanAbsoluteErrorWithFP16PredictionsAndFP32Loss();
     else
-        assert(false);
+        THOR_UNREACHABLE();
 }
 
 void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP32Predictions() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
 
     if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
         launchMeanAbsoluteErrorWithFP32PredictionsAndFP16Loss();
     else if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
         launchMeanAbsoluteErrorWithFP32PredictionsAndFP32Loss();
     else
-        assert(false);
+        THOR_UNREACHABLE();
 }
 
 void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP16PredictionsAndFP16Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
     if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
         launchMeanAbsoluteError<half, half, half>(labelsInput.get().getMemPtr(),
@@ -168,13 +169,13 @@ void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP16PredictionsAndFP16Loss() 
                                                   !isInferenceOnly(),
                                                   stream);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
 void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP16PredictionsAndFP32Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
 
     if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
         launchMeanAbsoluteError<half, half, float>(labelsInput.get().getMemPtr(),
@@ -231,13 +232,13 @@ void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP16PredictionsAndFP32Loss() 
                                                    !isInferenceOnly(),
                                                    stream);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
 void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP32PredictionsAndFP16Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
     if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
         launchMeanAbsoluteError<half, float, half>(labelsInput.get().getMemPtr(),
@@ -294,13 +295,13 @@ void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP32PredictionsAndFP16Loss() 
                                                    !isInferenceOnly(),
                                                    stream);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }
 
 void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP32PredictionsAndFP32Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
 
     if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
         launchMeanAbsoluteError<half, float, float>(labelsInput.get().getMemPtr(),
@@ -357,6 +358,6 @@ void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP32PredictionsAndFP32Loss() 
                                                     !isInferenceOnly(),
                                                     stream);
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 }

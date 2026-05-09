@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/CudnnHelper.h"
@@ -79,7 +81,7 @@ class Layer {
     virtual ~Layer() {}
 
     virtual void setName(std::string name) {
-        assert(this->name.empty());
+        THOR_THROW_IF_FALSE(this->name.empty());
         this->name = name;
     }
 
@@ -87,8 +89,8 @@ class Layer {
 
     // initialize weights using the configured initializer. In general set any initial values.
     virtual void initialize() {
-        assert(compiled);
-        assert(!running);
+        THOR_THROW_IF_FALSE(compiled);
+        THOR_THROW_IF_FALSE(!running);
         running = true;
     }
 
@@ -102,12 +104,12 @@ class Layer {
     virtual Optional<Tensor> createFeatureOutputTensor() {
         // The default implementation just creates a clone of the corresponding feature input tensor,
         // this is the behavior of math layers etc that apply a function to the input tensor but do not reshape it.
-        assert(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         return featureInput.get().clone();
     }
 
     virtual void forward(Optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) {
-        assert(running);
+        THOR_THROW_IF_FALSE(running);
 
         infer(featureInput, featureOutput, stream);
 
@@ -119,7 +121,7 @@ class Layer {
     }
 
     virtual void backward(Optional<Tensor> errorInput, uint32_t batchSize = 0) {
-        assert(running);
+        THOR_THROW_IF_FALSE(running);
 
         // Experimental - back propagation stops at empty error input
         // i.e. the errorInput data is the thing necessitates processing.
@@ -137,9 +139,9 @@ class Layer {
     }
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
-        assert(!compiled);
+        THOR_THROW_IF_FALSE(!compiled);
 
-        assert(this->nextLayer.isEmpty());
+        THOR_THROW_IF_FALSE(this->nextLayer.isEmpty());
         this->nextLayer = nextLayer;
         if (nextLayer->hasFeatureInput())
             featureOutput = createFeatureOutputTensor();
@@ -157,8 +159,8 @@ class Layer {
         }
 
         if (errorInput.isPresent() && featureOutput.isPresent()) {
-            assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
-            assert(errorInput.get().getPlacement() == featureOutput.get().getPlacement());
+            THOR_THROW_IF_FALSE(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
+            THOR_THROW_IF_FALSE(errorInput.get().getPlacement() == featureOutput.get().getPlacement());
         }
 
         ensureNoDeviceCrossing();
@@ -177,12 +179,12 @@ class Layer {
 
     virtual Optional<Tensor> connectToPreviousLayer(
         Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int loaderConnectionType = 0) {
-        assert(!compiled);
-        assert(this->previousLayer.isEmpty());
-        assert(this->featureInput.isEmpty());
-        assert(this->errorOutput.isEmpty());
+        THOR_THROW_IF_FALSE(!compiled);
+        THOR_THROW_IF_FALSE(this->previousLayer.isEmpty());
+        THOR_THROW_IF_FALSE(this->featureInput.isEmpty());
+        THOR_THROW_IF_FALSE(this->errorOutput.isEmpty());
         if (backPropagateError)
-            assert(featureInput.isPresent());
+            THOR_THROW_IF_FALSE(featureInput.isPresent());
 
         this->previousLayer = previousLayer;
         this->stream = stream;
@@ -197,9 +199,9 @@ class Layer {
     // This is also used when there is a path that hits in a non-back prop layer,
     // in that case the errorInput is set to Optional<Tensor>.empty().
     virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
-        assert(oldErrorInput.isPresent());
+        THOR_THROW_IF_FALSE(oldErrorInput.isPresent());
         if (errorInput.isPresent()) {
-            assert(oldErrorInput.get() == errorInput.get());
+            THOR_THROW_IF_FALSE(oldErrorInput.get() == errorInput.get());
         }
 
         if (errorOutput.isPresent()) {
@@ -216,19 +218,19 @@ class Layer {
 
     virtual void ensureNoDeviceCrossing() {
         if (featureInput.isPresent() && featureOutput.isPresent())
-            assert(featureInput.get().getPlacement() == featureOutput.get().getPlacement());
+            THOR_THROW_IF_FALSE(featureInput.get().getPlacement() == featureOutput.get().getPlacement());
         if (featureInput.isPresent() && errorInput.isPresent())
-            assert(featureInput.get().getPlacement() == errorInput.get().getPlacement());
+            THOR_THROW_IF_FALSE(featureInput.get().getPlacement() == errorInput.get().getPlacement());
         if (featureInput.isPresent() && errorOutput.isPresent())
-            assert(featureInput.get().getPlacement() == errorOutput.get().getPlacement());
+            THOR_THROW_IF_FALSE(featureInput.get().getPlacement() == errorOutput.get().getPlacement());
 
         if (featureOutput.isPresent() && errorInput.isPresent())
-            assert(featureOutput.get().getPlacement() == errorInput.get().getPlacement());
+            THOR_THROW_IF_FALSE(featureOutput.get().getPlacement() == errorInput.get().getPlacement());
         if (featureOutput.isPresent() && errorOutput.isPresent())
-            assert(featureOutput.get().getPlacement() == errorOutput.get().getPlacement());
+            THOR_THROW_IF_FALSE(featureOutput.get().getPlacement() == errorOutput.get().getPlacement());
 
         if (errorInput.isPresent() && errorOutput.isPresent())
-            assert(errorInput.get().getPlacement() == errorOutput.get().getPlacement());
+            THOR_THROW_IF_FALSE(errorInput.get().getPlacement() == errorOutput.get().getPlacement());
     }
 
     virtual TensorPlacement getPlacement() {
@@ -247,12 +249,12 @@ class Layer {
 
     virtual bool isInferenceOnly() { return inferenceOnly; }
     virtual void setConstructForInferenceOnly(bool inferenceOnly) {
-        assert(!compiled);
+        THOR_THROW_IF_FALSE(!compiled);
         this->inferenceOnly = inferenceOnly;
     }
     // When connecting to the next layer, choose if this layer will connect to the back prop error tensor.
     virtual void setConnectToBackPropErrorIn(bool connectToBackPropErrorIn) {
-        assert(!compiled);
+        THOR_THROW_IF_FALSE(!compiled);
         this->connectToBackPropErrorIn = connectToBackPropErrorIn;
     }
     virtual bool shouldConnectToBackPropErrorIn() { return connectToBackPropErrorIn; }
@@ -298,7 +300,7 @@ class Layer {
 
     // compute the fan in for one element of a batch
     virtual uint64_t getFanIn() {
-        assert(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
         std::vector<uint64_t> inputDimensions = featureInput.get().getDescriptor().getDimensions();
         uint64_t fanIn = 1;
         for (uint32_t i = 1; i < inputDimensions.size(); ++i) {
@@ -309,7 +311,7 @@ class Layer {
 
     // compute the fan out for one element of a batch
     virtual uint64_t getFanOut() {
-        assert(featureOutput.isPresent());
+        THOR_THROW_IF_FALSE(featureOutput.isPresent());
         std::vector<uint64_t> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
         uint64_t fanOut = 1;
         for (uint32_t i = 1; i < outputDimensions.size(); ++i) {
@@ -341,18 +343,18 @@ class Layer {
 
     virtual void setInitializer(Tensor target, std::shared_ptr<ThorImplementation::Initializer> initializer) {
         // Should not be called on a layer that does not override it.
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
     virtual bool hasInitializer(Tensor target) {
         // Should not be called on a layer that does not override it.
-        assert(false);
+        THOR_UNREACHABLE();
         return false;
     }
 
     virtual Event initializeTensor(Tensor target) {
         // Should not be called on a layer that does not override it.
-        assert(false);
+        THOR_UNREACHABLE();
         return Event();
     }
 
@@ -372,7 +374,7 @@ class Layer {
     // Layers can override preCompile() and must first call <Super>::preCompile()
     // Layers can override compileImpl() and must call <Super>::compileImpl() at any point during the function, usually first.
     // Layers can override postCompile() and must call <Super>::postCompile() last
-    virtual void preCompile() { assert(!compiled); }
+    virtual void preCompile() { THOR_THROW_IF_FALSE(!compiled); }
     virtual void compileImpl() {};
     virtual void postCompile() { compiled = true; }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.h"
 
@@ -14,30 +16,30 @@ namespace ThorImplementation {
 
 class BinaryAccuracy : public Metric {
    public:
-    virtual ~BinaryAccuracy() {}
+    ~BinaryAccuracy() override {}
     BinaryAccuracy() {}
 
-    virtual Optional<Tensor> createFeatureOutputTensor() {
+    Optional<Tensor> createFeatureOutputTensor() override {
         TensorPlacement placement = featureInput.get().getPlacement();
         return Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1U}));
     }
 
-    virtual void compileImpl() {
+    void compileImpl() override {
         Layer::compileImpl();
-        assert(labelsInput.isPresent());
-        assert(labelsInput.get().isInitialized());
-        assert(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
-        assert(featureInput.isPresent());
-        assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(labelsInput.isPresent());
+        THOR_THROW_IF_FALSE(labelsInput.get().isInitialized());
+        THOR_THROW_IF_FALSE(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
+        THOR_THROW_IF_FALSE(featureInput.isPresent());
+        THOR_THROW_IF_FALSE(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
         std::vector<uint64_t> featureInputDimensions = featureInput.get().getDescriptor().getDimensions();
         std::vector<uint64_t> labelDimensions = labelsInput.get().getDescriptor().getDimensions();
         TensorDescriptor::DataType labelsDataType = labelsInput.get().getDescriptor().getDataType();
-        assert(labelDimensions.size() == 2);
-        assert(labelDimensions[1] == 1);
-        assert(featureInputDimensions == labelDimensions);
-        assert(labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
+        THOR_THROW_IF_FALSE(labelDimensions.size() == 2);
+        THOR_THROW_IF_FALSE(labelDimensions[1] == 1);
+        THOR_THROW_IF_FALSE(featureInputDimensions == labelDimensions);
+        THOR_THROW_IF_FALSE(labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
                labelsDataType == TensorDescriptor::DataType::UINT32 || labelsDataType == TensorDescriptor::DataType::INT8 ||
                labelsDataType == TensorDescriptor::DataType::INT16 || labelsDataType == TensorDescriptor::DataType::INT32 ||
                labelsDataType == TensorDescriptor::DataType::FP16 || labelsDataType == TensorDescriptor::DataType::FP32);
@@ -49,7 +51,7 @@ class BinaryAccuracy : public Metric {
         batchReduce = createBinaryAccuracyBatchReduce(batchSize, stream);
     }
 
-    virtual void computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) {
+    void computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) override {
         if (predictions.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
             if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
                 launchComputeBinaryAccuracy(featureOutput,
@@ -113,7 +115,7 @@ class BinaryAccuracy : public Metric {
                 launchComputeBinaryAccuracy(
                     featureOutput, (half *)predictions.getMemPtr(), (float *)labels.getMemPtr(), workspace, batchSize, batchReduce, stream);
             } else {
-                assert(false);
+                THOR_UNREACHABLE();
             }
 
         } else if (predictions.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
@@ -184,15 +186,15 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
             } else {
-                assert(false);
+                THOR_UNREACHABLE();
             }
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     }
 
-    virtual std::string toDisplayString(Tensor metric_h) {
-        assert(metric_h.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    std::string toDisplayString(Tensor metric_h) override {
+        THOR_THROW_IF_FALSE(metric_h.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
         float accuracy = *((float *)metric_h.getMemPtr());
         return "Accuracy: " + std::to_string(accuracy);
     }

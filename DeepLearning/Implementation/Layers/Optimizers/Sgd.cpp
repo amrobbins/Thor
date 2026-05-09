@@ -6,6 +6,7 @@
 
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 
+#include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
 using namespace std;
 
@@ -20,10 +21,10 @@ Sgd::Sgd(uint64_t id, float initialLearningRate, float decay, float momentum, bo
       currentLearningRate(initialLearningRate) {}
 
 void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
-    assert(!compiled);
-    assert(gradientUpdateStream.isInitialized());
-    assert(weights.isInitialized());
-    assert(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(!compiled);
+    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
+    THOR_THROW_IF_FALSE(weights.isInitialized());
+    THOR_THROW_IF_FALSE(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     this->gradientUpdateStream = gradientUpdateStream;
     this->weights = weights;
@@ -55,7 +56,7 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
             momentumParameter->compileStorage(weights);
             momentumParameter->compileInitializer();
             momentumParameter->initialize(gradientUpdateStream);
-            assert(momentumParameter->getStorage().isPresent());
+            THOR_THROW_IF_FALSE(momentumParameter->getStorage().isPresent());
         }
         shared_ptr<PhysicalParameter> momentumParameter = getParameter("momentum");
         Tensor momentumTensor = momentumParameter->getStorage();
@@ -105,15 +106,15 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
 }
 
 void Sgd::updateWeights(uint32_t batchSize) {
-    assert(compiled);
-    assert(weightsGradient.isPresent());
-    assert(weightsGradient.get().isInitialized());
-    assert(weightsGradient.get().getPlacement() == weights.getPlacement());
-    assert(updateEquationStamped != nullptr);
+    THOR_THROW_IF_FALSE(compiled);
+    THOR_THROW_IF_FALSE(weightsGradient.isPresent());
+    THOR_THROW_IF_FALSE(weightsGradient.get().isInitialized());
+    THOR_THROW_IF_FALSE(weightsGradient.get().getPlacement() == weights.getPlacement());
+    THOR_THROW_IF_FALSE(updateEquationStamped != nullptr);
 
-    assert(batchSize > 0);
+    THOR_THROW_IF_FALSE(batchSize > 0);
     const float lossScalingFactor = Loss::getLossScalingFactor();
-    assert(lossScalingFactor > 0);
+    THOR_THROW_IF_FALSE(lossScalingFactor > 0);
 
     const float step = currentLearningRate / (static_cast<float>(batchSize) * lossScalingFactor);
     updateEquationStamped->run({
@@ -150,7 +151,7 @@ void Sgd::setInitialLearningRate(float initialLearningRate) { this->initialLearn
 void Sgd::setDecay(float decay) { this->decay = decay; }
 
 void Sgd::setMomentum(float momentum) {
-    assert(momentum >= 0.0f);
+    THOR_THROW_IF_FALSE(momentum >= 0.0f);
     this->momentum = momentum;
 }
 

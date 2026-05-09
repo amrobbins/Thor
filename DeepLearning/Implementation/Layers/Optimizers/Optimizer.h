@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
+
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
 
 #include "DeepLearning/Implementation/Layers/Loss.h"
@@ -19,7 +21,7 @@ class Optimizer : public Parameterizable {
     Optimizer(uint64_t id) : id(id) {}
 
     virtual void compile(const Tensor &weights, Stream &gradientUpdateStream) = 0;
-    virtual void compile() { assert(false); /*FIXME DELETE*/ }
+    virtual void compile() { THOR_UNREACHABLE(); /*FIXME DELETE*/ }
     bool isCompiled() const { return compiled; }
 
     // Note: It is the responsibility of the layer to ensure all dependencies are available at the start of gradient update stream,
@@ -53,14 +55,14 @@ class Optimizer : public Parameterizable {
     std::vector<std::string> getOptimizerParameterNames() {
         if (!compiled)
             throw std::runtime_error("getOptimizerParameterNames() called on an uncompiled optimizer. It must be compiled first.");
-        assert(updateEquationStamped != nullptr);
+        THOR_THROW_IF_FALSE(updateEquationStamped != nullptr);
         return updateEquationStamped->outputNames();
     }
 
     Tensor getOptimizerParameterTensor(const std::string &parameterName) {
         if (!compiled)
             throw std::runtime_error("getOptimizerParameterTensor() called on an uncompiled optimizer. It must be compiled first.");
-        assert(updateEquationStamped != nullptr);
+        THOR_THROW_IF_FALSE(updateEquationStamped != nullptr);
         std::unordered_map<std::string, Tensor> optimizerParameters = updateEquationStamped->getFinalOutputs();
         if (!optimizerParameters.contains(parameterName))
             throw std::runtime_error("Request to get optimizer parameter " + parameterName +
@@ -70,7 +72,7 @@ class Optimizer : public Parameterizable {
         return optimizerParameters[parameterName];
     }
 
-    virtual ~Optimizer() = default;
+    ~Optimizer() override = default;
 
     Optional<Tensor> getWeightsGradient() { return weightsGradient; }
 

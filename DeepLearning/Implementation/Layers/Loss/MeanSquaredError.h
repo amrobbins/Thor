@@ -14,17 +14,17 @@ namespace ThorImplementation {
 
 class MeanSquaredError : public Loss {
    public:
-    virtual ~MeanSquaredError();
+    ~MeanSquaredError() override;
 
     MeanSquaredError(TensorDescriptor::DataType lossDataType = TensorDescriptor::DataType::FP32);
 
-    virtual void compileImpl();
+    void compileImpl() override;
 
-    virtual void cleanup() {}
+    void cleanup() override {}
 
-    virtual void infer(Optional<Tensor> predictions, Optional<Tensor> loss, Stream stream);
+    void infer(Optional<Tensor> predictions, Optional<Tensor> loss, Stream stream) override;
 
-    virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream);
+    void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream) override;
 
    private:
     void launchMeanSquaredErrorWithFP16Predictions();
