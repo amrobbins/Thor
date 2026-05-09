@@ -111,11 +111,6 @@ ThorImplementation::CublasMatrixMultiply::MatmulDataTypes cublasLtMatmulDataType
                                 ", output=" + fullyConnectedDataTypeName(outputDataType) + ".");
 }
 
-ThorImplementation::Expression applyFullyConnectedEpilogue(const ThorImplementation::Expression& input,
-                                                           const ThorImplementation::Expression& epilogue) {
-    return epilogue.substituteInput(FullyConnected::epilogueInputName(), input);
-}
-
 ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias,
                                                                     ThorImplementation::TensorPlacement placement,
                                                                     Tensor::DataType weightsDataType,
@@ -248,7 +243,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
                 fout = activation->toExpression(fout);
             }
             if (epilogue.isPresent()) {
-                fout = applyFullyConnectedEpilogue(fout, epilogue.get());
+                fout = FullyConnected::applyEpilogue(fout, epilogue.get());
             }
 
             // The API layer's declared output tensor dtype is authoritative.
@@ -551,9 +546,7 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
     if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
         ThorImplementation::ExpressionDefinition epilogueDefinition =
             ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
-        validateEpilogueDefinition(epilogueDefinition);
-        const ThorImplementation::NamedOutput& epilogueOutput = epilogueDefinition.outputs.outputs.front();
-        epilogue = ThorImplementation::Expression::fromPhysicalNode(epilogueDefinition.outputs.expr, epilogueOutput.node_idx);
+        epilogue = epilogueExpressionFromDefinition(epilogueDefinition);
     }
 
     FullyConnected fullyConnected(epilogue);

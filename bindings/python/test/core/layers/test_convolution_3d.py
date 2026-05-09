@@ -130,3 +130,43 @@ def test_conv3d_rejects_filter_larger_than_padded_input():
         horizontal_padding=1,
     )
     assert isinstance(conv, thor.layers.Convolution3d)
+
+
+def test_conv3d_accepts_epilogue_expression_and_serializes_it():
+    n = thor.Network("test_net_conv3d_epilogue")
+    x = _cdhw_input(n, 3, 4, 8, 8, thor.DataType.fp16)
+
+    epilogue_input = thor.layers.Convolution3d.epilogue_input(
+        output_dtype=thor.DataType.fp32,
+        compute_dtype=thor.DataType.fp32,
+    )
+    epilogue = epilogue_input * 2.0 + 1.0
+
+    conv = thor.layers.Convolution3d(
+        n,
+        x,
+        num_output_channels=4,
+        filter_depth=3,
+        filter_height=3,
+        filter_width=3,
+        depth_padding=1,
+        vertical_padding=1,
+        horizontal_padding=1,
+        activation=None,
+        epilogue=epilogue,
+    )
+
+    assert conv.get_feature_output().get_dimensions() == [4, 4, 8, 8]
+    arch = _only_layer_architecture(n, "convolution_3d")
+    assert arch["activation"] is None
+    assert arch["epilogue"] is not None
+    assert arch["epilogue"]["expected_input_names"] == ["__convolution_3d_epilogue_input"]
+    assert arch["epilogue"]["expected_output_names"] == ["__convolution_3d_epilogue_output"]
+
+
+def test_conv3d_rejects_wrong_epilogue_type():
+    n = _net()
+    x = _cdhw_input(n, 3, 4, 8, 8)
+
+    with pytest.raises(TypeError, match="epilogue must be"):
+        thor.layers.Convolution3d(n, x, 4, 3, 3, 3, epilogue=123)

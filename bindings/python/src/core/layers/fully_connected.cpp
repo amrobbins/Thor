@@ -12,6 +12,7 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "Utilities/Expression/Expression.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -51,6 +52,29 @@ void applyPythonActivation(FullyConnected::Builder &builder, const nb::object &a
         builder.activation(activationPtr);
     }
 }
+
+Optional<DataType> optionalDataTypeFromPython(const nb::object &obj) {
+    if (obj.is_none()) {
+        return Optional<DataType>::empty();
+    }
+    return nb::cast<DataType>(obj);
+}
+
+ThorImplementation::Expression makePythonEpilogueInput(const nb::object &outputDTypeObj, const nb::object &computeDTypeObj) {
+    Optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
+    Optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    return FullyConnected::epilogueInput(computeDType, outputDType);
+}
+
+void applyPythonEpilogue(FullyConnected::Builder &builder, const nb::object &epilogue) {
+    if (epilogue.is_none()) {
+        return;
+    }
+    if (!nb::isinstance<ThorImplementation::Expression>(epilogue)) {
+        throw nb::type_error("epilogue must be a thor.physical.Expression instance or None");
+    }
+    builder.epilogue(nb::cast<ThorImplementation::Expression>(epilogue));
+}
 }  // namespace
 
 void bind_fully_connected(nb::module_ &m) {
@@ -68,7 +92,8 @@ void bind_fully_connected(nb::module_ &m) {
            shared_ptr<Initializer> weights_initializer,
            shared_ptr<Initializer> biases_initializer,
            shared_ptr<Optimizer> weights_optimizer,
-           shared_ptr<Optimizer> biases_optimizer) {
+           shared_ptr<Optimizer> biases_optimizer,
+           nb::object epilogue) {
             if (numOutputFeatures == 0) {
                 throw nb::value_error("FullyConnected instance: num_output_features must be > 0.");
             }
@@ -77,6 +102,7 @@ void bind_fully_connected(nb::module_ &m) {
             builder.network(network).featureInput(featureInput).numOutputFeatures(numOutputFeatures).hasBias(hasBias);
 
             applyPythonActivation(builder, activation);
+            applyPythonEpilogue(builder, epilogue);
 
             if (weights_initializer != nullptr)
                 builder.weightsInitializer(weights_initializer);
@@ -97,7 +123,17 @@ void bind_fully_connected(nb::module_ &m) {
         "weights_initializer"_a.none() = nb::none(),
         "biases_initializer"_a.none() = nb::none(),
         "weights_optimizer"_a.none() = nb::none(),
-        "biases_optimizer"_a.none() = nb::none());
+        "biases_optimizer"_a.none() = nb::none(),
+        "epilogue"_a.none() = nb::none());
+
+    fully_connected.def_static(
+        "epilogue_input",
+        &makePythonEpilogueInput,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+            Return the single tensor input expression expected by a FullyConnected epilogue.
+            )nbdoc");
 
     fully_connected.def(
         "get_feature_output",
@@ -146,5 +182,8 @@ void bind_fully_connected(nb::module_ &m) {
             Initializer for the weight matrix.
         biases_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
             Initializer for the bias vector.
+        epilogue : thor.physical.Expression or None, default None
+            Optional expression applied after the affine transform and activation.
+            Build it from ``FullyConnected.epilogue_input()``.
         )nbdoc";
 }

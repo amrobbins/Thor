@@ -13,12 +13,15 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "Utilities/Expression/Expression.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 
 using namespace Thor;
+
+using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 namespace {
 constexpr const char *DEFAULT_ACTIVATION_SENTINEL = "__thor_default_activation__";
@@ -50,6 +53,29 @@ void applyPythonActivation(Convolution3d::Builder &builder, const nb::object &ac
         builder.activation(activationPtr);
     }
 }
+
+Optional<DataType> optionalDataTypeFromPython(const nb::object &obj) {
+    if (obj.is_none()) {
+        return Optional<DataType>::empty();
+    }
+    return nb::cast<DataType>(obj);
+}
+
+ThorImplementation::Expression makePythonEpilogueInput(const nb::object &outputDTypeObj, const nb::object &computeDTypeObj) {
+    Optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
+    Optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    return Convolution3d::epilogueInput(computeDType, outputDType);
+}
+
+void applyPythonEpilogue(Convolution3d::Builder &builder, const nb::object &epilogue) {
+    if (epilogue.is_none()) {
+        return;
+    }
+    if (!nb::isinstance<ThorImplementation::Expression>(epilogue)) {
+        throw nb::type_error("epilogue must be a thor.physical.Expression instance or None");
+    }
+    builder.epilogue(nb::cast<ThorImplementation::Expression>(epilogue));
+}
 }  // namespace
 
 void bind_convolution_3d(nb::module_ &m) {
@@ -74,7 +100,8 @@ void bind_convolution_3d(nb::module_ &m) {
            bool hasBias,
            nb::object activation,
            shared_ptr<Initializer> weights_initializer,
-           shared_ptr<Initializer> biases_initializer) {
+           shared_ptr<Initializer> biases_initializer,
+           nb::object epilogue) {
             const auto &dims = featureInput.getDimensions();
             if (dims.size() != 4) {
                 string msg = "Convolution3d instance: feature_input must be a 4D CDHW tensor (no batch) but tensor format is " +
@@ -127,6 +154,7 @@ void bind_convolution_3d(nb::module_ &m) {
                 .hasBias(hasBias);
 
             applyPythonActivation(builder, activation);
+            applyPythonEpilogue(builder, epilogue);
 
             if (weights_initializer != nullptr)
                 builder.weightsInitializer(weights_initializer);
@@ -151,7 +179,17 @@ void bind_convolution_3d(nb::module_ &m) {
         "has_bias"_a = true,
         "activation"_a.none() = nb::str(DEFAULT_ACTIVATION_SENTINEL),
         "weights_initializer"_a = nb::none(),
-        "biases_initializer"_a = nb::none());
+        "biases_initializer"_a = nb::none(),
+        "epilogue"_a.none() = nb::none());
+
+    convolution_3d.def_static(
+        "epilogue_input",
+        &makePythonEpilogueInput,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+            Return the single tensor input expression expected by a Convolution3d epilogue.
+            )nbdoc");
 
     convolution_3d.def(
         "get_feature_output",
@@ -172,5 +210,7 @@ void bind_convolution_3d(nb::module_ &m) {
         The API tensor layout is CDHW; the physical implementation adds the
         batch dimension and uses NCDHW. Activations are stitched into the
         expression before the implementation CustomLayer is constructed.
+        ``epilogue`` may be a ``thor.physical.Expression`` built from
+        ``Convolution3d.epilogue_input()`` and is applied after activation.
         )nbdoc";
 }

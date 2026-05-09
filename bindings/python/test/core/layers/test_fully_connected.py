@@ -114,3 +114,38 @@ def test_fully_connected_rejects_wrong_types_and_arity():
 
     with pytest.raises(TypeError):
         thor.layers.FullyConnected(n, x, 8, "True")
+
+
+def test_fully_connected_accepts_epilogue_expression_and_serializes_it():
+    n = thor.Network("test_net_fully_connected_epilogue")
+    x = _input_tensor(n, 16, thor.DataType.fp16)
+
+    epilogue_input = thor.layers.FullyConnected.epilogue_input(
+        output_dtype=thor.DataType.fp32,
+        compute_dtype=thor.DataType.fp32,
+    )
+    epilogue = epilogue_input * 2.0 + 1.0
+
+    fc = thor.layers.FullyConnected(
+        n,
+        x,
+        8,
+        True,
+        activation=None,
+        epilogue=epilogue,
+    )
+
+    assert fc.get_feature_output().get_dimensions() == [8]
+    arch = _only_layer_architecture(n, "fully_connected")
+    assert arch["activation"] is None
+    assert arch["epilogue"] is not None
+    assert arch["epilogue"]["expected_input_names"] == ["__fully_connected_epilogue_input"]
+    assert arch["epilogue"]["expected_output_names"] == ["__fully_connected_epilogue_output"]
+
+
+def test_fully_connected_rejects_wrong_epilogue_type():
+    n = _net()
+    x = _input_tensor(n, 16, thor.DataType.fp16)
+
+    with pytest.raises(TypeError, match="epilogue must be"):
+        thor.layers.FullyConnected(n, x, 8, True, epilogue=123)

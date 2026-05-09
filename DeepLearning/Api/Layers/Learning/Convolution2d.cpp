@@ -14,7 +14,8 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
                                                                     uint32_t padH,
                                                                     uint32_t padW,
                                                                     ThorImplementation::TensorPlacement placement,
-                                                                    std::shared_ptr<Thor::Activation> activation) {
+                                                                    std::shared_ptr<Thor::Activation> activation,
+                                                                    Optional<ThorImplementation::Expression> epilogue) {
     using ImplDataType = ThorImplementation::TensorDescriptor::DataType;
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
@@ -22,7 +23,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
     using ThorImplementation::FusedEquation;
     using ThorImplementation::Tensor;
 
-    return DynamicExpression([hasBias, strideH, strideW, padH, padW, placement, activation = std::move(activation)](
+    return DynamicExpression([hasBias, strideH, strideW, padH, padW, placement, activation = std::move(activation), epilogue](
                                  const DynamicExpression::TensorMap& inputs,
                                  const DynamicExpression::TensorMap& outputs,
                                  Stream& stream) -> DynamicExpressionBuild {
@@ -45,6 +46,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
 
         const uint64_t expectedOutputRows = (featureInputTensor.getDimensions()[2] + 2 * padH - wTensor.getDimensions()[2]) / strideH + 1;
         const uint64_t expectedOutputCols = (featureInputTensor.getDimensions()[3] + 2 * padW - wTensor.getDimensions()[3]) / strideW + 1;
+        Optional<ImplDataType> featureOutputDType = Optional<ImplDataType>::empty();
 
         if (outputs.contains("feature_output")) {
             const Tensor& featureOutputTensor = outputs.at("feature_output");
@@ -58,6 +60,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
                 throw std::runtime_error("Convolution2d feature_output shape does not match the implied convolution output shape.");
             }
             assert(featureOutputTensor.getPlacement() == placement);
+            featureOutputDType = featureOutputTensor.getDescriptor().getDataType();
         }
 
         const ImplDataType weightsDType = wTensor.getDescriptor().getDataType();
@@ -83,6 +86,12 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
 
         if (activation != nullptr) {
             fout = activation->toExpression(fout);
+        }
+        if (epilogue.isPresent()) {
+            fout = Convolution2d::applyEpilogue(fout, epilogue.get());
+        }
+        if (featureOutputDType.isPresent()) {
+            fout = fout.withOutputDType(featureOutputDType.get());
         }
 
         auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
@@ -112,7 +121,7 @@ std::shared_ptr<ThorImplementation::Layer> Convolution2d::stamp(ThorImplementati
 
     Tensor::DataType weightsDataType = Tensor::DataType::FP16;
     std::shared_ptr<ThorImplementation::CustomLayer> physicalConvolution2d = std::make_shared<ThorImplementation::CustomLayer>(
-        buildConvolution2dExpression(hasBias, verticalStride, horizontalStride, verticalPadding, horizontalPadding, placement, activation),
+        buildConvolution2dExpression(hasBias, verticalStride, horizontalStride, verticalPadding, horizontalPadding, placement, activation, epilogue),
         placement,
         ThorImplementation::Convolution2d::defineParameters(numOutputChannels, hasBias, filterWidth, filterHeight, weightsDataType),
         inferenceOnly,
@@ -142,6 +151,9 @@ void Convolution2d::buildSupportLayersAndAddToNetwork(Network *network) {
         convolution2dBuilder.activation(std::dynamic_pointer_cast<Activation>(activation->clone()));
     } else {
         convolution2dBuilder.noActivation();
+    }
+    if (epilogue.isPresent()) {
+        convolution2dBuilder.epilogue(epilogue.get());
     }
 
     vector<Tensor> currentFeatureInputs;
@@ -226,6 +238,13 @@ json Convolution2d::architectureJson() const {
         j["activation"] = activation->architectureJson();
     } else {
         j["activation"] = nullptr;
+    }
+    if (epilogue.isPresent()) {
+        if (serializableEpilogue.isEmpty())
+            serializableEpilogue = makeEpilogueDefinition(epilogue.get());
+        j["epilogue"] = serializableEpilogue.get().architectureJson();
+    } else {
+        j["epilogue"] = nullptr;
     }
 
     // Input connections

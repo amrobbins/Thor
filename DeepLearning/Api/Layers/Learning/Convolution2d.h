@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Activations/SoftPlus.h"
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
 #include "DeepLearning/Api/Layers/Layer.h"
+#include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
@@ -22,6 +23,7 @@ class Convolution2d : public TrainableLayer {
     class Builder;
 
     Convolution2d() {}
+    explicit Convolution2d(const Optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
     virtual ~Convolution2d() = default;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Convolution2d>(*this); }
@@ -41,6 +43,39 @@ class Convolution2d : public TrainableLayer {
                              ThorImplementation::StampedNetwork &stampedNetwork) const override;
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
     nlohmann::json architectureJson() const override;
+
+    static const char *epilogueInputName() { return "__convolution_2d_epilogue_input"; }
+    static const char *epilogueOutputName() { return "__convolution_2d_epilogue_output"; }
+
+    [[nodiscard]] static ThorImplementation::Expression epilogueInput(
+        Optional<ThorImplementation::TensorDescriptor::DataType> computeDType =
+            Optional<ThorImplementation::TensorDescriptor::DataType>::empty(),
+        Optional<ThorImplementation::TensorDescriptor::DataType> outputDType =
+            Optional<ThorImplementation::TensorDescriptor::DataType>::empty()) {
+        return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
+    }
+
+    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(const ThorImplementation::Expression &expression) {
+        return LayerEpilogue::makeDefinition(expression, epilogueInputName(), epilogueOutputName(), "Convolution2d");
+    }
+
+    static void validateEpilogueExpression(const ThorImplementation::Expression &expression) {
+        LayerEpilogue::validateExpression(expression, epilogueInputName(), epilogueOutputName(), "Convolution2d");
+    }
+
+    static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition &definition) {
+        LayerEpilogue::validateDefinition(definition, epilogueInputName(), epilogueOutputName(), "Convolution2d");
+    }
+
+    [[nodiscard]] static ThorImplementation::Expression epilogueExpressionFromDefinition(
+        const ThorImplementation::ExpressionDefinition &definition) {
+        return LayerEpilogue::expressionFromDefinition(definition, epilogueInputName(), epilogueOutputName(), "Convolution2d");
+    }
+
+    [[nodiscard]] static ThorImplementation::Expression applyEpilogue(const ThorImplementation::Expression &input,
+                                                                      const ThorImplementation::Expression &epilogue) {
+        return LayerEpilogue::apply(input, epilogue, epilogueInputName());
+    }
 
    protected:
     virtual bool isMultiLayer() const {
@@ -107,6 +142,9 @@ class Convolution2d : public TrainableLayer {
     bool useBatchNormalization;
     Optional<double> batchNormExponentialRunningAverageFactor;
     Optional<double> batchNormEpsilon;
+
+    const Optional<ThorImplementation::Expression> epilogue;
+    mutable Optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
 };
 
 // featureInput, numOutputChannels, filterHeight and filterWidth are required, all other parameters are optional.
@@ -149,7 +187,11 @@ class Convolution2d::Builder {
             _useBatchNormalization = false;
         }
 
-        Convolution2d convolution2d;
+        if (_epilogue.isPresent()) {
+            Convolution2d::validateEpilogueExpression(_epilogue.get());
+        }
+
+        Convolution2d convolution2d(_epilogue);
 
         convolution2d.featureInputs = _featureInputs;
         convolution2d.numOutputChannels = _numOutputChannels;
@@ -370,6 +412,13 @@ class Convolution2d::Builder {
         return *this;
     }
 
+    virtual Convolution2d::Builder &epilogue(const ThorImplementation::Expression &expression) {
+        assert(this->_epilogue.isEmpty());
+        Convolution2d::validateEpilogueExpression(expression);
+        _epilogue = expression;
+        return *this;
+    }
+
     virtual Convolution2d::Builder &weightsOptimizer(std::shared_ptr<Optimizer> _weightsOptimizer) {
         assert(this->_weightsOptimizer == nullptr);
         this->_weightsOptimizer = _weightsOptimizer;
@@ -444,6 +493,7 @@ class Convolution2d::Builder {
     Optional<bool> _useBatchNormalization;
     Optional<double> _batchNormExponentialRunningAverageFactor;
     Optional<double> _batchNormEpsilon;
+    Optional<ThorImplementation::Expression> _epilogue;
 };
 
 }  // namespace Thor

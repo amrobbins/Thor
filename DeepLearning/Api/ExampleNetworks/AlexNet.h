@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
+#include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Learning/Convolution2d.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
