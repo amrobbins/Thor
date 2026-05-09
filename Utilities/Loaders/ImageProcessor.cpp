@@ -1,4 +1,5 @@
 #include "Utilities/Loaders/ImageProcessor.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 
@@ -11,7 +12,7 @@ ImageProcessor::ImageProcessor(double minAspectRatio,
                                bool display) {
     this->bytesPerPixelChannel = bytesPerPixelChannel;
     if (centerAndScale)
-        assert(bytesPerPixelChannel == 2);
+        THOR_THROW_IF_FALSE(bytesPerPixelChannel == 2);
 
     this->minAspectRatio = minAspectRatio;
     this->maxAspectRatio = maxAspectRatio;

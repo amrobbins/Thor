@@ -5,7 +5,6 @@
 #include <Magick++.h>
 #include <cuda_fp16.h>
 
-#include <assert.h>
 #include <math.h>
 
 class ImageLoader {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "Event.h"
 #include "ScopedGpu.h"
@@ -13,7 +14,6 @@
 #include "cuda.h"
 #include "cuda_runtime.h"
 
-#include <assert.h>
 #include <stdio.h>
 #include <deque>
 #include <future>
@@ -61,7 +61,7 @@ class Stream : private ReferenceCounted {
     }
 
     operator cudaStream_t() const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return cudaStream;
     }
 
@@ -72,7 +72,7 @@ class Stream : private ReferenceCounted {
     }
 
     Event putEvent(bool enableTiming = false, bool expectingHostToWaitOnThisOne = false) const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
 
         ScopedGpu scopedGpu(gpuNum);
 
@@ -91,7 +91,7 @@ class Stream : private ReferenceCounted {
     void enqueueHostFunction(cudaHostFn_t function, std::unique_ptr<HostFunctionArgsBase> &&args);
 
     cudnnHandle_t getCudnnHandle() const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         mtx->lock();
         if (!cudnnHandle->has_value()) {
             ScopedGpu scopedGpu(gpuNum);
@@ -106,10 +106,10 @@ class Stream : private ReferenceCounted {
                        numCudnnHandles);
                 fflush(stdout);
             }
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
             numCudnnHandles += 1;
             cudnnStatus = cudnnSetStream(handle, cudaStream);
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
             *cudnnHandle = handle;
         }
         mtx->unlock();
@@ -117,12 +117,12 @@ class Stream : private ReferenceCounted {
     }
 
     cudaStream_t getStream() const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return cudaStream;
     }
 
     cublasHandle_t getCublasHandle() const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         mtx->lock();
         if (!cublasHandle->has_value()) {
             ScopedGpu scopedGpu(gpuNum);
@@ -133,10 +133,10 @@ class Stream : private ReferenceCounted {
                 printf("cublasStatus %d    gpu:%d   numcublasHandles %d\n", cublasStatus, gpuNum, numCublasHandles);
                 fflush(stdout);
             }
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             numCublasHandles += 1;
             cublasStatus = cublasSetStream(handle, cudaStream);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             *cublasHandle = handle;
         }
         mtx->unlock();
@@ -146,7 +146,7 @@ class Stream : private ReferenceCounted {
     bool operator==(const Stream &other) const { return cudaStream == other.cudaStream && cudaStream != nullptr; }
 
     int getGpuNum() const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return gpuNum;
     }
 

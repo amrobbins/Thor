@@ -1,4 +1,5 @@
 #include "Map.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 template <typename INDEX_TYPE>
 __global__ void map(half *dest, half *source, INDEX_TYPE *mapping, INDEX_TYPE numDestElements) {
@@ -18,7 +19,7 @@ void launchMap(half *dest_d, half *source_d, INDEX_TYPE *mapping_d, INDEX_TYPE n
     dim3 blockSize(256);
     dim3 gridSize((numDestElements + 511) / 512);
     // in place is not supported
-    assert(dest_d != source_d);
+    THOR_THROW_IF_FALSE(dest_d != source_d);
     map<INDEX_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(dest_d, source_d, mapping_d, numDestElements);
 }
 
@@ -56,7 +57,7 @@ void launchMapNInto1(unsigned int N, half *dest_d, half *source_d, INDEX_TYPE *m
     dim3 blockSize(256);
     dim3 gridSize((numMapElements + 511) / 512);
     // in place is not supported
-    assert(dest_d != source_d);
+    THOR_THROW_IF_FALSE(dest_d != source_d);
     mapNInto1<INDEX_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(N, dest_d, source_d, mapping_d, numMapElements);
 }
 

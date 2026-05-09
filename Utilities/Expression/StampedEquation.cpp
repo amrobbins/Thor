@@ -13,6 +13,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 
@@ -90,11 +91,11 @@ StampedReduction::StampedReduction(
     std::shared_ptr<BuiltReduction> built, const Tensor& input, const Tensor& output, const Stream& stream, std::optional<Tensor> workspace)
     : built_reduction(built), input(input), output(output), workspace(workspace), stream(stream) {
     if (built_reduction->workspace_bytes != 0) {
-        assert(workspace.has_value());
-        assert(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
+        THOR_THROW_IF_FALSE(workspace.has_value());
+        THOR_THROW_IF_FALSE(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
     }
-    assert(input.getDataType() == built_reduction->key.input_dtype);
-    assert(output.getDataType() == built_reduction->key.output_dtype);
+    THOR_THROW_IF_FALSE(input.getDataType() == built_reduction->key.input_dtype);
+    THOR_THROW_IF_FALSE(output.getDataType() == built_reduction->key.output_dtype);
 }
 
 void StampedReduction::run() { runOn(stream); }
@@ -102,7 +103,7 @@ void StampedReduction::run() { runOn(stream); }
 void StampedReduction::runOn(Stream& run_stream) const {
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
-        assert(workspace.has_value());
+        THOR_THROW_IF_FALSE(workspace.has_value());
         workspace_ptr = (void*)workspace.value().getMemPtr();
     }
 
@@ -136,8 +137,8 @@ StampedArgMinMax::StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
         throw std::runtime_error("StampedArgMinMax requires a BuiltReduction configured for indices.");
     }
     if (built_reduction->workspace_bytes != 0) {
-        assert(workspace.has_value());
-        assert(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
+        THOR_THROW_IF_FALSE(workspace.has_value());
+        THOR_THROW_IF_FALSE(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
     }
 }
 
@@ -153,7 +154,7 @@ void StampedArgMinMax::runOn(Stream& run_stream) const {
 
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
-        assert(workspace.has_value());
+        THOR_THROW_IF_FALSE(workspace.has_value());
         workspace_ptr = (void*)workspace.value().getMemPtr();
     }
 
@@ -180,8 +181,8 @@ StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
     if (!compiled_softmax || !built_softmax) {
         throw std::runtime_error("StampedSoftmax requires compiled and built softmax payloads.");
     }
-    assert(input.getDataType() == built_softmax->key.input_dtype);
-    assert(output.getDataType() == built_softmax->key.output_dtype);
+    THOR_THROW_IF_FALSE(input.getDataType() == built_softmax->key.input_dtype);
+    THOR_THROW_IF_FALSE(output.getDataType() == built_softmax->key.output_dtype);
 }
 
 void StampedSoftmax::run() { runOn(stream); }
@@ -369,7 +370,7 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
         if (!workspace.has_value()) {
             throw std::runtime_error("StampedMatmul requires workspace for the chosen optimal kernel.");
         }
-        assert(workspace.value().getArraySizeInBytes() >= built_matmul->workspace_bytes);
+        THOR_THROW_IF_FALSE(workspace.value().getArraySizeInBytes() >= built_matmul->workspace_bytes);
     }
 }
 
@@ -670,8 +671,8 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltRe
         throw std::runtime_error("StampedReduceMinMaxBackward requires a BuiltReduction configured for indices.");
     }
     if (built_reduction->workspace_bytes != 0) {
-        assert(workspace.has_value());
-        assert(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
+        THOR_THROW_IF_FALSE(workspace.has_value());
+        THOR_THROW_IF_FALSE(workspace.value().getArraySizeInBytes() >= built_reduction->workspace_bytes);
     }
 }
 
@@ -688,7 +689,7 @@ void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
 
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
-        assert(workspace.has_value());
+        THOR_THROW_IF_FALSE(workspace.has_value());
         workspace_ptr = (void*)workspace.value().getMemPtr();
     }
 

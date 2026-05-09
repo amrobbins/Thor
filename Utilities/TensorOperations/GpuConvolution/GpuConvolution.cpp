@@ -1,5 +1,6 @@
 #include <optional>
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace ThorImplementation;
 using namespace std;
@@ -38,8 +39,8 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
                                                        MAX_ALGOS,
                                                        &returnedAlgoCount,
                                                        perfResults);
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-    assert(returnedAlgoCount > 0);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(returnedAlgoCount > 0);
 
     // Returned algos don't always run, choose the first one that runs.
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
@@ -82,7 +83,7 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
             workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 
         // Clear any possible runtime errors
-        assert(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
 
         cudnnStatus = cudnnConvolutionForward(stream.getCudnnHandle(),
                                               &ALPHA_NO_SCALE,
@@ -99,7 +100,7 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
                                               dataOutput.getMemPtr());
         if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
             // Check for a runtime error
-            assert(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
             if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
                 GpuConvolution::instance().optimalForwardKernels.put(convolutionKernelRequirement, perfResults[i]);
                 return;
@@ -107,7 +108,7 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
         }
     }
 
-    assert(false);
+    THOR_UNREACHABLE();
 }
 
 // Finds the optimal backwardData and backwardFilter kernel for the convolution operation given the parameters
@@ -145,8 +146,8 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
                                                             MAX_ALGOS,
                                                             &returnedAlgoCount,
                                                             perfResults);
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-    assert(returnedAlgoCount > 0);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(returnedAlgoCount > 0);
 
     // Returned algos don't always run, choose the first one that runs.
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
@@ -190,7 +191,7 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
             workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 
         // Clear any possible runtime errors
-        assert(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
 
         cudnnStatus = cudnnConvolutionBackwardData(stream.getCudnnHandle(),
                                                    &ALPHA_NO_SCALE,
@@ -207,7 +208,7 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
                                                    errorOutput.getMemPtr());
         if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
             // Check for a runtime error
-            assert(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
             if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
                 GpuConvolution::instance().optimalBackwardDataKernels.put(convolutionKernelRequirement, perfResults[i]);
                 return;
@@ -215,7 +216,7 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
         }
     }
 
-    assert(false);
+    THOR_UNREACHABLE();
 }
 
 void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirement convolutionKernelRequirement, Stream stream) {
@@ -247,8 +248,8 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
                                                               MAX_ALGOS,
                                                               &returnedAlgoCount,
                                                               perfResults);
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-    assert(returnedAlgoCount > 0);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(returnedAlgoCount > 0);
 
     // Returned algos don't always run, choose the first one that runs.
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
@@ -297,7 +298,7 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
             workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 
         // Clear any possible runtime errors
-        assert(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
 
         cudnnStatus = cudnnConvolutionBackwardFilter(stream.getCudnnHandle(),
                                                      &ALPHA_NO_SCALE,
@@ -314,7 +315,7 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
                                                      weightsGradient.getMemPtr());
         if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
             // Check for a runtime error
-            assert(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
             if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
                 GpuConvolution::instance().optimalBackwardFilterKernels.put(convolutionKernelRequirement, perfResults[i]);
                 return;
@@ -322,24 +323,24 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
         }
     }
 
-    assert(false);
+    THOR_UNREACHABLE();
 }
 
 uint64_t GpuConvolution::getForwardWorkspaceSizeInBytes(ConvolutionKernelRequirement convolutionKernelRequirement) {
     auto optimalKernel = GpuConvolution::instance().optimalForwardKernels.get(convolutionKernelRequirement);
-    assert(optimalKernel.has_value());
+    THOR_THROW_IF_FALSE(optimalKernel.has_value());
     return optimalKernel->memory;
 }
 
 uint64_t GpuConvolution::getBackwardDataWorkspaceSizeInBytes(ConvolutionKernelRequirement convolutionKernelRequirement) {
     auto optimalKernel = GpuConvolution::instance().optimalBackwardDataKernels.get(convolutionKernelRequirement);
-    assert(optimalKernel.has_value());
+    THOR_THROW_IF_FALSE(optimalKernel.has_value());
     return optimalKernel->memory;
 }
 
 uint64_t GpuConvolution::getBackwardFilterWorkspaceSizeInBytes(ConvolutionKernelRequirement convolutionKernelRequirement) {
     auto optimalKernel = GpuConvolution::instance().optimalBackwardFilterKernels.get(convolutionKernelRequirement);
-    assert(optimalKernel.has_value());
+    THOR_THROW_IF_FALSE(optimalKernel.has_value());
     return optimalKernel->memory;
 }
 
@@ -357,16 +358,16 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
                                         Tensor dataOutput,
                                         std::optional<Tensor> workspace,
                                         Stream stream) {
-    assert(dataInput.getPlacement() == weights.getPlacement());
-    assert(dataInput.getPlacement() == dataOutput.getPlacement());
+    THOR_THROW_IF_FALSE(dataInput.getPlacement() == weights.getPlacement());
+    THOR_THROW_IF_FALSE(dataInput.getPlacement() == dataOutput.getPlacement());
 
     auto maybeOptimalKernel = GpuConvolution::instance().optimalForwardKernels.get(convolutionKernelRequirement);
-    assert(maybeOptimalKernel.has_value());
+    THOR_THROW_IF_FALSE(maybeOptimalKernel.has_value());
     cudnnConvolutionFwdAlgoPerf_t optimalKernel = *maybeOptimalKernel;
 
     if (optimalKernel.memory > 0) {
-        assert(workspace.has_value());
-        assert(optimalKernel.memory == workspace.value().getDescriptor().getArraySizeInBytes());
+        THOR_THROW_IF_FALSE(workspace.has_value());
+        THOR_THROW_IF_FALSE(optimalKernel.memory == workspace.value().getDescriptor().getArraySizeInBytes());
     }
 
     ScopedGpu scopedGpu(stream.getGpuNum());
@@ -390,13 +391,13 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
         printf("cudnnStatus %d\n", cudnnStatus);
         fflush(stdout);
     }
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
     if (biases.has_value()) {
-        assert(biases.value().getPlacement() == weights.getPlacement());
+        THOR_THROW_IF_FALSE(biases.value().getPlacement() == weights.getPlacement());
         vector<unsigned long> biasDimensions = biases.value().getDescriptor().getDimensions();
-        assert(biasDimensions.size() == 1);
-        assert(biasDimensions[0] == dataOutput.getDescriptor().getDimensions()[1]);
+        THOR_THROW_IF_FALSE(biasDimensions.size() == 1);
+        THOR_THROW_IF_FALSE(biasDimensions[0] == dataOutput.getDescriptor().getDimensions()[1]);
 
         if (useCudnnForwardBias) {
             cudnnStatus = cudnnAddTensor(stream.getCudnnHandle(),
@@ -406,7 +407,7 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
                                          &BETA_ACCUMULATE,
                                          convolutionKernelRequirement.getDataOutputTensorDescriptor(),
                                          dataOutput.getMemPtr());
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         } else {
             addConvolutionBias(dataOutput, biases.value(), stream);
         }
@@ -419,19 +420,19 @@ void GpuConvolution::convolutionBackwardData(ConvolutionKernelRequirement convol
                                              Tensor errorOutput,
                                              std::optional<Tensor> workspace,
                                              Stream stream) {
-    assert(errorInput.getPlacement() == weights.getPlacement());
-    assert(errorInput.getPlacement() == errorOutput.getPlacement());
+    THOR_THROW_IF_FALSE(errorInput.getPlacement() == weights.getPlacement());
+    THOR_THROW_IF_FALSE(errorInput.getPlacement() == errorOutput.getPlacement());
 
     auto maybeOptimalKernel = GpuConvolution::instance().optimalBackwardDataKernels.get(convolutionKernelRequirement);
-    assert(maybeOptimalKernel.has_value());
+    THOR_THROW_IF_FALSE(maybeOptimalKernel.has_value());
     cudnnConvolutionBwdDataAlgoPerf_t optimalKernel = *maybeOptimalKernel;
 
     if (optimalKernel.memory > 0) {
         if (!workspace.has_value()) {
             printf("algo %d workspaceBytes %ld\n", optimalKernel.algo, optimalKernel.memory);
         }
-        assert(workspace.has_value());
-        assert(optimalKernel.memory == workspace.value().getDescriptor().getArraySizeInBytes());
+        THOR_THROW_IF_FALSE(workspace.has_value());
+        THOR_THROW_IF_FALSE(optimalKernel.memory == workspace.value().getDescriptor().getArraySizeInBytes());
     }
 
     ScopedGpu scopedGpu(stream.getGpuNum());
@@ -454,7 +455,7 @@ void GpuConvolution::convolutionBackwardData(ConvolutionKernelRequirement convol
         printf("cudnnStatus %d\n", cudnnStatus);
         fflush(stdout);
     }
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
 
 void GpuConvolution::convolutionBackwardFilter(ConvolutionKernelRequirement convolutionKernelRequirement,
@@ -464,16 +465,16 @@ void GpuConvolution::convolutionBackwardFilter(ConvolutionKernelRequirement conv
                                                std::optional<Tensor> workspace,
                                                Stream stream,
                                                bool accumulateGradient) {
-    assert(dataInput.getPlacement() == errorInput.getPlacement());
-    assert(dataInput.getPlacement() == weightsGradient.getPlacement());
+    THOR_THROW_IF_FALSE(dataInput.getPlacement() == errorInput.getPlacement());
+    THOR_THROW_IF_FALSE(dataInput.getPlacement() == weightsGradient.getPlacement());
 
     auto maybeOptimalKernel = GpuConvolution::instance().optimalBackwardFilterKernels.get(convolutionKernelRequirement);
-    assert(maybeOptimalKernel.has_value());
+    THOR_THROW_IF_FALSE(maybeOptimalKernel.has_value());
     cudnnConvolutionBwdFilterAlgoPerf_t optimalKernel = *maybeOptimalKernel;
 
     if (optimalKernel.memory > 0) {
-        assert(workspace.has_value());
-        assert(optimalKernel.memory == workspace.value().getDescriptor().getArraySizeInBytes());
+        THOR_THROW_IF_FALSE(workspace.has_value());
+        THOR_THROW_IF_FALSE(optimalKernel.memory == workspace.value().getDescriptor().getArraySizeInBytes());
     }
 
     ScopedGpu scopedGpu(stream.getGpuNum());
@@ -496,7 +497,7 @@ void GpuConvolution::convolutionBackwardFilter(ConvolutionKernelRequirement conv
         printf("cudnnStatus %d\n", cudnnStatus);
         fflush(stdout);
     }
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
 
 void GpuConvolution::convolutionBackwardBias(ConvolutionKernelRequirement convolutionKernelRequirement,
@@ -514,7 +515,7 @@ void GpuConvolution::convolutionBackwardBias(ConvolutionKernelRequirement convol
                                                    accumulateGradient ? &BETA_ACCUMULATE : &BETA_CLEAR,
                                                    convolutionKernelRequirement.getBiasesTensorDescriptor(),
                                                    biasesGradient.getMemPtr());
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
     } else {
         computeConvolutionBiasesGradient(errorInput, biasesGradient, workspace.value(), stream);
     }
@@ -522,7 +523,7 @@ void GpuConvolution::convolutionBackwardBias(ConvolutionKernelRequirement convol
 
 void GpuConvolution::printBackwardFilterKernelInfo(ConvolutionKernelRequirement convolutionKernelRequirement) {
     auto maybeAlgo = GpuConvolution::instance().optimalBackwardFilterKernels.get(convolutionKernelRequirement);
-    assert(maybeAlgo.has_value());
+    THOR_THROW_IF_FALSE(maybeAlgo.has_value());
     const auto& algo = *maybeAlgo;
 
     printf("algo %d status %d time %f workspaceSize %ld determinism %d mathType %d\n",

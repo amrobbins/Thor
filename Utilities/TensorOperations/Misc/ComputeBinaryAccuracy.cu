@@ -1,4 +1,5 @@
 #include "ComputeBinaryAccuracy.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 using namespace ThorImplementation;
@@ -191,10 +192,10 @@ void launchComputeBinaryAccuracy(ThorImplementation::Tensor accuracy_d,
                                  uint32_t batchSize,
                                  shared_ptr<BatchReduce> batchReduce,
                                  Stream stream) {
-    assert(batchSize > 0);
+    THOR_THROW_IF_FALSE(batchSize > 0);
 
-    assert(workspace_d.getDataType() == ThorImplementation::TensorDescriptor::DataType::FP16);
-    assert(accuracy_d.getDataType() == ThorImplementation::TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(workspace_d.getDataType() == ThorImplementation::TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(accuracy_d.getDataType() == ThorImplementation::TensorDescriptor::DataType::FP32);
     float *accuracy_m = (float *)accuracy_d.getMemPtr();
     uint8_t *workspace_m = (uint8_t *)workspace_d.getMemPtr();
 
@@ -209,7 +210,7 @@ void launchComputeBinaryAccuracy(ThorImplementation::Tensor accuracy_d,
         } else if (sizeof(LABEL_TYPE) == 4) {
             computeBinaryAccuracyPerBatchItemResult24<<<gridSize, blockSize, 0, stream>>>(predictions_d, labels_d, workspace_m, batchSize);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     } else if (sizeof(PREDICTION_TYPE) == 4) {
         if (sizeof(LABEL_TYPE) == 1) {
@@ -220,13 +221,13 @@ void launchComputeBinaryAccuracy(ThorImplementation::Tensor accuracy_d,
         } else if (sizeof(LABEL_TYPE) == 4) {
             computeBinaryAccuracyPerBatchItemResult44<<<gridSize, blockSize, 0, stream>>>(predictions_d, labels_d, workspace_m, batchSize);
         } else {
-            assert(false);
+            THOR_UNREACHABLE();
         }
     } else {
-        assert(false);
+        THOR_UNREACHABLE();
     }
 
-    assert(batchReduce->getStream() == stream);
+    THOR_THROW_IF_FALSE(batchReduce->getStream() == stream);
     // Sum and divide by batch size:
     batchReduce->reduce(workspace_d, accuracy_d);
 }

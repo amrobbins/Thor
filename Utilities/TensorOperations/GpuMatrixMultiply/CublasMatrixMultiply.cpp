@@ -3,6 +3,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <stdexcept>
+#include "DeepLearning/Implementation/ThorError.h"
 
 //-----------------------------------------------
 //
@@ -96,7 +97,7 @@ uint64_t cudaDataTypeSizeInBytes(cudaDataType_t dataType) {
         case CUDA_R_8I:
             return 1;
         default:
-            assert(false);
+            THOR_UNREACHABLE();
             return 1;
     }
 }
@@ -479,10 +480,10 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                 const Fp8MatmulScales fp8Scales,
                                 Stream stream,
                                 CublasScalarPointerMode pointerMode) {
-    assert(A.getDimensions().size() == 2);
-    assert(B.getDimensions().size() == 2);
-    assert(C.getDimensions().size() == 2);
-    assert(D.getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(A.getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(B.getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(C.getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(D.getDimensions().size() == 2);
     const int32_t ld_A = A.getDimensions()[1];
     const int32_t ld_B = B.getDimensions()[1];
     const int32_t ld_C = C.getDimensions()[1];
@@ -493,39 +494,39 @@ void CublasMatrixMultiply::gemm(Tensor A,
     int32_t D_rows = C_rows;
     int32_t D_cols = C_cols;
 
-    assert(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
+    THOR_THROW_IF_FALSE(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
 
-    assert(!(C == D && transposeC));
-    assert(!(C == D) || dataTypes.C == dataTypes.D);
+    THOR_THROW_IF_FALSE(!(C == D && transposeC));
+    THOR_THROW_IF_FALSE(!(C == D) || dataTypes.C == dataTypes.D);
 
-    assert(A_rows > 0);
-    assert(A_cols > 0);
-    assert(B_rows > 0);
-    assert(B_cols > 0);
-    assert(ld_A >= A_cols);
-    assert(ld_B >= B_cols);
-    assert(ld_C >= C_cols);
-    assert(ld_D >= D_cols);
+    THOR_THROW_IF_FALSE(A_rows > 0);
+    THOR_THROW_IF_FALSE(A_cols > 0);
+    THOR_THROW_IF_FALSE(B_rows > 0);
+    THOR_THROW_IF_FALSE(B_cols > 0);
+    THOR_THROW_IF_FALSE(ld_A >= A_cols);
+    THOR_THROW_IF_FALSE(ld_B >= B_cols);
+    THOR_THROW_IF_FALSE(ld_C >= C_cols);
+    THOR_THROW_IF_FALSE(ld_D >= D_cols);
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::gemm");
     validateFp8MatmulScaleConfigurationOrThrow(dataTypes, fp8Scales, "CublasMatrixMultiply::gemm");
-    assert(A.getDescriptor().getDataType() == dataTypes.A);
-    assert(B.getDescriptor().getDataType() == dataTypes.B);
-    assert(C.getDescriptor().getDataType() == dataTypes.C);
-    assert(D.getDescriptor().getDataType() == dataTypes.D);
+    THOR_THROW_IF_FALSE(A.getDescriptor().getDataType() == dataTypes.A);
+    THOR_THROW_IF_FALSE(B.getDescriptor().getDataType() == dataTypes.B);
+    THOR_THROW_IF_FALSE(C.getDescriptor().getDataType() == dataTypes.C);
+    THOR_THROW_IF_FALSE(D.getDescriptor().getDataType() == dataTypes.D);
     // Check dimensions of tensors
     vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
     vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
     vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
     vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
-    assert(ADimensions.size() == 2);
-    assert(ADimensions[0] == static_cast<uint32_t>(A_rows));
-    assert(ADimensions[1] == static_cast<uint32_t>(ld_A));
-    assert(BDimensions[0] == static_cast<uint32_t>(B_rows));
-    assert(BDimensions[1] == static_cast<uint32_t>(ld_B));
-    assert(CDimensions[0] == static_cast<uint32_t>(C_rows));
-    assert(CDimensions[1] == static_cast<uint32_t>(ld_C));
-    assert(DDimensions[0] == static_cast<uint32_t>(D_rows));
-    assert(DDimensions[1] == static_cast<uint32_t>(ld_D));
+    THOR_THROW_IF_FALSE(ADimensions.size() == 2);
+    THOR_THROW_IF_FALSE(ADimensions[0] == static_cast<uint32_t>(A_rows));
+    THOR_THROW_IF_FALSE(ADimensions[1] == static_cast<uint32_t>(ld_A));
+    THOR_THROW_IF_FALSE(BDimensions[0] == static_cast<uint32_t>(B_rows));
+    THOR_THROW_IF_FALSE(BDimensions[1] == static_cast<uint32_t>(ld_B));
+    THOR_THROW_IF_FALSE(CDimensions[0] == static_cast<uint32_t>(C_rows));
+    THOR_THROW_IF_FALSE(CDimensions[1] == static_cast<uint32_t>(ld_C));
+    THOR_THROW_IF_FALSE(DDimensions[0] == static_cast<uint32_t>(D_rows));
+    THOR_THROW_IF_FALSE(DDimensions[1] == static_cast<uint32_t>(ld_D));
 
     int gpuNum = stream.getGpuNum();
     ScopedGpu scopedGpu(gpuNum);
@@ -554,17 +555,17 @@ void CublasMatrixMultiply::gemm(Tensor A,
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
     auto maybeCublasKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement);
-    assert(maybeCublasKernel.has_value());
+    THOR_THROW_IF_FALSE(maybeCublasKernel.has_value());
     CublasKernel cublasKernel = maybeCublasKernel.value();
 
     // Check byte size of workspace
     if (workspace.has_value()) {
         bool kernelWillRunOnGpu;
         size_t workspaceSizeInBytes = cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales);
-        assert(kernelWillRunOnGpu);
+        THOR_THROW_IF_FALSE(kernelWillRunOnGpu);
 
         if (workspaceSizeInBytes > 0)
-            assert(cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales) <=
+            THOR_THROW_IF_FALSE(cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales) <=
                    workspace.value().getDescriptor().getArraySizeInBytes());
     }
 
@@ -586,7 +587,7 @@ cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(TensorDescriptor::DataT
         case TensorDescriptor::DataType::INT8:
             return CUDA_R_8I;
         default:
-            assert(false);
+            THOR_UNREACHABLE();
             return CUDA_R_32F;
     }
 }
@@ -946,10 +947,10 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     const Fp8MatmulScales fp8Scales,
     Stream stream,
     CublasScalarPointerMode pointerMode) {
-    assert(A.getDimensions().size() == 2);
-    assert(B.getDimensions().size() == 2);
-    assert(C.getDimensions().size() == 2);
-    assert(D.getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(A.getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(B.getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(C.getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(D.getDimensions().size() == 2);
     const int32_t ld_A = A.getDimensions()[1];
     const int32_t ld_B = B.getDimensions()[1];
     const int32_t ld_C = C.getDimensions()[1];
@@ -960,39 +961,39 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     int32_t D_rows = C_rows;
     int32_t D_cols = C_cols;
 
-    assert(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
+    THOR_THROW_IF_FALSE(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
 
-    assert(!(C == D && transposeC));
+    THOR_THROW_IF_FALSE(!(C == D && transposeC));
 
-    assert(A_rows > 0);
-    assert(A_cols > 0);
-    assert(B_rows > 0);
-    assert(B_cols > 0);
-    assert(ld_A >= A_cols);
-    assert(ld_B >= B_cols);
-    assert(ld_C >= C_cols);
-    assert(ld_D >= D_cols);
-    assert(!(C == D) || dataTypes.C == dataTypes.D);
+    THOR_THROW_IF_FALSE(A_rows > 0);
+    THOR_THROW_IF_FALSE(A_cols > 0);
+    THOR_THROW_IF_FALSE(B_rows > 0);
+    THOR_THROW_IF_FALSE(B_cols > 0);
+    THOR_THROW_IF_FALSE(ld_A >= A_cols);
+    THOR_THROW_IF_FALSE(ld_B >= B_cols);
+    THOR_THROW_IF_FALSE(ld_C >= C_cols);
+    THOR_THROW_IF_FALSE(ld_D >= D_cols);
+    THOR_THROW_IF_FALSE(!(C == D) || dataTypes.C == dataTypes.D);
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::gemmUsingHeuristicKernelChoice");
     validateFp8MatmulScaleConfigurationOrThrow(dataTypes, fp8Scales, "CublasMatrixMultiply::gemmUsingHeuristicKernelChoice");
-    assert(A.getDescriptor().getDataType() == dataTypes.A);
-    assert(B.getDescriptor().getDataType() == dataTypes.B);
-    assert(C.getDescriptor().getDataType() == dataTypes.C);
-    assert(D.getDescriptor().getDataType() == dataTypes.D);
+    THOR_THROW_IF_FALSE(A.getDescriptor().getDataType() == dataTypes.A);
+    THOR_THROW_IF_FALSE(B.getDescriptor().getDataType() == dataTypes.B);
+    THOR_THROW_IF_FALSE(C.getDescriptor().getDataType() == dataTypes.C);
+    THOR_THROW_IF_FALSE(D.getDescriptor().getDataType() == dataTypes.D);
     // Check dimensions of tensors
     vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
     vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
     vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
     vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
-    assert(ADimensions.size() == 2);
-    assert(ADimensions[0] == static_cast<uint32_t>(A_rows));
-    assert(ADimensions[1] == static_cast<uint32_t>(ld_A));
-    assert(BDimensions[0] == static_cast<uint32_t>(B_rows));
-    assert(BDimensions[1] == static_cast<uint32_t>(ld_B));
-    assert(CDimensions[0] == static_cast<uint32_t>(C_rows));
-    assert(CDimensions[1] == static_cast<uint32_t>(ld_C));
-    assert(DDimensions[0] == static_cast<uint32_t>(D_rows));
-    assert(DDimensions[1] == static_cast<uint32_t>(ld_D));
+    THOR_THROW_IF_FALSE(ADimensions.size() == 2);
+    THOR_THROW_IF_FALSE(ADimensions[0] == static_cast<uint32_t>(A_rows));
+    THOR_THROW_IF_FALSE(ADimensions[1] == static_cast<uint32_t>(ld_A));
+    THOR_THROW_IF_FALSE(BDimensions[0] == static_cast<uint32_t>(B_rows));
+    THOR_THROW_IF_FALSE(BDimensions[1] == static_cast<uint32_t>(ld_B));
+    THOR_THROW_IF_FALSE(CDimensions[0] == static_cast<uint32_t>(C_rows));
+    THOR_THROW_IF_FALSE(CDimensions[1] == static_cast<uint32_t>(ld_C));
+    THOR_THROW_IF_FALSE(DDimensions[0] == static_cast<uint32_t>(D_rows));
+    THOR_THROW_IF_FALSE(DDimensions[1] == static_cast<uint32_t>(ld_D));
 
     ScopedGpu scopedGpu(stream.getGpuNum());
 
@@ -1136,7 +1137,6 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     // cublasLtMatmulPreferenceAttributes_t attribute = CUBLASLT_MATMUL_PREF_IMPL_MASK;
     // cublasLtNumericalImplFlags_t computeType = CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_TYPE_MASK |
     // CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_32F; CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(searchPreferences, attribute,
-    // &computeType, sizeof(computeType)); assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
     int returnedAlgoCount;
     vector<cublasLtMatmulHeuristicResult_t> results(30);
@@ -1223,7 +1223,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
         }
     }
 
-    assert(kernelLaunchedSuccessfully);
+    THOR_THROW_IF_FALSE(kernelLaunchedSuccessfully);
 
     CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(searchPreferences));
     CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
@@ -1266,12 +1266,12 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     //    const int32_t ld_C = C_cols;
     //    const int32_t ld_D = D_cols;
 
-    assert(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
+    THOR_THROW_IF_FALSE(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
 
-    assert(A_rows > 0);
-    assert(A_cols > 0);
-    assert(B_rows > 0);
-    assert(B_cols > 0);
+    THOR_THROW_IF_FALSE(A_rows > 0);
+    THOR_THROW_IF_FALSE(A_cols > 0);
+    THOR_THROW_IF_FALSE(B_rows > 0);
+    THOR_THROW_IF_FALSE(B_cols > 0);
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::getHeuristicGemmKernels");
     validateFp8MatmulScaleConfigurationOrThrow(dataTypes, fp8Scales, "CublasMatrixMultiply::getHeuristicGemmKernels");
 
@@ -1600,8 +1600,8 @@ void CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
         std::lock_guard<std::mutex> lock(CublasMatrixMultiply::instance().mtx);
         auto noWorkspaceKernel = CublasMatrixMultiply::instance().optimalKernels.get(noWorkspaceCublasKernelRequirement);
         auto workspaceKernel = CublasMatrixMultiply::instance().optimalKernels.get(workspaceCublasKernelRequirement);
-        assert(noWorkspaceKernel.has_value());
-        assert(workspaceKernel.has_value());
+        THOR_THROW_IF_FALSE(noWorkspaceKernel.has_value());
+        THOR_THROW_IF_FALSE(workspaceKernel.has_value());
         if (noWorkspaceKernel->getAverageRunTimeMilliseconds() < workspaceKernel->getAverageRunTimeMilliseconds()) {
             CublasMatrixMultiply::instance().optimalKernels.put(workspaceCublasKernelRequirement, *noWorkspaceKernel);
         }
@@ -1626,8 +1626,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                    const bool printResults) {
     lock_guard<mutex> lck(CublasMatrixMultiply::instance().mtx);
 
-    assert(gpuNum >= 0);
-    assert(gpuNum < (int)MachineEvaluator::instance().getNumGpus());
+    THOR_THROW_IF_FALSE(gpuNum >= 0);
+    THOR_THROW_IF_FALSE(gpuNum < (int)MachineEvaluator::instance().getNumGpus());
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::chooseOptimalGemmKernel");
     validateFp8MatmulScaleConfigurationOrThrow(dataTypes, fp8Scales, "CublasMatrixMultiply::chooseOptimalGemmKernel");
 
@@ -1637,15 +1637,15 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     const int32_t finalColsA = (transposeA ? rowsA : colsA);
     const int32_t finalRowsB = (transposeB ? colsB : rowsB);
     const int32_t finalColsB = (transposeB ? rowsB : colsB);
-    assert(finalColsA == finalRowsB);
+    THOR_THROW_IF_FALSE(finalColsA == finalRowsB);
 
     const int32_t initialRowsC = (transposeC ? finalColsB : finalRowsA);
     const int32_t initialColsC = (transposeC ? finalRowsA : finalColsB);
-    assert(ldC >= initialColsC);
+    THOR_THROW_IF_FALSE(ldC >= initialColsC);
 
     // const int32_t finalRowsC = finalRowsA;
     const int32_t finalColsC = finalColsB;
-    assert(ldD >= finalColsC);
+    THOR_THROW_IF_FALSE(ldD >= finalColsC);
 
     Stream stream(gpuNum);
 
@@ -1723,11 +1723,11 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     if (auto optimalKernel = optimalKernels.get(cublasKernelRequirement); optimalKernel.has_value()) {
         bool kernelWillRunOnGpu;
         unsigned int workspaceSizeInBytes = optimalKernel->getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales);
-        assert(kernelWillRunOnGpu);
+        THOR_THROW_IF_FALSE(kernelWillRunOnGpu);
         return workspaceSizeInBytes > 0 ? true : false;
     }
 
-    assert(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
+    THOR_THROW_IF_FALSE(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
 
     const int32_t rowsC = (transposeA == false ? rowsA : colsA);
     int32_t rowsD = rowsC;
@@ -1823,7 +1823,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
         rowsA * ldA * A_ELEMENT_SIZE + rowsB * ldB * B_ELEMENT_SIZE + initialRowsC * ldC * C_ELEMENT_SIZE + rowsD * ldD * D_ELEMENT_SIZE;
     long totalMatrixMemory = minl(totalGpuMem * 0.4, maxl(ONE_HUNDRED_MEGS, 10 * memPerInstance));
     long numInstances = minl(totalMatrixMemory / memPerInstance, 5000);
-    assert(numInstances > 0);
+    THOR_THROW_IF_FALSE(numInstances > 0);
 
     long numWorkspaceInstances;
     if (maxWorkspaceSizeInBytes == 0) {
@@ -1832,7 +1832,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     } else {
         long totalWorkspaceMem = minl(totalGpuMem * 0.4, maxl(ONE_HUNDRED_MEGS, 10 * maxWorkspaceSizeInBytes));
         numWorkspaceInstances = minl(totalWorkspaceMem / maxWorkspaceSizeInBytes, 5000);
-        assert(numWorkspaceInstances > 0);
+        THOR_THROW_IF_FALSE(numWorkspaceInstances > 0);
     }
 
     vector<Tensor> A;
@@ -2056,7 +2056,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     for (unsigned int i = 0; i < kernels.size(); ++i)
         kernels[i].stashRunStats();
 
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
     for (int run = 0; run < finalRun; ++run) {
         for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
             startEvents[kernelIndex].push_back(stream.putEvent(true));
@@ -2112,11 +2112,11 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     }
 
     CublasKernel bestKernel = *std::min_element(kernels.begin(), kernels.end(), CublasKernel::executionTimeComparison);
-    assert(!bestKernel.getErrorFlag());
+    THOR_THROW_IF_FALSE(!bestKernel.getErrorFlag());
     bestKernel.unstashRunStats();
     bool kernelWillRunOnGpu;
     bool bestKernelHasWorkspace = bestKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales) > 0;
-    assert(kernelWillRunOnGpu);
+    THOR_THROW_IF_FALSE(kernelWillRunOnGpu);
 
     optimalKernels.put(cublasKernelRequirement, bestKernel);
 
@@ -2214,7 +2214,7 @@ vector<cublasLtMatmulTile_t> CublasMatrixMultiply::getSupportedTileSizes(cublasL
                                           supportedTileSizeEnums.data(),
                                           numSupportedTilesConfigurations * sizeof(cublasLtMatmulTile_t),
                                           &sizeWritten);
-        assert(sizeWritten == numSupportedTilesConfigurations);
+        THOR_THROW_IF_FALSE(sizeWritten == numSupportedTilesConfigurations);
     }
 
     return supportedTileSizeEnums;
@@ -2224,7 +2224,7 @@ bool CublasMatrixMultiply::isSplitKSupported(cublasLtMatmulAlgo_t algo) {
     size_t sizeWritten = 0;
     int splitKSupported;
     cublasLtMatmulAlgoCapGetAttribute(&algo, CUBLASLT_ALGO_CAP_SPLITK_SUPPORT, &splitKSupported, sizeof(splitKSupported), &sizeWritten);
-    assert(sizeWritten == sizeof(splitKSupported));
+    THOR_THROW_IF_FALSE(sizeWritten == sizeof(splitKSupported));
 
     return splitKSupported ? true : false;
 }
@@ -2234,7 +2234,7 @@ uint32_t CublasMatrixMultiply::getReductionSupportMask(cublasLtMatmulAlgo_t algo
     uint32_t reductionSupportMask;
     cublasLtMatmulAlgoCapGetAttribute(
         &algo, CUBLASLT_ALGO_CAP_REDUCTION_SCHEME_MASK, &reductionSupportMask, sizeof(reductionSupportMask), &sizeWritten);
-    assert(sizeWritten == sizeof(reductionSupportMask));
+    THOR_THROW_IF_FALSE(sizeWritten == sizeof(reductionSupportMask));
 
     return reductionSupportMask;
 }
@@ -2243,8 +2243,8 @@ int CublasMatrixMultiply::getSwizzleMaxValue(cublasLtMatmulAlgo_t algo) {
     size_t sizeWritten = 0;
     int swizzleMax;
     cublasLtMatmulAlgoCapGetAttribute(&algo, CUBLASLT_ALGO_CAP_CTA_SWIZZLING_SUPPORT, &swizzleMax, sizeof(swizzleMax), &sizeWritten);
-    assert(sizeWritten == sizeof(swizzleMax));
-    assert(swizzleMax == 0 || swizzleMax == 1);
+    THOR_THROW_IF_FALSE(sizeWritten == sizeof(swizzleMax));
+    THOR_THROW_IF_FALSE(swizzleMax == 0 || swizzleMax == 1);
 
     return swizzleMax;
 }
@@ -2254,7 +2254,7 @@ int CublasMatrixMultiply::getCustomKernelOptionMaxValue(cublasLtMatmulAlgo_t alg
     int kernelOptionMaxValue;
     cublasLtMatmulAlgoCapGetAttribute(
         &algo, CUBLASLT_ALGO_CAP_CUSTOM_OPTION_MAX, &kernelOptionMaxValue, sizeof(kernelOptionMaxValue), &sizeWritten);
-    assert(sizeWritten == sizeof(kernelOptionMaxValue));
+    THOR_THROW_IF_FALSE(sizeWritten == sizeof(kernelOptionMaxValue));
 
     return kernelOptionMaxValue;
 }
@@ -2369,7 +2369,7 @@ unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
     auto optimalKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement);
-    assert(optimalKernel.has_value());
+    THOR_THROW_IF_FALSE(optimalKernel.has_value());
     unsigned int workspaceSize = optimalKernel->getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu, fp8Scales);
 
     return workspaceSize;

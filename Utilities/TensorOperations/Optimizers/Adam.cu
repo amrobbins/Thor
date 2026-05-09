@@ -92,7 +92,6 @@
 //         adamStep_fp32<<<gridSize, blockSize, 0, stream>>>(
 //             weightUpdate_d, gradient_d, m_d, v_d, alphaT, beta1, beta2, epsilon, length, inverseBatchSizeTimesInverseLossScale);
 //     } else {
-//         static_assert(is_same_v<T, half> || is_same_v<T, float>, "launchAdamStep only supports T=half or T=float");
 //     }
 // }
 //

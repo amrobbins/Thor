@@ -1,4 +1,5 @@
 #include "Extract.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 __global__ void extract(half *dest,
                         half *source,
@@ -60,7 +61,7 @@ void launchExtract(half *dest_d,
                    unsigned int padAfter_d[],
                    Stream stream) {
     // in place is not supported
-    assert(dest_d != source_d);
+    THOR_THROW_IF_FALSE(dest_d != source_d);
 
     dim3 blockSize(256);
     dim3 gridSize((numDestElements + 2047) / 2048);

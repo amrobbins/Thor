@@ -1,5 +1,6 @@
 #include "Utilities/Loaders/ImageLoader.h"
 #include <X11/Xlib.h>
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace Magick;
 using namespace std;
@@ -28,7 +29,7 @@ bool ImageLoader::loadImage(void *rawImageData, uint64_t rawImageDataSizeInBytes
 bool ImageLoader::resizeImage(
     double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns, Image &image) {
     if (minAspectRatio > 0 && maxAspectRatio > 0)
-        assert(minAspectRatio <= maxAspectRatio);
+        THOR_THROW_IF_FALSE(minAspectRatio <= maxAspectRatio);
 
     double rowAspectRatio = (double)outputImageRows / image.rows();
     double colAspectRatio = (double)outputImageColumns / image.columns();
@@ -44,8 +45,8 @@ bool ImageLoader::resizeImage(
         uint32_t numResizedColumns = ceil(image.columns() * aspectRatio);
         image.resize(Geometry(numResizedColumns, numResizedRows));
 
-        assert(numResizedRows >= outputImageRows);
-        assert(numResizedColumns >= outputImageColumns);
+        THOR_THROW_IF_FALSE(numResizedRows >= outputImageRows);
+        THOR_THROW_IF_FALSE(numResizedColumns >= outputImageColumns);
         if (numResizedRows > outputImageRows || numResizedColumns > outputImageColumns) {
             // crop
             uint32_t cropStartRow = (numResizedRows - outputImageRows) / 2;

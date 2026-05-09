@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 #include "WorkQueueExecutorBase.h"
 
 #include <condition_variable>
@@ -9,7 +10,6 @@
 #include <deque>
 #include <vector>
 
-#include <assert.h>
 #include <stdio.h>
 
 template <class InputType, class OutputType>
@@ -96,7 +96,7 @@ class WorkQueue {
     }
 
     void popInputQueue() {
-        assert(!inputEmpty);
+        THOR_THROW_IF_FALSE(!inputEmpty);
         inputHead = computeNextInputQueueSlot(inputHead);
         if (inputHead == inputTail)
             inputEmpty = true;
@@ -104,7 +104,7 @@ class WorkQueue {
     }
 
     void pushInputQueue() {
-        assert(!inputFull);
+        THOR_THROW_IF_FALSE(!inputFull);
         inputTail = computeNextInputQueueSlot(inputTail);
         if (inputHead == inputTail)
             inputFull = true;
@@ -119,7 +119,7 @@ class WorkQueue {
     }
 
     void popOutputQueue() {
-        assert(!outputEmpty);
+        THOR_THROW_IF_FALSE(!outputEmpty);
         outputHead = computeNextOutputQueueSlot(outputHead);
         if (outputHead == outputTail)
             outputEmpty = true;
@@ -127,7 +127,7 @@ class WorkQueue {
     }
 
     void pushOutputQueue() {
-        assert(!outputFull);
+        THOR_THROW_IF_FALSE(!outputFull);
         outputTail = computeNextOutputQueueSlot(outputTail);
         if (outputHead == outputTail)
             outputFull = true;
@@ -142,10 +142,10 @@ WorkQueue<InputType, OutputType>::WorkQueue() {}
 template <class InputType, class OutputType>
 void WorkQueue<InputType, OutputType>::openImpl(int numThreads, unsigned int inputBufferingMultiple, unsigned int outputBufferingMultiple) {
     std::unique_lock<std::mutex> lck(mtx);
-    assert(queueOpen == false);
-    assert(numThreads < 10000);
-    assert(inputBufferingMultiple > 0);
-    assert(outputBufferingMultiple > 0);
+    THOR_THROW_IF_FALSE(queueOpen == false);
+    THOR_THROW_IF_FALSE(numThreads < 10000);
+    THOR_THROW_IF_FALSE(inputBufferingMultiple > 0);
+    THOR_THROW_IF_FALSE(outputBufferingMultiple > 0);
 
     if (numThreads < 1) {
         int numCpuThreads = std::thread::hardware_concurrency();
@@ -187,7 +187,7 @@ void WorkQueue<InputType, OutputType>::open(std::unique_ptr<WorkQueueExecutorBas
                                             int numThreads,
                                             unsigned int inputBufferingMultiple,
                                             unsigned int outputBufferingMultiple) {
-    assert(!queueOpen);
+    THOR_THROW_IF_FALSE(!queueOpen);
     openImpl(numThreads, inputBufferingMultiple, outputBufferingMultiple);
     this->executor.reset(executor.release());
 }
@@ -197,7 +197,7 @@ void WorkQueue<InputType, OutputType>::open(std::unique_ptr<WorkQueueExecutorBas
                                             int numThreads,
                                             unsigned int inputBufferingMultiple,
                                             unsigned int outputBufferingMultiple) {
-    assert(!queueOpen);
+    THOR_THROW_IF_FALSE(!queueOpen);
     openImpl(numThreads, inputBufferingMultiple, outputBufferingMultiple);
     this->executor.reset(executor.release());
 }

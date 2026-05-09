@@ -1,4 +1,5 @@
 #include "BatchReduce.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace ThorImplementation;
 
@@ -38,14 +39,14 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
     this->reduceClass = reduceClass;
     this->doBatchSizeDivide = doBatchSizeDivide;
 
-    assert(batchSize > 0);
-    assert(classDimSize > 0);
+    THOR_THROW_IF_FALSE(batchSize > 0);
+    THOR_THROW_IF_FALSE(classDimSize > 0);
     if (isWire() || isScalarDivide()) {
         return;
     }
 
     if (doubleType) {
-        assert(destDataType == TensorDescriptor::DataType::FP64);
+        THOR_THROW_IF_FALSE(destDataType == TensorDescriptor::DataType::FP64);
         zero = new double;
         ((double *)zero)[0] = 0.0;
         one = new double;
@@ -87,7 +88,7 @@ uint64_t BatchReduce::computeWorkspaceSizeInBytes(uint32_t batchletSize,
 
     cudnnStatus_t cudnnStatus;
     cudnnStatus = cudnnCreateReduceTensorDescriptor(&reduceTensorDescriptor);
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
     cudnnStatus = cudnnSetReduceTensorDescriptor(reduceTensorDescriptor,
                                                  CUDNN_REDUCE_TENSOR_ADD,
@@ -95,14 +96,14 @@ uint64_t BatchReduce::computeWorkspaceSizeInBytes(uint32_t batchletSize,
                                                  CUDNN_NOT_PROPAGATE_NAN,
                                                  CUDNN_REDUCE_TENSOR_NO_INDICES,
                                                  CUDNN_32BIT_INDICES);
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
     sourceTensorDescriptor = Layer::createCudnnTensorDescriptor({batchletSize, classDimSize}, sourceDataType);
     destTensorDescriptor =
         Layer::createCudnnTensorDescriptor({reduceBatch ? 1 : batchletSize, reduceClass ? 1 : classDimSize}, destDataType);
     cudnnStatus = cudnnGetReductionWorkspaceSize(
         stream.getCudnnHandle(), reduceTensorDescriptor, sourceTensorDescriptor, destTensorDescriptor, &workspaceSizeInBytes);
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
     return workspaceSizeInBytes;
 }
@@ -116,7 +117,7 @@ BatchReduce::~BatchReduce() {
     cudnnStatus_t cudnnStatus;
 
     cudnnStatus = cudnnDestroyReduceTensorDescriptor(reduceTensorDescriptor);
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
     if (doubleType) {
         if (zero != nullptr) {
@@ -168,8 +169,8 @@ void BatchReduce::reduce(Tensor source, Tensor dest, bool accumulate) {
 
     cudnnStatus_t cudnnStatus;
 
-    assert(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(dest.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    THOR_THROW_IF_FALSE(dest.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     cudnnStatus = cudnnReduceTensor(stream.getCudnnHandle(),
                                     reduceTensorDescriptor,
@@ -195,5 +196,5 @@ void BatchReduce::reduce(Tensor source, Tensor dest, bool accumulate) {
                doBatchSizeDivide);
         fflush(stdout);
     }
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }

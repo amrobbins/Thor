@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 #include "Crc32.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/TarFile/TarArchive.h"
@@ -89,7 +90,7 @@ class ArchiveShardWriterWorker {
         const std::string& archiveShardPath = (archiveDirectory / job.archiveShardPath).string();
         const uint32_t shardNumber = job.shardNumber;
 
-        assert(!plan.empty());
+        THOR_THROW_IF_FALSE(!plan.empty());
         uringDirect.registerDumpFile(archiveShardPath);
         uint32_t numCompletionsToFinish[2] = {0, 0};
         constexpr uint64_t fourKLeftoverMask = 0xFFF;
@@ -112,7 +113,7 @@ class ArchiveShardWriterWorker {
                 std::memcpy(bounceBufferMem[0], tailAndTarSeparator, numTailPadAndHeaderBytes);
 
                 // Initiate fetch of the first chunk of the file, place it on the bounce buffer after the tar header:
-                assert(plan[0].numBytes <= fiveHundredMB);
+                THOR_THROW_IF_FALSE(plan[0].numBytes <= fiveHundredMB);
                 bounceBufferReady[0] = prefetchGpuBuffer(
                     bounceBuffer[0], plan[0].tensor, stream, plan[0].tensorOffsetBytes, plan[0].numBytes, numTailPadAndHeaderBytes);
 
@@ -123,7 +124,7 @@ class ArchiveShardWriterWorker {
                     state = WriterState::CONSUME_BUFFER_0;
                 }
             } else {
-                assert(state == WriterState::CONSUME_BUFFER_0 || state == WriterState::CONSUME_BUFFER_1);
+                THOR_THROW_IF_FALSE(state == WriterState::CONSUME_BUFFER_0 || state == WriterState::CONSUME_BUFFER_1);
 
                 uint32_t loadedBuffer;
                 uint32_t dumpingBuffer;
@@ -209,7 +210,7 @@ class ArchiveShardWriterWorker {
             }
         }
 
-        assert(state == WriterState::POST);
+        THOR_THROW_IF_FALSE(state == WriterState::POST);
         uint32_t freeBuffer = finalFetchingBuffer == 0 ? 1 : 0;
 
         // Wait for done prefetch of final buffer from GPU
@@ -238,7 +239,7 @@ class ArchiveShardWriterWorker {
         // Ensuring that the total number of bytes to write is a multiple of 4K, this can be accomplished by increasing the size
         // of the end of tar marker.
         numTailPadAndHeaderBytes = appendTarEndOfArchive(plan.back().numBytes, numTailBytesToForward, tailAndTarSeparator, thirtyTwoK);
-        assert((numTailPadAndHeaderBytes & fourKLeftoverMask) == 0);
+        THOR_THROW_IF_FALSE((numTailPadAndHeaderBytes & fourKLeftoverMask) == 0);
 
         // Compute CRC of the payload part of final buffer
         uint32_t crc = crc32_ieee(
@@ -291,9 +292,9 @@ class ArchiveShardWriterWorker {
         constexpr uint64_t fourKLeftoverMask = 0xFFF;
         constexpr uint32_t kChunkBytes = (uint32_t(1) << 24);  // 16 MiB
 
-        assert(num4kSegmentedBytes > 0);
-        assert((num4kSegmentedBytes & fourKLeftoverMask) == 0);
-        assert(bufferIndex < 2);
+        THOR_THROW_IF_FALSE(num4kSegmentedBytes > 0);
+        THOR_THROW_IF_FALSE((num4kSegmentedBytes & fourKLeftoverMask) == 0);
+        THOR_THROW_IF_FALSE(bufferIndex < 2);
 
         uint64_t fileBase = dumpedFileOffsetBytes;
 
@@ -305,9 +306,9 @@ class ArchiveShardWriterWorker {
             if (len > kChunkBytes)
                 len = kChunkBytes;
 
-            assert((len & fourKLeftoverMask) == 0);
-            assert(((fileBase + submitted) & fourKLeftoverMask) == 0);
-            assert((submitted & fourKLeftoverMask) == 0);
+            THOR_THROW_IF_FALSE((len & fourKLeftoverMask) == 0);
+            THOR_THROW_IF_FALSE(((fileBase + submitted) & fourKLeftoverMask) == 0);
+            THOR_THROW_IF_FALSE((submitted & fourKLeftoverMask) == 0);
 
             // IMPORTANT: pass bufOffsetBytes=submitted so each chunk writes the correct slice of the bounce buffer
             uringDirect.submitWriteFixed(bufferIndex,

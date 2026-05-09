@@ -1,5 +1,6 @@
 #include "Sum.h"
 #include "Utilities/Common/ScopedGpu.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 template <typename DATA_TYPE>
 __global__ void sum(DATA_TYPE *dest, DATA_TYPE *source[], uint32_t numInstances, uint64_t numElements) {
@@ -30,8 +31,8 @@ __global__ void sum(DATA_TYPE *dest, DATA_TYPE *source[], uint32_t numInstances,
 // source_d_pd[] is a device memory array of pointers to device memory
 template <typename DATA_TYPE>
 void launchSum(DATA_TYPE *dest_d, DATA_TYPE *source_d_pd[], uint32_t numInstances, uint64_t numElements, Stream stream) {
-    assert(numElements > 0);
-    assert(numInstances > 0);
+    THOR_THROW_IF_FALSE(numElements > 0);
+    THOR_THROW_IF_FALSE(numInstances > 0);
     dim3 blockSize(256);
     dim3 gridSize((numElements + 511) / 512);
     ScopedGpu scopedGpu(stream.getGpuNum());

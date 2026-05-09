@@ -1,4 +1,5 @@
 #include "Utilities/Loaders/NoOpDataProcessor.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 NoOpDataProcessor::NoOpDataProcessor(uint64_t numOutputTensorBytes, ThorImplementation::TensorDescriptor::DataType dataType) {
     this->numOutputTensorBytes = numOutputTensorBytes;
@@ -10,6 +11,6 @@ uint64_t NoOpDataProcessor::outputTensorSizeInBytes() { return numOutputTensorBy
 ThorImplementation::TensorDescriptor::DataType NoOpDataProcessor::getDataType() { return dataType; }
 
 DataElement NoOpDataProcessor::operator()(DataElement &input) {
-    assert(input.numDataBytes == outputTensorSizeInBytes());
+    THOR_THROW_IF_FALSE(input.numDataBytes == outputTensorSizeInBytes());
     return input;
 }

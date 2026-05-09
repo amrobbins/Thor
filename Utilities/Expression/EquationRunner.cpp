@@ -1,6 +1,7 @@
 #include "Utilities/Expression/EquationRunner.h"
 #include <algorithm>
 #include <limits>
+#include "DeepLearning/Implementation/ThorError.h"
 
 namespace ThorImplementation {
 
@@ -123,7 +124,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
 
     if (!is_fused_tiled_transpose_launch) {
-        assert(max_numel != 0);
+        THOR_THROW_IF_FALSE(max_numel != 0);
     }
     std::vector<const void*> input_ptrs;
     input_ptrs.reserve(inputs.size());

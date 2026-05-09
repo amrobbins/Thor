@@ -1,5 +1,6 @@
 #include "gpuMatrixMultiply.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 
@@ -16,7 +17,7 @@ cublasStatus_t matrixMultiply(cublasLtHandle_t cublasLtHandle,
             printf(
                 "ERROR: You specified C++ element order in the C matrix, so you must provide a transpose buffer as an "
                 "argument to this function. Its size must be the same size as C.");
-            assert(transposeBuffer_d != NULL);
+            THOR_THROW_IF_FALSE(transposeBuffer_d != NULL);
         }
     }
 
@@ -205,9 +206,9 @@ MatrixMultiplyKernelInfo LtSgemmCustomFind(cublasLtHandle_t ltHandle,
     //
     // NOTE: VERY IMPORTANT! YOU MUST USE ALL DIMENSIONS AS MULTIPLES OF 8 AND 0 PAD THE EDGES
     // This will use tensor cores which are many times faster than regular floating point units
-    assert(m % 8 == 0);
-    assert(n % 8 == 0);
-    assert(k % 8 == 0);
+    THOR_THROW_IF_FALSE(m % 8 == 0);
+    THOR_THROW_IF_FALSE(n % 8 == 0);
+    THOR_THROW_IF_FALSE(k % 8 == 0);
 
     cublasLtMatmulDesc_t operationDesc = NULL;
     cublasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL;
@@ -431,7 +432,7 @@ MatrixMultiplyKernelInfo LtSgemmCustomFind(cublasLtHandle_t ltHandle,
             printf("result %03d : ", i);
             printPerfStructure(perfResults[i]);
             printf("%lf TFLOPS\n", ((2.0 * k - 1.0) * m * n * kernelRepeats) / (perfResults[i].time * 1.0e9));
-            assert(kernelInfo[0].time == perfResults[0].time);
+            THOR_THROW_IF_FALSE(kernelInfo[0].time == perfResults[0].time);
         }
     }
 
@@ -445,8 +446,8 @@ CLEANUP:
         cudaEventDestroy(startEvent);
     if (stopEvent)
         cudaEventDestroy(stopEvent);
-    assert(AlgoCount > 0);
-    assert(kernelInfo[0].status == CUBLAS_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(AlgoCount > 0);
+    THOR_THROW_IF_FALSE(kernelInfo[0].status == CUBLAS_STATUS_SUCCESS);
     return kernelInfo[0];
 }
 
@@ -463,13 +464,13 @@ MatrixMultiplyKernelInfo getBestGemmKernel(unsigned int m,
                                            ElementOrder BElementOrder,
                                            ElementOrder CElementOrder,
                                            bool printResults) {
-    assert(dataType != DataType::FP16);  // I have not gotten that to work.
+    THOR_THROW_IF_FALSE(dataType != DataType::FP16);  // I have not gotten that to work.
 
     cublasStatus_t cublasStatus;
     cublasLtHandle_t cublasLtHandle;
     CUDA_CHECK(cudaSetDevice(deviceNum));
     cublasStatus = cublasLtCreate(&cublasLtHandle);
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
     float alpha = 1.0f;
     float beta = 0.0f;

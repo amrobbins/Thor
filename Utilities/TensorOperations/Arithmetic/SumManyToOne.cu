@@ -1,4 +1,5 @@
 #include "SumManyToOne.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 // 1. A block is 256 threads, each thread accumulates one element at a time, until all elements have been accumulated for one item in a
 // batch
@@ -60,8 +61,8 @@ void launchSumManyToOne(SOURCE_TYPE *source_d,
                         bool invert,
                         bool accumulate,
                         Stream stream) {
-    assert(numElementsPerBatchItem > 0);
-    assert(batchSize > 0);
+    THOR_THROW_IF_FALSE(numElementsPerBatchItem > 0);
+    THOR_THROW_IF_FALSE(batchSize > 0);
 
     dim3 blockSize(256);
     dim3 gridSize(batchSize);
@@ -96,8 +97,8 @@ __global__ void sumBatch(SOURCE_TYPE *source, DEST_TYPE *dest, uint32_t numEleme
 template <typename SOURCE_TYPE, typename DEST_TYPE>
 void launchSumBatch(
     SOURCE_TYPE *source_d, DEST_TYPE *dest_d, uint32_t numElementsPerBatchItem, uint32_t batchSize, bool accumulate, Stream stream) {
-    assert(numElementsPerBatchItem > 0);
-    assert(batchSize > 0);
+    THOR_THROW_IF_FALSE(numElementsPerBatchItem > 0);
+    THOR_THROW_IF_FALSE(batchSize > 0);
 
     dim3 blockSize(256);
     dim3 gridSize((numElementsPerBatchItem + 255) / 256);

@@ -1,4 +1,5 @@
 #include "CrossEntropyLoss.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 
@@ -19,7 +20,7 @@ void launchElementWiseCrossEntropyLoss(void *labelsOrClassOfHotLabels_d,
                                        CrossEntropyLossType crossEntropyLossType,
                                        bool indexLabels,
                                        Stream stream) {
-    assert(crossEntropyLossType == CrossEntropyLossType::BINARY || crossEntropyLossType == CrossEntropyLossType::CATEGORICAL);
+    THOR_THROW_IF_FALSE(crossEntropyLossType == CrossEntropyLossType::BINARY || crossEntropyLossType == CrossEntropyLossType::CATEGORICAL);
 
     if (crossEntropyLossType == CrossEntropyLossType::BINARY) {
         launchElementWiseBinaryCrossEntropyLoss<LABEL_OR_INDEX_TYPE, PROBABILITY_TYPE, LOSS_TYPE>(

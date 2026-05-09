@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 // FIXME: Update this based on the ordered WorkQueue, since that has been updated.
 //        From that, remove output ready, and only acquire an input queue buffer, then wait to acquire an output
 //        queue buffer after processing.
@@ -32,7 +33,6 @@
 #include <deque>
 #include <vector>
 
-#include <assert.h>
 #include <stdio.h>
 
 template <class InputType, class OutputType>
@@ -155,10 +155,10 @@ void WorkQueueUnordered<InputType, OutputType>::openImpl(int numThreads,
                                                          unsigned int inputBufferingMultiple,
                                                          unsigned int outputBufferingMultiple) {
     std::unique_lock<std::mutex> lck(mtx);
-    assert(queueOpen == false);
-    assert(numThreads < 10000);
-    assert(inputBufferingMultiple > 0);
-    assert(outputBufferingMultiple > 0);
+    THOR_THROW_IF_FALSE(queueOpen == false);
+    THOR_THROW_IF_FALSE(numThreads < 10000);
+    THOR_THROW_IF_FALSE(inputBufferingMultiple > 0);
+    THOR_THROW_IF_FALSE(outputBufferingMultiple > 0);
 
     if (numThreads < 1) {
         int numCpuThreads = std::thread::hardware_concurrency();

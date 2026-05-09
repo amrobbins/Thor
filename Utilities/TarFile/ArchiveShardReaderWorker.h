@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 #include <optional>
 
 #include "Crc32.h"
@@ -38,7 +39,7 @@ class ArchiveShardReaderWorker {
     // Produces CRCs for the payload bytes and compares against the crc in the plan.
     void process(ArchiveShardPlan job) {
         std::vector<ArchivePlanEntry>& plan = job.entries;
-        assert(plan.size() > 0);
+        THOR_THROW_IF_FALSE(plan.size() > 0);
         const std::string& archiveShardPath = (archiveDirectory / job.archiveShardPath).string();
 
         // Symmetric to writer's registerDumpFile()
@@ -80,7 +81,7 @@ class ArchiveShardReaderWorker {
                     state = ReaderState::CONSUME_BUFFER_0;
                 }
             } else {
-                assert(state == ReaderState::CONSUME_BUFFER_0 || state == ReaderState::CONSUME_BUFFER_1);
+                THOR_THROW_IF_FALSE(state == ReaderState::CONSUME_BUFFER_0 || state == ReaderState::CONSUME_BUFFER_1);
 
                 uint32_t loadedBuffer;
                 uint32_t loadingBuffer;
@@ -139,7 +140,7 @@ class ArchiveShardReaderWorker {
             }
         }
 
-        assert(state == ReaderState::POST);
+        THOR_THROW_IF_FALSE(state == ReaderState::POST);
         if (numCompletionsToFinish[lastLoadingBuffer] > 0) {
             uringDirect.waitCompletionsInOrder(numCompletionsToFinish[lastLoadingBuffer]);
             numCompletionsToFinish[lastLoadingBuffer] = 0;
@@ -174,10 +175,10 @@ class ArchiveShardReaderWorker {
     uint32_t loadBufferFromArchiveFile(uint32_t bufferIndex, uint64_t fileOffsetBytes, uint32_t num4kBytes) {
         constexpr uint32_t kChunkBytes = (uint32_t(1) << 24);  // 16 MiB
 
-        assert(bufferIndex < 2);
-        assert(num4kBytes > 0);
-        assert((num4kBytes & fourKBMask) == 0);
-        assert((fileOffsetBytes & fourKBMask) == 0);
+        THOR_THROW_IF_FALSE(bufferIndex < 2);
+        THOR_THROW_IF_FALSE(num4kBytes > 0);
+        THOR_THROW_IF_FALSE((num4kBytes & fourKBMask) == 0);
+        THOR_THROW_IF_FALSE((fileOffsetBytes & fourKBMask) == 0);
 
         uint32_t submitted = 0;
         uint32_t numOps = 0;
@@ -187,9 +188,9 @@ class ArchiveShardReaderWorker {
             if (len > kChunkBytes)
                 len = kChunkBytes;
 
-            assert((len & fourKBMask) == 0);
-            assert(((fileOffsetBytes + submitted) & fourKBMask) == 0);
-            assert((submitted & fourKBMask) == 0);
+            THOR_THROW_IF_FALSE((len & fourKBMask) == 0);
+            THOR_THROW_IF_FALSE(((fileOffsetBytes + submitted) & fourKBMask) == 0);
+            THOR_THROW_IF_FALSE((submitted & fourKBMask) == 0);
 
             uringDirect.submitReadFixed(bufferIndex, fileOffsetBytes + submitted, len, submitted);
 
@@ -215,8 +216,8 @@ class ArchiveShardReaderWorker {
                                 ThorImplementation::Tensor* dstDeviceTensorForBuffer[2],
                                 uint32_t deviceNumForBuffer[2],
                                 uint32_t numCompletionsToFinish[2]) {
-        assert(bufferIndex < 2);
-        assert(p.numBytes <= fiveHundredMB);
+        THOR_THROW_IF_FALSE(bufferIndex < 2);
+        THOR_THROW_IF_FALSE(p.numBytes <= fiveHundredMB);
 
         const uint64_t payloadOffset = p.fileOffsetBytes;
         const uint64_t alignedFileOffset = alignDown4k(payloadOffset);

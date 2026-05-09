@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 #include <optional>
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -13,7 +14,6 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 
-#include <assert.h>
 #include <atomic>
 #include <stdexcept>
 #include <string>
@@ -52,12 +52,12 @@ class CublasKernel : private ReferenceCounted {
     }
 
     void setErrorFlag() {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         cublasKernelOptions->runStats.errorFlag = true;
     }
 
     bool getErrorFlag() const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return cublasKernelOptions->runStats.errorFlag;
     }
 
@@ -70,39 +70,39 @@ class CublasKernel : private ReferenceCounted {
     void unstashRunStats() { cublasKernelOptions->runStats.unstashRunStats(); }
 
     cublasLtMatmulDesc_t getOperationDesc(CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host) {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return (pointerMode == CublasScalarPointerMode::Device) ? *operationDescDevice : *operationDescHost;
     }
 
     cublasLtMatrixLayout_t getADesc() {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return *ADesc;
     }
 
     cublasLtMatrixLayout_t getBDesc() {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return *BDesc;
     }
 
     cublasLtMatrixLayout_t getCDesc() {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return *CDesc;
     }
 
     cublasLtMatrixLayout_t getDDesc() {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return *DDesc;
     }
 
     float getWavesCount(int gpuNum) const {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
 
         return cublasKernelOptions->wavesCount;
     }
 
     static inline bool executionTimeComparison(CublasKernel &lhs, CublasKernel &rhs) {
-        assert(!lhs.uninitialized());
-        assert(!rhs.uninitialized());
+        THOR_THROW_IF_FALSE(!lhs.uninitialized());
+        THOR_THROW_IF_FALSE(!rhs.uninitialized());
         return lhs.cublasKernelOptions->runStats < rhs.cublasKernelOptions->runStats;
     }
 
@@ -146,40 +146,40 @@ class CublasKernel : private ReferenceCounted {
                        Stream stream,
                        CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
                        CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
 
         uint64_t rowsC = cublasKernelRequirement->kernelRequirement.transposeA == false ? cublasKernelRequirement->kernelRequirement.rowsA
                                                                                         : cublasKernelRequirement->kernelRequirement.colsA;
 
         // Check that everything matches up
         std::vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
-        assert(ADimensions.size() == 2);
-        assert(ADimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsA);
-        assert(ADimensions[1] == ldA);
-        assert(mapTensorDataTypeToCublasDataType(A.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.ADataType);
+        THOR_THROW_IF_FALSE(ADimensions.size() == 2);
+        THOR_THROW_IF_FALSE(ADimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsA);
+        THOR_THROW_IF_FALSE(ADimensions[1] == ldA);
+        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(A.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.ADataType);
 
         std::vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
-        assert(BDimensions.size() == 2);
-        assert(BDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsB);
-        assert(BDimensions[1] == ldB);
-        assert(mapTensorDataTypeToCublasDataType(B.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.BDataType);
+        THOR_THROW_IF_FALSE(BDimensions.size() == 2);
+        THOR_THROW_IF_FALSE(BDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsB);
+        THOR_THROW_IF_FALSE(BDimensions[1] == ldB);
+        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(B.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.BDataType);
 
         std::vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
-        assert(CDimensions.size() == 2);
-        assert(CDimensions[0] == rowsC);
-        assert(CDimensions[1] == ldC);
-        assert(mapTensorDataTypeToCublasDataType(C.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.CDataType);
+        THOR_THROW_IF_FALSE(CDimensions.size() == 2);
+        THOR_THROW_IF_FALSE(CDimensions[0] == rowsC);
+        THOR_THROW_IF_FALSE(CDimensions[1] == ldC);
+        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(C.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.CDataType);
 
         std::vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
-        assert(DDimensions.size() == 2);
-        assert(DDimensions[0] == rowsC);
-        assert(DDimensions[1] == ldD);
-        assert(mapTensorDataTypeToCublasDataType(D.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.DDataType);
+        THOR_THROW_IF_FALSE(DDimensions.size() == 2);
+        THOR_THROW_IF_FALSE(DDimensions[0] == rowsC);
+        THOR_THROW_IF_FALSE(DDimensions[1] == ldD);
+        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(D.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.DDataType);
 
-        assert(C.getMemPtr() != A.getMemPtr());
-        assert(C.getMemPtr() != B.getMemPtr());
+        THOR_THROW_IF_FALSE(C.getMemPtr() != A.getMemPtr());
+        THOR_THROW_IF_FALSE(C.getMemPtr() != B.getMemPtr());
 
-        assert(runWithoutChecks(A, B, C, D, workspace, alpha, beta, stream, pointerMode, fp8Scales) == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(runWithoutChecks(A, B, C, D, workspace, alpha, beta, stream, pointerMode, fp8Scales) == CUBLAS_STATUS_SUCCESS);
     }
 
     inline cublasStatus_t runWithoutChecks(Tensor A,
@@ -192,18 +192,18 @@ class CublasKernel : private ReferenceCounted {
                                            Stream stream,
                                            CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host,
                                            CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         ScopedGpu scopedGpu(stream.getGpuNum());
 
         bool kernelWillRunOnGpu;
         const size_t requiredWorkspaceSize = getWorkspaceSizeInBytes(stream.getGpuNum(), kernelWillRunOnGpu, fp8Scales);
-        assert(kernelWillRunOnGpu);
+        THOR_THROW_IF_FALSE(kernelWillRunOnGpu);
 
         if (requiredWorkspaceSize > 0 && !workspace.has_value()) {
             throw std::runtime_error("CublasKernel::runWithoutChecks requires a workspace tensor for this cuBLASLt kernel.");
         }
         if (workspace.has_value()) {
-            assert(workspace.value().getDescriptor().getArraySizeInBytes() >= requiredWorkspaceSize);
+            THOR_THROW_IF_FALSE(workspace.value().getDescriptor().getArraySizeInBytes() >= requiredWorkspaceSize);
         }
 
         cublasLtMatmulDesc_t operationDesc = getOperationDesc(pointerMode);
@@ -287,11 +287,11 @@ class CublasKernel : private ReferenceCounted {
     }
 
     std::string toString(int gpuNum) {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
 
         std::string description;
         description += "AlgoId " + std::to_string(cublasKernelOptions->algorithmId);
-        assert(tileEnumToString.count(cublasKernelOptions->tileSize) == 1);
+        THOR_THROW_IF_FALSE(tileEnumToString.count(cublasKernelOptions->tileSize) == 1);
         description += " " + tileEnumToString[cublasKernelOptions->tileSize];
         description += " error: " + std::to_string(cublasKernelOptions->runStats.errorFlag);
         description += " waves: " + std::to_string(getWavesCount(gpuNum));
@@ -332,7 +332,7 @@ class CublasKernel : private ReferenceCounted {
     unsigned long getWorkspaceSizeInBytes(int gpuNum,
                                           bool &kernelWillRunOnGpu,
                                           CublasFp8MatmulScales fp8Scales = CublasFp8MatmulScales::none()) {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
 
         cublasStatus_t cublasStatus;
         cublasLtMatmulHeuristicResult_t result;
@@ -357,12 +357,12 @@ class CublasKernel : private ReferenceCounted {
     }
 
     CublasKernelRequirement getCublasKernelRequirement() {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return *cublasKernelRequirement;
     }
 
     CublasKernelOptions getCublasKernelOptions() {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
         return *cublasKernelOptions;
     }
 
@@ -396,7 +396,7 @@ class CublasKernel : private ReferenceCounted {
             case TensorDescriptor::DataType::INT8:
                 return CUDA_R_8I;
             default:
-                assert(false);
+                THOR_UNREACHABLE();
                 return CUDA_R_32F;
         }
     }
@@ -406,7 +406,7 @@ class CublasKernel : private ReferenceCounted {
     static void setTensorwideFp8ScaleMode(cublasLtMatmulDesc_t desc, cublasLtMatmulDescAttributes_t attribute) {
         const cublasLtMatmulMatrixScale_t scaleMode = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
         cublasStatus_t cublasStatus = cublasLtMatmulDescSetAttribute(desc, attribute, &scaleMode, sizeof(scaleMode));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
     }
 
     static void setFp8ScalePointerIfPresent(cublasLtMatmulDesc_t desc,
@@ -414,14 +414,14 @@ class CublasKernel : private ReferenceCounted {
                                             const float *scaleDevicePointer) {
         if (scaleDevicePointer != nullptr) {
             cublasStatus_t cublasStatus = cublasLtMatmulDescSetAttribute(desc, attribute, &scaleDevicePointer, sizeof(scaleDevicePointer));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         }
     }
 
     static void setFp8AmaxPointerIfPresent(cublasLtMatmulDesc_t desc, cublasLtMatmulDescAttributes_t attribute, float *amaxDevicePointer) {
         if (amaxDevicePointer != nullptr) {
             cublasStatus_t cublasStatus = cublasLtMatmulDescSetAttribute(desc, attribute, &amaxDevicePointer, sizeof(amaxDevicePointer));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         }
     }
 
@@ -447,7 +447,7 @@ class CublasKernel : private ReferenceCounted {
             case CUDA_R_8I:
                 return 1;
             default:
-                assert(false);
+                THOR_UNREACHABLE();
                 return 1;
         }
     }
@@ -467,7 +467,7 @@ class CublasKernel : private ReferenceCounted {
             case CUDA_R_8I:
                 return TensorDescriptor::DataType::INT8;
             default:
-                assert(false);
+                THOR_UNREACHABLE();
                 return TensorDescriptor::DataType::UINT8;
         }
     }
@@ -597,41 +597,41 @@ class CublasKernel : private ReferenceCounted {
     }
 
     void allocateCublasResources() {
-        assert(!uninitialized());
+        THOR_THROW_IF_FALSE(!uninitialized());
 
         cublasStatus_t cublasStatus;
 
         auto createOperationDesc = [&](cublasLtPointerMode_t pointerMode, cublasLtMatmulDesc_t *desc) {
             cublasStatus = cublasLtMatmulDescCreate(
                 desc, cublasKernelRequirement->operationType.computeDataType, cublasKernelRequirement->operationType.scaleDataType);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
             cublasStatus = cublasLtMatmulDescSetAttribute(*desc, pointerModeAttribute, &pointerMode, sizeof(pointerMode));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
             if (usesFp8ColumnMajorLtPath()) {
                 // For FP8, cuBLASLt exposes the usable kernels as column-major TN.  CublasKernel keeps Thor's
                 // external row-major API by making cuBLASLt compute D^T = (op(B))^T * (op(A))^T.
                 cublasOperation_t transpose = CUBLAS_OP_T;
                 cublasStatus = cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose));
-                assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+                THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
                 return;
             }
 
             if (cublasKernelRequirement->kernelRequirement.transposeA) {
                 cublasOperation_t transpose = CUBLAS_OP_T;
                 cublasStatus = cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose));
-                assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+                THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             }
             if (cublasKernelRequirement->kernelRequirement.transposeB) {
                 cublasOperation_t transpose = CUBLAS_OP_T;
                 cublasStatus = cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose));
-                assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+                THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             }
             if (cublasKernelRequirement->kernelRequirement.transposeC) {
                 cublasOperation_t transpose = CUBLAS_OP_T;
                 cublasStatus = cublasLtMatmulDescSetAttribute(*desc, CUBLASLT_MATMUL_DESC_TRANSC, &transpose, sizeof(transpose));
-                assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+                THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             }
         };
 
@@ -658,13 +658,13 @@ class CublasKernel : private ReferenceCounted {
 
             cublasStatus =
                 cublasLtMatrixLayoutCreate(ADesc, getLtADescDataType(), internalARowMajorCols, internalARowMajorRows, internalALd);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             cublasStatus =
                 cublasLtMatrixLayoutSetAttribute(*ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             ld = internalALd;
             cublasStatus = cublasLtMatrixLayoutSetAttribute(*ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
             // Internal cuBLASLt B operand is the row-major matrix Y=op(A) presented as column-major Y^T.
             const int internalBRowMajorRows = kr.transposeA ? kr.colsA : kr.rowsA;
@@ -673,34 +673,34 @@ class CublasKernel : private ReferenceCounted {
 
             cublasStatus =
                 cublasLtMatrixLayoutCreate(BDesc, getLtBDescDataType(), internalBRowMajorCols, internalBRowMajorRows, internalBLd);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             cublasStatus =
                 cublasLtMatrixLayoutSetAttribute(*BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             ld = internalBLd;
             cublasStatus = cublasLtMatrixLayoutSetAttribute(*BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
             const int rowsD = kr.transposeA ? kr.colsA : kr.rowsA;
             const int colsD = kr.transposeB ? kr.rowsB : kr.colsB;
 
             cublasStatus = cublasLtMatrixLayoutCreate(CDesc, cublasKernelRequirement->operationType.CDataType, colsD, rowsD, kr.ldC);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             cublasStatus =
                 cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             ld = kr.ldC;
             cublasStatus = cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
             cublasStatus = cublasLtMatrixLayoutCreate(DDesc, cublasKernelRequirement->operationType.DDataType, colsD, rowsD, kr.ldD);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             cublasStatus =
                 cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
             ld = kr.ldD;
             cublasStatus = cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
             return;
         }
@@ -712,24 +712,24 @@ class CublasKernel : private ReferenceCounted {
                                                   cublasKernelRequirement->kernelRequirement.rowsA,
                                                   cublasKernelRequirement->kernelRequirement.colsA,
                                                   cublasKernelRequirement->kernelRequirement.ldA);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         ld = cublasKernelRequirement->kernelRequirement.ldA;
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
         cublasStatus = cublasLtMatrixLayoutCreate(BDesc,
                                                   cublasKernelRequirement->operationType.BDataType,
                                                   cublasKernelRequirement->kernelRequirement.rowsB,
                                                   cublasKernelRequirement->kernelRequirement.colsB,
                                                   cublasKernelRequirement->kernelRequirement.ldB);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         ld = cublasKernelRequirement->kernelRequirement.ldB;
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
         int rowsC = cublasKernelRequirement->kernelRequirement.transposeA == false ? cublasKernelRequirement->kernelRequirement.rowsA
                                                                                    : cublasKernelRequirement->kernelRequirement.colsA;
@@ -738,21 +738,21 @@ class CublasKernel : private ReferenceCounted {
 
         cublasStatus = cublasLtMatrixLayoutCreate(
             CDesc, cublasKernelRequirement->operationType.CDataType, rowsC, colsC, cublasKernelRequirement->kernelRequirement.ldC);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         ld = cublasKernelRequirement->kernelRequirement.ldC;
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
         cublasStatus = cublasLtMatrixLayoutCreate(
             DDesc, cublasKernelRequirement->operationType.DDataType, rowsC, colsC, cublasKernelRequirement->kernelRequirement.ldD);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         ld = cublasKernelRequirement->kernelRequirement.ldD;
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
     }
 
     void construct(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, std::string gpuType) {
@@ -786,27 +786,27 @@ class CublasKernel : private ReferenceCounted {
         cublasStatus_t cublasStatus;
 
         cublasStatus = cublasLtMatmulDescDestroy(*operationDescHost);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         delete operationDescHost;
 
         cublasStatus = cublasLtMatmulDescDestroy(*operationDescDevice);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         delete operationDescDevice;
 
         cublasStatus = cublasLtMatrixLayoutDestroy(*ADesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         delete ADesc;
 
         cublasStatus = cublasLtMatrixLayoutDestroy(*BDesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         delete BDesc;
 
         cublasStatus = cublasLtMatrixLayoutDestroy(*CDesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         delete CDesc;
 
         cublasStatus = cublasLtMatrixLayoutDestroy(*DDesc);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         delete DDesc;
     }
 };

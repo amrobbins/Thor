@@ -3,7 +3,6 @@
 #include "Utilities/Common/ReferenceCounted.h"
 #include "Utilities/Common/ScopedGpu.h"
 
-#include <assert.h>
 
 #include <atomic>
 

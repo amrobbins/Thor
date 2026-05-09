@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 
 #include <cudnn.h>
@@ -29,9 +30,9 @@ class CudnnHelper {
             case ThorImplementation::TensorDescriptor::DataType::INT64:
                 return CUDNN_DATA_INT64;
             default:
-                assert(false);
+                THOR_UNREACHABLE();
         }
-        assert(false);
+        THOR_UNREACHABLE();
         return CUDNN_DATA_HALF;
     }
 
@@ -50,7 +51,7 @@ class CudnnHelper {
                 printf("cudnnStatus %d : %s   gpu:%d\n", cudnnStatus, cudnnGetErrorString(cudnnStatus), gpuNum);
                 fflush(stdout);
             }
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
             cudnnHandles[gpuNum][std::this_thread::get_id()] = cudnnHandle;
         } else {
             cudnnHandle = cudnnHandles[gpuNum][std::this_thread::get_id()];

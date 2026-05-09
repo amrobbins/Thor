@@ -1,6 +1,7 @@
 #include <optional>
 #include "Utilities/Common/Stream.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
 
@@ -33,10 +34,10 @@ Stream Stream::getNextGradientUpdateStream(uint32_t deviceNum) {
     if (deviceNum >= numGpus) {
         printf("Error: trying to get a stream for gpu %d but there are only %d gpus\n", deviceNum, numGpus);
         fflush(stdout);
-        assert(deviceNum < numGpus);
+        THOR_THROW_IF_FALSE(deviceNum < numGpus);
     }
 
-    assert(maxNumGradientUpdateStreams > 0);
+    THOR_THROW_IF_FALSE(maxNumGradientUpdateStreams > 0);
 
     while (gradientUpdateStreams.size() < numGpus)
         gradientUpdateStreams.emplace_back();
@@ -61,10 +62,10 @@ Stream Stream::getMostRecentGradientUpdateStream(uint32_t deviceNum) {
     if (deviceNum >= numGpus) {
         printf("Error: trying to get a stream for gpu %d but there are only %d gpus\n", deviceNum, numGpus);
         fflush(stdout);
-        assert(deviceNum < numGpus);
+        THOR_THROW_IF_FALSE(deviceNum < numGpus);
     }
 
-    assert(maxNumGradientUpdateStreams > 0);
+    THOR_THROW_IF_FALSE(maxNumGradientUpdateStreams > 0);
 
     while (gradientUpdateStreams.size() < numGpus)
         gradientUpdateStreams.emplace_back();
@@ -91,10 +92,10 @@ Stream Stream::getNextUploadStream(uint32_t deviceNum) {
     if (deviceNum >= numGpus) {
         printf("Error: trying to get a stream for gpu %d but there are only %d gpus\n", deviceNum, numGpus);
         fflush(stdout);
-        assert(deviceNum < numGpus);
+        THOR_THROW_IF_FALSE(deviceNum < numGpus);
     }
 
-    assert(maxNumUploadStreams > 0);
+    THOR_THROW_IF_FALSE(maxNumUploadStreams > 0);
 
     while (uploadStreams.size() < numGpus)
         uploadStreams.emplace_back();
@@ -124,10 +125,10 @@ Stream Stream::getNextDownloadStream(uint32_t deviceNum) {
     if (deviceNum >= numGpus) {
         printf("Error: trying to get a stream for gpu %d but there are only %d gpus\n", deviceNum, numGpus);
         fflush(stdout);
-        assert(deviceNum < numGpus);
+        THOR_THROW_IF_FALSE(deviceNum < numGpus);
     }
 
-    assert(maxNumDownloadStreams > 0);
+    THOR_THROW_IF_FALSE(maxNumDownloadStreams > 0);
 
     while (downloadStreams.size() < numGpus)
         downloadStreams.emplace_back();
@@ -157,11 +158,11 @@ void cleanUpHostFunctionArgs(Stream stream, unique_ptr<HostFunctionArgsBase> &&a
 
 void Stream::launchCleanUpHostFunctionArgs(unique_ptr<HostFunctionArgsBase> &&args) {
     ThreadJoinQueue::instance().push(thread(&cleanUpHostFunctionArgs, *this, std::move(args)));
-    assert(args == nullptr);
+    THOR_THROW_IF_FALSE(args == nullptr);
 }
 
 void Stream::waitEvent(Event event) const {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
 
     ScopedGpu scopedGpu(gpuNum);
 
@@ -169,7 +170,7 @@ void Stream::waitEvent(Event event) const {
 }
 
 void Stream::synchronize() const {
-    assert(!uninitialized());
+    THOR_THROW_IF_FALSE(!uninitialized());
 
     CUDA_CHECK(cudaStreamSynchronize(cudaStream));
 }
@@ -221,7 +222,7 @@ void Stream::destroy() {
 
             cudnnStatus_t cudnnStatus;
             cudnnStatus = cudnnDestroy(cudnnHandle->value());
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
         }
 
         if (cublasHandle->has_value()) {
@@ -229,7 +230,7 @@ void Stream::destroy() {
 
             cublasStatus_t cublasStatus;
             cublasStatus = cublasDestroy(cublasHandle->value());
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
         }
 
         CUDA_CHECK(cudaStreamDestroy(cudaStream));

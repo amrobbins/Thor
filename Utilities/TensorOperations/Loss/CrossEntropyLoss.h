@@ -4,7 +4,6 @@
 #include "CategoricalCrossEntropyLoss.h"
 #include "Utilities/Common/Stream.h"
 
-#include <assert.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <math.h>

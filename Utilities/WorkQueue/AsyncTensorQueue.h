@@ -3,7 +3,6 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 
-#include <assert.h>
 #include <stdio.h>
 #include <chrono>
 #include <condition_variable>

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <assert.h>
+#include "DeepLearning/Implementation/ThorError.h"
 #include <stdio.h>
 #include <atomic>
 #include <mutex>
@@ -204,7 +204,7 @@ class ReferenceCounted {
                    objectsCreated.fetch_add(0),
                    objectsDestroyed.fetch_add(0));
             fflush(stdout);
-            assert(objectsCreated.fetch_add(0) == objectsDestroyed.fetch_add(0));
+            THOR_THROW_IF_FALSE(objectsCreated.fetch_add(0) == objectsDestroyed.fetch_add(0));
         }
     };
     static RefCountChecker refCountChecker;

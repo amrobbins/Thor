@@ -1,4 +1,5 @@
 #include "Utilities/WorkQueue/AsyncTensorQueue.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace ThorImplementation;
 
@@ -10,7 +11,7 @@ AsyncTensorQueue::AsyncTensorQueue() {
 AsyncTensorQueue::AsyncTensorQueue(uint64_t queueSize, TensorDescriptor bufferDescriptor, TensorPlacement bufferPlacement) {
     std::unique_lock<std::mutex> lck(mtx);
 
-    assert(queueSize > 0);
+    THOR_THROW_IF_FALSE(queueSize > 0);
 
     queueOpen = false;
     this->queueSize = queueSize;
@@ -23,8 +24,8 @@ AsyncTensorQueue::~AsyncTensorQueue() { close(); }
 void AsyncTensorQueue::resize(uint64_t queueSize, TensorDescriptor bufferDescriptor, TensorPlacement bufferPlacement) {
     std::unique_lock<std::mutex> lck(mtx);
 
-    assert(queueOpen == false);
-    assert(queueSize > 0);
+    THOR_THROW_IF_FALSE(queueOpen == false);
+    THOR_THROW_IF_FALSE(queueSize > 0);
 
     this->queueSize = queueSize;
     this->bufferDescriptor = bufferDescriptor;
@@ -35,8 +36,8 @@ void AsyncTensorQueue::resize(uint64_t queueSize, TensorDescriptor bufferDescrip
 
 void AsyncTensorQueue::open() {
     std::unique_lock<std::mutex> lck(mtx);
-    assert(queueOpen == false);
-    assert(queueSize > 0);
+    THOR_THROW_IF_FALSE(queueOpen == false);
+    THOR_THROW_IF_FALSE(queueSize > 0);
 
     allocateBuffers();
     queueOpen = true;
@@ -76,7 +77,7 @@ bool AsyncTensorQueue::bufferLoaded(Tensor loadedBuffer) {
     if (!queueOpen)
         return false;
 
-    assert(loadingBuffers.count(loadedBuffer) == 1);
+    THOR_THROW_IF_FALSE(loadingBuffers.count(loadedBuffer) == 1);
     loadingBuffers.erase(loadedBuffer);
     loadedBuffers.push_back(loadedBuffer);
 
@@ -111,7 +112,7 @@ bool AsyncTensorQueue::bufferUnloaded(Tensor unloadedBuffer) {
     if (!queueOpen)
         return false;
 
-    assert(unloadingBuffers.count(unloadedBuffer) == 1);
+    THOR_THROW_IF_FALSE(unloadingBuffers.count(unloadedBuffer) == 1);
     unloadingBuffers.erase(unloadedBuffer);
     emptyBuffers.push_back(unloadedBuffer);
 
@@ -178,7 +179,7 @@ int AsyncTensorQueue::capacity() {
 
 // called only from locked methods
 void AsyncTensorQueue::allocateBuffers() {
-    assert(queueSize > 0);
+    THOR_THROW_IF_FALSE(queueSize > 0);
 
     for (uint64_t i = 0; i < queueSize; ++i) {
         emptyBuffers.emplace_back(bufferPlacement, bufferDescriptor);
@@ -187,7 +188,7 @@ void AsyncTensorQueue::allocateBuffers() {
 
 // called only from locked methods
 void AsyncTensorQueue::deallocateBuffers() {
-    assert(queueOpen == false);
+    THOR_THROW_IF_FALSE(queueOpen == false);
 
     // Buffers are reference counted, if and *ing buffers are being used externally, they will not be deallocated until they are no longer
     // referenced.
