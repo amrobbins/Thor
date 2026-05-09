@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
+#include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
@@ -45,30 +46,29 @@ class FullyConnected : public TrainableLayer {
             Optional<ThorImplementation::TensorDescriptor::DataType>::empty(),
         Optional<ThorImplementation::TensorDescriptor::DataType> outputDType =
             Optional<ThorImplementation::TensorDescriptor::DataType>::empty()) {
-        return ThorImplementation::Expression::input(epilogueInputName(), computeDType, outputDType);
+        return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
     }
 
     [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(const ThorImplementation::Expression &expression) {
-        ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
-            ThorImplementation::Expression::outputs({{epilogueOutputName(), expression}}));
-        validateEpilogueDefinition(definition);
-        return definition;
+        return LayerEpilogue::makeDefinition(expression, epilogueInputName(), epilogueOutputName(), "FullyConnected");
     }
 
-    static void validateEpilogueExpression(const ThorImplementation::Expression &expression) { (void)makeEpilogueDefinition(expression); }
+    static void validateEpilogueExpression(const ThorImplementation::Expression &expression) {
+        LayerEpilogue::validateExpression(expression, epilogueInputName(), epilogueOutputName(), "FullyConnected");
+    }
 
     static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition &definition) {
-        definition.validate();
-        if (definition.outputs.outputs.size() != 1 || definition.outputs.outputs.front().name != epilogueOutputName()) {
-            throw std::invalid_argument("FullyConnected epilogue expression must have exactly one output named " +
-                                        std::string(epilogueOutputName()) + ".");
-        }
-        if (definition.outputs.expr == nullptr || definition.outputs.expr->inputs.size() != 1 ||
-            definition.outputs.expr->inputs.front().name != epilogueInputName() ||
-            definition.outputs.expr->inputs.front().kind != ThorImplementation::NamedInput::Kind::Tensor) {
-            throw std::invalid_argument("FullyConnected epilogue expression must have exactly one tensor input named " +
-                                        std::string(epilogueInputName()) + ".");
-        }
+        LayerEpilogue::validateDefinition(definition, epilogueInputName(), epilogueOutputName(), "FullyConnected");
+    }
+
+    [[nodiscard]] static ThorImplementation::Expression epilogueExpressionFromDefinition(
+        const ThorImplementation::ExpressionDefinition &definition) {
+        return LayerEpilogue::expressionFromDefinition(definition, epilogueInputName(), epilogueOutputName(), "FullyConnected");
+    }
+
+    [[nodiscard]] static ThorImplementation::Expression applyEpilogue(const ThorImplementation::Expression &input,
+                                                                      const ThorImplementation::Expression &epilogue) {
+        return LayerEpilogue::apply(input, epilogue, epilogueInputName());
     }
 
     int getConnectionType(Tensor connectingTensor) const override {

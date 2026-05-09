@@ -15,7 +15,8 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
                                                                     uint32_t padH,
                                                                     uint32_t padW,
                                                                     ThorImplementation::TensorPlacement placement,
-                                                                    std::shared_ptr<Thor::Activation> activation) {
+                                                                    std::shared_ptr<Thor::Activation> activation,
+                                                                    Optional<ThorImplementation::Expression> epilogue) {
     using ImplDataType = ThorImplementation::TensorDescriptor::DataType;
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
@@ -23,7 +24,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
     using ThorImplementation::FusedEquation;
     using ThorImplementation::Tensor;
 
-    return DynamicExpression([hasBias, strideD, strideH, strideW, padD, padH, padW, placement, activation = std::move(activation)](
+    return DynamicExpression([hasBias, strideD, strideH, strideW, padD, padH, padW, placement, activation = std::move(activation), epilogue](
                                  const DynamicExpression::TensorMap& inputs,
                                  const DynamicExpression::TensorMap& outputs,
                                  Stream& stream) -> DynamicExpressionBuild {
@@ -50,6 +51,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
             (featureInputTensor.getDimensions()[3] + 2 * padH - wTensor.getDimensions()[3]) / strideH + 1;
         const uint64_t expectedOutputCols =
             (featureInputTensor.getDimensions()[4] + 2 * padW - wTensor.getDimensions()[4]) / strideW + 1;
+        Optional<ImplDataType> featureOutputDType = Optional<ImplDataType>::empty();
 
         if (outputs.contains("feature_output")) {
             const Tensor& featureOutputTensor = outputs.at("feature_output");
@@ -64,6 +66,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
                 throw std::runtime_error("Convolution3d feature_output shape does not match the implied convolution output shape.");
             }
             assert(featureOutputTensor.getPlacement() == placement);
+            featureOutputDType = featureOutputTensor.getDescriptor().getDataType();
         }
 
         const ImplDataType weightsDType = wTensor.getDescriptor().getDataType();
@@ -89,6 +92,12 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
 
         if (activation != nullptr) {
             fout = activation->toExpression(fout);
+        }
+        if (epilogue.isPresent()) {
+            fout = Convolution3d::applyEpilogue(fout, epilogue.get());
+        }
+        if (featureOutputDType.isPresent()) {
+            fout = fout.withOutputDType(featureOutputDType.get());
         }
 
         auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
@@ -126,7 +135,8 @@ std::shared_ptr<ThorImplementation::Layer> Convolution3d::stamp(ThorImplementati
                                      verticalPadding,
                                      horizontalPadding,
                                      placement,
-                                     activation),
+                                     activation,
+                                     epilogue),
         placement,
         ThorImplementation::Convolution3d::defineParameters(numOutputChannels, hasBias, filterWidth, filterHeight, filterDepth, weightsDataType),
         inferenceOnly,
@@ -175,6 +185,9 @@ void Convolution3d::buildSupportLayersAndAddToNetwork(Network* network) {
     } else {
         convolution3dBuilder.noActivation();
     }
+    if (epilogue.isPresent()) {
+        convolution3dBuilder.epilogue(epilogue.get());
+    }
 
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         convolution3dBuilder.featureInput(currentFeatureInputs[i]);
@@ -217,6 +230,13 @@ json Convolution3d::architectureJson() const {
         j["activation"] = activation->architectureJson();
     } else {
         j["activation"] = nullptr;
+    }
+    if (epilogue.isPresent()) {
+        if (serializableEpilogue.isEmpty())
+            serializableEpilogue = makeEpilogueDefinition(epilogue.get());
+        j["epilogue"] = serializableEpilogue.get().architectureJson();
+    } else {
+        j["epilogue"] = nullptr;
     }
 
     json inputs = json::array();

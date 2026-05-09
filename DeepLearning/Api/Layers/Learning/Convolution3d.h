@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Activations/SoftPlus.h"
+#include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution3d.h"
@@ -16,6 +17,7 @@ class Convolution3d : public TrainableLayer {
     class Builder;
 
     Convolution3d() {}
+    explicit Convolution3d(const Optional<ThorImplementation::Expression> epilogue) : epilogue(epilogue) {}
     virtual ~Convolution3d() = default;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Convolution3d>(*this); }
@@ -38,6 +40,39 @@ class Convolution3d : public TrainableLayer {
                              ThorImplementation::StampedNetwork& stampedNetwork) const override;
     static void deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader, const nlohmann::json& j, Network* network);
     nlohmann::json architectureJson() const override;
+
+    static const char *epilogueInputName() { return "__convolution_3d_epilogue_input"; }
+    static const char *epilogueOutputName() { return "__convolution_3d_epilogue_output"; }
+
+    [[nodiscard]] static ThorImplementation::Expression epilogueInput(
+        Optional<ThorImplementation::TensorDescriptor::DataType> computeDType =
+            Optional<ThorImplementation::TensorDescriptor::DataType>::empty(),
+        Optional<ThorImplementation::TensorDescriptor::DataType> outputDType =
+            Optional<ThorImplementation::TensorDescriptor::DataType>::empty()) {
+        return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
+    }
+
+    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(const ThorImplementation::Expression &expression) {
+        return LayerEpilogue::makeDefinition(expression, epilogueInputName(), epilogueOutputName(), "Convolution3d");
+    }
+
+    static void validateEpilogueExpression(const ThorImplementation::Expression &expression) {
+        LayerEpilogue::validateExpression(expression, epilogueInputName(), epilogueOutputName(), "Convolution3d");
+    }
+
+    static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition &definition) {
+        LayerEpilogue::validateDefinition(definition, epilogueInputName(), epilogueOutputName(), "Convolution3d");
+    }
+
+    [[nodiscard]] static ThorImplementation::Expression epilogueExpressionFromDefinition(
+        const ThorImplementation::ExpressionDefinition &definition) {
+        return LayerEpilogue::expressionFromDefinition(definition, epilogueInputName(), epilogueOutputName(), "Convolution3d");
+    }
+
+    [[nodiscard]] static ThorImplementation::Expression applyEpilogue(const ThorImplementation::Expression &input,
+                                                                      const ThorImplementation::Expression &epilogue) {
+        return LayerEpilogue::apply(input, epilogue, epilogueInputName());
+    }
 
    protected:
     virtual bool isMultiLayer() const { return featureInputs.front().getDataType() != Tensor::DataType::FP16; }
@@ -76,6 +111,9 @@ class Convolution3d : public TrainableLayer {
     std::shared_ptr<Activation> activation;
     std::shared_ptr<Optimizer> weightsOptimizer;
     std::shared_ptr<Optimizer> biasesOptimizer;
+
+    const Optional<ThorImplementation::Expression> epilogue;
+    mutable Optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
 };
 
 class Convolution3d::Builder {
@@ -113,7 +151,11 @@ class Convolution3d::Builder {
         if (!_activation && !_activationExplicitlyRemoved)
             _activation = SoftPlus::Builder().build();
 
-        Convolution3d convolution3d;
+        if (_epilogue.isPresent()) {
+            Convolution3d::validateEpilogueExpression(_epilogue.get());
+        }
+
+        Convolution3d convolution3d(_epilogue);
         convolution3d.featureInputs = _featureInputs;
         convolution3d.numOutputChannels = _numOutputChannels;
         convolution3d.filterDepth = _filterDepth;
@@ -262,6 +304,13 @@ class Convolution3d::Builder {
         _activationExplicitlyRemoved = true;
         return *this;
     }
+    virtual Convolution3d::Builder& epilogue(const ThorImplementation::Expression &expression) {
+        assert(this->_epilogue.isEmpty());
+        Convolution3d::validateEpilogueExpression(expression);
+        _epilogue = expression;
+        return *this;
+    }
+
     virtual Convolution3d::Builder& weightsOptimizer(std::shared_ptr<Optimizer> value) {
         assert(this->_weightsOptimizer == nullptr);
         this->_weightsOptimizer = value;
@@ -299,6 +348,7 @@ class Convolution3d::Builder {
     bool _activationExplicitlyRemoved;
     std::shared_ptr<Optimizer> _weightsOptimizer;
     std::shared_ptr<Optimizer> _biasesOptimizer;
+    Optional<ThorImplementation::Expression> _epilogue;
 };
 
 }  // namespace Thor
