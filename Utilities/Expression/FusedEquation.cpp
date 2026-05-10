@@ -882,6 +882,55 @@ static std::vector<uint64_t> resolveMatmulOutputDimsFromInputs(const CompiledMat
     return out_dims;
 }
 
+static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const CompiledAttention& compiled_stage,
+                                                                  const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    (void)compiled_stage;
+    if (stage_input_dims.size() < 3) {
+        throw std::runtime_error("Attention stage expected q/k/v input shapes.");
+    }
+
+    const auto& q_dims = stage_input_dims.at(0);
+    const auto& k_dims = stage_input_dims.at(1);
+    const auto& v_dims = stage_input_dims.at(2);
+    if (q_dims.size() != 4 || k_dims.size() != 4 || v_dims.size() != 4) {
+        throw std::runtime_error("Attention stage requires rank-4 q/k/v tensors in logical [B,H,S,D] order.");
+    }
+
+    const uint64_t batch = q_dims.at(0);
+    const uint64_t query_heads = q_dims.at(1);
+    const uint64_t query_len = q_dims.at(2);
+    const uint64_t qk_dim = q_dims.at(3);
+    const uint64_t kv_batch = k_dims.at(0);
+    const uint64_t kv_heads = k_dims.at(1);
+    const uint64_t kv_len = k_dims.at(2);
+    const uint64_t k_dim = k_dims.at(3);
+    const uint64_t v_batch = v_dims.at(0);
+    const uint64_t v_heads = v_dims.at(1);
+    const uint64_t v_len = v_dims.at(2);
+    const uint64_t v_dim = v_dims.at(3);
+
+    if (batch != kv_batch || batch != v_batch) {
+        throw std::runtime_error("Attention q/k/v batch dimensions must match.");
+    }
+    if (kv_heads != v_heads) {
+        throw std::runtime_error("Attention k/v head counts must match.");
+    }
+    if (query_heads % kv_heads != 0) {
+        throw std::runtime_error("Attention query heads must be an integer multiple of key/value heads for MHA/MQA/GQA.");
+    }
+    if (kv_len != v_len) {
+        throw std::runtime_error("Attention k/v sequence lengths must match.");
+    }
+    if (qk_dim != k_dim) {
+        throw std::runtime_error("Attention q/k head dimensions must match.");
+    }
+    if (kv_len == 0 || query_len == 0 || qk_dim == 0 || v_dim == 0) {
+        throw std::runtime_error("Attention q/k/v dimensions must be non-zero.");
+    }
+
+    return std::vector<uint64_t>{batch, query_heads, query_len, v_dim};
+}
+
 static std::vector<uint64_t> resolveConvolutionOutputDimsFromInputs(const CompiledConvolution& compiled_stage,
                                                                     const std::vector<std::vector<uint64_t>>& stage_input_dims) {
     if (stage_input_dims.size() < 2) {
@@ -1414,56 +1463,7 @@ static uint64_t maxNumel(const std::vector<std::vector<uint64_t>>& dims_by_outpu
     return max_numel;
 }
 
-static DataType compiledStageOutputDType(const CompiledExecutionStage& stage, size_t output_idx) {
-    if (output_idx >= stage.outputs.size()) {
-        throw std::runtime_error("compiledStageOutputDType output index out of range.");
-    }
-
-    switch (stage.kind) {
-        case CompiledExecutionStage::Kind::FusedKernel:
-            if (!stage.flat) {
-                throw std::runtime_error("compiledStageOutputDType missing fused stage kernel.");
-            }
-            return stage.flat->output_dtypes.at(output_idx);
-        case CompiledExecutionStage::Kind::Reduction:
-            if (!stage.reduction) {
-                throw std::runtime_error("compiledStageOutputDType missing reduction stage.");
-            }
-            return stage.reduction->output_dtype;
-        case CompiledExecutionStage::Kind::ArgMinMax:
-            if (!stage.arg_minmax) {
-                throw std::runtime_error("compiledStageOutputDType missing arg-min/max stage.");
-            }
-            return stage.arg_minmax->output_dtype;
-        case CompiledExecutionStage::Kind::Softmax:
-            if (!stage.softmax) {
-                throw std::runtime_error("compiledStageOutputDType missing softmax stage.");
-            }
-            return stage.softmax->output_dtype;
-        case CompiledExecutionStage::Kind::Matmul:
-            if (!stage.matmul) {
-                throw std::runtime_error("compiledStageOutputDType missing matmul/gemm stage.");
-            }
-            return stage.matmul->output_dtype;
-        case CompiledExecutionStage::Kind::Convolution:
-            if (!stage.convolution) {
-                throw std::runtime_error("compiledStageOutputDType missing convolution stage.");
-            }
-            return stage.convolution->output_dtype;
-        case CompiledExecutionStage::Kind::ConvolutionBackward:
-            if (!stage.convolution_backward) {
-                throw std::runtime_error("compiledStageOutputDType missing convolution-backward stage.");
-            }
-            return stage.convolution_backward->output_dtype;
-        case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
-            if (!stage.reduce_minmax_backward) {
-                throw std::runtime_error("compiledStageOutputDType missing reduce-min/max-backward stage.");
-            }
-            return stage.reduce_minmax_backward->output_dtype;
-    }
-
-    throw std::runtime_error("compiledStageOutputDType encountered unknown stage kind.");
-}
+static DataType compiledStageOutputDType(const CompiledExecutionStage& stage, size_t output_idx) { return stage.outputDType(output_idx); }
 
 static PhysicalExecutionStage toPhysicalFusedStage(const CompiledExecutionStage& stage) {
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
@@ -2094,6 +2094,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
 
             case ExprOp::TRANSPOSE:
             case ExprOp::SOFTMAX:
+            case ExprOp::ATTENTION:
             case ExprOp::MATMUL:
             case ExprOp::GEMM:
             case ExprOp::CONV2D:
@@ -2168,6 +2169,33 @@ static uint64_t computeMatmulStageFlops(const CompiledMatmul& matmul, const std:
     }
 
     return total;
+}
+
+static uint64_t computeAttentionStageFlops(const CompiledAttention& attention, const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    const std::vector<uint64_t> out_dims = resolveAttentionOutputDimsFromInputs(attention, stage_input_dims);
+    const auto& q_dims = stage_input_dims.at(0);
+    const auto& k_dims = stage_input_dims.at(1);
+
+    const uint64_t batch = out_dims.at(0);
+    const uint64_t query_heads = out_dims.at(1);
+    const uint64_t query_len = out_dims.at(2);
+    const uint64_t value_dim = out_dims.at(3);
+    const uint64_t key_len = k_dims.at(2);
+    const uint64_t qk_dim = q_dims.at(3);
+
+    uint64_t scores = checkedMulU64(batch, query_heads, "computeAttentionStageFlops");
+    scores = checkedMulU64(scores, query_len, "computeAttentionStageFlops");
+    scores = checkedMulU64(scores, key_len, "computeAttentionStageFlops");
+
+    uint64_t qk_flops = checkedMulU64(scores, qk_dim, "computeAttentionStageFlops");
+    qk_flops = checkedMulU64(qk_flops, 2, "computeAttentionStageFlops");
+
+    uint64_t pv_flops = checkedMulU64(scores, value_dim, "computeAttentionStageFlops");
+    pv_flops = checkedMulU64(pv_flops, 2, "computeAttentionStageFlops");
+
+    // Approximate softmax/masking/scale work separately from the two dense attention products.
+    const uint64_t softmax_flops = checkedMulU64(scores, 5, "computeAttentionStageFlops");
+    return checkedAddU64(checkedAddU64(qk_flops, pv_flops, "computeAttentionStageFlops"), softmax_flops, "computeAttentionStageFlops");
 }
 
 static uint64_t multiplyDimsForFlops(uint64_t value, const std::vector<uint64_t>& dims, size_t begin, const char* where) {
@@ -2260,6 +2288,11 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
                 throw std::runtime_error("Matmul stage missing payload while computing FLOPs.");
             return computeMatmulStageFlops(*stage.matmul, stage_input_dims);
 
+        case CompiledExecutionStage::Kind::Attention:
+            if (!stage.attention)
+                throw std::runtime_error("Attention stage missing payload while computing FLOPs.");
+            return computeAttentionStageFlops(*stage.attention, stage_input_dims);
+
         case CompiledExecutionStage::Kind::Convolution:
             if (!stage.convolution)
                 throw std::runtime_error("Convolution stage missing payload while computing FLOPs.");
@@ -2335,6 +2368,13 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 throw std::runtime_error("resolveOutputDimsForStageOutput matmul stage missing payload.");
             }
             return resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+        }
+
+        case CompiledExecutionStage::Kind::Attention: {
+            if (!stage.attention) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput attention stage missing payload.");
+            }
+            return resolveAttentionOutputDimsFromInputs(*stage.attention, stage_input_dims);
         }
 
         case CompiledExecutionStage::Kind::Convolution: {
@@ -3137,6 +3177,14 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("Matmul/gemm stage expected exactly one output.");
             }
             value_dims[stage.outputs[0].value_id] = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Attention) {
+            if (!stage.attention) {
+                throw std::runtime_error("Missing compiled attention stage.");
+            }
+            if (stage.outputs.size() != 1) {
+                throw std::runtime_error("Attention stage expected exactly one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = resolveAttentionOutputDimsFromInputs(*stage.attention, stage_input_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::Convolution) {
             if (!stage.convolution) {
                 throw std::runtime_error("Missing compiled convolution stage.");
@@ -4316,6 +4364,49 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       beta_host_scratch);
 }
 
+std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::shared_ptr<CompiledAttention>& compiledStage,
+                                                                const Tensor& q,
+                                                                const Tensor& k,
+                                                                const Tensor& v,
+                                                                std::optional<Tensor> preallocatedOutput,
+                                                                const Stream& stream) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampAttention requires non-null compiled stage.");
+    }
+
+    Tensor adaptedQ = adaptMatmulInputDTypeIfNeeded(q, compiledStage->output_dtype, stream);
+    Tensor adaptedK = adaptMatmulInputDTypeIfNeeded(k, compiledStage->output_dtype, stream);
+    Tensor adaptedV = adaptMatmulInputDTypeIfNeeded(v, compiledStage->output_dtype, stream);
+
+    std::vector<std::vector<uint64_t>> stage_input_dims(3);
+    stage_input_dims[0] = adaptedQ.getDimensions();
+    stage_input_dims[1] = adaptedK.getDimensions();
+    stage_input_dims[2] = adaptedV.getDimensions();
+    const std::vector<uint64_t> output_dims = resolveAttentionOutputDimsFromInputs(*compiledStage, stage_input_dims);
+
+    Tensor output;
+    if (preallocatedOutput.has_value()) {
+        output = preallocatedOutput.value();
+        if (output.getPlacement() != adaptedQ.getPlacement()) {
+            throw std::runtime_error("Preallocated attention output tensor placement does not match the input placement.");
+        }
+        if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
+            throw std::runtime_error("Preallocated attention output tensor dtype does not match the compiled output dtype.");
+        }
+        if (output.getDimensions() != output_dims) {
+            throw std::runtime_error("Preallocated attention output tensor dimensions are incompatible with the attention output shape.");
+        }
+    } else {
+        TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dims);
+        output = Tensor(adaptedQ.getPlacement(), outputDescriptor);
+    }
+
+    // Build and validate the cuDNN descriptor during stamping so shape/layout errors fail before execution.
+    (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, output);
+
+    return make_shared<StampedAttention>(compiledStage, adaptedQ, adaptedK, adaptedV, output, stream);
+}
+
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
     const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const {
     return stampReduceMinMaxBackward(compiledStage, input, grad_output, std::nullopt, stream);
@@ -4797,6 +4888,37 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedMatmul, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
+            case CompiledExecutionStage::Kind::Attention: {
+                if (!stage.attention) {
+                    throw std::runtime_error("Attention stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 3) {
+                    throw std::runtime_error("Attention stage expects exactly three inputs: q, k, and v.");
+                }
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Attention stage expects exactly one output.");
+                }
+                Tensor qTensor = runtimeInputTensor(stageInputs[0]);
+                Tensor kTensor = runtimeInputTensor(stageInputs[1]);
+                Tensor vTensor = runtimeInputTensor(stageInputs[2]);
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                std::optional<Tensor> preallocated = std::nullopt;
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    preallocated = preallocated_it->second;
+                }
+                std::shared_ptr<StampedAttention> stampedAttention =
+                    stampAttention(stage.attention, qTensor, kTensor, vTensor, preallocated, stream);
+                Tensor outputTensor = stampedAttention->getOutputTensor();
+                if (outputTensor.getDimensions() != output_dims) {
+                    throw std::runtime_error("Stamped attention output tensor dimensions are incompatible with the staged output shape.");
+                }
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedAttention, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
             case CompiledExecutionStage::Kind::Convolution: {
                 if (!stage.convolution) {
                     throw std::runtime_error("Convolution stage missing compiled payload.");
@@ -5141,6 +5263,8 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                 stage, stage_input_dims, resolved_stage_output_dims, root_input_name_by_slot, parameter_names, result);
         } else if (stage.kind == CompiledExecutionStage::Kind::Matmul) {
             addMatmulParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Attention) {
+            // Attention stages do not currently infer initializer fan overrides for q/k/v inputs.
         } else if (stage.kind == CompiledExecutionStage::Kind::Convolution) {
             addConvolutionParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
         } else if (stage.kind == CompiledExecutionStage::Kind::ConvolutionBackward) {
@@ -5200,6 +5324,14 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                 throw std::runtime_error("Matmul/gemm stage expected exactly one output.");
             }
             value_dims[stage.outputs[0].value_id] = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+        } else if (stage.kind == CompiledExecutionStage::Kind::Attention) {
+            if (!stage.attention) {
+                throw std::runtime_error("Missing compiled attention stage.");
+            }
+            if (stage.outputs.size() != 1) {
+                throw std::runtime_error("Attention stage expected exactly one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = resolveAttentionOutputDimsFromInputs(*stage.attention, stage_input_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::Convolution) {
             if (!stage.convolution) {
                 throw std::runtime_error("Missing compiled convolution stage.");

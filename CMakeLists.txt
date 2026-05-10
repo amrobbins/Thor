@@ -627,3 +627,27 @@ if (_git_head MATCHES "^ref: (.+)$")
     set(_git_ref "${CMAKE_SOURCE_DIR}/.git/${CMAKE_MATCH_1}")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_git_ref}")
 endif ()
+
+execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -c
+        "import importlib.metadata as md
+from pathlib import Path
+try:
+    dist = md.distribution('nvidia-cudnn-frontend')
+    hits = [Path(dist.locate_file(f)).parent for f in (dist.files or []) if f.name == 'cudnn_frontend.h']
+    print(hits[0] if hits else '')
+except Exception:
+    print('')"
+        OUTPUT_VARIABLE THOR_CUDNN_FRONTEND_INCLUDE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+if (NOT THOR_CUDNN_FRONTEND_INCLUDE_DIR)
+    message(FATAL_ERROR
+            "Thor attention requires nvidia-cudnn-frontend and cudnn_frontend.h. "
+            "Install it with: ${Python3_EXECUTABLE} -m pip install nvidia-cudnn-frontend==1.23.0")
+endif ()
+
+message(STATUS "Thor: cuDNN Frontend include = ${THOR_CUDNN_FRONTEND_INCLUDE_DIR}")
+
+target_include_directories(Thor PRIVATE "${THOR_CUDNN_FRONTEND_INCLUDE_DIR}")

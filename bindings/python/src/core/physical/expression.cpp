@@ -28,6 +28,9 @@ using ExpressionDefinition = ThorImplementation::ExpressionDefinition;
 using NamedOutput = ThorImplementation::NamedOutput;
 using DynamicExpression = ThorImplementation::DynamicExpression;
 using TensorScalarBinding = ThorImplementation::TensorScalarBinding;
+using AttentionTensorLayout = ThorImplementation::AttentionTensorLayout;
+using AttentionMaskKind = ThorImplementation::AttentionMaskKind;
+using AttentionOptions = ThorImplementation::AttentionOptions;
 using PreparedDynamicExpression = ThorImplementation::PreparedDynamicExpression;
 using DynamicExpressionBuild = ThorImplementation::DynamicExpressionBuild;
 using DynamicTensorMap = std::unordered_map<std::string, Tensor>;
@@ -74,6 +77,26 @@ static nb::dict parameterFanOverridesToPython(const FusedEquation::ParameterFanO
 }
 
 void bind_physical_expression(nb::module_& physical) {
+    auto attention_layout = nb::enum_<AttentionTensorLayout>(physical, "AttentionTensorLayout")
+                                .value("bhsd", AttentionTensorLayout::BHSD)
+                                .value("bshd", AttentionTensorLayout::BSHD);
+    attention_layout.attr("__module__") = "thor.physical";
+
+    auto attention_mask_kind = nb::enum_<AttentionMaskKind>(physical, "AttentionMaskKind")
+                                   .value("none", AttentionMaskKind::None)
+                                   .value("causal_top_left", AttentionMaskKind::CausalTopLeft)
+                                   .value("causal_bottom_right", AttentionMaskKind::CausalBottomRight)
+                                   .value("sliding_window_top_left", AttentionMaskKind::SlidingWindowTopLeft)
+                                   .value("sliding_window_bottom_right", AttentionMaskKind::SlidingWindowBottomRight);
+    attention_mask_kind.attr("__module__") = "thor.physical";
+
+    physical.def(
+        "cudnn_frontend_attention_available",
+        []() { return ThorImplementation::CudnnScaledDotProductAttention::frontendAvailable(); },
+        R"nbdoc(
+Return True when Thor was compiled with the cuDNN Frontend C++ headers needed by the cuDNN SDPA attention executor.
+)nbdoc");
+
     auto expr = nb::class_<Expression>(physical, "Expression");
     expr.attr("__module__") = "thor.physical";
 
@@ -352,6 +375,121 @@ Shorthand for ``self.transpose()``.
         "transpose_c"_a = false,
         "output_dtype"_a.none() = nb::none(),
         "compute_dtype"_a.none() = nb::none());
+
+    auto parse_optional_dtype = [](const nb::object& dtype_obj) -> std::optional<DataType> {
+        if (dtype_obj.is_none()) {
+            return std::nullopt;
+        }
+        return nb::cast<DataType>(dtype_obj);
+    };
+
+    expr.def_static(
+        "scaled_dot_product_attention",
+        [parse_optional_dtype](const Expression& q,
+                               const Expression& k,
+                               const Expression& v,
+                               AttentionTensorLayout q_layout,
+                               AttentionTensorLayout k_layout,
+                               AttentionTensorLayout v_layout,
+                               AttentionTensorLayout o_layout,
+                               AttentionMaskKind mask_kind,
+                               int64_t diagonal_left_bound,
+                               int64_t diagonal_right_bound,
+                               nb::object attention_scale_obj,
+                               bool use_alibi_mask,
+                               nb::object output_dtype_obj,
+                               nb::object compute_dtype_obj) {
+            AttentionOptions options;
+            options.q_layout = q_layout;
+            options.k_layout = k_layout;
+            options.v_layout = v_layout;
+            options.o_layout = o_layout;
+            options.mask_kind = mask_kind;
+            options.diagonal_left_bound = diagonal_left_bound;
+            options.diagonal_right_bound = diagonal_right_bound;
+            if (!attention_scale_obj.is_none()) {
+                options.attention_scale = nb::cast<float>(attention_scale_obj);
+            }
+            options.use_alibi_mask = use_alibi_mask;
+            options.output_dtype = parse_optional_dtype(output_dtype_obj);
+            options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
+            return Expression::scaledDotProductAttention(q, k, v, std::move(options));
+        },
+        "q"_a,
+        "k"_a,
+        "v"_a,
+        "q_layout"_a = AttentionTensorLayout::BHSD,
+        "k_layout"_a = AttentionTensorLayout::BHSD,
+        "v_layout"_a = AttentionTensorLayout::BHSD,
+        "o_layout"_a = AttentionTensorLayout::BHSD,
+        "mask_kind"_a = AttentionMaskKind::None,
+        "diagonal_left_bound"_a = 0,
+        "diagonal_right_bound"_a = 0,
+        "attention_scale"_a.none() = nb::none(),
+        "use_alibi_mask"_a = false,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Create a cuDNN scaled-dot-product attention expression stage.
+
+All tensors use logical semantic shape [B, H, S, D].  Layout arguments describe
+how the stage should hand those logical tensors to cuDNN.  The default layout is
+BHSD, matching Thor's row-major physical tensor layout for rank-4 attention
+inputs.  output_dtype should normally match q/k/v for the current cuDNN SDPA
+path; compute_dtype should normally be thor.DataType.fp32.
+)nbdoc");
+
+    expr.def_static(
+        "attention",
+        [](const Expression& q,
+           const Expression& k,
+           const Expression& v,
+           AttentionTensorLayout q_layout,
+           AttentionTensorLayout k_layout,
+           AttentionTensorLayout v_layout,
+           AttentionTensorLayout o_layout,
+           AttentionMaskKind mask_kind,
+           int64_t diagonal_left_bound,
+           int64_t diagonal_right_bound,
+           nb::object attention_scale_obj,
+           bool use_alibi_mask,
+           nb::object output_dtype_obj,
+           nb::object compute_dtype_obj) {
+            AttentionOptions options;
+            options.q_layout = q_layout;
+            options.k_layout = k_layout;
+            options.v_layout = v_layout;
+            options.o_layout = o_layout;
+            options.mask_kind = mask_kind;
+            options.diagonal_left_bound = diagonal_left_bound;
+            options.diagonal_right_bound = diagonal_right_bound;
+            if (!attention_scale_obj.is_none()) {
+                options.attention_scale = nb::cast<float>(attention_scale_obj);
+            }
+            options.use_alibi_mask = use_alibi_mask;
+            if (!output_dtype_obj.is_none()) {
+                options.output_dtype = nb::cast<DataType>(output_dtype_obj);
+            }
+            if (!compute_dtype_obj.is_none()) {
+                options.compute_dtype = nb::cast<DataType>(compute_dtype_obj);
+            }
+            return Expression::scaledDotProductAttention(q, k, v, std::move(options));
+        },
+        "q"_a,
+        "k"_a,
+        "v"_a,
+        "q_layout"_a = AttentionTensorLayout::BHSD,
+        "k_layout"_a = AttentionTensorLayout::BHSD,
+        "v_layout"_a = AttentionTensorLayout::BHSD,
+        "o_layout"_a = AttentionTensorLayout::BHSD,
+        "mask_kind"_a = AttentionMaskKind::None,
+        "diagonal_left_bound"_a = 0,
+        "diagonal_right_bound"_a = 0,
+        "attention_scale"_a.none() = nb::none(),
+        "use_alibi_mask"_a = false,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(Alias for scaled_dot_product_attention().)nbdoc");
     expr.def("__rpow__", [](const Expression& a, const Expression& b) { return b.pow(a); }, "other"_a);
 
     expr.def("__neg__", [](const Expression& a) { return -a; });

@@ -22,9 +22,10 @@ dependencies = [
     "nvidia-cuda-nvrtc>=13,<14",
     "nvidia-cublas>=13,<14",
     "nvidia-nvjitlink>=13,<14",
-    "nvidia-cudnn-cu13>=9,<10",
+    "nvidia-cudnn-cu13>=9.21,<10",
     "nvidia-cusparse>=12,<13",
     "nvidia-cusolver>=12,<13",
+    "nvidia-cudnn-frontend>=1.23.0, <2"
 ]
 readme = { file = "README.md", content-type = "text/markdown" }
 

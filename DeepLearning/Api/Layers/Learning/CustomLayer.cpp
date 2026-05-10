@@ -23,36 +23,6 @@ using CompiledStageOutput = ThorImplementation::CompiledStageOutput;
 
 namespace {
 
-std::optional<DataType> stageOutputDType(const CompiledExecutionStage& stage, size_t outputIdx) {
-    switch (stage.kind) {
-        case CompiledExecutionStage::Kind::FusedKernel:
-            return stage.flat->output_dtypes.at(outputIdx);
-
-        case CompiledExecutionStage::Kind::Reduction:
-            return stage.reduction->output_dtype;
-
-        case CompiledExecutionStage::Kind::ArgMinMax:
-            return stage.arg_minmax->output_dtype;
-
-        case CompiledExecutionStage::Kind::Softmax:
-            return stage.softmax->output_dtype;
-
-        case CompiledExecutionStage::Kind::Matmul:
-            return stage.matmul->output_dtype;
-
-        case CompiledExecutionStage::Kind::Convolution:
-            return stage.convolution->output_dtype;
-
-        case CompiledExecutionStage::Kind::ConvolutionBackward:
-            return stage.convolution_backward->output_dtype;
-
-        case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
-            return stage.reduce_minmax_backward->output_dtype;
-    }
-
-    return std::nullopt;
-}
-
 PhysicalTensor makeFakePlacedTensor(const Thor::Tensor& apiTensor) {
     std::vector<uint64_t> fakeDims;
     fakeDims.reserve(apiTensor.getDimensions().size() + 1);
@@ -332,7 +302,7 @@ CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const
     std::unordered_map<uint32_t, DataType> outputDTypeByValueId;
     for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
         for (size_t outputIdx = 0; outputIdx < stage.outputs.size(); ++outputIdx) {
-            outputDTypeByValueId.emplace(stage.outputs[outputIdx].value_id, stageOutputDType(stage, outputIdx).value());
+            outputDTypeByValueId.emplace(stage.outputs[outputIdx].value_id, stage.outputDType(outputIdx));
         }
     }
 

@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
+#include <cudnn_frontend.h>
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
@@ -72,9 +73,7 @@ constexpr int64_t UID_AMAX_DK = 63;
 constexpr int64_t UID_AMAX_DV = 64;
 constexpr int64_t UID_AMAX_DP = 65;
 
-void throwInvalidAttention(const string& message) {
-    throw invalid_argument("Invalid cuDNN attention descriptor: " + message);
-}
+void throwInvalidAttention(const string& message) { throw invalid_argument("Invalid cuDNN attention descriptor: " + message); }
 
 vector<int64_t> asInt64(const vector<uint64_t>& values) {
     vector<int64_t> converted;
@@ -125,8 +124,8 @@ void requireGpuTensor(const Tensor& tensor, string_view name, int gpuNum) {
     if (placement.getMemDevice() != TensorPlacement::MemDevices::GPU)
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' must be on GPU memory");
     if (placement.getDeviceNum() != gpuNum)
-        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' is on GPU " +
-                               to_string(placement.getDeviceNum()) + " but stream is on GPU " + to_string(gpuNum));
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' is on GPU " + to_string(placement.getDeviceNum()) +
+                               " but stream is on GPU " + to_string(gpuNum));
 }
 
 void requireOptionalGpuTensor(const optional<Tensor>& tensor, string_view name, int gpuNum) {
@@ -356,28 +355,32 @@ class AttentionGraphCache {
                     .set_seq_len_kv(seqLen(built.graph, "seq_len_kv", UID_SEQ_KV, descriptor.batchSize()));
             }
             if (descriptor.useBias)
-                attrs.set_bias(tensor(built.graph,
-                                      "bias",
-                                      UID_BIAS,
-                                      {descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), descriptor.keyValueLength()},
-                                      {descriptor.queryHeads() * descriptor.queryLength() * descriptor.keyValueLength(),
-                                       descriptor.queryLength() * descriptor.keyValueLength(),
-                                       descriptor.keyValueLength(),
-                                       1},
-                                      descriptor.computeDataType));
+                attrs.set_bias(
+                    tensor(built.graph,
+                           "bias",
+                           UID_BIAS,
+                           {descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), descriptor.keyValueLength()},
+                           {descriptor.queryHeads() * descriptor.queryLength() * descriptor.keyValueLength(),
+                            descriptor.queryLength() * descriptor.keyValueLength(),
+                            descriptor.keyValueLength(),
+                            1},
+                           descriptor.computeDataType));
             if (descriptor.usePagedKvCache) {
-                attrs.set_paged_attention_k_table(tensor(built.graph,
-                                                         "page_table_k",
-                                                         UID_PAGE_TABLE_K,
-                                                         {descriptor.batchSize(), 1, 1, descriptor.keyValueLength()},
-                                                         {descriptor.keyValueLength(), descriptor.keyValueLength(), descriptor.keyValueLength(), 1},
-                                                         TensorDescriptor::DataType::INT32))
-                    .set_paged_attention_v_table(tensor(built.graph,
-                                                        "page_table_v",
-                                                        UID_PAGE_TABLE_V,
-                                                        {descriptor.batchSize(), 1, 1, descriptor.keyValueLength()},
-                                                        {descriptor.keyValueLength(), descriptor.keyValueLength(), descriptor.keyValueLength(), 1},
-                                                        TensorDescriptor::DataType::INT32))
+                attrs
+                    .set_paged_attention_k_table(
+                        tensor(built.graph,
+                               "page_table_k",
+                               UID_PAGE_TABLE_K,
+                               {descriptor.batchSize(), 1, 1, descriptor.keyValueLength()},
+                               {descriptor.keyValueLength(), descriptor.keyValueLength(), descriptor.keyValueLength(), 1},
+                               TensorDescriptor::DataType::INT32))
+                    .set_paged_attention_v_table(
+                        tensor(built.graph,
+                               "page_table_v",
+                               UID_PAGE_TABLE_V,
+                               {descriptor.batchSize(), 1, 1, descriptor.keyValueLength()},
+                               {descriptor.keyValueLength(), descriptor.keyValueLength(), descriptor.keyValueLength(), 1},
+                               TensorDescriptor::DataType::INT32))
                     .set_paged_attention_max_seq_len_kv(static_cast<int>(descriptor.pagedKv.maxSequenceLengthKv));
             }
             if (descriptor.dropout.probability > 0.0f) {
@@ -386,16 +389,17 @@ class AttentionGraphCache {
                                       scalar(built.graph, "dropout_seed", UID_DROPOUT_SEED, TensorDescriptor::DataType::INT64),
                                       scalar(built.graph, "dropout_offset", UID_DROPOUT_OFFSET, TensorDescriptor::DataType::INT64));
                 } else {
-                    attrs.set_dropout(tensor(built.graph,
-                                             "dropout_mask",
-                                             UID_DROPOUT_MASK,
-                                             {descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), descriptor.keyValueLength()},
-                                             {descriptor.queryHeads() * descriptor.queryLength() * descriptor.keyValueLength(),
-                                              descriptor.queryLength() * descriptor.keyValueLength(),
-                                              descriptor.keyValueLength(),
-                                              1},
-                                             TensorDescriptor::DataType::BOOLEAN),
-                                      scalar(built.graph, "dropout_scale", UID_DROPOUT_SCALE));
+                    attrs.set_dropout(
+                        tensor(built.graph,
+                               "dropout_mask",
+                               UID_DROPOUT_MASK,
+                               {descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), descriptor.keyValueLength()},
+                               {descriptor.queryHeads() * descriptor.queryLength() * descriptor.keyValueLength(),
+                                descriptor.queryLength() * descriptor.keyValueLength(),
+                                descriptor.keyValueLength(),
+                                1},
+                               TensorDescriptor::DataType::BOOLEAN),
+                        scalar(built.graph, "dropout_scale", UID_DROPOUT_SCALE));
                 }
             }
 
@@ -420,15 +424,15 @@ class AttentionGraphCache {
             }
 
             auto [o, stats, amaxS, amaxO] = built.graph->sdpa_fp8(q,
-                                                                   k,
-                                                                   v,
-                                                                   scalar(built.graph, "descale_q", UID_DESCALE_Q),
-                                                                   scalar(built.graph, "descale_k", UID_DESCALE_K),
-                                                                   scalar(built.graph, "descale_v", UID_DESCALE_V),
-                                                                   scalar(built.graph, "descale_s", UID_DESCALE_S),
-                                                                   scalar(built.graph, "scale_s", UID_SCALE_S),
-                                                                   scalar(built.graph, "scale_o", UID_SCALE_O),
-                                                                   attrs);
+                                                                  k,
+                                                                  v,
+                                                                  scalar(built.graph, "descale_q", UID_DESCALE_Q),
+                                                                  scalar(built.graph, "descale_k", UID_DESCALE_K),
+                                                                  scalar(built.graph, "descale_v", UID_DESCALE_V),
+                                                                  scalar(built.graph, "descale_s", UID_DESCALE_S),
+                                                                  scalar(built.graph, "scale_s", UID_SCALE_S),
+                                                                  scalar(built.graph, "scale_o", UID_SCALE_O),
+                                                                  attrs);
             o->set_output(true)
                 .set_uid(UID_O)
                 .set_dim(descriptor.o.dimensions)
@@ -447,7 +451,9 @@ class AttentionGraphCache {
     BuiltGraph buildBackwardGraph(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
         descriptor.validateBackward();
         if (descriptor.useFp8)
-            throwInvalidAttention("FP8 backward API is reserved in the descriptor/args but not enabled in this first Thor wrapper; add it once the forward path is validated on target hardware");
+            throwInvalidAttention(
+                "FP8 backward API is reserved in the descriptor/args but not enabled in this first Thor wrapper; add it once the forward "
+                "path is validated on target hardware");
 
         BuiltGraph built;
         built.graph = make_shared<fe::graph::Graph>();
@@ -504,9 +510,21 @@ class AttentionGraphCache {
         }
 
         auto [dQ, dK, dV] = built.graph->sdpa_backward(q, k, v, o, dO, stats, attrs);
-        dQ->set_output(true).set_uid(UID_DQ).set_dim(descriptor.q.dimensions).set_stride(descriptor.q.strides).set_data_type(toFrontendDataType(descriptor.q.dataType));
-        dK->set_output(true).set_uid(UID_DK).set_dim(descriptor.k.dimensions).set_stride(descriptor.k.strides).set_data_type(toFrontendDataType(descriptor.k.dataType));
-        dV->set_output(true).set_uid(UID_DV).set_dim(descriptor.v.dimensions).set_stride(descriptor.v.strides).set_data_type(toFrontendDataType(descriptor.v.dataType));
+        dQ->set_output(true)
+            .set_uid(UID_DQ)
+            .set_dim(descriptor.q.dimensions)
+            .set_stride(descriptor.q.strides)
+            .set_data_type(toFrontendDataType(descriptor.q.dataType));
+        dK->set_output(true)
+            .set_uid(UID_DK)
+            .set_dim(descriptor.k.dimensions)
+            .set_stride(descriptor.k.strides)
+            .set_data_type(toFrontendDataType(descriptor.k.dataType));
+        dV->set_output(true)
+            .set_uid(UID_DV)
+            .set_dim(descriptor.v.dimensions)
+            .set_stride(descriptor.v.strides)
+            .set_data_type(toFrontendDataType(descriptor.v.dataType));
 
         finalize(built, gpuNum);
         return built;
@@ -530,7 +548,7 @@ void insertOptionalTensor(unordered_map<int64_t, void*>& pack, int64_t uid, cons
         pack[uid] = const_cast<void*>(static_cast<const void*>(tensor.value().getMemPtr<void>()));
 }
 
-void executeGraph(BuiltGraph& built, const unordered_map<int64_t, void*>& pack, Stream stream) {
+void executeGraph(BuiltGraph& built, unordered_map<int64_t, void*>& pack, Stream stream) {
     void* workspace = built.workspaceBytes > 0 ? built.workspace.getMemPtr<void>() : nullptr;
     auto status = built.graph->execute(stream.getCudnnHandle(), pack, workspace);
     if (!status.is_good())
@@ -540,41 +558,47 @@ void executeGraph(BuiltGraph& built, const unordered_map<int64_t, void*>& pack, 
 #else
 
 void throwFrontendUnavailable() {
-    throw runtime_error("Thor cuDNN attention requires NVIDIA cuDNN Frontend C++ headers (<cudnn_frontend.h>). "
-                        "Install cudnn-frontend v1.23+ / matching headers for cuDNN 9.21+ and add the include path to Thor.");
+    throw runtime_error(
+        "Thor cuDNN attention requires NVIDIA cuDNN Frontend C++ headers (<cudnn_frontend.h>). "
+        "Install cudnn-frontend v1.23+ / matching headers for cuDNN 9.21+ and add the include path to Thor.");
 }
 
 #endif
 
 }  // namespace
 
-AttentionTensorSpec AttentionTensorSpec::bhsd(int64_t batch,
-                                              int64_t heads,
-                                              int64_t sequenceLength,
-                                              int64_t headDim,
-                                              TensorDescriptor::DataType dataType) {
-    return AttentionTensorSpec{{batch, heads, sequenceLength, headDim},
-                               {heads * sequenceLength * headDim, sequenceLength * headDim, headDim, 1},
-                               dataType,
-                               false};
+AttentionTensorSpec AttentionTensorSpec::bhsd(
+    int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, TensorDescriptor::DataType dataType) {
+    return AttentionTensorSpec{
+        {batch, heads, sequenceLength, headDim}, {heads * sequenceLength * headDim, sequenceLength * headDim, headDim, 1}, dataType, false};
 }
 
-AttentionTensorSpec AttentionTensorSpec::bshd(int64_t batch,
-                                              int64_t heads,
-                                              int64_t sequenceLength,
-                                              int64_t headDim,
-                                              TensorDescriptor::DataType dataType) {
+AttentionTensorSpec AttentionTensorSpec::bshd(
+    int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, TensorDescriptor::DataType dataType) {
     // Semantic dimension order remains [B,H,S,D]; this stride maps those indices to BSHD physical storage.
-    return AttentionTensorSpec{{batch, heads, sequenceLength, headDim},
-                               {sequenceLength * heads * headDim, headDim, heads * headDim, 1},
-                               dataType,
-                               false};
+    return AttentionTensorSpec{
+        {batch, heads, sequenceLength, headDim}, {sequenceLength * heads * headDim, headDim, heads * headDim, 1}, dataType, false};
+}
+
+AttentionTensorSpec AttentionTensorSpec::fromLayout(AttentionTensorLayout layout,
+                                                    int64_t batch,
+                                                    int64_t heads,
+                                                    int64_t sequenceLength,
+                                                    int64_t headDim,
+                                                    TensorDescriptor::DataType dataType) {
+    switch (layout) {
+        case AttentionTensorLayout::BHSD:
+            return bhsd(batch, heads, sequenceLength, headDim, dataType);
+        case AttentionTensorLayout::BSHD:
+            return bshd(batch, heads, sequenceLength, headDim, dataType);
+    }
+    throw std::invalid_argument("Unknown AttentionTensorLayout.");
 }
 
 string AttentionTensorSpec::toString() const {
     ostringstream out;
-    out << "dim=" << joinInts(dimensions) << " stride=" << joinInts(strides)
-        << " dtype=" << TensorDescriptor::getElementTypeName(dataType) << " ragged=" << ragged;
+    out << "dim=" << joinInts(dimensions) << " stride=" << joinInts(strides) << " dtype=" << TensorDescriptor::getElementTypeName(dataType)
+        << " ragged=" << ragged;
     return out.str();
 }
 
@@ -882,5 +906,13 @@ size_t CudnnScaledDotProductAttention::cachedGraphCount() const {
     return cache().size();
 #else
     return 0;
+#endif
+}
+
+bool CudnnScaledDotProductAttention::frontendAvailable() {
+#if THOR_CUDNN_FRONTEND_AVAILABLE
+    return true;
+#else
+    return false;
 #endif
 }

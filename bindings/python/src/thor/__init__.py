@@ -67,7 +67,19 @@ def _preload_cuda_user_space_libs() -> None:
                     pass
 
 
+def _configure_cudnn_frontend_include_dir() -> None:
+    if "THOR_CUDNN_FRONTEND_INCLUDE_DIR" in os.environ:
+        return
+
+    site_packages = _find_site_packages_root()
+    candidate = site_packages / "include"
+
+    if (candidate / "cudnn_frontend.h").exists():
+        os.environ.setdefault("THOR_CUDNN_FRONTEND_INCLUDE_DIR", str(candidate))
+
+
 _configure_cuda_include_dir()
+_configure_cudnn_frontend_include_dir()
 _preload_cuda_user_space_libs()
 
 from ._thor import *

@@ -22,7 +22,7 @@ bool isSupportedFusionFloatingType(DataType dtype) {
 
 bool isFp8Type(DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2; }
 
-static bool isReductionComputeOp(ExprOp op) { return isCudnnReduceOp(op); }
+static bool isReductionComputeOp(ExprOp op) { return isCudnnReduceOp(op) || op == ExprOp::ATTENTION; }
 static bool isCudnnSingleInputStageOp(ExprOp op) { return isCudnnReduceOp(op) || isCudnnSoftmaxOp(op); }
 
 DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {

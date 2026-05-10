@@ -16,6 +16,7 @@
 #include "Utilities/Cache/LruCache.h"
 #include "Utilities/Expression/CompiledEquation.h"
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
+#include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 
 namespace ThorImplementation {
 
@@ -184,6 +185,23 @@ struct BuiltMatmul {
 
     BuiltMatmul(const BuiltMatmul&) = delete;
     BuiltMatmul& operator=(const BuiltMatmul&) = delete;
+};
+
+struct CompiledAttention {
+    AttentionTensorLayout q_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout k_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout v_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout o_layout = AttentionTensorLayout::BHSD;
+    AttentionMaskKind mask_kind = AttentionMaskKind::None;
+    int64_t diagonal_left_bound = 0;
+    int64_t diagonal_right_bound = 0;
+    std::optional<float> attention_scale = std::nullopt;
+    bool use_alibi_mask = false;
+    TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
+    TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP16;
+    std::string debug_name = "thor_expr_attention";
+
+    CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o) const;
 };
 
 struct BuiltConvolution {
@@ -433,6 +451,31 @@ class StampedMatmul {
     const std::optional<Tensor> beta_host_scratch;
 };
 
+class StampedAttention {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+    Tensor getOutputTensor() const { return output; }
+
+    StampedAttention(std::shared_ptr<CompiledAttention> compiled,
+                     const Tensor& q,
+                     const Tensor& k,
+                     const Tensor& v,
+                     const Tensor& output,
+                     const Stream& stream);
+
+   private:
+    const std::shared_ptr<CompiledAttention> compiled_attention;
+    const Tensor q;
+    const Tensor k;
+    const Tensor v;
+    Tensor output;
+    Stream stream;
+};
+
 class StampedConvolution {
    public:
     void run();
@@ -522,7 +565,7 @@ class StampedReduceMinMaxBackward {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Attention, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     const Kind kind;
 
     const std::vector<uint32_t> dependency_stage_indices;
@@ -534,6 +577,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<StampedSoftmax> softmax = nullptr;
     const std::shared_ptr<StampedMatmul> matmul = nullptr;
+    const std::shared_ptr<StampedAttention> attention = nullptr;
     const std::shared_ptr<StampedConvolution> convolution = nullptr;
     const std::shared_ptr<StampedConvolutionBackward> convolution_backward = nullptr;
     const std::shared_ptr<StampedReduceMinMaxBackward> reduce_minmax_backward = nullptr;
@@ -582,6 +626,15 @@ struct StampedExecutionStage {
           gpu_num(matmul->gpuNum()),
           flop_count(flop_count),
           matmul(matmul) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedAttention>& attention,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::Attention),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(attention->gpuNum()),
+          flop_count(flop_count),
+          attention(attention) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedConvolution>& convolution,
                                    std::vector<uint32_t> dependency_stage_indices = {},
@@ -636,6 +689,9 @@ struct StampedExecutionStage {
                 matmul->runOn(run_stream);
             else
                 matmul->runOn(run_stream, runtime_scalars);
+        } else if (kind == Kind::Attention) {
+            THOR_THROW_IF_FALSE(attention != nullptr);
+            attention->runOn(run_stream);
         } else if (kind == Kind::Convolution) {
             THOR_THROW_IF_FALSE(convolution != nullptr);
             convolution->runOn(run_stream);
