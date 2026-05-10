@@ -31,7 +31,7 @@ struct ParameterFanOverride {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Attention, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -46,6 +46,8 @@ struct CompiledExecutionStage {
                 return "Matmul";
             case Kind::Attention:
                 return "Attention";
+            case Kind::AttentionBackward:
+                return "AttentionBackward";
             case Kind::Convolution:
                 return "Convolution";
             case Kind::ConvolutionBackward:
@@ -66,6 +68,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
     const std::shared_ptr<CompiledMatmul> matmul = nullptr;
     const std::shared_ptr<CompiledAttention> attention = nullptr;
+    const std::shared_ptr<CompiledAttentionBackward> attention_backward = nullptr;
     const std::shared_ptr<CompiledConvolution> convolution = nullptr;
     const std::shared_ptr<CompiledConvolutionBackward> convolution_backward = nullptr;
     const std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = nullptr;
@@ -115,6 +118,15 @@ struct CompiledExecutionStage {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing attention stage.");
                 }
                 return attention->output_dtype;
+
+            case Kind::AttentionBackward:
+                if (!attention_backward) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing attention-backward stage.");
+                }
+                if (outputs.at(output_idx).local_node_idx >= expr.nodes.size()) {
+                    throw std::runtime_error("Attention-backward output node index out of range while resolving dtype.");
+                }
+                return attention_backward->outputDTypeFor(expr.nodes.at(outputs.at(output_idx).local_node_idx).op);
 
             case Kind::Convolution:
                 if (!convolution) {
@@ -198,6 +210,18 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::Attention),
           attention(attention),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const PhysicalExpression& expr,
+                           const std::shared_ptr<CompiledAttentionBackward>& attention_backward,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::AttentionBackward),
+          expr(expr),
+          attention_backward(attention_backward),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
@@ -434,12 +458,26 @@ class FusedEquation {
         const std::optional<std::string>& alpha_runtime_name = std::nullopt,
         const std::optional<std::string>& beta_runtime_name = std::nullopt) const;
 
-    [[nodiscard]] std::shared_ptr<StampedAttention> stampAttention(const std::shared_ptr<CompiledAttention>& compiledStage,
-                                                                   const Tensor& q,
-                                                                   const Tensor& k,
-                                                                   const Tensor& v,
-                                                                   std::optional<Tensor> preallocatedOutput,
-                                                                   const Stream& stream) const;
+    [[nodiscard]] std::shared_ptr<StampedAttention> stampAttention(
+        const std::shared_ptr<CompiledAttention>& compiledStage,
+        const Tensor& q,
+        const Tensor& k,
+        const Tensor& v,
+        const std::optional<Tensor>& bias,
+        std::optional<Tensor> preallocatedOutput,
+        const Stream& stream,
+        std::shared_ptr<AttentionForwardState> forward_state = nullptr) const;
+
+    [[nodiscard]] std::shared_ptr<StampedAttentionBackward> stampAttentionBackward(
+        const std::shared_ptr<CompiledAttentionBackward>& compiledStage,
+        const Tensor& q,
+        const Tensor& k,
+        const Tensor& v,
+        const std::optional<Tensor>& bias,
+        const Tensor& dO,
+        const std::vector<std::optional<Tensor>>& preallocatedOutputs,
+        const Stream& stream,
+        std::shared_ptr<AttentionForwardState> saved_forward_state = nullptr) const;
 
     [[nodiscard]] std::shared_ptr<StampedConvolution> stampConvolution(const std::shared_ptr<CompiledConvolution>& compiledStage,
                                                                        Tensor& input,

@@ -77,6 +77,7 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
     descriptor.diagonalLeftBound = diagonal_left_bound;
     descriptor.diagonalRightBound = diagonal_right_bound;
     descriptor.useAlibiMask = use_alibi_mask;
+    descriptor.useBias = use_bias;
     descriptor.debugName = debug_name;
     descriptor.useFp8 =
         qTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || qTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
@@ -87,24 +88,256 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
     return descriptor;
 }
 
+
+CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& qTensor,
+                                                                  const Tensor& kTensor,
+                                                                  const Tensor& vTensor,
+                                                                  const Tensor& oTensor) const {
+    CudnnAttentionDescriptor descriptor;
+    const std::vector<uint64_t> qDims = qTensor.getDimensions();
+    const std::vector<uint64_t> kDims = kTensor.getDimensions();
+    const std::vector<uint64_t> vDims = vTensor.getDimensions();
+    const std::vector<uint64_t> oDims = oTensor.getDimensions();
+    if (qDims.size() != 4 || kDims.size() != 4 || vDims.size() != 4 || oDims.size() != 4) {
+        throw std::runtime_error("Thor cuDNN attention-backward expression stage requires rank-4 tensors in logical [B,H,S,D] order.");
+    }
+
+    descriptor.q = AttentionTensorSpec::fromLayout(q_layout,
+                                                   checkedDim(qDims, 0, "q"),
+                                                   checkedDim(qDims, 1, "q"),
+                                                   checkedDim(qDims, 2, "q"),
+                                                   checkedDim(qDims, 3, "q"),
+                                                   qTensor.getDataType());
+    descriptor.k = AttentionTensorSpec::fromLayout(k_layout,
+                                                   checkedDim(kDims, 0, "k"),
+                                                   checkedDim(kDims, 1, "k"),
+                                                   checkedDim(kDims, 2, "k"),
+                                                   checkedDim(kDims, 3, "k"),
+                                                   kTensor.getDataType());
+    descriptor.v = AttentionTensorSpec::fromLayout(v_layout,
+                                                   checkedDim(vDims, 0, "v"),
+                                                   checkedDim(vDims, 1, "v"),
+                                                   checkedDim(vDims, 2, "v"),
+                                                   checkedDim(vDims, 3, "v"),
+                                                   vTensor.getDataType());
+    descriptor.o = AttentionTensorSpec::fromLayout(o_layout,
+                                                   checkedDim(oDims, 0, "o"),
+                                                   checkedDim(oDims, 1, "o"),
+                                                   checkedDim(oDims, 2, "o"),
+                                                   checkedDim(oDims, 3, "o"),
+                                                   oTensor.getDataType());
+    descriptor.computeDataType = compute_dtype;
+    descriptor.intermediateDataType = TensorDescriptor::DataType::FP32;
+    descriptor.attentionScale = attention_scale;
+    descriptor.maskKind = mask_kind;
+    descriptor.diagonalLeftBound = diagonal_left_bound;
+    descriptor.diagonalRightBound = diagonal_right_bound;
+    descriptor.useAlibiMask = use_alibi_mask;
+    descriptor.useBias = use_bias;
+    descriptor.generateStats = true;
+    descriptor.deterministicBackward = deterministic_backward;
+    descriptor.debugName = debug_name;
+    descriptor.useFp8 =
+        qTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || qTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
+        kTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || kTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
+        vTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || vTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
+        oTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || oTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2;
+    descriptor.validateBackward();
+    return descriptor;
+}
+
+TensorDescriptor::DataType CompiledAttentionBackward::outputDTypeFor(ExprOp op) const {
+    switch (op) {
+        case ExprOp::ATTENTION_BACKWARD_Q:
+            return dQ_dtype;
+        case ExprOp::ATTENTION_BACKWARD_K:
+            return dK_dtype;
+        case ExprOp::ATTENTION_BACKWARD_V:
+            return dV_dtype;
+        default:
+            throw std::runtime_error("CompiledAttentionBackward::outputDTypeFor expected an attention-backward output op.");
+    }
+}
+
+namespace {
+
+bool sameOptionalFloat(const std::optional<float>& lhs, const std::optional<float>& rhs) {
+    if (lhs.has_value() != rhs.has_value()) {
+        return false;
+    }
+    if (!lhs.has_value()) {
+        return true;
+    }
+    return lhs.value() == rhs.value();
+}
+
+bool attentionConfigMatchesBackward(const CompiledAttention& forward,
+                                    const CompiledAttentionBackward& backward,
+                                    TensorDescriptor::DataType output_dtype) {
+    return forward.q_layout == backward.q_layout && forward.k_layout == backward.k_layout &&
+           forward.v_layout == backward.v_layout && forward.o_layout == backward.o_layout &&
+           forward.mask_kind == backward.mask_kind && forward.diagonal_left_bound == backward.diagonal_left_bound &&
+           forward.diagonal_right_bound == backward.diagonal_right_bound &&
+           sameOptionalFloat(forward.attention_scale, backward.attention_scale) &&
+           forward.use_alibi_mask == backward.use_alibi_mask && forward.use_bias == backward.use_bias && forward.compute_dtype == backward.compute_dtype &&
+           forward.output_dtype == output_dtype;
+}
+
+bool tensorMatches(const Tensor& lhs, const Tensor& rhs) {
+    return lhs.isInitialized() && rhs.isInitialized() && lhs == rhs && lhs.getDimensions() == rhs.getDimensions() &&
+           lhs.getDataType() == rhs.getDataType() && lhs.getPlacement() == rhs.getPlacement();
+}
+
+}  // namespace
+
 void StampedAttention::run() { runOn(stream); }
 
 void StampedAttention::runOn(Stream& run_stream) const {
     if (!compiled_attention) {
         throw std::runtime_error("StampedAttention::runOn called with null compiled attention payload.");
     }
+
+    CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output);
     CudnnAttentionForwardArgs args{.q = q, .k = k, .v = v, .o = output};
-    const CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output);
+    if (compiled_attention->use_bias) {
+        if (!bias.has_value()) {
+            throw std::runtime_error("StampedAttention requires an additive bias tensor but none was provided.");
+        }
+        args.bias = bias.value();
+    }
+
+    if (forward_state && forward_state->retain_for_backward) {
+        if (!forward_state->stats.isInitialized()) {
+            throw std::runtime_error("StampedAttention retained-forward state was requested without an allocated stats tensor.");
+        }
+        descriptor.generateStats = true;
+        args.stats = forward_state->stats;
+        forward_state->has_valid_stats = false;
+    }
+
     CudnnScaledDotProductAttention::instance().forward(descriptor, args, run_stream);
+
+    if (forward_state && forward_state->retain_for_backward) {
+        forward_state->output = output;
+        forward_state->has_valid_stats = true;
+    }
+}
+
+bool StampedAttention::canProvideForwardStateFor(const CompiledAttentionBackward& backward,
+                                                 const Tensor& q_tensor,
+                                                 const Tensor& k_tensor,
+                                                 const Tensor& v_tensor,
+                                                 const std::optional<Tensor>& bias_tensor,
+                                                 const Tensor& dO_tensor) const {
+    if (!compiled_attention || !forward_state) {
+        return false;
+    }
+    if (!tensorMatches(q, q_tensor) || !tensorMatches(k, k_tensor) || !tensorMatches(v, v_tensor)) {
+        return false;
+    }
+    if (compiled_attention->use_bias) {
+        if (!bias.has_value() || !bias_tensor.has_value() || !tensorMatches(bias.value(), bias_tensor.value())) {
+            return false;
+        }
+    }
+    if (output.getDimensions() != dO_tensor.getDimensions() || output.getDataType() != dO_tensor.getDataType() ||
+        output.getPlacement() != dO_tensor.getPlacement()) {
+        return false;
+    }
+    return attentionConfigMatchesBackward(*compiled_attention, backward, dO_tensor.getDataType());
 }
 
 StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
                                    const Tensor& q,
                                    const Tensor& k,
                                    const Tensor& v,
+                                   const std::optional<Tensor>& bias,
                                    const Tensor& output,
-                                   const Stream& stream)
-    : compiled_attention(std::move(compiled)), q(q), k(k), v(v), output(output), stream(stream) {}
+                                   const Stream& stream,
+                                   std::shared_ptr<AttentionForwardState> forward_state)
+    : compiled_attention(std::move(compiled)), q(q), k(k), v(v), bias(bias), output(output), stream(stream), forward_state(std::move(forward_state)) {}
+
+
+void StampedAttentionBackward::run() { runOn(stream); }
+
+void StampedAttentionBackward::runOn(Stream& run_stream) const {
+    if (!compiled_attention_backward) {
+        throw std::runtime_error("StampedAttentionBackward::runOn called with null compiled attention-backward payload.");
+    }
+
+    const bool use_saved_forward = saved_forward_state != nullptr;
+    const Tensor& forwardOutput = use_saved_forward ? saved_forward_state->output : oScratch;
+    const Tensor& forwardStats = use_saved_forward ? saved_forward_state->stats : stats;
+
+    if (use_saved_forward) {
+        if (!saved_forward_state->has_valid_stats || !forwardOutput.isInitialized() || !forwardStats.isInitialized()) {
+            throw std::runtime_error(
+                "Attention-backward expected same-plan retained cuDNN forward stats, but the matching forward stage did not populate them.");
+        }
+        if (forwardOutput.getDimensions() != dO.getDimensions() || forwardOutput.getDataType() != dO.getDataType() ||
+            forwardOutput.getPlacement() != dO.getPlacement()) {
+            throw std::runtime_error("Retained attention forward output is incompatible with attention-backward dO.");
+        }
+    }
+
+    CudnnAttentionDescriptor descriptor = compiled_attention_backward->descriptorFor(q, k, v, forwardOutput);
+    descriptor.generateStats = true;
+
+    if (!use_saved_forward) {
+        CudnnAttentionForwardArgs fwdArgs{.q = q, .k = k, .v = v, .o = oScratch, .stats = stats};
+        if (compiled_attention_backward->use_bias) {
+            if (!bias.has_value()) {
+                throw std::runtime_error("StampedAttentionBackward requires an additive bias tensor but none was provided.");
+            }
+            fwdArgs.bias = bias.value();
+        }
+        CudnnScaledDotProductAttention::instance().forward(descriptor, fwdArgs, run_stream);
+    }
+
+    CudnnAttentionBackwardArgs bwdArgs{
+        .q = q, .k = k, .v = v, .o = forwardOutput, .dO = dO, .stats = forwardStats, .dQ = dQ, .dK = dK, .dV = dV};
+    if (compiled_attention_backward->use_bias) {
+        if (!bias.has_value()) {
+            throw std::runtime_error("StampedAttentionBackward requires an additive bias tensor but none was provided.");
+        }
+        bwdArgs.bias = bias.value();
+        if (!dBiasScratch.has_value()) {
+            throw std::runtime_error("StampedAttentionBackward requires an additive-bias gradient scratch tensor but none was allocated.");
+        }
+        bwdArgs.dBias = dBiasScratch.value();
+    }
+    CudnnScaledDotProductAttention::instance().backward(descriptor, bwdArgs, run_stream);
+}
+
+StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAttentionBackward> compiled,
+                                                   const Tensor& q,
+                                                   const Tensor& k,
+                                                   const Tensor& v,
+                                                   const std::optional<Tensor>& bias,
+                                                   const Tensor& dO,
+                                                   const Tensor& dQ,
+                                                   const Tensor& dK,
+                                                   const Tensor& dV,
+                                                   const Tensor& oScratch,
+                                                   const Tensor& stats,
+                                                   const std::optional<Tensor>& dBiasScratch,
+                                                   const Stream& stream,
+                                                   std::shared_ptr<AttentionForwardState> saved_forward_state)
+    : compiled_attention_backward(std::move(compiled)),
+      q(q),
+      k(k),
+      v(v),
+      bias(bias),
+      dO(dO),
+      dQ(dQ),
+      dK(dK),
+      dV(dV),
+      oScratch(oScratch),
+      stats(stats),
+      dBiasScratch(dBiasScratch),
+      stream(stream),
+      saved_forward_state(std::move(saved_forward_state)),
+      outputs{this->dQ, this->dK, this->dV} {}
 
 void StampedEquation::run() { runOn(stream); }
 

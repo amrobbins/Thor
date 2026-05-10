@@ -572,10 +572,17 @@ static const CompiledStageOutput& requireSingleTransposedMaterializedOutput(cons
     return output;
 }
 
+static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return node.op == ExprOp::ROPE; });
+}
+
 static std::optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpression& expr,
                                                              const std::vector<DataType>& input_dtypes,
                                                              const std::vector<DataType>& output_dtypes) {
     if (input_dtypes.empty() || output_dtypes.empty()) {
+        return std::nullopt;
+    }
+    if (expressionHasIndexAwareOps(expr)) {
         return std::nullopt;
     }
 
@@ -670,6 +677,10 @@ static std::optional<DataType> getSingleTensorInputStorageDType(const PhysicalEx
 }
 
 static bool supportsMixedTwoByteFloat2TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
+    if (expressionHasIndexAwareOps(expr)) {
+        return false;
+    }
+
     if (input_dtype == output_dtype || !isTwoByteFloatDType(input_dtype) || !isTwoByteFloatDType(output_dtype)) {
         return false;
     }
@@ -698,6 +709,10 @@ static bool supportsMixedTwoByteFloat2TransposedVectorization(const PhysicalExpr
 }
 
 static bool supportsMixedFp8TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
+    if (expressionHasIndexAwareOps(expr)) {
+        return false;
+    }
+
     if (input_dtype == output_dtype || !isFp8DType(input_dtype) || !isFp8DType(output_dtype)) {
         return false;
     }
@@ -726,6 +741,10 @@ static bool supportsMixedFp8TransposedVectorization(const PhysicalExpression& ex
 }
 
 static bool supportsFloat2TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
+    if (expressionHasIndexAwareOps(expr)) {
+        return false;
+    }
+
     if (transposePackScalars(output_dtype) <= 1 || input_dtype == output_dtype) {
         return false;
     }
@@ -760,6 +779,10 @@ static bool supportsFloat2TransposedVectorization(const PhysicalExpression& expr
 }
 
 static bool supportsHalf2TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
+    if (expressionHasIndexAwareOps(expr)) {
+        return false;
+    }
+
     if (input_dtype == output_dtype || !isHalf2ComputeStorageDType(input_dtype) || !isHalf2ComputeStorageDType(output_dtype)) {
         return false;
     }
@@ -791,6 +814,10 @@ static bool supportsHalf2TransposedVectorization(const PhysicalExpression& expr,
 }
 
 static bool supportsFp8ToBf16Float2TransposedVectorization(const PhysicalExpression& expr, DataType input_dtype, DataType output_dtype) {
+    if (expressionHasIndexAwareOps(expr)) {
+        return false;
+    }
+
     if (!isFp8DType(input_dtype) || output_dtype != DataType::BF16) {
         return false;
     }
@@ -863,6 +890,9 @@ uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& 
         return 1;
     }
     if (stageHasTransposedMaterializedOutput(stage.outputs)) {
+        return 1;
+    }
+    if (expressionHasIndexAwareOps(stage.expr)) {
         return 1;
     }
 
@@ -1282,6 +1312,24 @@ static bool shouldEmitScalarNodeDefinition(const PhysicalExpression& expr, uint3
     return true;
 }
 
+static std::string emitResolvedScalarValueExprSuffixed(const PhysicalExpression& expr,
+                                                       uint32_t node_idx,
+                                                       DataType target_dtype,
+                                                       const std::string& suffix);
+
+static void emitScalarNodeSuffixed(std::ostringstream& ss,
+                                   const PhysicalExpression& expr,
+                                   uint32_t node_idx,
+                                   const std::string& idx_expr,
+                                   const std::string& suffix,
+                                   const std::string& indent,
+                                   const std::string& flat_chunk_lane_expr,
+                                   uint32_t flat_elements_per_thread,
+                                   const std::function<std::string(uint32_t)>& input_slot_value);
+
+static std::string ropeAxisCoordVar(uint32_t axis) { return "c_" + std::to_string(axis); }
+static std::string ropeAxisDimVar(uint32_t axis) { return "out_dim_" + std::to_string(axis); }
+
 static void emitScalarAliasNode(
     std::ostringstream& ss, const PhysicalExpression& expr, uint32_t node_idx, uint32_t source_node_idx, const std::string& indent) {
     const DataType emitted_dtype = emittedScalarNodeValueDType(expr.nodes[node_idx]);
@@ -1346,6 +1394,76 @@ static void emitScalarNode(
 
         default:
             break;
+    }
+
+    if (n.op == ExprOp::ROPE) {
+        if (!broadcast_support) {
+            throw runtime_error("RoPE fused emission requires specialized index-aware broadcast launch.");
+        }
+        if (n.rope_base <= 0.0 || n.rope_scaling_factor <= 0.0) {
+            throw runtime_error("Invalid RoPE base/scaling factor during code generation.");
+        }
+        (void)requireNodeComputeDType(n);
+        const std::string current_value = emitResolvedScalarValueExpr(expr, n.lhs, DataType::FP32);
+        const std::string dim_coord = ropeAxisCoordVar(n.rope_head_dim_axis);
+        const std::string seq_coord = ropeAxisCoordVar(n.rope_sequence_axis);
+        const std::string head_dim_extent = ropeAxisDimVar(n.rope_head_dim_axis);
+        const std::string seq_extent = ropeAxisDimVar(n.rope_sequence_axis);
+        const std::string rotary_dim_expr = n.rope_rotary_dim == 0 ? head_dim_extent : emitUnsignedLiteral(n.rope_rotary_dim, true);
+        const std::string suffix = "_rope_peer_" + std::to_string(node_idx);
+
+        ss << indent << output_type << " t" << node_idx << ";\n";
+        ss << indent << "{\n";
+        ss << indent << "  const unsigned long long rope_dim_coord = static_cast<unsigned long long>(" << dim_coord << ");\n";
+        ss << indent << "  const unsigned long long rope_rotary_dim = static_cast<unsigned long long>(" << rotary_dim_expr << ");\n";
+        ss << indent << "  if (rope_dim_coord >= rope_rotary_dim) {\n";
+        ss << indent << "    t" << node_idx << " = " << castScalarExpr(current_value, DataType::FP32, emitted_dtype) << ";\n";
+        ss << indent << "  } else {\n";
+        ss << indent << "    const bool rope_interleaved = " << (n.rope_interleaved ? "true" : "false") << ";\n";
+        ss << indent << "    const unsigned long long rope_half_dim = rope_rotary_dim / 2ULL;\n";
+        ss << indent << "    const bool rope_first_lane = rope_interleaved ? ((rope_dim_coord & 1ULL) == 0ULL) : (rope_dim_coord < rope_half_dim);\n";
+        ss << indent << "    const unsigned long long rope_pair_index = rope_interleaved ? (rope_dim_coord >> 1ULL) : (rope_dim_coord < rope_half_dim ? rope_dim_coord : rope_dim_coord - rope_half_dim);\n";
+        ss << indent << "    const unsigned long long rope_peer_abs_delta = rope_interleaved ? 1ULL : rope_half_dim;\n";
+        ss << indent << "    const unsigned long long rope_peer_idx = rope_first_lane ? (static_cast<unsigned long long>(idx) + rope_peer_abs_delta) : (static_cast<unsigned long long>(idx) - rope_peer_abs_delta);\n";
+
+        std::unordered_set<uint32_t> rope_required;
+        collectRequiredNodes(expr, n.lhs, rope_required);
+        for (uint32_t dep_idx = 0; dep_idx < node_idx; ++dep_idx) {
+            if (!rope_required.contains(dep_idx) || !shouldEmitScalarNodeDefinition(expr, dep_idx)) {
+                continue;
+            }
+            emitScalarNodeSuffixed(ss, expr, dep_idx, "rope_peer_idx", suffix, indent + "    ", "", 0, {});
+        }
+
+        ss << indent << "    float rope_position = static_cast<float>(" << seq_coord << ") + " << emitScalarFpLiteral(static_cast<double>(n.rope_position_offset)) << ";\n";
+        if (n.rope_scaling_kind == RotaryScalingKind::Linear) {
+            ss << indent << "    rope_position = rope_position / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
+        }
+        ss << indent << "    float rope_base = " << emitScalarFpLiteral(n.rope_base) << ";\n";
+        if (n.rope_scaling_kind == RotaryScalingKind::DynamicNTK) {
+            ss << indent << "    const float rope_seq_len = fmaxf(static_cast<float>(" << seq_extent << ") + "
+               << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
+            ss << indent << "    const float rope_original_max = " << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            ss << indent << "    if (rope_seq_len > rope_original_max && rope_rotary_dim > 2ULL) {\n";
+            ss << indent << "      const float rope_ntk_ratio = (" << emitScalarFpLiteral(n.rope_scaling_factor) << " * rope_seq_len / rope_original_max) - (" << emitScalarFpLiteral(n.rope_scaling_factor) << " - 1.0f);\n";
+            ss << indent << "      rope_base = rope_base * powf(rope_ntk_ratio, static_cast<float>(rope_rotary_dim) / static_cast<float>(rope_rotary_dim - 2ULL));\n";
+            ss << indent << "    }\n";
+        }
+        ss << indent << "    const float rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
+        ss << indent << "    const float rope_theta = rope_position * rope_freq;\n";
+        ss << indent << "    float rope_s = sinf(rope_theta);\n";
+        ss << indent << "    const float rope_c = cosf(rope_theta);\n";
+        if (n.rope_inverse) {
+            ss << indent << "    rope_s = -rope_s;\n";
+        }
+        const std::string peer_value = emitResolvedScalarValueExprSuffixed(expr, n.lhs, DataType::FP32, suffix);
+        ss << indent << "    const float rope_current = " << current_value << ";\n";
+        ss << indent << "    const float rope_peer = " << peer_value << ";\n";
+        ss << indent << "    const float rope_out = rope_first_lane ? (rope_current * rope_c - rope_peer * rope_s) : (rope_peer * rope_s + rope_current * rope_c);\n";
+        ss << indent << "    t" << node_idx << " = " << castScalarExpr("rope_out", DataType::FP32, emitted_dtype) << ";\n";
+        ss << indent << "  }\n";
+        ss << indent << "}\n";
+        return;
     }
 
     const DataType compute_dtype = requireNodeComputeDType(n);
@@ -1525,6 +1643,10 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
 
         default:
             break;
+    }
+
+    if (n.op == ExprOp::ROPE) {
+        throw runtime_error("Nested RoPE inside a suffixed peer expression is not supported; materialize the inner RoPE first.");
     }
 
     const DataType compute_dtype = requireNodeComputeDType(n);
@@ -3915,6 +4037,9 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
         throw std::runtime_error("emitSpecializedBroadcast requires at least one group.");
     }
     if (stageHasTransposedMaterializedOutput(stage.outputs)) {
+        if (expressionHasIndexAwareOps(stage.expr)) {
+            throw std::runtime_error("RoPE/index-aware fused stages do not currently support transposed materialized outputs.");
+        }
         return emitTiledTransposeMaterializedSpecializedBroadcast(stage, groups, kernel_name);
     }
 
@@ -3966,6 +4091,10 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
         std::iota(all_used_indices.begin(), all_used_indices.end(), 0);
 
         ss << "  if (idx < " << emitUnsignedLiteral(group.numel, use_uint32_index_math) << ") {\n";
+        for (size_t axis = 0; axis < group.output_dims.size(); ++axis) {
+            ss << "    const " << index_type << " out_dim_" << axis << " = "
+               << emitUnsignedLiteral(group.output_dims[axis], use_uint32_index_math) << ";\n";
+        }
 
         for (uint32_t input_slot : group.used_input_slots) {
             ss << "    " << index_type << " in" << input_slot << "_offset = " << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";

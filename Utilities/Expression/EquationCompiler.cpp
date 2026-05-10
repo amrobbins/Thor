@@ -156,6 +156,17 @@ struct StageNodeKey {
     int32_t conv_pad_d = 0;
     int32_t conv_pad_h = 0;
     int32_t conv_pad_w = 0;
+    uint32_t rope_sequence_axis = 2;
+    uint32_t rope_head_dim_axis = 3;
+    uint64_t rope_rotary_dim = 0;
+    uint64_t rope_base_bits = 0;
+    int64_t rope_position_offset = 0;
+    bool rope_interleaved = false;
+    bool rope_inverse = false;
+    int32_t rope_scaling_kind = 0;
+    uint64_t rope_scaling_factor_bits = 0;
+    uint64_t rope_original_max_position_embeddings = 0;
+    bool attention_use_bias = false;
     int32_t input_tensor_dtype = -1;
     int32_t output_dtype = -1;
     int32_t compute_dtype = -1;
@@ -190,6 +201,17 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<int32_t>{}(k.conv_pad_d));
         hashCombine(h, std::hash<int32_t>{}(k.conv_pad_h));
         hashCombine(h, std::hash<int32_t>{}(k.conv_pad_w));
+        hashCombine(h, std::hash<uint32_t>{}(k.rope_sequence_axis));
+        hashCombine(h, std::hash<uint32_t>{}(k.rope_head_dim_axis));
+        hashCombine(h, std::hash<uint64_t>{}(k.rope_rotary_dim));
+        hashCombine(h, std::hash<uint64_t>{}(k.rope_base_bits));
+        hashCombine(h, std::hash<int64_t>{}(k.rope_position_offset));
+        hashCombine(h, std::hash<bool>{}(k.rope_interleaved));
+        hashCombine(h, std::hash<bool>{}(k.rope_inverse));
+        hashCombine(h, std::hash<int32_t>{}(k.rope_scaling_kind));
+        hashCombine(h, std::hash<uint64_t>{}(k.rope_scaling_factor_bits));
+        hashCombine(h, std::hash<uint64_t>{}(k.rope_original_max_position_embeddings));
+        hashCombine(h, std::hash<bool>{}(k.attention_use_bias));
         hashCombine(h, std::hash<int32_t>{}(k.input_tensor_dtype));
         hashCombine(h, std::hash<int32_t>{}(k.output_dtype));
         hashCombine(h, std::hash<int32_t>{}(k.compute_dtype));
@@ -243,6 +265,17 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.beta_bits = scalarBits(n.beta_fp);
     key.alpha_node = n.alpha_node;
     key.beta_node = n.beta_node;
+    key.rope_sequence_axis = n.rope_sequence_axis;
+    key.rope_head_dim_axis = n.rope_head_dim_axis;
+    key.rope_rotary_dim = n.rope_rotary_dim;
+    key.rope_base_bits = scalarBits(n.rope_base);
+    key.rope_position_offset = n.rope_position_offset;
+    key.rope_interleaved = n.rope_interleaved;
+    key.rope_inverse = n.rope_inverse;
+    key.rope_scaling_kind = static_cast<int32_t>(n.rope_scaling_kind);
+    key.rope_scaling_factor_bits = scalarBits(n.rope_scaling_factor);
+    key.rope_original_max_position_embeddings = n.rope_original_max_position_embeddings;
+    key.attention_use_bias = n.attention_use_bias;
 
     switch (n.op) {
         case ExprOp::INPUT:
@@ -428,11 +461,18 @@ static bool isConvolutionOp(ExprOp op) { return isConvolutionForwardOp(op) || is
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
 static bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
 static bool isAttentionOp(ExprOp op) { return op == ExprOp::ATTENTION; }
+static bool isAttentionBackwardOp(ExprOp op) {
+    return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V;
+}
+
+static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return node.op == ExprOp::ROPE; });
+}
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
-    return isCudnnReduceOp(op) || isSoftmaxOp(op) || isMatmulOp(op) || isAttentionOp(op) || isConvolutionOp(op) ||
-           isReduceMinMaxBackwardOp(op) || isTransposeOp(op);
+    return isCudnnReduceOp(op) || isSoftmaxOp(op) || isMatmulOp(op) || isAttentionOp(op) || isAttentionBackwardOp(op) ||
+           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isTransposeOp(op);
 }
 
 static uint32_t peelExplicitTransposeChain(const PhysicalExpression& expr, uint32_t node_idx, bool& transpose_toggled) {
@@ -502,6 +542,15 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
         if (Expression::isTernaryOp(node.op)) {
             addExternalValue(node.aux);
         }
+        if (node.op == ExprOp::ATTENTION && node.attention_use_bias) {
+            addExternalValue(node.alpha_node);
+        }
+        if (isAttentionBackwardOp(node.op)) {
+            addExternalValue(node.alpha_node);
+            if (node.attention_use_bias) {
+                addExternalValue(node.beta_node);
+            }
+        }
     }
 }
 
@@ -569,6 +618,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "TANH";
         case ExprOp::NORMCDF:
             return "NORMCDF";
+        case ExprOp::ROPE:
+            return "ROPE";
         case ExprOp::SOFTMAX:
             return "SOFTMAX";
         case ExprOp::FILL:
@@ -621,6 +672,12 @@ static const char* fusedOpTag(ExprOp op) {
             return "GEMM";
         case ExprOp::ATTENTION:
             return "ATTENTION";
+        case ExprOp::ATTENTION_BACKWARD_Q:
+            return "ATTN_BW_Q";
+        case ExprOp::ATTENTION_BACKWARD_K:
+            return "ATTN_BW_K";
+        case ExprOp::ATTENTION_BACKWARD_V:
+            return "ATTN_BW_V";
         case ExprOp::CONV2D:
             return "CONV2D";
         case ExprOp::CONV2D_BACKWARD_DATA:
@@ -765,7 +822,32 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",right=" + std::to_string(node.attention_diagonal_right_bound) +
                 ",hasScale=" + std::to_string(node.attention_has_scale ? 1 : 0) +
                 ",scale=" + std::to_string(node.attention_scale) +
-                ",alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0) + ")";
+                ",alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0) +
+                ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0);
+            if (node.attention_use_bias && node.alpha_node != UINT32_MAX) {
+                s += ",biasNode=" + fusedRegionSignatureRec(expr, node.alpha_node);
+            }
+            s += ")";
+        } else if (isAttentionBackwardOp(node.op)) {
+            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+            const std::string aux = fusedRegionSignatureRec(expr, node.aux);
+            const std::string dO = fusedRegionSignatureRec(expr, node.alpha_node);
+            s = std::string(fusedOpTag(node.op)) + "(q=" + lhs + ",k=" + rhs + ",v=" + aux + ",dO=" + dO +
+                ",qLayout=" + std::to_string(static_cast<int>(node.attention_q_layout)) +
+                ",kLayout=" + std::to_string(static_cast<int>(node.attention_k_layout)) +
+                ",vLayout=" + std::to_string(static_cast<int>(node.attention_v_layout)) +
+                ",oLayout=" + std::to_string(static_cast<int>(node.attention_o_layout)) +
+                ",mask=" + std::to_string(static_cast<int>(node.attention_mask_kind)) +
+                ",left=" + std::to_string(node.attention_diagonal_left_bound) +
+                ",right=" + std::to_string(node.attention_diagonal_right_bound) +
+                ",hasScale=" + std::to_string(node.attention_has_scale ? 1 : 0) +
+                ",scale=" + std::to_string(node.attention_scale) +
+                ",alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0) +
+                ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0);
+            if (node.attention_use_bias && node.beta_node != UINT32_MAX) {
+                s += ",biasNode=" + fusedRegionSignatureRec(expr, node.beta_node);
+            }
+            s += ")";
         } else if (isConvolutionOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",sh=" + std::to_string(node.conv_stride_h) +
@@ -786,6 +868,18 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",axes=" + uintVecSignature(node.unsqueeze_axes) + ")";
         } else if (node.op == ExprOp::SQUEEZE) {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",axes=" + uintVecSignature(node.squeeze_axes) + ")";
+        } else if (node.op == ExprOp::ROPE) {
+            s = std::string(fusedOpTag(node.op)) + "(" + lhs +
+                ",seqAxis=" + std::to_string(node.rope_sequence_axis) +
+                ",dimAxis=" + std::to_string(node.rope_head_dim_axis) +
+                ",rotaryDim=" + std::to_string(node.rope_rotary_dim) +
+                ",base=" + std::to_string(scalarBits(node.rope_base)) +
+                ",offset=" + std::to_string(node.rope_position_offset) +
+                ",interleaved=" + std::to_string(node.rope_interleaved ? 1 : 0) +
+                ",inverse=" + std::to_string(node.rope_inverse ? 1 : 0) +
+                ",scaling=" + std::to_string(static_cast<int>(node.rope_scaling_kind)) +
+                ",factor=" + std::to_string(scalarBits(node.rope_scaling_factor)) +
+                ",originalMax=" + std::to_string(node.rope_original_max_position_embeddings) + ")";
         } else {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
         }
@@ -1035,9 +1129,6 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     if (hit)
         return hit;
 
-    string kernel_name = "fused_kernel";
-    const std::string cuda_src = CudaSourceEmitter::emitFlat(stage, kernel_name, use_uint32_index_math);
-
     vector<string> input_names;
     std::vector<NamedInput::Kind> input_kinds;
     input_names.reserve(stage.expr.inputs.size());
@@ -1048,6 +1139,29 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     }
     const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
     const std::vector<DataType> output_dtypes = collectCompiledOutputDTypes(stage);
+
+    // RoPE/index-aware fused stages need runtime output dimensions to compute logical
+    // coordinates. They are always launched through the specialized-broadcast path,
+    // even when the tensor shapes happen to be identical, so do not try to build a
+    // dimensionless flat kernel during the shape-independent compile phase.
+    if (expressionHasIndexAwareOps(stage.expr)) {
+        auto compiled = std::make_shared<CompiledEquation>();
+        compiled->key = key;
+        compiled->kernel_name = "fused_kernel";
+        compiled->deviceNum = sig.device_num;
+        compiled->input_names = std::move(input_names);
+        compiled->input_kinds = std::move(input_kinds);
+        compiled->input_dtypes = input_dtypes;
+        compiled->output_dtypes = output_dtypes;
+        compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;
+        compiled->elements_per_thread = 1;
+        compiled->uses_uint32_numel_arg = false;
+        cacheInsert(key, compiled);
+        return compiled;
+    }
+
+    string kernel_name = "fused_kernel";
+    const std::string cuda_src = CudaSourceEmitter::emitFlat(stage, kernel_name, use_uint32_index_math);
 
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);
@@ -1343,8 +1457,11 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     if (!isAttentionOp(node.op)) {
         throw std::runtime_error("Attention stage output node is not ATTENTION.");
     }
-    if (expr.numInputs() != 3) {
-        throw std::runtime_error("Attention stage must have exactly three tensor inputs: q, k, and v.");
+    const uint32_t expected_attention_inputs = node.attention_use_bias ? 4u : 3u;
+    if (expr.numInputs() != expected_attention_inputs) {
+        throw std::runtime_error(node.attention_use_bias ?
+            "Attention stage with additive bias must have exactly four tensor inputs: q, k, v, and bias." :
+            "Attention stage must have exactly three tensor inputs: q, k, and v.");
     }
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX) {
         throw std::runtime_error("Attention node is missing q/k/v inputs.");
@@ -1367,6 +1484,12 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     (void)validate_local_input(node.lhs, "q");
     (void)validate_local_input(node.rhs, "k");
     (void)validate_local_input(node.aux, "v");
+    if (node.attention_use_bias) {
+        if (node.alpha_node == UINT32_MAX) {
+            throw std::runtime_error("Attention node marked as using bias but is missing the bias input.");
+        }
+        (void)validate_local_input(node.alpha_node, "bias");
+    }
 
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Attention node missing resolved output_dtype.");
@@ -1393,8 +1516,81 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     compiled->diagonal_right_bound = node.attention_diagonal_right_bound;
     compiled->attention_scale = node.attention_has_scale ? std::optional<float>(node.attention_scale) : std::nullopt;
     compiled->use_alibi_mask = node.attention_use_alibi_mask;
+    compiled->use_bias = node.attention_use_bias;
     compiled->compute_dtype = node.compute_dtype.value();
     compiled->output_dtype = node.output_dtype.value();
+    return compiled;
+}
+
+shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward(const PhysicalExpression& expr) {
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("Attention-backward stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isAttentionBackwardOp(node.op)) {
+        throw std::runtime_error("Attention-backward stage output node is not an attention backward op.");
+    }
+    const uint32_t expected_attention_backward_inputs = node.attention_use_bias ? 5u : 4u;
+    if (expr.numInputs() != expected_attention_backward_inputs) {
+        throw std::runtime_error(node.attention_use_bias ?
+            "Attention-backward stage with additive bias must have exactly five tensor inputs: q, k, v, dO, and bias." :
+            "Attention-backward stage must have exactly four tensor inputs: q, k, v, and dO.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX || node.alpha_node == UINT32_MAX) {
+        throw std::runtime_error("Attention-backward node is missing q/k/v/dO input(s).");
+    }
+
+    auto validate_local_input = [&](uint32_t local_idx, const char* label) -> const ExprNode& {
+        if (local_idx >= expr.nodes.size()) {
+            throw std::runtime_error(std::string("Attention-backward stage ") + label + " input index is out of range.");
+        }
+        const ExprNode& input_node = expr.nodes[local_idx];
+        if (input_node.op != ExprOp::INPUT) {
+            throw std::runtime_error(std::string("Attention-backward stage ") + label + " input must be a local INPUT node.");
+        }
+        if (!input_node.input_tensor_dtype.has_value()) {
+            throw std::runtime_error(std::string("Attention-backward stage ") + label + " input missing resolved input_tensor_dtype.");
+        }
+        return input_node;
+    };
+
+    const ExprNode& q = validate_local_input(node.lhs, "q");
+    const ExprNode& k = validate_local_input(node.rhs, "k");
+    const ExprNode& v = validate_local_input(node.aux, "v");
+    (void)validate_local_input(node.alpha_node, "dO");
+    if (node.attention_use_bias) {
+        if (node.beta_node == UINT32_MAX) {
+            throw std::runtime_error("Attention-backward node marked as using bias but is missing the bias input.");
+        }
+        (void)validate_local_input(node.beta_node, "bias");
+    }
+
+    if (!node.compute_dtype.has_value()) {
+        throw std::runtime_error("Attention-backward node missing resolved compute_dtype.");
+    }
+    if (node.compute_dtype.value() != DataType::FP32) {
+        throw std::runtime_error("cuDNN attention-backward expression stages require FP32 compute dtype.");
+    }
+    if (!q.output_dtype.has_value() || !k.output_dtype.has_value() || !v.output_dtype.has_value()) {
+        throw std::runtime_error("Attention-backward local inputs must have resolved output dtypes.");
+    }
+
+    auto compiled = make_shared<CompiledAttentionBackward>();
+    compiled->q_layout = node.attention_q_layout;
+    compiled->k_layout = node.attention_k_layout;
+    compiled->v_layout = node.attention_v_layout;
+    compiled->o_layout = node.attention_o_layout;
+    compiled->mask_kind = node.attention_mask_kind;
+    compiled->diagonal_left_bound = node.attention_diagonal_left_bound;
+    compiled->diagonal_right_bound = node.attention_diagonal_right_bound;
+    compiled->attention_scale = node.attention_has_scale ? std::optional<float>(node.attention_scale) : std::nullopt;
+    compiled->use_alibi_mask = node.attention_use_alibi_mask;
+    compiled->use_bias = node.attention_use_bias;
+    compiled->compute_dtype = node.compute_dtype.value();
+    compiled->dQ_dtype = q.output_dtype.value();
+    compiled->dK_dtype = k.output_dtype.value();
+    compiled->dV_dtype = v.output_dtype.value();
     return compiled;
 }
 
@@ -2203,7 +2399,7 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
 
     PhysicalExpression stage_expr;
     std::vector<uint32_t> input_value_ids;
-    input_value_ids.reserve(3);
+    input_value_ids.reserve(node.attention_use_bias ? 4 : 3);
 
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
@@ -2250,12 +2446,19 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
     const uint32_t q_local = bind_parent_to_local_tensor_input(node.lhs, 0);
     const uint32_t k_local = bind_parent_to_local_tensor_input(node.rhs, 1);
     const uint32_t v_local = bind_parent_to_local_tensor_input(node.aux, 2);
+    uint32_t bias_local = UINT32_MAX;
+    if (node.attention_use_bias) {
+        if (node.alpha_node == UINT32_MAX) {
+            throw std::runtime_error("Attention node marked as using bias but missing bias input.");
+        }
+        bias_local = bind_parent_to_local_tensor_input(node.alpha_node, 3);
+    }
 
     ExprNode route = node;
     route.lhs = q_local;
     route.rhs = k_local;
     route.aux = v_local;
-    route.alpha_node = UINT32_MAX;
+    route.alpha_node = bias_local;
     route.beta_node = UINT32_MAX;
     stage_expr.nodes.push_back(std::move(route));
     stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
@@ -2273,6 +2476,159 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
         .input_value_ids = std::move(input_value_ids),
         .outputs = std::move(stage_outputs),
     };
+}
+
+static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpression& expr,
+                                                          uint32_t node_idx,
+                                                          uint32_t output_value_id,
+                                                          const std::string& output_name,
+                                                          const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isAttentionBackwardOp(node.op)) {
+        throw std::runtime_error("buildAttentionBackwardStage called on non-attention-backward node.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX || node.alpha_node == UINT32_MAX) {
+        throw std::runtime_error("Attention-backward node missing q/k/v/dO input(s).");
+    }
+
+    PhysicalExpression stage_expr;
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(node.attention_use_bias ? 5 : 4);
+
+    auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
+
+    auto bind_parent_to_local_tensor_input = [&](uint32_t parent_idx, uint32_t local_slot) -> uint32_t {
+        if (parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Attention-backward input node index out of range.");
+        }
+
+        const ExprNode& parent = expr.nodes[parent_idx];
+        std::optional<DataType> actual_input_dtype = std::nullopt;
+
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            input_value_ids.push_back(out_it->second);
+            actual_input_dtype = parent.output_dtype;
+        } else if (parent.op == ExprOp::INPUT) {
+            input_value_ids.push_back(parent.input_slot);
+            actual_input_dtype = parent.input_tensor_dtype;
+        } else {
+            throw std::runtime_error("Missing value id for attention-backward input.");
+        }
+
+        if (!parent.output_dtype.has_value()) {
+            throw std::runtime_error("Attention-backward parent node missing resolved output_dtype.");
+        }
+        if (!actual_input_dtype.has_value()) {
+            throw std::runtime_error("Attention-backward parent node missing resolved actual input dtype.");
+        }
+
+        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot), local_slot, NamedInput::Kind::Tensor});
+
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = actual_input_dtype.value();
+        input_node.output_dtype = parent.output_dtype;
+        input_node.compute_dtype = parent.compute_dtype;
+        input_node.backward_output_dtype = parent.backward_output_dtype;
+        input_node.backward_compute_dtype = parent.backward_compute_dtype;
+        stage_expr.nodes.push_back(std::move(input_node));
+        return static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+    };
+
+    const uint32_t q_local = bind_parent_to_local_tensor_input(node.lhs, 0);
+    const uint32_t k_local = bind_parent_to_local_tensor_input(node.rhs, 1);
+    const uint32_t v_local = bind_parent_to_local_tensor_input(node.aux, 2);
+    const uint32_t dO_local = bind_parent_to_local_tensor_input(node.alpha_node, 3);
+    uint32_t bias_local = UINT32_MAX;
+    if (node.attention_use_bias) {
+        if (node.beta_node == UINT32_MAX) {
+            throw std::runtime_error("Attention-backward node marked as using bias but missing bias input.");
+        }
+        bias_local = bind_parent_to_local_tensor_input(node.beta_node, 4);
+    }
+
+    ExprNode route = node;
+    route.lhs = q_local;
+    route.rhs = k_local;
+    route.aux = v_local;
+    route.alpha_node = dO_local;
+    route.beta_node = bias_local;
+    stage_expr.nodes.push_back(std::move(route));
+    stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{
+        .name = output_name,
+        .local_node_idx = stage_expr.output_node,
+        .value_id = output_value_id,
+    });
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::AttentionBackward,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = std::move(stage_outputs),
+    };
+}
+
+static std::string attentionBackwardMergeKey(const PhysicalExecutionStage& stage) {
+    if (stage.kind != PhysicalExecutionStage::Kind::AttentionBackward || stage.expr.output_node >= stage.expr.nodes.size()) {
+        throw std::runtime_error("attentionBackwardMergeKey expected an attention-backward stage.");
+    }
+    const ExprNode& node = stage.expr.nodes[stage.expr.output_node];
+    std::string key = "attn_bwd";
+    for (uint32_t value_id : stage.input_value_ids) {
+        key += ":" + std::to_string(value_id);
+    }
+    key += ";qL=" + std::to_string(static_cast<int>(node.attention_q_layout));
+    key += ";kL=" + std::to_string(static_cast<int>(node.attention_k_layout));
+    key += ";vL=" + std::to_string(static_cast<int>(node.attention_v_layout));
+    key += ";oL=" + std::to_string(static_cast<int>(node.attention_o_layout));
+    key += ";mask=" + std::to_string(static_cast<int>(node.attention_mask_kind));
+    key += ";left=" + std::to_string(node.attention_diagonal_left_bound);
+    key += ";right=" + std::to_string(node.attention_diagonal_right_bound);
+    key += ";hasScale=" + std::to_string(node.attention_has_scale ? 1 : 0);
+    key += ";scale=" + formatFloatCanonical(node.attention_scale);
+    key += ";alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0);
+    key += ";bias=" + std::to_string(node.attention_use_bias ? 1 : 0);
+    key += ";compute=" + optionalDTypeSignature(node.compute_dtype);
+    return key;
+}
+
+static void mergeAttentionBackwardStages(std::vector<PhysicalExecutionStage>& stages) {
+    std::unordered_map<std::string, size_t> first_by_key;
+    std::vector<PhysicalExecutionStage> merged;
+    merged.reserve(stages.size());
+
+    for (PhysicalExecutionStage& stage : stages) {
+        if (stage.kind != PhysicalExecutionStage::Kind::AttentionBackward) {
+            merged.push_back(std::move(stage));
+            continue;
+        }
+
+        const std::string key = attentionBackwardMergeKey(stage);
+        auto it = first_by_key.find(key);
+        if (it == first_by_key.end()) {
+            first_by_key.emplace(key, merged.size());
+            merged.push_back(std::move(stage));
+            continue;
+        }
+
+        PhysicalExecutionStage& target = merged.at(it->second);
+        if (stage.outputs.size() != 1 || stage.expr.output_node >= stage.expr.nodes.size()) {
+            throw std::runtime_error("Attention-backward stage merge expected one source output.");
+        }
+        ExprNode route = stage.expr.nodes.at(stage.expr.output_node);
+        const uint32_t new_local_idx = static_cast<uint32_t>(target.expr.nodes.size());
+        target.expr.nodes.push_back(std::move(route));
+        CompiledStageOutput out = stage.outputs.front();
+        out.local_node_idx = new_local_idx;
+        target.outputs.push_back(std::move(out));
+    }
+
+    stages = std::move(merged);
 }
 
 static PhysicalExecutionStage buildConvolutionStage(const PhysicalExpression& expr,
@@ -2752,11 +3108,20 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
 
             ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isConvolutionOp(root.op)) {
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isConvolutionOp(root.op)) {
                 ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
             }
-            if (isAttentionOp(root.op)) {
+            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);
+            }
+            if (root.op == ExprOp::ATTENTION && root.attention_use_bias) {
+                ensureBoundaryParentEmitted(root.alpha_node, "bias", false);
+            }
+            if (isAttentionBackwardOp(root.op)) {
+                ensureBoundaryParentEmitted(root.alpha_node, "dO", false);
+                if (root.attention_use_bias) {
+                    ensureBoundaryParentEmitted(root.beta_node, "bias", false);
+                }
             }
             if (root.op == ExprOp::GEMM) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);
@@ -2774,6 +3139,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 planned.stages.push_back(buildMatmulStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isAttentionOp(root.op)) {
                 planned.stages.push_back(buildAttentionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isAttentionBackwardOp(root.op)) {
+                planned.stages.push_back(buildAttentionBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isConvolutionBackwardOp(root.op)) {
                 planned.stages.push_back(buildConvolutionBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isConvolutionForwardOp(root.op)) {
@@ -2953,11 +3320,20 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
 
             ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isConvolutionOp(root.op)) {
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isConvolutionOp(root.op)) {
                 ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
             }
-            if (isAttentionOp(root.op)) {
+            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);
+            }
+            if (root.op == ExprOp::ATTENTION && root.attention_use_bias) {
+                ensureBoundaryParentEmitted(root.alpha_node, "bias", false);
+            }
+            if (isAttentionBackwardOp(root.op)) {
+                ensureBoundaryParentEmitted(root.alpha_node, "dO", false);
+                if (root.attention_use_bias) {
+                    ensureBoundaryParentEmitted(root.beta_node, "bias", false);
+                }
             }
             if (root.op == ExprOp::GEMM) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);
@@ -2979,6 +3355,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isAttentionOp(root.op)) {
                 planned.stages.push_back(
                     buildAttentionStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isAttentionBackwardOp(root.op)) {
+                planned.stages.push_back(
+                    buildAttentionBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isConvolutionBackwardOp(root.op)) {
                 planned.stages.push_back(
                     buildConvolutionBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -3071,6 +3450,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         materializeTerminalGroup(i);
     }
 
+    mergeAttentionBackwardStages(planned.stages);
     return planned;
 }
 
@@ -3128,6 +3508,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::Attention: {
                 std::shared_ptr<CompiledAttention> attention = compileAttention(stage.expr);
                 compiled->stages.emplace_back(attention, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::AttentionBackward: {
+                std::shared_ptr<CompiledAttentionBackward> attention_backward = compileAttentionBackward(stage.expr);
+                compiled->stages.emplace_back(stage.expr, attention_backward, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::Convolution: {

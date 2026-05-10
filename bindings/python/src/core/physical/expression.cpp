@@ -31,6 +31,8 @@ using TensorScalarBinding = ThorImplementation::TensorScalarBinding;
 using AttentionTensorLayout = ThorImplementation::AttentionTensorLayout;
 using AttentionMaskKind = ThorImplementation::AttentionMaskKind;
 using AttentionOptions = ThorImplementation::AttentionOptions;
+using RotaryScalingKind = ThorImplementation::RotaryScalingKind;
+using RotaryPositionEmbeddingOptions = ThorImplementation::RotaryPositionEmbeddingOptions;
 using PreparedDynamicExpression = ThorImplementation::PreparedDynamicExpression;
 using DynamicExpressionBuild = ThorImplementation::DynamicExpressionBuild;
 using DynamicTensorMap = std::unordered_map<std::string, Tensor>;
@@ -89,6 +91,12 @@ void bind_physical_expression(nb::module_& physical) {
                                    .value("sliding_window_top_left", AttentionMaskKind::SlidingWindowTopLeft)
                                    .value("sliding_window_bottom_right", AttentionMaskKind::SlidingWindowBottomRight);
     attention_mask_kind.attr("__module__") = "thor.physical";
+
+    auto rotary_scaling_kind = nb::enum_<RotaryScalingKind>(physical, "RotaryScalingKind")
+                                   .value("none", RotaryScalingKind::None)
+                                   .value("linear", RotaryScalingKind::Linear)
+                                   .value("dynamic_ntk", RotaryScalingKind::DynamicNTK);
+    rotary_scaling_kind.attr("__module__") = "thor.physical";
 
     physical.def(
         "cudnn_frontend_attention_available",
@@ -383,6 +391,104 @@ Shorthand for ``self.transpose()``.
         return nb::cast<DataType>(dtype_obj);
     };
 
+
+    expr.def_static(
+        "rotary_position_embedding",
+        [parse_optional_dtype](const Expression& input,
+                               uint32_t sequence_axis,
+                               uint32_t head_dim_axis,
+                               uint64_t rotary_dim,
+                               double base,
+                               int64_t position_offset,
+                               bool interleaved,
+                               bool inverse,
+                               RotaryScalingKind scaling_kind,
+                               double scaling_factor,
+                               uint64_t original_max_position_embeddings,
+                               nb::object output_dtype_obj,
+                               nb::object compute_dtype_obj) {
+            RotaryPositionEmbeddingOptions options;
+            options.sequence_axis = sequence_axis;
+            options.head_dim_axis = head_dim_axis;
+            options.rotary_dim = rotary_dim;
+            options.base = base;
+            options.position_offset = position_offset;
+            options.interleaved = interleaved;
+            options.inverse = inverse;
+            options.scaling_kind = scaling_kind;
+            options.scaling_factor = scaling_factor;
+            options.original_max_position_embeddings = original_max_position_embeddings;
+            options.output_dtype = parse_optional_dtype(output_dtype_obj);
+            options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
+            return Expression::rotaryPositionEmbedding(input, std::move(options));
+        },
+        "input"_a,
+        "sequence_axis"_a = 2,
+        "head_dim_axis"_a = 3,
+        "rotary_dim"_a = 0,
+        "base"_a = 10000.0,
+        "position_offset"_a = 0,
+        "interleaved"_a = false,
+        "inverse"_a = false,
+        "scaling_kind"_a = RotaryScalingKind::None,
+        "scaling_factor"_a = 1.0,
+        "original_max_position_embeddings"_a = 0,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Apply rotary positional embedding as a fused expression primitive.
+
+The tensor is interpreted as having a sequence axis and an innermost head-dim
+axis.  rotary_dim=0 rotates the full head dimension; otherwise only the leading
+rotary_dim channels are rotated.  The inverse flag applies the transpose rotation,
+which is used by autodiff.
+)nbdoc");
+
+    expr.def_static(
+        "rope",
+        [parse_optional_dtype](const Expression& input,
+                               uint32_t sequence_axis,
+                               uint32_t head_dim_axis,
+                               uint64_t rotary_dim,
+                               double base,
+                               int64_t position_offset,
+                               bool interleaved,
+                               bool inverse,
+                               RotaryScalingKind scaling_kind,
+                               double scaling_factor,
+                               uint64_t original_max_position_embeddings,
+                               nb::object output_dtype_obj,
+                               nb::object compute_dtype_obj) {
+            RotaryPositionEmbeddingOptions options;
+            options.sequence_axis = sequence_axis;
+            options.head_dim_axis = head_dim_axis;
+            options.rotary_dim = rotary_dim;
+            options.base = base;
+            options.position_offset = position_offset;
+            options.interleaved = interleaved;
+            options.inverse = inverse;
+            options.scaling_kind = scaling_kind;
+            options.scaling_factor = scaling_factor;
+            options.original_max_position_embeddings = original_max_position_embeddings;
+            options.output_dtype = parse_optional_dtype(output_dtype_obj);
+            options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
+            return Expression::rotaryPositionEmbedding(input, std::move(options));
+        },
+        "input"_a,
+        "sequence_axis"_a = 2,
+        "head_dim_axis"_a = 3,
+        "rotary_dim"_a = 0,
+        "base"_a = 10000.0,
+        "position_offset"_a = 0,
+        "interleaved"_a = false,
+        "inverse"_a = false,
+        "scaling_kind"_a = RotaryScalingKind::None,
+        "scaling_factor"_a = 1.0,
+        "original_max_position_embeddings"_a = 0,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(Alias for rotary_position_embedding().)nbdoc");
+
     expr.def_static(
         "scaled_dot_product_attention",
         [parse_optional_dtype](const Expression& q,
@@ -398,7 +504,8 @@ Shorthand for ``self.transpose()``.
                                nb::object attention_scale_obj,
                                bool use_alibi_mask,
                                nb::object output_dtype_obj,
-                               nb::object compute_dtype_obj) {
+                               nb::object compute_dtype_obj,
+                               nb::object bias_obj) {
             AttentionOptions options;
             options.q_layout = q_layout;
             options.k_layout = k_layout;
@@ -413,6 +520,9 @@ Shorthand for ``self.transpose()``.
             options.use_alibi_mask = use_alibi_mask;
             options.output_dtype = parse_optional_dtype(output_dtype_obj);
             options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
+            if (!bias_obj.is_none()) {
+                return Expression::scaledDotProductAttention(q, k, v, nb::cast<Expression>(bias_obj), std::move(options));
+            }
             return Expression::scaledDotProductAttention(q, k, v, std::move(options));
         },
         "q"_a,
@@ -429,6 +539,7 @@ Shorthand for ``self.transpose()``.
         "use_alibi_mask"_a = false,
         "output_dtype"_a.none() = nb::none(),
         "compute_dtype"_a.none() = nb::none(),
+        "bias"_a.none() = nb::none(),
         R"nbdoc(
 Create a cuDNN scaled-dot-product attention expression stage.
 
@@ -454,7 +565,8 @@ path; compute_dtype should normally be thor.DataType.fp32.
            nb::object attention_scale_obj,
            bool use_alibi_mask,
            nb::object output_dtype_obj,
-           nb::object compute_dtype_obj) {
+           nb::object compute_dtype_obj,
+           nb::object bias_obj) {
             AttentionOptions options;
             options.q_layout = q_layout;
             options.k_layout = k_layout;
@@ -473,6 +585,9 @@ path; compute_dtype should normally be thor.DataType.fp32.
             if (!compute_dtype_obj.is_none()) {
                 options.compute_dtype = nb::cast<DataType>(compute_dtype_obj);
             }
+            if (!bias_obj.is_none()) {
+                return Expression::scaledDotProductAttention(q, k, v, nb::cast<Expression>(bias_obj), std::move(options));
+            }
             return Expression::scaledDotProductAttention(q, k, v, std::move(options));
         },
         "q"_a,
@@ -489,6 +604,7 @@ path; compute_dtype should normally be thor.DataType.fp32.
         "use_alibi_mask"_a = false,
         "output_dtype"_a.none() = nb::none(),
         "compute_dtype"_a.none() = nb::none(),
+        "bias"_a.none() = nb::none(),
         R"nbdoc(Alias for scaled_dot_product_attention().)nbdoc");
     expr.def("__rpow__", [](const Expression& a, const Expression& b) { return b.pow(a); }, "other"_a);
 
