@@ -11,6 +11,11 @@
 
 namespace ThorImplementation {
 
+enum class AttentionTensorLayout {
+    BHSD,
+    BSHD,
+};
+
 /**
  * cuDNN Frontend scaled-dot-product attention wrapper for Thor tensors.
  *
@@ -35,6 +40,13 @@ struct AttentionTensorSpec {
                                     int64_t sequenceLength,
                                     int64_t headDim,
                                     TensorDescriptor::DataType dataType);
+
+    static AttentionTensorSpec fromLayout(AttentionTensorLayout layout,
+                                          int64_t batch,
+                                          int64_t heads,
+                                          int64_t sequenceLength,
+                                          int64_t headDim,
+                                          TensorDescriptor::DataType dataType);
 
     std::string toString() const;
 };
@@ -199,6 +211,8 @@ class CudnnScaledDotProductAttention {
 
     void clearCache();
     size_t cachedGraphCount() const;
+
+    static bool frontendAvailable();
 
    private:
     CudnnScaledDotProductAttention() = default;

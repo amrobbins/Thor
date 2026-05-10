@@ -194,6 +194,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "reduce_norm1";
         case ExprOp::REDUCE_NORM2:
             return "reduce_norm2";
+        case ExprOp::ATTENTION:
+            return "attention";
         default:
             throw std::runtime_error("Unknown ExprOp.");
     }
@@ -253,6 +255,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"reduce_avg", ExprOp::REDUCE_AVG},
         {"reduce_norm1", ExprOp::REDUCE_NORM1},
         {"reduce_norm2", ExprOp::REDUCE_NORM2},
+        {"attention", ExprOp::ATTENTION},
     };
 
     auto it = lookup.find(op);
@@ -327,6 +330,16 @@ json exprNodeToJson(const ExprNode& node) {
     j["conv_pad_w"] = node.conv_pad_w;
     j["softmax_algorithm"] = static_cast<int>(node.softmax_algorithm);
     j["softmax_mode"] = static_cast<int>(node.softmax_mode);
+    j["attention_q_layout"] = static_cast<int>(node.attention_q_layout);
+    j["attention_k_layout"] = static_cast<int>(node.attention_k_layout);
+    j["attention_v_layout"] = static_cast<int>(node.attention_v_layout);
+    j["attention_o_layout"] = static_cast<int>(node.attention_o_layout);
+    j["attention_mask_kind"] = static_cast<int>(node.attention_mask_kind);
+    j["attention_diagonal_left_bound"] = node.attention_diagonal_left_bound;
+    j["attention_diagonal_right_bound"] = node.attention_diagonal_right_bound;
+    j["attention_has_scale"] = node.attention_has_scale;
+    j["attention_scale"] = node.attention_scale;
+    j["attention_use_alibi_mask"] = node.attention_use_alibi_mask;
     setOptionalDTypeJson(j, "input_tensor_dtype", node.input_tensor_dtype);
     setOptionalDTypeJson(j, "output_dtype", node.output_dtype);
     setOptionalDTypeJson(j, "compute_dtype", node.compute_dtype);
@@ -362,6 +375,16 @@ ExprNode exprNodeFromJson(const json& j) {
     node.conv_pad_w = j.value("conv_pad_w", 0);
     node.softmax_algorithm = static_cast<cudnnSoftmaxAlgorithm_t>(j.value("softmax_algorithm", static_cast<int>(CUDNN_SOFTMAX_ACCURATE)));
     node.softmax_mode = static_cast<cudnnSoftmaxMode_t>(j.value("softmax_mode", static_cast<int>(CUDNN_SOFTMAX_MODE_CHANNEL)));
+    node.attention_q_layout = static_cast<AttentionTensorLayout>(j.value("attention_q_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
+    node.attention_k_layout = static_cast<AttentionTensorLayout>(j.value("attention_k_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
+    node.attention_v_layout = static_cast<AttentionTensorLayout>(j.value("attention_v_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
+    node.attention_o_layout = static_cast<AttentionTensorLayout>(j.value("attention_o_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
+    node.attention_mask_kind = static_cast<AttentionMaskKind>(j.value("attention_mask_kind", static_cast<int>(AttentionMaskKind::None)));
+    node.attention_diagonal_left_bound = j.value("attention_diagonal_left_bound", int64_t{0});
+    node.attention_diagonal_right_bound = j.value("attention_diagonal_right_bound", int64_t{0});
+    node.attention_has_scale = j.value("attention_has_scale", false);
+    node.attention_scale = j.value("attention_scale", 0.0f);
+    node.attention_use_alibi_mask = j.value("attention_use_alibi_mask", false);
     parseOptionalDTypeField(j, "input_tensor_dtype", node.input_tensor_dtype);
     parseOptionalDTypeField(j, "output_dtype", node.output_dtype);
     parseOptionalDTypeField(j, "compute_dtype", node.compute_dtype);
@@ -498,6 +521,8 @@ std::string opName(ExprOp op) {
             return "RNORM1";
         case ExprOp::REDUCE_NORM2:
             return "RNORM2";
+        case ExprOp::ATTENTION:
+            return "ATTENTION";
         default:
             throw std::runtime_error("Unknown ExprOp");
     }
@@ -667,6 +692,24 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 }
             }
             out += ")";
+            break;
+        }
+
+        case ExprOp::ATTENTION: {
+            std::string q = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string k = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            std::string v = canonicalizeNode(expr, n.aux, memo, memoReady);
+            out = opName(n.op) + "(" + q + "," + k + "," + v +
+                  ";qLayout=" + std::to_string(static_cast<int>(n.attention_q_layout)) +
+                  ";kLayout=" + std::to_string(static_cast<int>(n.attention_k_layout)) +
+                  ";vLayout=" + std::to_string(static_cast<int>(n.attention_v_layout)) +
+                  ";oLayout=" + std::to_string(static_cast<int>(n.attention_o_layout)) +
+                  ";mask=" + std::to_string(static_cast<int>(n.attention_mask_kind)) +
+                  ";left=" + std::to_string(n.attention_diagonal_left_bound) +
+                  ";right=" + std::to_string(n.attention_diagonal_right_bound) +
+                  ";hasScale=" + std::to_string(n.attention_has_scale ? 1 : 0) +
+                  ";scale=" + formatFloatCanonical(n.attention_scale) +
+                  ";alibi=" + std::to_string(n.attention_use_alibi_mask ? 1 : 0) + ")";
             break;
         }
 
@@ -1096,6 +1139,7 @@ bool Expression::isBinaryOp(const ExprOp op) {
 bool Expression::isTernaryOp(const ExprOp op) {
     switch (op) {
         case ExprOp::GEMM:
+        case ExprOp::ATTENTION:
             return true;
         default:
             return false;
@@ -1812,6 +1856,38 @@ Expression Expression::gemm(const Expression& lhs,
     out->nodes.push_back(node);
     out->output_node = new_index;
     return Expression(out, new_index);
+}
+
+Expression Expression::scaledDotProductAttention(const Expression& q,
+                                                        const Expression& k,
+                                                        const Expression& v,
+                                                        AttentionOptions options) {
+    if (!q.expr || !k.expr || !v.expr) {
+        throw std::runtime_error("Cannot build attention from empty expressions.");
+    }
+    if (options.diagonal_left_bound < 0 || options.diagonal_right_bound < 0) {
+        throw std::runtime_error("Attention diagonal/sliding-window bounds must be non-negative.");
+    }
+
+    Expression out = ternaryOp(q, k, v, ExprOp::ATTENTION);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.attention_q_layout = options.q_layout;
+    node.attention_k_layout = options.k_layout;
+    node.attention_v_layout = options.v_layout;
+    node.attention_o_layout = options.o_layout;
+    node.attention_mask_kind = options.mask_kind;
+    node.attention_diagonal_left_bound = options.diagonal_left_bound;
+    node.attention_diagonal_right_bound = options.diagonal_right_bound;
+    node.attention_has_scale = options.attention_scale.has_value();
+    node.attention_scale = options.attention_scale.value_or(0.0f);
+    node.attention_use_alibi_mask = options.use_alibi_mask;
+    if (options.compute_dtype.has_value()) {
+        node.compute_dtype = options.compute_dtype.value();
+    }
+    if (options.output_dtype.has_value()) {
+        node.output_dtype = options.output_dtype.value();
+    }
+    return out;
 }
 
 Expression Expression::conv2d(const Expression& input,

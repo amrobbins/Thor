@@ -21,7 +21,90 @@ namespace ThorImplementation {
 
 namespace {
 constexpr int MAX_CUDNN_CONV_ALGOS = 5000;
+
+static int64_t checkedDim(const std::vector<uint64_t>& dims, size_t idx, const char* tensor_name) {
+    if (idx >= dims.size()) {
+        throw std::runtime_error(std::string("Attention tensor '") + tensor_name + "' must have rank 4 [B,H,S,D].");
+    }
+    if (dims[idx] > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        throw std::runtime_error(std::string("Attention tensor '") + tensor_name + "' dimension exceeds int64_t range.");
+    }
+    return static_cast<int64_t>(dims[idx]);
 }
+}  // namespace
+
+CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
+                                                          const Tensor& kTensor,
+                                                          const Tensor& vTensor,
+                                                          const Tensor& oTensor) const {
+    const std::vector<uint64_t> qDims = qTensor.getDimensions();
+    const std::vector<uint64_t> kDims = kTensor.getDimensions();
+    const std::vector<uint64_t> vDims = vTensor.getDimensions();
+    const std::vector<uint64_t> oDims = oTensor.getDimensions();
+    if (qDims.size() != 4 || kDims.size() != 4 || vDims.size() != 4 || oDims.size() != 4) {
+        throw std::runtime_error("Thor cuDNN attention expression stage requires rank-4 tensors in logical [B,H,S,D] order.");
+    }
+
+    CudnnAttentionDescriptor descriptor;
+    descriptor.q = AttentionTensorSpec::fromLayout(q_layout,
+                                                   checkedDim(qDims, 0, "q"),
+                                                   checkedDim(qDims, 1, "q"),
+                                                   checkedDim(qDims, 2, "q"),
+                                                   checkedDim(qDims, 3, "q"),
+                                                   qTensor.getDataType());
+    descriptor.k = AttentionTensorSpec::fromLayout(k_layout,
+                                                   checkedDim(kDims, 0, "k"),
+                                                   checkedDim(kDims, 1, "k"),
+                                                   checkedDim(kDims, 2, "k"),
+                                                   checkedDim(kDims, 3, "k"),
+                                                   kTensor.getDataType());
+    descriptor.v = AttentionTensorSpec::fromLayout(v_layout,
+                                                   checkedDim(vDims, 0, "v"),
+                                                   checkedDim(vDims, 1, "v"),
+                                                   checkedDim(vDims, 2, "v"),
+                                                   checkedDim(vDims, 3, "v"),
+                                                   vTensor.getDataType());
+    descriptor.o = AttentionTensorSpec::fromLayout(o_layout,
+                                                   checkedDim(oDims, 0, "o"),
+                                                   checkedDim(oDims, 1, "o"),
+                                                   checkedDim(oDims, 2, "o"),
+                                                   checkedDim(oDims, 3, "o"),
+                                                   oTensor.getDataType());
+    descriptor.computeDataType = compute_dtype;
+    descriptor.intermediateDataType = TensorDescriptor::DataType::FP32;
+    descriptor.attentionScale = attention_scale;
+    descriptor.maskKind = mask_kind;
+    descriptor.diagonalLeftBound = diagonal_left_bound;
+    descriptor.diagonalRightBound = diagonal_right_bound;
+    descriptor.useAlibiMask = use_alibi_mask;
+    descriptor.debugName = debug_name;
+    descriptor.useFp8 =
+        qTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || qTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
+        kTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || kTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
+        vTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || vTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
+        oTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || oTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2;
+    descriptor.validateForward();
+    return descriptor;
+}
+
+void StampedAttention::run() { runOn(stream); }
+
+void StampedAttention::runOn(Stream& run_stream) const {
+    if (!compiled_attention) {
+        throw std::runtime_error("StampedAttention::runOn called with null compiled attention payload.");
+    }
+    CudnnAttentionForwardArgs args{.q = q, .k = k, .v = v, .o = output};
+    const CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output);
+    CudnnScaledDotProductAttention::instance().forward(descriptor, args, run_stream);
+}
+
+StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
+                                   const Tensor& q,
+                                   const Tensor& k,
+                                   const Tensor& v,
+                                   const Tensor& output,
+                                   const Stream& stream)
+    : compiled_attention(std::move(compiled)), q(q), k(k), v(v), output(output), stream(stream) {}
 
 void StampedEquation::run() { runOn(stream); }
 

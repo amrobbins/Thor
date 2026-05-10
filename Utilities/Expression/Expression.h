@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 
 namespace ThorImplementation {
 struct PhysicalExecutionStage;
@@ -75,6 +76,7 @@ enum class ExprOp : uint16_t {
     REDUCE_AVG,
     REDUCE_NORM1,
     REDUCE_NORM2,
+    ATTENTION,
 };
 
 inline bool isCudnnReduceOp(ExprOp op) {
@@ -130,6 +132,17 @@ struct ExprNode {
     int32_t conv_pad_w = 0;
     cudnnSoftmaxAlgorithm_t softmax_algorithm = CUDNN_SOFTMAX_ACCURATE;
     cudnnSoftmaxMode_t softmax_mode = CUDNN_SOFTMAX_MODE_CHANNEL;
+
+    AttentionTensorLayout attention_q_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout attention_k_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout attention_v_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout attention_o_layout = AttentionTensorLayout::BHSD;
+    AttentionMaskKind attention_mask_kind = AttentionMaskKind::None;
+    int64_t attention_diagonal_left_bound = 0;
+    int64_t attention_diagonal_right_bound = 0;
+    bool attention_has_scale = false;
+    float attention_scale = 0.0f;
+    bool attention_use_alibi_mask = false;
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     std::optional<TensorDescriptor::DataType> input_tensor_dtype = std::nullopt;
@@ -230,6 +243,20 @@ class Outputs {
         : expr(std::move(expr)), outputs(std::move(outputs)) {}
 
     friend class Expression;
+};
+
+struct AttentionOptions {
+    AttentionTensorLayout q_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout k_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout v_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout o_layout = AttentionTensorLayout::BHSD;
+    AttentionMaskKind mask_kind = AttentionMaskKind::None;
+    int64_t diagonal_left_bound = 0;
+    int64_t diagonal_right_bound = 0;
+    std::optional<float> attention_scale = std::nullopt;
+    bool use_alibi_mask = false;
+    std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt;
+    std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt;
 };
 
 class Expression {
@@ -334,6 +361,16 @@ class Expression {
                                          bool transpose_addend = false,
                                          std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
                                          std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
+    [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
+                                                              const Expression& k,
+                                                              const Expression& v,
+                                                              AttentionOptions options = {});
+    [[nodiscard]] static Expression attention(const Expression& q,
+                                              const Expression& k,
+                                              const Expression& v,
+                                              AttentionOptions options = {}) {
+        return scaledDotProductAttention(q, k, v, std::move(options));
+    }
     [[nodiscard]] static Expression conv2d(
         const Expression& input,
         const Expression& filter,

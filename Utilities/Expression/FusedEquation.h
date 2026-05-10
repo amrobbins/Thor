@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -30,7 +31,7 @@ struct ParameterFanOverride {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Attention, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -43,6 +44,8 @@ struct CompiledExecutionStage {
                 return "Softmax";
             case Kind::Matmul:
                 return "Matmul";
+            case Kind::Attention:
+                return "Attention";
             case Kind::Convolution:
                 return "Convolution";
             case Kind::ConvolutionBackward:
@@ -62,12 +65,78 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
     const std::shared_ptr<CompiledMatmul> matmul = nullptr;
+    const std::shared_ptr<CompiledAttention> attention = nullptr;
     const std::shared_ptr<CompiledConvolution> convolution = nullptr;
     const std::shared_ptr<CompiledConvolutionBackward> convolution_backward = nullptr;
     const std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = nullptr;
 
     const std::vector<uint32_t> input_value_ids;
     const std::vector<CompiledStageOutput> outputs;
+
+    [[nodiscard]] TensorDescriptor::DataType outputDType(size_t output_idx) const {
+        if (output_idx >= outputs.size()) {
+            throw std::runtime_error("CompiledExecutionStage::outputDType output index out of range for stage kind " +
+                                     kindToString(kind) + ".");
+        }
+
+        switch (kind) {
+            case Kind::FusedKernel:
+                if (!flat) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing fused stage kernel.");
+                }
+                return flat->output_dtypes.at(output_idx);
+
+            case Kind::Reduction:
+                if (!reduction) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing reduction stage.");
+                }
+                return reduction->output_dtype;
+
+            case Kind::ArgMinMax:
+                if (!arg_minmax) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing arg-min/max stage.");
+                }
+                return arg_minmax->output_dtype;
+
+            case Kind::Softmax:
+                if (!softmax) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing softmax stage.");
+                }
+                return softmax->output_dtype;
+
+            case Kind::Matmul:
+                if (!matmul) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing matmul/gemm stage.");
+                }
+                return matmul->output_dtype;
+
+            case Kind::Attention:
+                if (!attention) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing attention stage.");
+                }
+                return attention->output_dtype;
+
+            case Kind::Convolution:
+                if (!convolution) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing convolution stage.");
+                }
+                return convolution->output_dtype;
+
+            case Kind::ConvolutionBackward:
+                if (!convolution_backward) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing convolution-backward stage.");
+                }
+                return convolution_backward->output_dtype;
+
+            case Kind::ReduceMinMaxBackward:
+                if (!reduce_minmax_backward) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing reduce-min/max-backward stage.");
+                }
+                return reduce_minmax_backward->output_dtype;
+        }
+
+        throw std::runtime_error("CompiledExecutionStage::outputDType encountered unknown stage kind.");
+    }
 
     const std::vector<ParameterFanOverride> parameter_fan_overrides;
 
@@ -119,6 +188,16 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::Matmul),
           matmul(matmul),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledAttention>& attention,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::Attention),
+          attention(attention),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
@@ -354,6 +433,13 @@ class FusedEquation {
         const std::optional<RuntimeInputValue>& beta_input = std::nullopt,
         const std::optional<std::string>& alpha_runtime_name = std::nullopt,
         const std::optional<std::string>& beta_runtime_name = std::nullopt) const;
+
+    [[nodiscard]] std::shared_ptr<StampedAttention> stampAttention(const std::shared_ptr<CompiledAttention>& compiledStage,
+                                                                   const Tensor& q,
+                                                                   const Tensor& k,
+                                                                   const Tensor& v,
+                                                                   std::optional<Tensor> preallocatedOutput,
+                                                                   const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<StampedConvolution> stampConvolution(const std::shared_ptr<CompiledConvolution>& compiledStage,
                                                                        Tensor& input,
