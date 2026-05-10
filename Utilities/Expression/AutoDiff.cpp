@@ -71,6 +71,14 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
             new_node.attention_ragged_offset_q_node = cloneForwardSubtree(src, src_node.attention_ragged_offset_q_node, dst, old_to_new);
             new_node.attention_ragged_offset_kv_node = cloneForwardSubtree(src, src_node.attention_ragged_offset_kv_node, dst, old_to_new);
         }
+        if (src_node.attention_use_paged_kv_cache) {
+            if (src_node.attention_page_table_k_node == UINT32_MAX || src_node.attention_page_table_v_node == UINT32_MAX) {
+                throw std::runtime_error(
+                    "Malformed attention expression: missing paged KV page-table node while cloning forward subtree for autodiff.");
+            }
+            new_node.attention_page_table_k_node = cloneForwardSubtree(src, src_node.attention_page_table_k_node, dst, old_to_new);
+            new_node.attention_page_table_v_node = cloneForwardSubtree(src, src_node.attention_page_table_v_node, dst, old_to_new);
+        }
         if (src_node.attention_dropout_probability > 0.0f) {
             if (src_node.attention_dropout_seed_node == UINT32_MAX || src_node.attention_dropout_offset_node == UINT32_MAX) {
                 throw std::runtime_error(
@@ -175,7 +183,8 @@ std::optional<TensorDescriptor::DataType> preferredGradValueDType(const ExprNode
 }
 
 static bool isAttentionBackwardOp(ExprOp op) {
-    return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V;
+    return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V ||
+           op == ExprOp::ATTENTION_BACKWARD_BIAS;
 }
 
 static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
@@ -183,6 +192,7 @@ static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
         case ExprOp::ATTENTION_BACKWARD_Q:
         case ExprOp::ATTENTION_BACKWARD_K:
         case ExprOp::ATTENTION_BACKWARD_V:
+        case ExprOp::ATTENTION_BACKWARD_BIAS:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
         case ExprOp::CONV3D_BACKWARD_DATA:
@@ -288,18 +298,23 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                              (node.attention_use_padding_mask && node.attention_seq_len_kv_node != UINT32_MAX && reaches.at(node.attention_seq_len_kv_node)) ||
                              (node.attention_use_ragged_offsets && node.attention_ragged_offset_q_node != UINT32_MAX && reaches.at(node.attention_ragged_offset_q_node)) ||
                              (node.attention_use_ragged_offsets && node.attention_ragged_offset_kv_node != UINT32_MAX && reaches.at(node.attention_ragged_offset_kv_node)) ||
+                             (node.attention_use_paged_kv_cache && node.attention_page_table_k_node != UINT32_MAX && reaches.at(node.attention_page_table_k_node)) ||
+                             (node.attention_use_paged_kv_cache && node.attention_page_table_v_node != UINT32_MAX && reaches.at(node.attention_page_table_v_node)) ||
                              (node.attention_dropout_probability > 0.0f && node.attention_dropout_seed_node != UINT32_MAX && reaches.at(node.attention_dropout_seed_node)) ||
                              (node.attention_dropout_probability > 0.0f && node.attention_dropout_offset_node != UINT32_MAX && reaches.at(node.attention_dropout_offset_node));
                 break;
             case ExprOp::ATTENTION_BACKWARD_Q:
             case ExprOp::ATTENTION_BACKWARD_K:
             case ExprOp::ATTENTION_BACKWARD_V:
+            case ExprOp::ATTENTION_BACKWARD_BIAS:
                 reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs) || reaches.at(node.aux) || reaches.at(node.alpha_node) ||
                              (node.attention_use_bias && node.beta_node != UINT32_MAX && reaches.at(node.beta_node)) ||
                              (node.attention_use_padding_mask && node.attention_seq_len_q_node != UINT32_MAX && reaches.at(node.attention_seq_len_q_node)) ||
                              (node.attention_use_padding_mask && node.attention_seq_len_kv_node != UINT32_MAX && reaches.at(node.attention_seq_len_kv_node)) ||
                              (node.attention_use_ragged_offsets && node.attention_ragged_offset_q_node != UINT32_MAX && reaches.at(node.attention_ragged_offset_q_node)) ||
                              (node.attention_use_ragged_offsets && node.attention_ragged_offset_kv_node != UINT32_MAX && reaches.at(node.attention_ragged_offset_kv_node)) ||
+                             (node.attention_use_paged_kv_cache && node.attention_page_table_k_node != UINT32_MAX && reaches.at(node.attention_page_table_k_node)) ||
+                             (node.attention_use_paged_kv_cache && node.attention_page_table_v_node != UINT32_MAX && reaches.at(node.attention_page_table_v_node)) ||
                              (node.attention_dropout_probability > 0.0f && node.attention_dropout_seed_node != UINT32_MAX && reaches.at(node.attention_dropout_seed_node)) ||
                              (node.attention_dropout_probability > 0.0f && node.attention_dropout_offset_node != UINT32_MAX && reaches.at(node.attention_dropout_offset_node));
                 break;
@@ -868,11 +883,15 @@ class BackwardGraphBuilder {
         node.attention_use_bias = forward_attention.attention_use_bias;
         node.attention_use_padding_mask = forward_attention.attention_use_padding_mask;
         node.attention_use_ragged_offsets = forward_attention.attention_use_ragged_offsets;
+        node.attention_use_paged_kv_cache = forward_attention.attention_use_paged_kv_cache;
+        node.attention_paged_kv_max_sequence_length = forward_attention.attention_paged_kv_max_sequence_length;
         node.attention_dropout_probability = forward_attention.attention_dropout_probability;
         node.attention_seq_len_q_node = forward_attention.attention_seq_len_q_node;
         node.attention_seq_len_kv_node = forward_attention.attention_seq_len_kv_node;
         node.attention_ragged_offset_q_node = forward_attention.attention_ragged_offset_q_node;
         node.attention_ragged_offset_kv_node = forward_attention.attention_ragged_offset_kv_node;
+        node.attention_page_table_k_node = forward_attention.attention_page_table_k_node;
+        node.attention_page_table_v_node = forward_attention.attention_page_table_v_node;
         node.attention_dropout_seed_node = forward_attention.attention_dropout_seed_node;
         node.attention_dropout_offset_node = forward_attention.attention_dropout_offset_node;
         if (output_dtype.has_value()) {
@@ -1350,6 +1369,8 @@ static std::vector<uint64_t> inferAttentionBackwardOutputDims(ExprOp op,
             return k_dims;
         case ExprOp::ATTENTION_BACKWARD_V:
             return v_dims;
+        case ExprOp::ATTENTION_BACKWARD_BIAS:
+            throw std::runtime_error("Autodiff attention-backward bias shape requires the explicit bias node shape.");
         default:
             throw std::runtime_error("Autodiff attention-backward shape inference received a non-attention-backward op.");
     }
@@ -1619,6 +1640,12 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                                                                 node_dims[node.rhs],
                                                                 node_dims[node.aux],
                                                                 node_dims[node.alpha_node]);
+                break;
+            case ExprOp::ATTENTION_BACKWARD_BIAS:
+                if (node.beta_node == UINT32_MAX) {
+                    throw std::runtime_error("Autodiff attention-backward bias node is missing the forward bias input.");
+                }
+                node_dims[i] = node_dims[node.beta_node];
                 break;
             case ExprOp::CONV2D:
             case ExprOp::CONV3D:
@@ -2616,6 +2643,12 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
             case ExprOp::ATTENTION: {
                 const uint32_t grad_like_output = shapeAttentionOutputGrad(grad, static_cast<uint32_t>(node_idx), node_dims);
+                if (node.attention_use_paged_kv_cache &&
+                    (node_reaches_requested_inputs.at(node.lhs) || node_reaches_requested_inputs.at(node.rhs) ||
+                     node_reaches_requested_inputs.at(node.aux))) {
+                    throw std::runtime_error(
+                        "Attention-backward with paged KV cache is not enabled; the paged KV path is inference-only until training semantics are defined.");
+                }
                 const std::vector<uint64_t> q_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : std::vector<uint64_t>{};
                 const std::vector<uint64_t> k_dims = has_forward_dims ? forward_node_dims.at(node.rhs) : std::vector<uint64_t>{};
                 const std::vector<uint64_t> v_dims = has_forward_dims ? forward_node_dims.at(node.aux) : std::vector<uint64_t>{};
@@ -2632,13 +2665,13 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     attention_for_backward.attention_ragged_offset_q_node = builder.cloneForward(node.attention_ragged_offset_q_node);
                     attention_for_backward.attention_ragged_offset_kv_node = builder.cloneForward(node.attention_ragged_offset_kv_node);
                 }
+                if (node.attention_use_paged_kv_cache) {
+                    attention_for_backward.attention_page_table_k_node = builder.cloneForward(node.attention_page_table_k_node);
+                    attention_for_backward.attention_page_table_v_node = builder.cloneForward(node.attention_page_table_v_node);
+                }
                 if (node.attention_dropout_probability > 0.0f) {
                     attention_for_backward.attention_dropout_seed_node = builder.cloneForward(node.attention_dropout_seed_node);
                     attention_for_backward.attention_dropout_offset_node = builder.cloneForward(node.attention_dropout_offset_node);
-                }
-
-                if (node.attention_use_bias && node.alpha_node != UINT32_MAX && node_reaches_requested_inputs.at(node.alpha_node)) {
-                    throw std::runtime_error("Thor expressions autodiff does not yet expose dBias for cuDNN additive attention bias.");
                 }
 
                 if (node_reaches_requested_inputs.at(node.lhs)) {
@@ -2677,12 +2710,26 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                                                                   node.compute_dtype);
                     addContributionToChild(node.aux, dV, v_dims);
                 }
+                if (node.attention_use_bias && node.alpha_node != UINT32_MAX && node_reaches_requested_inputs.at(node.alpha_node)) {
+                    const std::vector<uint64_t> bias_dims = has_forward_dims ? forward_node_dims.at(node.alpha_node) : std::vector<uint64_t>{};
+                    const uint32_t dBias = builder.attentionBackward(ExprOp::ATTENTION_BACKWARD_BIAS,
+                                                                     q,
+                                                                     k,
+                                                                     v,
+                                                                     grad_like_output,
+                                                                     bias,
+                                                                     attention_for_backward,
+                                                                     preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
+                                                                     node.compute_dtype);
+                    addContributionToChild(node.alpha_node, dBias, bias_dims);
+                }
                 break;
             }
 
             case ExprOp::ATTENTION_BACKWARD_Q:
             case ExprOp::ATTENTION_BACKWARD_K:
             case ExprOp::ATTENTION_BACKWARD_V:
+            case ExprOp::ATTENTION_BACKWARD_BIAS:
                 throw std::runtime_error("Thor expressions autodiff does not support second derivatives for attention backward yet.");
 
             case ExprOp::REDUCE_ARGMIN:

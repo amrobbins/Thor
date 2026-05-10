@@ -902,9 +902,15 @@ static std::vector<uint64_t> resolveMatmulOutputDimsFromInputs(const CompiledMat
     return out_dims;
 }
 
+static uint64_t ceilDivPositive(uint64_t numerator, uint64_t denominator) {
+    if (numerator == 0 || denominator == 0) {
+        throw std::runtime_error("ceilDivPositive requires positive operands.");
+    }
+    return (numerator + denominator - 1) / denominator;
+}
+
 static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const CompiledAttention& compiled_stage,
                                                                   const std::vector<std::vector<uint64_t>>& stage_input_dims) {
-    (void)compiled_stage;
     if (stage_input_dims.size() < 3) {
         throw std::runtime_error("Attention stage expected q/k/v input shapes.");
     }
@@ -920,16 +926,16 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
     const uint64_t query_heads = q_dims.at(1);
     const uint64_t query_len = q_dims.at(2);
     const uint64_t qk_dim = q_dims.at(3);
-    const uint64_t kv_batch = k_dims.at(0);
+    const uint64_t kv_batch_or_blocks = k_dims.at(0);
     const uint64_t kv_heads = k_dims.at(1);
-    const uint64_t kv_len = k_dims.at(2);
+    const uint64_t kv_len_or_block = k_dims.at(2);
     const uint64_t k_dim = k_dims.at(3);
-    const uint64_t v_batch = v_dims.at(0);
+    const uint64_t v_batch_or_blocks = v_dims.at(0);
     const uint64_t v_heads = v_dims.at(1);
-    const uint64_t v_len = v_dims.at(2);
+    const uint64_t v_len_or_block = v_dims.at(2);
     const uint64_t v_dim = v_dims.at(3);
 
-    if (batch != kv_batch || batch != v_batch) {
+    if (!compiled_stage.use_paged_kv_cache && (batch != kv_batch_or_blocks || batch != v_batch_or_blocks)) {
         throw std::runtime_error("Attention q/k/v batch dimensions must match.");
     }
     if (kv_heads != v_heads) {
@@ -938,15 +944,19 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
     if (query_heads % kv_heads != 0) {
         throw std::runtime_error("Attention query heads must be an integer multiple of key/value heads for MHA/MQA/GQA.");
     }
-    if (kv_len != v_len) {
+    if (!compiled_stage.use_paged_kv_cache && kv_len_or_block != v_len_or_block) {
         throw std::runtime_error("Attention k/v sequence lengths must match.");
     }
     if (qk_dim != k_dim) {
         throw std::runtime_error("Attention q/k head dimensions must match.");
     }
-    if (kv_len == 0 || query_len == 0 || qk_dim == 0 || v_dim == 0) {
+    if (kv_len_or_block == 0 || v_len_or_block == 0 || query_len == 0 || qk_dim == 0 || v_dim == 0) {
         throw std::runtime_error("Attention q/k/v dimensions must be non-zero.");
     }
+    if (compiled_stage.use_paged_kv_cache && compiled_stage.paged_kv_max_sequence_length <= 0) {
+        throw std::runtime_error("Attention paged KV max sequence length must be positive.");
+    }
+    const uint64_t kv_len = compiled_stage.use_paged_kv_cache ? static_cast<uint64_t>(compiled_stage.paged_kv_max_sequence_length) : kv_len_or_block;
     size_t next_optional_idx = 3;
     if (compiled_stage.use_bias) {
         if (stage_input_dims.size() <= next_optional_idx) {
@@ -981,6 +991,23 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
         }
         next_optional_idx += 2;
     }
+    if (compiled_stage.use_paged_kv_cache) {
+        if (!compiled_stage.use_padding_mask) {
+            throw std::runtime_error("Attention paged KV cache requires q_seq_len and kv_seq_len inputs.");
+        }
+        if (stage_input_dims.size() <= next_optional_idx + 1) {
+            throw std::runtime_error("Attention stage with paged KV cache expected page_table_k and page_table_v input shapes.");
+        }
+        const std::vector<uint64_t> expected_page_table_k_dims{batch, 1, ceilDivPositive(kv_len, kv_len_or_block), 1};
+        const std::vector<uint64_t> expected_page_table_v_dims{batch, 1, ceilDivPositive(kv_len, v_len_or_block), 1};
+        if (stage_input_dims.at(next_optional_idx) != expected_page_table_k_dims) {
+            throw std::runtime_error("Attention paged KV page_table_k shape must be [B,1,ceil(Skv/block_k),1].");
+        }
+        if (stage_input_dims.at(next_optional_idx + 1) != expected_page_table_v_dims) {
+            throw std::runtime_error("Attention paged KV page_table_v shape must be [B,1,ceil(Skv/block_v),1].");
+        }
+        next_optional_idx += 2;
+    }
 
     return std::vector<uint64_t>{batch, query_heads, query_len, v_dim};
 }
@@ -1001,6 +1028,8 @@ static CompiledAttention makeForwardAttentionView(const CompiledAttentionBackwar
     forward.use_bias = backward.use_bias;
     forward.use_padding_mask = backward.use_padding_mask;
     forward.use_ragged_offsets = backward.use_ragged_offsets;
+    forward.use_paged_kv_cache = backward.use_paged_kv_cache;
+    forward.paged_kv_max_sequence_length = backward.paged_kv_max_sequence_length;
     forward.dropout_probability = backward.dropout_probability;
     forward.compute_dtype = backward.compute_dtype;
     forward.output_dtype = output_dtype;
@@ -1051,6 +1080,11 @@ static std::vector<uint64_t> resolveAttentionBackwardOutputDimsFromInputs(const 
             return stage_input_dims.at(1);
         case ExprOp::ATTENTION_BACKWARD_V:
             return stage_input_dims.at(2);
+        case ExprOp::ATTENTION_BACKWARD_BIAS:
+            if (!compiled_stage.use_bias) {
+                throw std::runtime_error("Attention-backward dBias output requested for an unbiased attention stage.");
+            }
+            return stage_input_dims.at(4);
         default:
             throw std::runtime_error("Attention-backward output shape requested for non-attention-backward op.");
     }
@@ -2265,6 +2299,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::ATTENTION_BACKWARD_Q:
             case ExprOp::ATTENTION_BACKWARD_K:
             case ExprOp::ATTENTION_BACKWARD_V:
+            case ExprOp::ATTENTION_BACKWARD_BIAS:
             case ExprOp::MATMUL:
             case ExprOp::GEMM:
             case ExprOp::CONV2D:
@@ -4624,6 +4659,8 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
                                                                 const std::optional<Tensor>& seq_len_kv,
                                                                 const std::optional<Tensor>& q_ragged_offsets,
                                                                 const std::optional<Tensor>& kv_ragged_offsets,
+                                                                const std::optional<Tensor>& page_table_k,
+                                                                const std::optional<Tensor>& page_table_v,
                                                                 const std::optional<Tensor>& dropout_seed,
                                                                 const std::optional<Tensor>& dropout_offset,
                                                                 std::optional<Tensor> preallocatedOutput,
@@ -4661,6 +4698,13 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         }
         stage_input_dims.push_back(q_ragged_offsets->getDimensions());
         stage_input_dims.push_back(kv_ragged_offsets->getDimensions());
+    }
+    if (compiledStage->use_paged_kv_cache) {
+        if (!page_table_k.has_value() || !page_table_v.has_value()) {
+            throw std::runtime_error("stampAttention requires K/V page-table tensors for paged KV attention.");
+        }
+        stage_input_dims.push_back(page_table_k->getDimensions());
+        stage_input_dims.push_back(page_table_v->getDimensions());
     }
     if (compiledStage->dropout_probability > 0.0f) {
         if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
@@ -4724,6 +4768,30 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         validate_ragged_offset(q_ragged_offsets, "q_offsets");
         validate_ragged_offset(kv_ragged_offsets, "kv_offsets");
     }
+    if (compiledStage->use_paged_kv_cache) {
+        auto validate_page_table = [&](const std::optional<Tensor>& tensor, const char* label) {
+            if (!tensor.has_value()) {
+                throw std::runtime_error(std::string("Attention paged KV missing ") + label + " tensor.");
+            }
+            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+                throw std::runtime_error(std::string("Attention paged KV ") + label + " placement must match q.");
+            }
+            if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
+                throw std::runtime_error(std::string("Attention paged KV ") + label + " dtype must be INT32.");
+            }
+            if (compiledStage->paged_kv_max_sequence_length <= 0) {
+                throw std::runtime_error("Attention paged KV max sequence length must be positive.");
+            }
+            const uint64_t max_kv = static_cast<uint64_t>(compiledStage->paged_kv_max_sequence_length);
+            const uint64_t block_size = std::string(label).find("page_table_v") != std::string::npos ? adaptedV.getDimensions().at(2) : adaptedK.getDimensions().at(2);
+            const std::vector<uint64_t> expected{adaptedQ.getDimensions().at(0), 1, ceilDivPositive(max_kv, block_size), 1};
+            if (tensor->getDimensions() != expected) {
+                throw std::runtime_error(std::string("Attention paged KV ") + label + " shape must be [B,1,ceil(Skv/block),1].");
+            }
+        };
+        validate_page_table(page_table_k, "page_table_k");
+        validate_page_table(page_table_v, "page_table_v");
+    }
     if (compiledStage->dropout_probability > 0.0f) {
         auto validate_dropout_scalar = [&](const std::optional<Tensor>& tensor, const char* label) {
             if (!tensor.has_value()) {
@@ -4761,7 +4829,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
     }
 
     return make_shared<StampedAttention>(
-        compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, seq_len_q, seq_len_kv, q_ragged_offsets, kv_ragged_offsets, dropout_seed, dropout_offset, output, stream, std::move(forward_state));
+        compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, seq_len_q, seq_len_kv, q_ragged_offsets, kv_ragged_offsets, page_table_k, page_table_v, dropout_seed, dropout_offset, output, stream, std::move(forward_state));
 }
 
 std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
@@ -4859,7 +4927,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     Tensor stats(adaptedQ.getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1}));
     std::optional<Tensor> dBiasScratch = std::nullopt;
     if (compiledStage->use_bias) {
-        dBiasScratch = Tensor(adaptedQ.getPlacement(), TensorDescriptor(adaptedQ.getDataType(), adaptedBias->getDimensions()));
+        dBiasScratch = make_or_validate_output(3, adaptedQ.getDataType(), adaptedBias->getDimensions(), "dBias");
     }
 
     if (compiledStage->use_padding_mask) {
@@ -5463,9 +5531,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     throw std::runtime_error("Attention stage missing compiled payload.");
                 }
                 const size_t expected_attention_stage_inputs = 3 + (stage.attention->use_bias ? 1 : 0) + (stage.attention->use_padding_mask ? 2 : 0) +
-                    (stage.attention->use_ragged_offsets ? 2 : 0) + (stage.attention->dropout_probability > 0.0f ? 2 : 0);
+                    (stage.attention->use_ragged_offsets ? 2 : 0) + (stage.attention->use_paged_kv_cache ? 2 : 0) +
+                    (stage.attention->dropout_probability > 0.0f ? 2 : 0);
                 if (stageInputs.size() != expected_attention_stage_inputs) {
-                    throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional ragged offsets, and optional dropout seed/offset.");
+                    throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional ragged offsets, optional paged-KV page tables, and optional dropout seed/offset.");
                 }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Attention stage expects exactly one output.");
@@ -5490,6 +5559,12 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     qRaggedOffsetsTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
                     kvRaggedOffsetsTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
                 }
+                std::optional<Tensor> pageTableKTensor = std::nullopt;
+                std::optional<Tensor> pageTableVTensor = std::nullopt;
+                if (stage.attention->use_paged_kv_cache) {
+                    pageTableKTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    pageTableVTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                }
                 std::optional<Tensor> dropoutSeedTensor = std::nullopt;
                 std::optional<Tensor> dropoutOffsetTensor = std::nullopt;
                 if (stage.attention->dropout_probability > 0.0f) {
@@ -5513,6 +5588,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                                                     seqLenKvTensor,
                                                                                     qRaggedOffsetsTensor,
                                                                                     kvRaggedOffsetsTensor,
+                                                                                    pageTableKTensor,
+                                                                                    pageTableVTensor,
                                                                                     dropoutSeedTensor,
                                                                                     dropoutOffsetTensor,
                                                                                     preallocated,
@@ -5570,7 +5647,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     dropoutOffsetTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
                 }
 
-                std::vector<std::optional<Tensor>> preallocated(3, std::nullopt);
+                std::vector<std::optional<Tensor>> preallocated(4, std::nullopt);
                 for (size_t i = 0; i < stage.outputs.size(); ++i) {
                     if (stage.outputs[i].local_node_idx >= stage.expr.nodes.size()) {
                         throw std::runtime_error("Attention-backward stage output node index out of range while stamping.");
@@ -5578,8 +5655,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     const ExprOp out_op = stage.expr.nodes[stage.outputs[i].local_node_idx].op;
                     size_t slot = out_op == ExprOp::ATTENTION_BACKWARD_Q ? 0 :
                                   out_op == ExprOp::ATTENTION_BACKWARD_K ? 1 :
-                                  out_op == ExprOp::ATTENTION_BACKWARD_V ? 2 : 3;
-                    if (slot >= 3) {
+                                  out_op == ExprOp::ATTENTION_BACKWARD_V ? 2 :
+                                  out_op == ExprOp::ATTENTION_BACKWARD_BIAS ? 3 : 4;
+                    if (slot >= 4) {
                         throw std::runtime_error("Attention-backward stage output op is invalid while stamping.");
                     }
                     auto preallocated_it = preallocated_final_outputs_by_name.find(stage.outputs[i].name);
@@ -5636,12 +5714,19 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                                                                              stream,
                                                                                                              savedForwardState);
                 const std::vector<Tensor>& outputTensors = stampedAttentionBackward->getOutputTensors();
-                if (outputTensors.size() != 3) {
-                    throw std::runtime_error("Stamped attention-backward should expose dQ/dK/dV tensors.");
+                const size_t expected_attention_backward_outputs = stage.attention_backward->use_bias ? 4 : 3;
+                if (outputTensors.size() != expected_attention_backward_outputs) {
+                    throw std::runtime_error("Stamped attention-backward exposed an unexpected number of output tensors.");
                 }
                 for (size_t i = 0; i < stage.outputs.size(); ++i) {
                     const ExprOp out_op = stage.expr.nodes[stage.outputs[i].local_node_idx].op;
-                    size_t slot = out_op == ExprOp::ATTENTION_BACKWARD_Q ? 0 : out_op == ExprOp::ATTENTION_BACKWARD_K ? 1 : 2;
+                    size_t slot = out_op == ExprOp::ATTENTION_BACKWARD_Q ? 0 :
+                                  out_op == ExprOp::ATTENTION_BACKWARD_K ? 1 :
+                                  out_op == ExprOp::ATTENTION_BACKWARD_V ? 2 :
+                                  out_op == ExprOp::ATTENTION_BACKWARD_BIAS ? 3 : 4;
+                    if (slot >= outputTensors.size()) {
+                        throw std::runtime_error("Attention-backward stage output op is invalid while wiring outputs.");
+                    }
                     const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, i, stageInputs);
                     if (outputTensors.at(slot).getDimensions() != output_dims) {
                         throw std::runtime_error("Stamped attention-backward output tensor dimensions are incompatible with staged shape.");

@@ -465,7 +465,8 @@ static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MI
 static bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
 static bool isAttentionOp(ExprOp op) { return op == ExprOp::ATTENTION; }
 static bool isAttentionBackwardOp(ExprOp op) {
-    return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V;
+    return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V ||
+           op == ExprOp::ATTENTION_BACKWARD_BIAS;
 }
 
 static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
@@ -556,6 +557,10 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
             addExternalValue(node.attention_ragged_offset_q_node);
             addExternalValue(node.attention_ragged_offset_kv_node);
         }
+        if (node.op == ExprOp::ATTENTION && node.attention_use_paged_kv_cache) {
+            addExternalValue(node.attention_page_table_k_node);
+            addExternalValue(node.attention_page_table_v_node);
+        }
         if (node.op == ExprOp::ATTENTION && node.attention_dropout_probability > 0.0f) {
             addExternalValue(node.attention_dropout_seed_node);
             addExternalValue(node.attention_dropout_offset_node);
@@ -572,6 +577,10 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
             if (node.attention_use_ragged_offsets) {
                 addExternalValue(node.attention_ragged_offset_q_node);
                 addExternalValue(node.attention_ragged_offset_kv_node);
+            }
+            if (node.attention_use_paged_kv_cache) {
+                addExternalValue(node.attention_page_table_k_node);
+                addExternalValue(node.attention_page_table_v_node);
             }
             if (node.attention_dropout_probability > 0.0f) {
                 addExternalValue(node.attention_dropout_seed_node);
@@ -705,6 +714,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "ATTN_BW_K";
         case ExprOp::ATTENTION_BACKWARD_V:
             return "ATTN_BW_V";
+        case ExprOp::ATTENTION_BACKWARD_BIAS:
+            return "ATTN_BW_BIAS";
         case ExprOp::CONV2D:
             return "CONV2D";
         case ExprOp::CONV2D_BACKWARD_DATA:
@@ -861,6 +872,11 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 s += ",raggedQ=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_q_node);
                 s += ",raggedKV=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_kv_node);
             }
+            if (node.attention_use_paged_kv_cache) {
+                s += ",pagedMax=" + std::to_string(node.attention_paged_kv_max_sequence_length);
+                s += ",pageK=" + fusedRegionSignatureRec(expr, node.attention_page_table_k_node);
+                s += ",pageV=" + fusedRegionSignatureRec(expr, node.attention_page_table_v_node);
+            }
             if (node.attention_dropout_probability > 0.0f) {
                 s += ",dropoutSeed=" + fusedRegionSignatureRec(expr, node.attention_dropout_seed_node);
                 s += ",dropoutOffset=" + fusedRegionSignatureRec(expr, node.attention_dropout_offset_node);
@@ -891,6 +907,11 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             if (node.attention_use_ragged_offsets) {
                 s += ",raggedQ=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_q_node);
                 s += ",raggedKV=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_kv_node);
+            }
+            if (node.attention_use_paged_kv_cache) {
+                s += ",pagedMax=" + std::to_string(node.attention_paged_kv_max_sequence_length);
+                s += ",pageK=" + fusedRegionSignatureRec(expr, node.attention_page_table_k_node);
+                s += ",pageV=" + fusedRegionSignatureRec(expr, node.attention_page_table_v_node);
             }
             if (node.attention_dropout_probability > 0.0f) {
                 s += ",dropoutSeed=" + fusedRegionSignatureRec(expr, node.attention_dropout_seed_node);
@@ -1507,9 +1528,9 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
         throw std::runtime_error("Attention stage output node is not ATTENTION.");
     }
     const uint32_t expected_attention_inputs = 3u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u) +
-        (node.attention_use_ragged_offsets ? 2u : 0u) + (node.attention_dropout_probability > 0.0f ? 2u : 0u);
+        (node.attention_use_ragged_offsets ? 2u : 0u) + (node.attention_use_paged_kv_cache ? 2u : 0u) + (node.attention_dropout_probability > 0.0f ? 2u : 0u);
     if (expr.numInputs() != expected_attention_inputs) {
-        throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional ragged offsets, and optional dropout seed/offset.");
+        throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional ragged offsets, optional paged-KV page tables, and optional dropout seed/offset.");
     }
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX) {
         throw std::runtime_error("Attention node is missing q/k/v inputs.");
@@ -1558,6 +1579,16 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
             throw std::runtime_error("Attention ragged offset inputs must be INT32 tensors.");
         }
     }
+    if (node.attention_use_paged_kv_cache) {
+        if (node.attention_page_table_k_node == UINT32_MAX || node.attention_page_table_v_node == UINT32_MAX) {
+            throw std::runtime_error("Attention node marked as using paged KV cache but is missing page-table inputs.");
+        }
+        const ExprNode& page_k = validate_local_input(node.attention_page_table_k_node, "page_table_k");
+        const ExprNode& page_v = validate_local_input(node.attention_page_table_v_node, "page_table_v");
+        if (page_k.input_tensor_dtype.value() != DataType::INT32 || page_v.input_tensor_dtype.value() != DataType::INT32) {
+            throw std::runtime_error("Attention paged KV page-table inputs must be INT32 tensors.");
+        }
+    }
     if (node.attention_dropout_probability > 0.0f) {
         if (node.attention_dropout_seed_node == UINT32_MAX || node.attention_dropout_offset_node == UINT32_MAX) {
             throw std::runtime_error("Attention node marked as using dropout but is missing seed/offset inputs.");
@@ -1597,6 +1628,8 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     compiled->use_bias = node.attention_use_bias;
     compiled->use_padding_mask = node.attention_use_padding_mask;
     compiled->use_ragged_offsets = node.attention_use_ragged_offsets;
+    compiled->use_paged_kv_cache = node.attention_use_paged_kv_cache;
+    compiled->paged_kv_max_sequence_length = node.attention_paged_kv_max_sequence_length;
     compiled->dropout_probability = node.attention_dropout_probability;
     compiled->compute_dtype = node.compute_dtype.value();
     compiled->output_dtype = node.output_dtype.value();
@@ -1613,12 +1646,15 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
         throw std::runtime_error("Attention-backward stage output node is not an attention backward op.");
     }
     const uint32_t expected_attention_backward_inputs = 4u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u) +
-        (node.attention_use_ragged_offsets ? 2u : 0u) + (node.attention_dropout_probability > 0.0f ? 2u : 0u);
+        (node.attention_use_ragged_offsets ? 2u : 0u) + (node.attention_use_paged_kv_cache ? 2u : 0u) + (node.attention_dropout_probability > 0.0f ? 2u : 0u);
     if (expr.numInputs() != expected_attention_backward_inputs) {
-        throw std::runtime_error("Attention-backward stage input count mismatch for q/k/v/dO plus optional bias, optional q/kv sequence lengths, optional ragged offsets, and optional dropout seed/offset.");
+        throw std::runtime_error("Attention-backward stage input count mismatch for q/k/v/dO plus optional bias, optional q/kv sequence lengths, optional ragged offsets, optional paged-KV page tables, and optional dropout seed/offset.");
     }
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX || node.alpha_node == UINT32_MAX) {
         throw std::runtime_error("Attention-backward node is missing q/k/v/dO input(s).");
+    }
+    if (node.op == ExprOp::ATTENTION_BACKWARD_BIAS && !node.attention_use_bias) {
+        throw std::runtime_error("Attention-backward dBias output requested for an unbiased attention node.");
     }
 
     auto validate_local_input = [&](uint32_t local_idx, const char* label) -> const ExprNode& {
@@ -1665,6 +1701,9 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
             throw std::runtime_error("Attention-backward ragged offset inputs must be INT32 tensors.");
         }
     }
+    if (node.attention_use_paged_kv_cache) {
+        throw std::runtime_error("Attention-backward with paged KV cache is not enabled; the paged KV path is inference-only until training semantics are defined.");
+    }
     if (node.attention_dropout_probability > 0.0f) {
         if (node.attention_dropout_seed_node == UINT32_MAX || node.attention_dropout_offset_node == UINT32_MAX) {
             throw std::runtime_error("Attention-backward node marked as using dropout but is missing seed/offset inputs.");
@@ -1699,6 +1738,8 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     compiled->use_bias = node.attention_use_bias;
     compiled->use_padding_mask = node.attention_use_padding_mask;
     compiled->use_ragged_offsets = node.attention_use_ragged_offsets;
+    compiled->use_paged_kv_cache = node.attention_use_paged_kv_cache;
+    compiled->paged_kv_max_sequence_length = node.attention_paged_kv_max_sequence_length;
     compiled->dropout_probability = node.attention_dropout_probability;
     compiled->compute_dtype = node.compute_dtype.value();
     compiled->dQ_dtype = q.output_dtype.value();
@@ -2550,7 +2591,7 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
     PhysicalExpression stage_expr;
     std::vector<uint32_t> input_value_ids;
     input_value_ids.reserve(3 + (node.attention_use_bias ? 1 : 0) + (node.attention_use_padding_mask ? 2 : 0) +
-                            (node.attention_use_ragged_offsets ? 2 : 0) + (node.attention_dropout_probability > 0.0f ? 2 : 0));
+                            (node.attention_use_ragged_offsets ? 2 : 0) + (node.attention_use_paged_kv_cache ? 2 : 0) + (node.attention_dropout_probability > 0.0f ? 2 : 0));
 
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
@@ -2627,6 +2668,18 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
         forceAttentionSeqLenLocalInputDType(stage_expr, q_ragged_offset_local, "q_ragged_offsets");
         forceAttentionSeqLenLocalInputDType(stage_expr, kv_ragged_offset_local, "kv_ragged_offsets");
     }
+    uint32_t page_table_k_local = UINT32_MAX;
+    uint32_t page_table_v_local = UINT32_MAX;
+    if (node.attention_use_paged_kv_cache) {
+        if (node.attention_page_table_k_node == UINT32_MAX || node.attention_page_table_v_node == UINT32_MAX) {
+            throw std::runtime_error("Attention node marked as using paged KV cache but missing page-table inputs.");
+        }
+        page_table_k_local = bind_parent_to_local_tensor_input(node.attention_page_table_k_node, next_local_slot++);
+        page_table_v_local = bind_parent_to_local_tensor_input(node.attention_page_table_v_node, next_local_slot++);
+        forceAttentionSeqLenLocalInputDType(stage_expr, page_table_k_local, "page_table_k");
+        forceAttentionSeqLenLocalInputDType(stage_expr, page_table_v_local, "page_table_v");
+    }
+
     uint32_t dropout_seed_local = UINT32_MAX;
     uint32_t dropout_offset_local = UINT32_MAX;
     if (node.attention_dropout_probability > 0.0f) {
@@ -2649,6 +2702,8 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
     route.attention_seq_len_kv_node = kv_seq_len_local;
     route.attention_ragged_offset_q_node = q_ragged_offset_local;
     route.attention_ragged_offset_kv_node = kv_ragged_offset_local;
+    route.attention_page_table_k_node = page_table_k_local;
+    route.attention_page_table_v_node = page_table_v_local;
     route.attention_dropout_seed_node = dropout_seed_local;
     route.attention_dropout_offset_node = dropout_offset_local;
     stage_expr.nodes.push_back(std::move(route));
@@ -2681,11 +2736,17 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX || node.alpha_node == UINT32_MAX) {
         throw std::runtime_error("Attention-backward node missing q/k/v/dO input(s).");
     }
+    if (node.op == ExprOp::ATTENTION_BACKWARD_BIAS && !node.attention_use_bias) {
+        throw std::runtime_error("Attention-backward dBias output requested for an unbiased attention node.");
+    }
+    if (node.attention_use_paged_kv_cache) {
+        throw std::runtime_error("Attention-backward with paged KV cache is not enabled; the paged KV path is inference-only until training semantics are defined.");
+    }
 
     PhysicalExpression stage_expr;
     std::vector<uint32_t> input_value_ids;
     input_value_ids.reserve(4 + (node.attention_use_bias ? 1 : 0) + (node.attention_use_padding_mask ? 2 : 0) +
-                            (node.attention_use_ragged_offsets ? 2 : 0) + (node.attention_dropout_probability > 0.0f ? 2 : 0));
+                            (node.attention_use_ragged_offsets ? 2 : 0) + (node.attention_use_paged_kv_cache ? 2 : 0) + (node.attention_dropout_probability > 0.0f ? 2 : 0));
 
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
@@ -2828,6 +2889,8 @@ static std::string attentionBackwardMergeKey(const PhysicalExecutionStage& stage
     key += ";bias=" + std::to_string(node.attention_use_bias ? 1 : 0);
     key += ";padding=" + std::to_string(node.attention_use_padding_mask ? 1 : 0);
     key += ";ragged=" + std::to_string(node.attention_use_ragged_offsets ? 1 : 0);
+    key += ";paged=" + std::to_string(node.attention_use_paged_kv_cache ? 1 : 0);
+    key += ";pagedMax=" + std::to_string(node.attention_paged_kv_max_sequence_length);
     key += ";dropout=" + formatFloatCanonical(node.attention_dropout_probability);
     key += ";compute=" + optionalDTypeSignature(node.compute_dtype);
     return key;

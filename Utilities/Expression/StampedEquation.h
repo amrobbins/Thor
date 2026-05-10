@@ -200,6 +200,8 @@ struct CompiledAttention {
     bool use_bias = false;
     bool use_padding_mask = false;
     bool use_ragged_offsets = false;
+    bool use_paged_kv_cache = false;
+    int64_t paged_kv_max_sequence_length = 0;
     float dropout_probability = 0.0f;
     TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
     TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP16;
@@ -222,6 +224,8 @@ struct CompiledAttentionBackward {
     bool use_bias = false;
     bool use_padding_mask = false;
     bool use_ragged_offsets = false;
+    bool use_paged_kv_cache = false;
+    int64_t paged_kv_max_sequence_length = 0;
     float dropout_probability = 0.0f;
     TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
     TensorDescriptor::DataType dQ_dtype = TensorDescriptor::DataType::FP16;
@@ -519,6 +523,8 @@ class StampedAttention {
                      const std::optional<Tensor>& seq_len_kv,
                      const std::optional<Tensor>& q_ragged_offsets,
                      const std::optional<Tensor>& kv_ragged_offsets,
+                     const std::optional<Tensor>& page_table_k,
+                     const std::optional<Tensor>& page_table_v,
                      const std::optional<Tensor>& dropout_seed,
                      const std::optional<Tensor>& dropout_offset,
                      const Tensor& output,
@@ -535,6 +541,8 @@ class StampedAttention {
     const std::optional<Tensor> seq_len_kv;
     const std::optional<Tensor> q_ragged_offsets;
     const std::optional<Tensor> kv_ragged_offsets;
+    const std::optional<Tensor> page_table_k;
+    const std::optional<Tensor> page_table_v;
     const std::optional<Tensor> dropout_seed;
     const std::optional<Tensor> dropout_offset;
     Tensor output;

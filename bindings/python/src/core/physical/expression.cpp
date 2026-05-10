@@ -411,6 +411,9 @@ Shorthand for ``self.transpose()``.
                                                                  nb::object kv_seq_len_obj,
                                                                  nb::object q_ragged_offsets_obj,
                                                                  nb::object kv_ragged_offsets_obj,
+                                                                 nb::object page_table_k_obj,
+                                                                 nb::object page_table_v_obj,
+                                                                 int64_t paged_kv_max_sequence_length,
                                                                  float dropout_probability,
                                                                  nb::object dropout_seed_obj,
                                                                  nb::object dropout_offset_obj) -> Expression {
@@ -429,12 +432,15 @@ Shorthand for ``self.transpose()``.
         options.output_dtype = parse_optional_dtype(output_dtype_obj);
         options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
         options.dropout_probability = dropout_probability;
+        options.paged_kv_max_sequence_length = paged_kv_max_sequence_length;
 
         const bool has_bias = !bias_obj.is_none();
         const bool has_q_seq_len = !q_seq_len_obj.is_none();
         const bool has_kv_seq_len = !kv_seq_len_obj.is_none();
         const bool has_q_ragged_offsets = !q_ragged_offsets_obj.is_none();
         const bool has_kv_ragged_offsets = !kv_ragged_offsets_obj.is_none();
+        const bool has_page_table_k = !page_table_k_obj.is_none();
+        const bool has_page_table_v = !page_table_v_obj.is_none();
         const bool has_dropout_seed = !dropout_seed_obj.is_none();
         const bool has_dropout_offset = !dropout_offset_obj.is_none();
         const bool uses_dropout = dropout_probability > 0.0f;
@@ -445,8 +451,26 @@ Shorthand for ``self.transpose()``.
         if (has_q_ragged_offsets != has_kv_ragged_offsets) {
             throw std::runtime_error("q_ragged_offsets and kv_ragged_offsets must be provided together for ragged attention.");
         }
+        if (has_page_table_k != has_page_table_v) {
+            throw std::runtime_error("page_table_k and page_table_v must be provided together for paged KV attention.");
+        }
+        if (has_q_ragged_offsets && has_page_table_k) {
+            throw std::runtime_error("ragged attention and paged KV cache cannot be combined.");
+        }
         if ((has_bias || uses_dropout) && has_q_ragged_offsets) {
             throw std::runtime_error("ragged attention cannot currently be combined with additive bias or dropout.");
+        }
+        if (has_page_table_k && has_bias) {
+            throw std::runtime_error("paged KV attention cannot currently be combined with additive bias.");
+        }
+        if (has_page_table_k && uses_dropout) {
+            throw std::runtime_error("paged KV attention is inference-only and cannot currently be combined with dropout.");
+        }
+        if (has_page_table_k && paged_kv_max_sequence_length <= 0) {
+            throw std::runtime_error("paged KV attention requires paged_kv_max_sequence_length > 0.");
+        }
+        if (has_page_table_k && !has_q_seq_len) {
+            throw std::runtime_error("paged KV attention requires q_seq_len and kv_seq_len.");
         }
         if (has_q_ragged_offsets && !has_q_seq_len) {
             throw std::runtime_error(
@@ -464,6 +488,14 @@ Shorthand for ``self.transpose()``.
 
         if (has_q_seq_len) {
             options.use_padding_mask = true;
+        }
+
+        if (has_page_table_k) {
+            const Expression& q_seq_len = nb::cast<Expression>(q_seq_len_obj);
+            const Expression& kv_seq_len = nb::cast<Expression>(kv_seq_len_obj);
+            const Expression& page_table_k = nb::cast<Expression>(page_table_k_obj);
+            const Expression& page_table_v = nb::cast<Expression>(page_table_v_obj);
+            return Expression::scaledDotProductAttentionPagedKv(q, k, v, q_seq_len, kv_seq_len, page_table_k, page_table_v, std::move(options));
         }
 
         if (has_q_ragged_offsets) {
@@ -635,6 +667,9 @@ which is used by autodiff.
                                            nb::object kv_seq_len_obj,
                                            nb::object q_ragged_offsets_obj,
                                            nb::object kv_ragged_offsets_obj,
+                                           nb::object page_table_k_obj,
+                                           nb::object page_table_v_obj,
+                                           int64_t paged_kv_max_sequence_length,
                                            float dropout_probability,
                                            nb::object dropout_seed_obj,
                                            nb::object dropout_offset_obj) {
@@ -657,6 +692,9 @@ which is used by autodiff.
                                                     std::move(kv_seq_len_obj),
                                                     std::move(q_ragged_offsets_obj),
                                                     std::move(kv_ragged_offsets_obj),
+                                                    std::move(page_table_k_obj),
+                                                    std::move(page_table_v_obj),
+                                                    paged_kv_max_sequence_length,
                                                     dropout_probability,
                                                     std::move(dropout_seed_obj),
                                                     std::move(dropout_offset_obj));
@@ -680,6 +718,9 @@ which is used by autodiff.
         "kv_seq_len"_a.none() = nb::none(),
         "q_ragged_offsets"_a.none() = nb::none(),
         "kv_ragged_offsets"_a.none() = nb::none(),
+        "page_table_k"_a.none() = nb::none(),
+        "page_table_v"_a.none() = nb::none(),
+        "paged_kv_max_sequence_length"_a = 0,
         "dropout_probability"_a = 0.0f,
         "dropout_seed"_a.none() = nb::none(),
         "dropout_offset"_a.none() = nb::none(),
@@ -695,6 +736,11 @@ path; compute_dtype should normally be thor.DataType.fp32.
 When q_ragged_offsets and kv_ragged_offsets are provided, they must be INT32 GPU
 tensors with shape [B + 1].  They enable cuDNN packed/ragged variable-length
 attention and are passed through as q/o and k/v ragged offsets respectively.
+
+When page_table_k and page_table_v are provided, they must be INT32 GPU tensors
+with shape [B, 1, ceil(Skv / block_size), 1], where block_size is the K/V
+container block length.  Paged-KV attention requires q_seq_len and kv_seq_len,
+and paged_kv_max_sequence_length must be positive.
 
 When dropout_probability > 0, dropout_seed and dropout_offset must be INT64 GPU
 scalar expressions with shape [1, 1, 1, 1].  They are passed to cuDNN's Philox
@@ -722,6 +768,9 @@ attention dropout path and are part of the attention stage metadata.
                                            nb::object kv_seq_len_obj,
                                            nb::object q_ragged_offsets_obj,
                                            nb::object kv_ragged_offsets_obj,
+                                           nb::object page_table_k_obj,
+                                           nb::object page_table_v_obj,
+                                           int64_t paged_kv_max_sequence_length,
                                            float dropout_probability,
                                            nb::object dropout_seed_obj,
                                            nb::object dropout_offset_obj) {
@@ -744,6 +793,9 @@ attention dropout path and are part of the attention stage metadata.
                                                     std::move(kv_seq_len_obj),
                                                     std::move(q_ragged_offsets_obj),
                                                     std::move(kv_ragged_offsets_obj),
+                                                    std::move(page_table_k_obj),
+                                                    std::move(page_table_v_obj),
+                                                    paged_kv_max_sequence_length,
                                                     dropout_probability,
                                                     std::move(dropout_seed_obj),
                                                     std::move(dropout_offset_obj));
@@ -767,6 +819,9 @@ attention dropout path and are part of the attention stage metadata.
         "kv_seq_len"_a.none() = nb::none(),
         "q_ragged_offsets"_a.none() = nb::none(),
         "kv_ragged_offsets"_a.none() = nb::none(),
+        "page_table_k"_a.none() = nb::none(),
+        "page_table_v"_a.none() = nb::none(),
+        "paged_kv_max_sequence_length"_a = 0,
         "dropout_probability"_a = 0.0f,
         "dropout_seed"_a.none() = nb::none(),
         "dropout_offset"_a.none() = nb::none(),

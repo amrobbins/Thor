@@ -41,7 +41,8 @@ static bool isPassthroughInputDType(DataType dtype) {
 }
 
 static bool isAttentionBackwardOp(ExprOp op) {
-    return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V;
+    return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V ||
+           op == ExprOp::ATTENTION_BACKWARD_BIAS;
 }
 
 static bool isReductionComputeOp(ExprOp op) { return isCudnnReduceOp(op) || op == ExprOp::ATTENTION || isAttentionBackwardOp(op) || op == ExprOp::ROPE; }

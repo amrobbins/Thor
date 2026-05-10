@@ -81,6 +81,7 @@ enum class ExprOp : uint16_t {
     ATTENTION_BACKWARD_Q,
     ATTENTION_BACKWARD_K,
     ATTENTION_BACKWARD_V,
+    ATTENTION_BACKWARD_BIAS,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -171,11 +172,15 @@ struct ExprNode {
     bool attention_use_bias = false;
     bool attention_use_padding_mask = false;
     bool attention_use_ragged_offsets = false;
+    bool attention_use_paged_kv_cache = false;
+    int64_t attention_paged_kv_max_sequence_length = 0;
     float attention_dropout_probability = 0.0f;
     uint32_t attention_seq_len_q_node = UINT32_MAX;
     uint32_t attention_seq_len_kv_node = UINT32_MAX;
     uint32_t attention_ragged_offset_q_node = UINT32_MAX;
     uint32_t attention_ragged_offset_kv_node = UINT32_MAX;
+    uint32_t attention_page_table_k_node = UINT32_MAX;
+    uint32_t attention_page_table_v_node = UINT32_MAX;
     uint32_t attention_dropout_seed_node = UINT32_MAX;
     uint32_t attention_dropout_offset_node = UINT32_MAX;
 
@@ -303,6 +308,8 @@ struct AttentionOptions {
     bool use_alibi_mask = false;
     bool use_padding_mask = false;
     float dropout_probability = 0.0f;
+    bool use_paged_kv_cache = false;
+    int64_t paged_kv_max_sequence_length = 0;
     std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt;
     std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt;
 };
@@ -438,6 +445,14 @@ class Expression {
                                                               const Expression& q_seq_len,
                                                               const Expression& kv_seq_len,
                                                               AttentionOptions options);
+    [[nodiscard]] static Expression scaledDotProductAttentionPagedKv(const Expression& q,
+                                                                     const Expression& k,
+                                                                     const Expression& v,
+                                                                     const Expression& q_seq_len,
+                                                                     const Expression& kv_seq_len,
+                                                                     const Expression& page_table_k,
+                                                                     const Expression& page_table_v,
+                                                                     AttentionOptions options);
     [[nodiscard]] static Expression scaledDotProductAttentionRagged(const Expression& q,
                                                                     const Expression& k,
                                                                     const Expression& v,
@@ -590,6 +605,8 @@ class Expression {
                                                                   const Expression* kv_seq_len,
                                                                   const Expression* q_ragged_offsets,
                                                                   const Expression* kv_ragged_offsets,
+                                                                  const Expression* page_table_k,
+                                                                  const Expression* page_table_v,
                                                                   const Expression* dropout_seed,
                                                                   const Expression* dropout_offset,
                                                                   AttentionOptions options);
