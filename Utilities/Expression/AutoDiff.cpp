@@ -63,6 +63,14 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
             new_node.attention_seq_len_q_node = cloneForwardSubtree(src, src_node.attention_seq_len_q_node, dst, old_to_new);
             new_node.attention_seq_len_kv_node = cloneForwardSubtree(src, src_node.attention_seq_len_kv_node, dst, old_to_new);
         }
+        if (src_node.attention_use_ragged_offsets) {
+            if (src_node.attention_ragged_offset_q_node == UINT32_MAX || src_node.attention_ragged_offset_kv_node == UINT32_MAX) {
+                throw std::runtime_error(
+                    "Malformed attention expression: missing ragged offset node while cloning forward subtree for autodiff.");
+            }
+            new_node.attention_ragged_offset_q_node = cloneForwardSubtree(src, src_node.attention_ragged_offset_q_node, dst, old_to_new);
+            new_node.attention_ragged_offset_kv_node = cloneForwardSubtree(src, src_node.attention_ragged_offset_kv_node, dst, old_to_new);
+        }
         if (src_node.attention_dropout_probability > 0.0f) {
             if (src_node.attention_dropout_seed_node == UINT32_MAX || src_node.attention_dropout_offset_node == UINT32_MAX) {
                 throw std::runtime_error(
@@ -278,6 +286,8 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                              (node.attention_use_bias && node.alpha_node != UINT32_MAX && reaches.at(node.alpha_node)) ||
                              (node.attention_use_padding_mask && node.attention_seq_len_q_node != UINT32_MAX && reaches.at(node.attention_seq_len_q_node)) ||
                              (node.attention_use_padding_mask && node.attention_seq_len_kv_node != UINT32_MAX && reaches.at(node.attention_seq_len_kv_node)) ||
+                             (node.attention_use_ragged_offsets && node.attention_ragged_offset_q_node != UINT32_MAX && reaches.at(node.attention_ragged_offset_q_node)) ||
+                             (node.attention_use_ragged_offsets && node.attention_ragged_offset_kv_node != UINT32_MAX && reaches.at(node.attention_ragged_offset_kv_node)) ||
                              (node.attention_dropout_probability > 0.0f && node.attention_dropout_seed_node != UINT32_MAX && reaches.at(node.attention_dropout_seed_node)) ||
                              (node.attention_dropout_probability > 0.0f && node.attention_dropout_offset_node != UINT32_MAX && reaches.at(node.attention_dropout_offset_node));
                 break;
@@ -288,6 +298,8 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                              (node.attention_use_bias && node.beta_node != UINT32_MAX && reaches.at(node.beta_node)) ||
                              (node.attention_use_padding_mask && node.attention_seq_len_q_node != UINT32_MAX && reaches.at(node.attention_seq_len_q_node)) ||
                              (node.attention_use_padding_mask && node.attention_seq_len_kv_node != UINT32_MAX && reaches.at(node.attention_seq_len_kv_node)) ||
+                             (node.attention_use_ragged_offsets && node.attention_ragged_offset_q_node != UINT32_MAX && reaches.at(node.attention_ragged_offset_q_node)) ||
+                             (node.attention_use_ragged_offsets && node.attention_ragged_offset_kv_node != UINT32_MAX && reaches.at(node.attention_ragged_offset_kv_node)) ||
                              (node.attention_dropout_probability > 0.0f && node.attention_dropout_seed_node != UINT32_MAX && reaches.at(node.attention_dropout_seed_node)) ||
                              (node.attention_dropout_probability > 0.0f && node.attention_dropout_offset_node != UINT32_MAX && reaches.at(node.attention_dropout_offset_node));
                 break;
@@ -855,9 +867,12 @@ class BackwardGraphBuilder {
         node.attention_use_alibi_mask = forward_attention.attention_use_alibi_mask;
         node.attention_use_bias = forward_attention.attention_use_bias;
         node.attention_use_padding_mask = forward_attention.attention_use_padding_mask;
+        node.attention_use_ragged_offsets = forward_attention.attention_use_ragged_offsets;
         node.attention_dropout_probability = forward_attention.attention_dropout_probability;
         node.attention_seq_len_q_node = forward_attention.attention_seq_len_q_node;
         node.attention_seq_len_kv_node = forward_attention.attention_seq_len_kv_node;
+        node.attention_ragged_offset_q_node = forward_attention.attention_ragged_offset_q_node;
+        node.attention_ragged_offset_kv_node = forward_attention.attention_ragged_offset_kv_node;
         node.attention_dropout_seed_node = forward_attention.attention_dropout_seed_node;
         node.attention_dropout_offset_node = forward_attention.attention_dropout_offset_node;
         if (output_dtype.has_value()) {
@@ -2612,6 +2627,10 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 if (node.attention_use_padding_mask) {
                     attention_for_backward.attention_seq_len_q_node = builder.cloneForward(node.attention_seq_len_q_node);
                     attention_for_backward.attention_seq_len_kv_node = builder.cloneForward(node.attention_seq_len_kv_node);
+                }
+                if (node.attention_use_ragged_offsets) {
+                    attention_for_backward.attention_ragged_offset_q_node = builder.cloneForward(node.attention_ragged_offset_q_node);
+                    attention_for_backward.attention_ragged_offset_kv_node = builder.cloneForward(node.attention_ragged_offset_kv_node);
                 }
                 if (node.attention_dropout_probability > 0.0f) {
                     attention_for_backward.attention_dropout_seed_node = builder.cloneForward(node.attention_dropout_seed_node);

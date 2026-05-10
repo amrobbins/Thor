@@ -552,6 +552,10 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
             addExternalValue(node.attention_seq_len_q_node);
             addExternalValue(node.attention_seq_len_kv_node);
         }
+        if (node.op == ExprOp::ATTENTION && node.attention_use_ragged_offsets) {
+            addExternalValue(node.attention_ragged_offset_q_node);
+            addExternalValue(node.attention_ragged_offset_kv_node);
+        }
         if (node.op == ExprOp::ATTENTION && node.attention_dropout_probability > 0.0f) {
             addExternalValue(node.attention_dropout_seed_node);
             addExternalValue(node.attention_dropout_offset_node);
@@ -564,6 +568,10 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
             if (node.attention_use_padding_mask) {
                 addExternalValue(node.attention_seq_len_q_node);
                 addExternalValue(node.attention_seq_len_kv_node);
+            }
+            if (node.attention_use_ragged_offsets) {
+                addExternalValue(node.attention_ragged_offset_q_node);
+                addExternalValue(node.attention_ragged_offset_kv_node);
             }
             if (node.attention_dropout_probability > 0.0f) {
                 addExternalValue(node.attention_dropout_seed_node);
@@ -844,9 +852,14 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0) +
                 ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0) +
                 ",padding=" + std::to_string(node.attention_use_padding_mask ? 1 : 0) +
+                ",ragged=" + std::to_string(node.attention_use_ragged_offsets ? 1 : 0) +
                 ",dropout=" + formatFloatCanonical(node.attention_dropout_probability);
             if (node.attention_use_bias && node.alpha_node != UINT32_MAX) {
                 s += ",biasNode=" + fusedRegionSignatureRec(expr, node.alpha_node);
+            }
+            if (node.attention_use_ragged_offsets) {
+                s += ",raggedQ=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_q_node);
+                s += ",raggedKV=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_kv_node);
             }
             if (node.attention_dropout_probability > 0.0f) {
                 s += ",dropoutSeed=" + fusedRegionSignatureRec(expr, node.attention_dropout_seed_node);
@@ -870,9 +883,14 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0) +
                 ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0) +
                 ",padding=" + std::to_string(node.attention_use_padding_mask ? 1 : 0) +
+                ",ragged=" + std::to_string(node.attention_use_ragged_offsets ? 1 : 0) +
                 ",dropout=" + formatFloatCanonical(node.attention_dropout_probability);
             if (node.attention_use_bias && node.beta_node != UINT32_MAX) {
                 s += ",biasNode=" + fusedRegionSignatureRec(expr, node.beta_node);
+            }
+            if (node.attention_use_ragged_offsets) {
+                s += ",raggedQ=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_q_node);
+                s += ",raggedKV=" + fusedRegionSignatureRec(expr, node.attention_ragged_offset_kv_node);
             }
             if (node.attention_dropout_probability > 0.0f) {
                 s += ",dropoutSeed=" + fusedRegionSignatureRec(expr, node.attention_dropout_seed_node);
@@ -1489,9 +1507,9 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
         throw std::runtime_error("Attention stage output node is not ATTENTION.");
     }
     const uint32_t expected_attention_inputs = 3u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u) +
-        (node.attention_dropout_probability > 0.0f ? 2u : 0u);
+        (node.attention_use_ragged_offsets ? 2u : 0u) + (node.attention_dropout_probability > 0.0f ? 2u : 0u);
     if (expr.numInputs() != expected_attention_inputs) {
-        throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, and optional dropout seed/offset.");
+        throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional ragged offsets, and optional dropout seed/offset.");
     }
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX) {
         throw std::runtime_error("Attention node is missing q/k/v inputs.");
@@ -1528,6 +1546,16 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
         const ExprNode& kv_len = validate_local_input(node.attention_seq_len_kv_node, "kv_seq_len");
         if (q_len.input_tensor_dtype.value() != DataType::INT32 || kv_len.input_tensor_dtype.value() != DataType::INT32) {
             throw std::runtime_error("Attention padding-mask sequence length inputs must be INT32 tensors.");
+        }
+    }
+    if (node.attention_use_ragged_offsets) {
+        if (node.attention_ragged_offset_q_node == UINT32_MAX || node.attention_ragged_offset_kv_node == UINT32_MAX) {
+            throw std::runtime_error("Attention node marked as using ragged offsets but is missing q/kv ragged offset inputs.");
+        }
+        const ExprNode& q_offsets = validate_local_input(node.attention_ragged_offset_q_node, "q_ragged_offsets");
+        const ExprNode& kv_offsets = validate_local_input(node.attention_ragged_offset_kv_node, "kv_ragged_offsets");
+        if (q_offsets.input_tensor_dtype.value() != DataType::INT32 || kv_offsets.input_tensor_dtype.value() != DataType::INT32) {
+            throw std::runtime_error("Attention ragged offset inputs must be INT32 tensors.");
         }
     }
     if (node.attention_dropout_probability > 0.0f) {
@@ -1568,6 +1596,7 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     compiled->use_alibi_mask = node.attention_use_alibi_mask;
     compiled->use_bias = node.attention_use_bias;
     compiled->use_padding_mask = node.attention_use_padding_mask;
+    compiled->use_ragged_offsets = node.attention_use_ragged_offsets;
     compiled->dropout_probability = node.attention_dropout_probability;
     compiled->compute_dtype = node.compute_dtype.value();
     compiled->output_dtype = node.output_dtype.value();
@@ -1584,9 +1613,9 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
         throw std::runtime_error("Attention-backward stage output node is not an attention backward op.");
     }
     const uint32_t expected_attention_backward_inputs = 4u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u) +
-        (node.attention_dropout_probability > 0.0f ? 2u : 0u);
+        (node.attention_use_ragged_offsets ? 2u : 0u) + (node.attention_dropout_probability > 0.0f ? 2u : 0u);
     if (expr.numInputs() != expected_attention_backward_inputs) {
-        throw std::runtime_error("Attention-backward stage input count mismatch for q/k/v/dO plus optional bias, optional q/kv sequence lengths, and optional dropout seed/offset.");
+        throw std::runtime_error("Attention-backward stage input count mismatch for q/k/v/dO plus optional bias, optional q/kv sequence lengths, optional ragged offsets, and optional dropout seed/offset.");
     }
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX || node.alpha_node == UINT32_MAX) {
         throw std::runtime_error("Attention-backward node is missing q/k/v/dO input(s).");
@@ -1626,6 +1655,16 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
             throw std::runtime_error("Attention-backward padding-mask sequence length inputs must be INT32 tensors.");
         }
     }
+    if (node.attention_use_ragged_offsets) {
+        if (node.attention_ragged_offset_q_node == UINT32_MAX || node.attention_ragged_offset_kv_node == UINT32_MAX) {
+            throw std::runtime_error("Attention-backward node marked as using ragged offsets but is missing q/kv ragged offset inputs.");
+        }
+        const ExprNode& q_offsets = validate_local_input(node.attention_ragged_offset_q_node, "q_ragged_offsets");
+        const ExprNode& kv_offsets = validate_local_input(node.attention_ragged_offset_kv_node, "kv_ragged_offsets");
+        if (q_offsets.input_tensor_dtype.value() != DataType::INT32 || kv_offsets.input_tensor_dtype.value() != DataType::INT32) {
+            throw std::runtime_error("Attention-backward ragged offset inputs must be INT32 tensors.");
+        }
+    }
     if (node.attention_dropout_probability > 0.0f) {
         if (node.attention_dropout_seed_node == UINT32_MAX || node.attention_dropout_offset_node == UINT32_MAX) {
             throw std::runtime_error("Attention-backward node marked as using dropout but is missing seed/offset inputs.");
@@ -1659,6 +1698,7 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     compiled->use_alibi_mask = node.attention_use_alibi_mask;
     compiled->use_bias = node.attention_use_bias;
     compiled->use_padding_mask = node.attention_use_padding_mask;
+    compiled->use_ragged_offsets = node.attention_use_ragged_offsets;
     compiled->dropout_probability = node.attention_dropout_probability;
     compiled->compute_dtype = node.compute_dtype.value();
     compiled->dQ_dtype = q.output_dtype.value();
@@ -2510,7 +2550,7 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
     PhysicalExpression stage_expr;
     std::vector<uint32_t> input_value_ids;
     input_value_ids.reserve(3 + (node.attention_use_bias ? 1 : 0) + (node.attention_use_padding_mask ? 2 : 0) +
-                            (node.attention_dropout_probability > 0.0f ? 2 : 0));
+                            (node.attention_use_ragged_offsets ? 2 : 0) + (node.attention_dropout_probability > 0.0f ? 2 : 0));
 
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
@@ -2576,6 +2616,17 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
         forceAttentionSeqLenLocalInputDType(stage_expr, q_seq_len_local, "q_seq_len");
         forceAttentionSeqLenLocalInputDType(stage_expr, kv_seq_len_local, "kv_seq_len");
     }
+    uint32_t q_ragged_offset_local = UINT32_MAX;
+    uint32_t kv_ragged_offset_local = UINT32_MAX;
+    if (node.attention_use_ragged_offsets) {
+        if (node.attention_ragged_offset_q_node == UINT32_MAX || node.attention_ragged_offset_kv_node == UINT32_MAX) {
+            throw std::runtime_error("Attention node marked as using ragged offsets but missing q/kv ragged offset inputs.");
+        }
+        q_ragged_offset_local = bind_parent_to_local_tensor_input(node.attention_ragged_offset_q_node, next_local_slot++);
+        kv_ragged_offset_local = bind_parent_to_local_tensor_input(node.attention_ragged_offset_kv_node, next_local_slot++);
+        forceAttentionSeqLenLocalInputDType(stage_expr, q_ragged_offset_local, "q_ragged_offsets");
+        forceAttentionSeqLenLocalInputDType(stage_expr, kv_ragged_offset_local, "kv_ragged_offsets");
+    }
     uint32_t dropout_seed_local = UINT32_MAX;
     uint32_t dropout_offset_local = UINT32_MAX;
     if (node.attention_dropout_probability > 0.0f) {
@@ -2596,6 +2647,8 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
     route.beta_node = UINT32_MAX;
     route.attention_seq_len_q_node = q_seq_len_local;
     route.attention_seq_len_kv_node = kv_seq_len_local;
+    route.attention_ragged_offset_q_node = q_ragged_offset_local;
+    route.attention_ragged_offset_kv_node = kv_ragged_offset_local;
     route.attention_dropout_seed_node = dropout_seed_local;
     route.attention_dropout_offset_node = dropout_offset_local;
     stage_expr.nodes.push_back(std::move(route));
@@ -2632,7 +2685,7 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
     PhysicalExpression stage_expr;
     std::vector<uint32_t> input_value_ids;
     input_value_ids.reserve(4 + (node.attention_use_bias ? 1 : 0) + (node.attention_use_padding_mask ? 2 : 0) +
-                            (node.attention_dropout_probability > 0.0f ? 2 : 0));
+                            (node.attention_use_ragged_offsets ? 2 : 0) + (node.attention_dropout_probability > 0.0f ? 2 : 0));
 
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
@@ -2699,6 +2752,18 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
         forceAttentionSeqLenLocalInputDType(stage_expr, q_seq_len_local, "q_seq_len");
         forceAttentionSeqLenLocalInputDType(stage_expr, kv_seq_len_local, "kv_seq_len");
     }
+    uint32_t q_ragged_offset_local = UINT32_MAX;
+    uint32_t kv_ragged_offset_local = UINT32_MAX;
+    if (node.attention_use_ragged_offsets) {
+        if (node.attention_ragged_offset_q_node == UINT32_MAX || node.attention_ragged_offset_kv_node == UINT32_MAX) {
+            throw std::runtime_error("Attention-backward node marked as using ragged offsets but missing q/kv ragged offset inputs.");
+        }
+        q_ragged_offset_local = bind_parent_to_local_tensor_input(node.attention_ragged_offset_q_node, next_local_slot++);
+        kv_ragged_offset_local = bind_parent_to_local_tensor_input(node.attention_ragged_offset_kv_node, next_local_slot++);
+        forceAttentionSeqLenLocalInputDType(stage_expr, q_ragged_offset_local, "q_ragged_offsets");
+        forceAttentionSeqLenLocalInputDType(stage_expr, kv_ragged_offset_local, "kv_ragged_offsets");
+    }
+
     uint32_t dropout_seed_local = UINT32_MAX;
     uint32_t dropout_offset_local = UINT32_MAX;
     if (node.attention_dropout_probability > 0.0f) {
@@ -2719,6 +2784,8 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
     route.beta_node = bias_local;
     route.attention_seq_len_q_node = q_seq_len_local;
     route.attention_seq_len_kv_node = kv_seq_len_local;
+    route.attention_ragged_offset_q_node = q_ragged_offset_local;
+    route.attention_ragged_offset_kv_node = kv_ragged_offset_local;
     route.attention_dropout_seed_node = dropout_seed_local;
     route.attention_dropout_offset_node = dropout_offset_local;
     stage_expr.nodes.push_back(std::move(route));
@@ -2760,6 +2827,7 @@ static std::string attentionBackwardMergeKey(const PhysicalExecutionStage& stage
     key += ";alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0);
     key += ";bias=" + std::to_string(node.attention_use_bias ? 1 : 0);
     key += ";padding=" + std::to_string(node.attention_use_padding_mask ? 1 : 0);
+    key += ";ragged=" + std::to_string(node.attention_use_ragged_offsets ? 1 : 0);
     key += ";dropout=" + formatFloatCanonical(node.attention_dropout_probability);
     key += ";compute=" + optionalDTypeSignature(node.compute_dtype);
     return key;
@@ -3289,6 +3357,10 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
                 ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
             }
+            if (root.op == ExprOp::ATTENTION && root.attention_use_ragged_offsets) {
+                ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets", false);
+                ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets", false);
+            }
             if (root.op == ExprOp::ATTENTION && root.attention_dropout_probability > 0.0f) {
                 ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed", false);
                 ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset", false);
@@ -3301,6 +3373,10 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 if (root.attention_use_padding_mask) {
                     ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
                     ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
+                }
+                if (root.attention_use_ragged_offsets) {
+                    ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets", false);
+                    ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets", false);
                 }
                 if (root.attention_dropout_probability > 0.0f) {
                     ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed", false);
@@ -3517,6 +3593,10 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
                 ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
             }
+            if (root.op == ExprOp::ATTENTION && root.attention_use_ragged_offsets) {
+                ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets", false);
+                ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets", false);
+            }
             if (root.op == ExprOp::ATTENTION && root.attention_dropout_probability > 0.0f) {
                 ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed", false);
                 ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset", false);
@@ -3529,6 +3609,10 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 if (root.attention_use_padding_mask) {
                     ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
                     ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
+                }
+                if (root.attention_use_ragged_offsets) {
+                    ensureBoundaryParentEmitted(root.attention_ragged_offset_q_node, "q_ragged_offsets", false);
+                    ensureBoundaryParentEmitted(root.attention_ragged_offset_kv_node, "kv_ragged_offsets", false);
                 }
                 if (root.attention_dropout_probability > 0.0f) {
                     ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed", false);

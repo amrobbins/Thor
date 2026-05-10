@@ -966,6 +966,20 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
         if (stage_input_dims.at(next_optional_idx) != expected_seq_dims || stage_input_dims.at(next_optional_idx + 1) != expected_seq_dims) {
             throw std::runtime_error("Attention padding-mask sequence lengths must have shape [B].");
         }
+        next_optional_idx += 2;
+    }
+    if (compiled_stage.use_ragged_offsets) {
+        if (stage_input_dims.size() <= next_optional_idx + 1) {
+            throw std::runtime_error("Attention stage with ragged offsets expected q_ragged_offsets and kv_ragged_offsets input shapes.");
+        }
+        const std::vector<uint64_t> expected_offset_dims{batch + 1};
+        if (stage_input_dims.at(next_optional_idx) != expected_offset_dims) {
+            throw std::runtime_error("Attention ragged q_offsets shape must be [B + 1].");
+        }
+        if (stage_input_dims.at(next_optional_idx + 1) != expected_offset_dims) {
+            throw std::runtime_error("Attention ragged kv_offsets shape must be [B + 1].");
+        }
+        next_optional_idx += 2;
     }
 
     return std::vector<uint64_t>{batch, query_heads, query_len, v_dim};
@@ -986,6 +1000,7 @@ static CompiledAttention makeForwardAttentionView(const CompiledAttentionBackwar
     forward.use_alibi_mask = backward.use_alibi_mask;
     forward.use_bias = backward.use_bias;
     forward.use_padding_mask = backward.use_padding_mask;
+    forward.use_ragged_offsets = backward.use_ragged_offsets;
     forward.dropout_probability = backward.dropout_probability;
     forward.compute_dtype = backward.compute_dtype;
     forward.output_dtype = output_dtype;
@@ -1004,13 +1019,22 @@ static std::vector<uint64_t> resolveAttentionBackwardOutputDimsFromInputs(const 
     if (compiled_stage.use_bias && stage_input_dims.size() >= 5) {
         forward_input_dims.push_back(stage_input_dims.at(4));
     }
+    size_t next_optional_idx = 4 + (compiled_stage.use_bias ? 1 : 0);
     if (compiled_stage.use_padding_mask) {
-        const size_t seq_start = 4 + (compiled_stage.use_bias ? 1 : 0);
-        if (stage_input_dims.size() <= seq_start + 1) {
+        if (stage_input_dims.size() <= next_optional_idx + 1) {
             throw std::runtime_error("Attention-backward stage with padding mask expected q_seq_len and kv_seq_len input shapes.");
         }
-        forward_input_dims.push_back(stage_input_dims.at(seq_start));
-        forward_input_dims.push_back(stage_input_dims.at(seq_start + 1));
+        forward_input_dims.push_back(stage_input_dims.at(next_optional_idx));
+        forward_input_dims.push_back(stage_input_dims.at(next_optional_idx + 1));
+        next_optional_idx += 2;
+    }
+    if (compiled_stage.use_ragged_offsets) {
+        if (stage_input_dims.size() <= next_optional_idx + 1) {
+            throw std::runtime_error("Attention-backward stage with ragged offsets expected q_ragged_offsets and kv_ragged_offsets input shapes.");
+        }
+        forward_input_dims.push_back(stage_input_dims.at(next_optional_idx));
+        forward_input_dims.push_back(stage_input_dims.at(next_optional_idx + 1));
+        next_optional_idx += 2;
     }
     const std::vector<uint64_t> forward_out_dims = resolveAttentionOutputDimsFromInputs(
         makeForwardAttentionView(compiled_stage, compiled_stage.dQ_dtype), forward_input_dims);
@@ -2368,6 +2392,21 @@ static uint64_t computeAttentionBackwardStageFlops(const CompiledAttentionBackwa
         }
         forward_input_dims.push_back(stage_input_dims.at(next_optional_idx++));
         forward_input_dims.push_back(stage_input_dims.at(next_optional_idx++));
+    }
+    if (attention_backward.use_ragged_offsets) {
+        if (stage_input_dims.size() <= next_optional_idx + 1) {
+            throw std::runtime_error(
+                "AttentionBackward FLOP accounting expected q/k/v/dO plus q/kv ragged offset input dims for ragged attention.");
+        }
+        forward_input_dims.push_back(stage_input_dims.at(next_optional_idx++));
+        forward_input_dims.push_back(stage_input_dims.at(next_optional_idx++));
+    }
+    if (attention_backward.dropout_probability > 0.0f) {
+        if (stage_input_dims.size() <= next_optional_idx + 1) {
+            throw std::runtime_error(
+                "AttentionBackward FLOP accounting expected q/k/v/dO plus dropout seed/offset input dims for dropout attention.");
+        }
+        next_optional_idx += 2;
     }
     const uint64_t forward = computeAttentionStageFlops(
         makeForwardAttentionView(attention_backward, attention_backward.dQ_dtype), forward_input_dims);
@@ -4583,6 +4622,8 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
                                                                 const std::optional<Tensor>& bias,
                                                                 const std::optional<Tensor>& seq_len_q,
                                                                 const std::optional<Tensor>& seq_len_kv,
+                                                                const std::optional<Tensor>& q_ragged_offsets,
+                                                                const std::optional<Tensor>& kv_ragged_offsets,
                                                                 const std::optional<Tensor>& dropout_seed,
                                                                 const std::optional<Tensor>& dropout_offset,
                                                                 std::optional<Tensor> preallocatedOutput,
@@ -4613,6 +4654,13 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         }
         stage_input_dims.push_back(seq_len_q->getDimensions());
         stage_input_dims.push_back(seq_len_kv->getDimensions());
+    }
+    if (compiledStage->use_ragged_offsets) {
+        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
+            throw std::runtime_error("stampAttention requires q/kv ragged offset tensors for ragged attention.");
+        }
+        stage_input_dims.push_back(q_ragged_offsets->getDimensions());
+        stage_input_dims.push_back(kv_ragged_offsets->getDimensions());
     }
     if (compiledStage->dropout_probability > 0.0f) {
         if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
@@ -4658,6 +4706,24 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         validate_seq_len(seq_len_q, "q_seq_len");
         validate_seq_len(seq_len_kv, "kv_seq_len");
     }
+    if (compiledStage->use_ragged_offsets) {
+        auto validate_ragged_offset = [&](const std::optional<Tensor>& tensor, const char* label) {
+            if (!tensor.has_value()) {
+                throw std::runtime_error(std::string("Attention ragged missing ") + label + " tensor.");
+            }
+            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+                throw std::runtime_error(std::string("Attention ragged ") + label + " placement must match q.");
+            }
+            if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
+                throw std::runtime_error(std::string("Attention ragged ") + label + " dtype must be INT32.");
+            }
+            if (tensor->getDimensions() != std::vector<uint64_t>{adaptedQ.getDimensions().at(0) + 1}) {
+                throw std::runtime_error(std::string("Attention ragged ") + label + " shape must be [B + 1].");
+            }
+        };
+        validate_ragged_offset(q_ragged_offsets, "q_offsets");
+        validate_ragged_offset(kv_ragged_offsets, "kv_offsets");
+    }
     if (compiledStage->dropout_probability > 0.0f) {
         auto validate_dropout_scalar = [&](const std::optional<Tensor>& tensor, const char* label) {
             if (!tensor.has_value()) {
@@ -4695,7 +4761,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
     }
 
     return make_shared<StampedAttention>(
-        compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, seq_len_q, seq_len_kv, dropout_seed, dropout_offset, output, stream, std::move(forward_state));
+        compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, seq_len_q, seq_len_kv, q_ragged_offsets, kv_ragged_offsets, dropout_seed, dropout_offset, output, stream, std::move(forward_state));
 }
 
 std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
@@ -4706,6 +4772,8 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     const std::optional<Tensor>& bias,
     const std::optional<Tensor>& seq_len_q,
     const std::optional<Tensor>& seq_len_kv,
+    const std::optional<Tensor>& q_ragged_offsets,
+    const std::optional<Tensor>& kv_ragged_offsets,
     const std::optional<Tensor>& dropout_seed,
     const std::optional<Tensor>& dropout_offset,
     const Tensor& dO,
@@ -4742,6 +4810,15 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         forward_input_dims.push_back(seq_len_kv->getDimensions());
         stage_input_dims.push_back(seq_len_q->getDimensions());
         stage_input_dims.push_back(seq_len_kv->getDimensions());
+    }
+    if (compiledStage->use_ragged_offsets) {
+        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
+            throw std::runtime_error("stampAttentionBackward requires q/kv ragged offset tensors for ragged attention.");
+        }
+        forward_input_dims.push_back(q_ragged_offsets->getDimensions());
+        forward_input_dims.push_back(kv_ragged_offsets->getDimensions());
+        stage_input_dims.push_back(q_ragged_offsets->getDimensions());
+        stage_input_dims.push_back(kv_ragged_offsets->getDimensions());
     }
     if (compiledStage->dropout_probability > 0.0f) {
         if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
@@ -4803,6 +4880,24 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         validate_seq_len(seq_len_q, "q_seq_len");
         validate_seq_len(seq_len_kv, "kv_seq_len");
     }
+    if (compiledStage->use_ragged_offsets) {
+        auto validate_ragged_offset = [&](const std::optional<Tensor>& tensor, const char* label) {
+            if (!tensor.has_value()) {
+                throw std::runtime_error(std::string("Attention-backward ragged missing ") + label + " tensor.");
+            }
+            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+                throw std::runtime_error(std::string("Attention-backward ragged ") + label + " placement must match q.");
+            }
+            if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
+                throw std::runtime_error(std::string("Attention-backward ragged ") + label + " dtype must be INT32.");
+            }
+            if (tensor->getDimensions() != std::vector<uint64_t>{adaptedQ.getDimensions().at(0) + 1}) {
+                throw std::runtime_error(std::string("Attention-backward ragged ") + label + " shape must be [B + 1].");
+            }
+        };
+        validate_ragged_offset(q_ragged_offsets, "q_offsets");
+        validate_ragged_offset(kv_ragged_offsets, "kv_offsets");
+    }
     if (compiledStage->dropout_probability > 0.0f) {
         auto validate_dropout_scalar = [&](const std::optional<Tensor>& tensor, const char* label) {
             if (!tensor.has_value()) {
@@ -4839,6 +4934,8 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
                                                  adaptedBias,
                                                  seq_len_q,
                                                  seq_len_kv,
+                                                 q_ragged_offsets,
+                                                 kv_ragged_offsets,
                                                  dropout_seed,
                                                  dropout_offset,
                                                  adaptedDO,
@@ -5366,9 +5463,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     throw std::runtime_error("Attention stage missing compiled payload.");
                 }
                 const size_t expected_attention_stage_inputs = 3 + (stage.attention->use_bias ? 1 : 0) + (stage.attention->use_padding_mask ? 2 : 0) +
-                    (stage.attention->dropout_probability > 0.0f ? 2 : 0);
+                    (stage.attention->use_ragged_offsets ? 2 : 0) + (stage.attention->dropout_probability > 0.0f ? 2 : 0);
                 if (stageInputs.size() != expected_attention_stage_inputs) {
-                    throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, and optional dropout seed/offset.");
+                    throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional ragged offsets, and optional dropout seed/offset.");
                 }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Attention stage expects exactly one output.");
@@ -5386,6 +5483,12 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (stage.attention->use_padding_mask) {
                     seqLenQTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
                     seqLenKvTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                }
+                std::optional<Tensor> qRaggedOffsetsTensor = std::nullopt;
+                std::optional<Tensor> kvRaggedOffsetsTensor = std::nullopt;
+                if (stage.attention->use_ragged_offsets) {
+                    qRaggedOffsetsTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    kvRaggedOffsetsTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
                 }
                 std::optional<Tensor> dropoutSeedTensor = std::nullopt;
                 std::optional<Tensor> dropoutOffsetTensor = std::nullopt;
@@ -5408,6 +5511,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                                                     biasTensor,
                                                                                     seqLenQTensor,
                                                                                     seqLenKvTensor,
+                                                                                    qRaggedOffsetsTensor,
+                                                                                    kvRaggedOffsetsTensor,
                                                                                     dropoutSeedTensor,
                                                                                     dropoutOffsetTensor,
                                                                                     preallocated,
@@ -5431,10 +5536,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 const size_t expected_attention_backward_stage_inputs =
                     4 + (stage.attention_backward && stage.attention_backward->use_bias ? 1 : 0) +
                     (stage.attention_backward && stage.attention_backward->use_padding_mask ? 2 : 0) +
+                    (stage.attention_backward && stage.attention_backward->use_ragged_offsets ? 2 : 0) +
                     (stage.attention_backward && stage.attention_backward->dropout_probability > 0.0f ? 2 : 0);
                 if (stageInputs.size() != expected_attention_backward_stage_inputs) {
                     throw std::runtime_error(
-                        "Attention-backward stage input count mismatch for q/k/v/dO plus optional bias, optional q/kv sequence lengths, and optional dropout seed/offset.");
+                        "Attention-backward stage input count mismatch for q/k/v/dO plus optional bias, optional q/kv sequence lengths, optional ragged offsets, and optional dropout seed/offset.");
                 }
                 Tensor qTensor = runtimeInputTensor(stageInputs[0]);
                 Tensor kTensor = runtimeInputTensor(stageInputs[1]);
@@ -5450,6 +5556,12 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (stage.attention_backward && stage.attention_backward->use_padding_mask) {
                     seqLenQTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
                     seqLenKvTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
+                }
+                std::optional<Tensor> qRaggedOffsetsTensor = std::nullopt;
+                std::optional<Tensor> kvRaggedOffsetsTensor = std::nullopt;
+                if (stage.attention_backward && stage.attention_backward->use_ragged_offsets) {
+                    qRaggedOffsetsTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
+                    kvRaggedOffsetsTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
                 }
                 std::optional<Tensor> dropoutSeedTensor = std::nullopt;
                 std::optional<Tensor> dropoutOffsetTensor = std::nullopt;
@@ -5492,6 +5604,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                                                biasTensor,
                                                                                seqLenQTensor,
                                                                                seqLenKvTensor,
+                                                                               qRaggedOffsetsTensor,
+                                                                               kvRaggedOffsetsTensor,
                                                                                dropoutSeedTensor,
                                                                                dropoutOffsetTensor,
                                                                                dOTensor)) {
@@ -5513,6 +5627,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                                                                              biasTensor,
                                                                                                              seqLenQTensor,
                                                                                                              seqLenKvTensor,
+                                                                                                             qRaggedOffsetsTensor,
+                                                                                                             kvRaggedOffsetsTensor,
                                                                                                              dropoutSeedTensor,
                                                                                                              dropoutOffsetTensor,
                                                                                                              dOTensor,

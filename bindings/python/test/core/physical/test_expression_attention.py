@@ -43,6 +43,44 @@ def _host_to_gpu(arr: np.ndarray, dtype: thor.DataType, stream: Stream, gpu_num:
     return device
 
 
+def _ragged_element_offsets(lengths: np.ndarray, heads: int, dim: int) -> np.ndarray:
+    element_offsets = np.zeros((len(lengths) + 1,), dtype=np.int32)
+    element_offsets[1:] = np.cumsum(lengths.astype(np.int64) * np.int64(heads) * np.int64(dim)).astype(np.int32)
+    return element_offsets
+
+
+def _pack_bshd_ragged_storage(logical: np.ndarray, lengths: np.ndarray) -> np.ndarray:
+    # cuDNN ragged offsets index packed THD/token-contiguous storage in element offsets.  Thor tensors still carry
+    # semantic [B,H,S,D] dimensions here, so tests fill the underlying row-major buffer with BSHD/THD physical order.
+    batch, heads, sequence_length, head_dim = logical.shape
+    packed = np.zeros_like(logical)
+    flat = packed.reshape(-1)
+    cursor = 0
+    for b in range(batch):
+        valid = int(lengths[b])
+        token_contiguous = logical[b, :, :valid, :].transpose(1, 0, 2).reshape(-1)
+        flat[cursor:cursor + token_contiguous.size] = token_contiguous
+        cursor += token_contiguous.size
+    return packed
+
+
+def _packed_bshd_ragged_valid_values(storage: np.ndarray, lengths: np.ndarray) -> np.ndarray:
+    batch, heads, _, head_dim = storage.shape
+    offsets = _ragged_element_offsets(lengths, heads, head_dim)
+    flat = storage.reshape(-1)
+    pieces = [flat[int(offsets[b]):int(offsets[b + 1])] for b in range(batch)]
+    return np.concatenate(pieces) if pieces else np.asarray([], dtype=storage.dtype)
+
+
+def _assert_packed_bshd_ragged_close(got: np.ndarray, expected: np.ndarray, lengths: np.ndarray):
+    np.testing.assert_allclose(
+        _packed_bshd_ragged_valid_values(got, lengths).astype(np.float32),
+        _packed_bshd_ragged_valid_values(expected, lengths).astype(np.float32),
+        rtol=5e-2,
+        atol=5e-2,
+    )
+
+
 def _copy_to_host(tensor: PhysicalTensor, dtype: thor.DataType, stream: Stream) -> np.ndarray:
     host = _cpu_tensor(list(tensor.dimensions), dtype)
     host.copy_from_async(tensor, stream)
@@ -481,6 +519,515 @@ def test_attention_forward_sliding_window_bottom_right_decode_mask_matches_refer
     stamped.run()
     got = _copy_to_host(stamped.output(), dtype, stream)
     _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+
+
+
+@pytest.mark.cuda
+def test_attention_forward_ragged_offsets_plans_single_stage_and_validates_shape():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    scale = 0.61 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
+    q_lengths = np.asarray([6, 4], dtype=np.int32)
+    kv_lengths = np.asarray([7, 5], dtype=np.int32)
+    q_offsets_np = _ragged_element_offsets(q_lengths, heads=2, dim=16)
+    kv_offsets_np = _ragged_element_offsets(kv_lengths, heads=2, dim=16)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(q_offsets_np, thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(kv_offsets_np, thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 2, 6, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    assert list(stamped.output().dimensions) == [2, 2, 6, 16]
+
+
+
+@pytest.mark.cuda
+def test_attention_forward_ragged_offsets_bshd_packed_matches_reference():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    scale = 0.58 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
+    q_lengths = np.asarray([4, 2], dtype=np.int32)
+    kv_lengths = np.asarray([5, 3], dtype=np.int32)
+    expected = _attention_reference(q_np, k_np, v_np, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
+    expected_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected, dtype), q_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 2, 6, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got_storage = _copy_to_host(stamped.output(), dtype, stream)
+    got_valid = _packed_bshd_ragged_valid_values(got_storage, q_lengths).astype(np.float32)
+    expected_valid = _packed_bshd_ragged_valid_values(expected_storage, q_lengths).astype(np.float32)
+    np.testing.assert_allclose(got_valid, expected_valid, rtol=5e-2, atol=5e-2)
+
+
+
+@pytest.mark.cuda
+def test_attention_forward_ragged_offsets_gqa_bshd_packed_matches_reference():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    scale = 0.61 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=2, query_heads=4, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
+    q_lengths = np.asarray([4, 2], dtype=np.int32)
+    kv_lengths = np.asarray([5, 3], dtype=np.int32)
+    expected = _attention_reference(q_np, k_np, v_np, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
+    expected_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected, dtype), q_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=4, dim=16), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 4, 6, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got_storage = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_packed_bshd_ragged_close(got_storage, expected_storage, q_lengths)
+
+
+@pytest.mark.cuda
+def test_attention_forward_ragged_offsets_mqa_bshd_packed_matches_reference():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    scale = 0.64 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=2, query_heads=4, kv_heads=1, query_len=6, kv_len=7, dtype=dtype)
+    q_lengths = np.asarray([6, 3], dtype=np.int32)
+    kv_lengths = np.asarray([7, 4], dtype=np.int32)
+    expected = _attention_reference(q_np, k_np, v_np, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
+    expected_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected, dtype), q_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=4, dim=16), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=1, dim=16), thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 4, 6, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got_storage = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_packed_bshd_ragged_close(got_storage, expected_storage, q_lengths)
+
+
+@pytest.mark.cuda
+def test_attention_forward_ragged_offsets_causal_top_left_bshd_packed_matches_reference():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    scale = 0.61 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        mask_kind=AttentionMaskKind.causal_top_left,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
+    q_lengths = np.asarray([6, 4], dtype=np.int32)
+    kv_lengths = np.asarray([7, 5], dtype=np.int32)
+    expected = _attention_reference(
+        q_np,
+        k_np,
+        v_np,
+        scale=scale,
+        mask_kind=AttentionMaskKind.causal_top_left,
+        q_seq_len=q_lengths,
+        kv_seq_len=kv_lengths,
+    )
+
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
+    expected_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected, dtype), q_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 2, 6, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got_storage = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_packed_bshd_ragged_close(got_storage, expected_storage, q_lengths)
+
+
+@pytest.mark.cuda
+def test_attention_ragged_offsets_require_bshd_physical_layouts():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+
+    with pytest.raises(RuntimeError, match="Ragged attention requires BSHD physical layouts"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            q_seq_len=q_seq_len,
+            kv_seq_len=kv_seq_len,
+            q_ragged_offsets=q_offsets,
+            kv_ragged_offsets=kv_offsets,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        )
+
+
+
+@pytest.mark.cuda
+def test_attention_ragged_offsets_require_int32_and_batch_plus_one_shape():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    eq = ex.compile(
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            q_seq_len=q_seq_len,
+            kv_seq_len=kv_seq_len,
+            q_ragged_offsets=q_offsets,
+            kv_ragged_offsets=kv_offsets,
+            q_layout=AttentionTensorLayout.bshd,
+            k_layout=AttentionTensorLayout.bshd,
+            v_layout=AttentionTensorLayout.bshd,
+            o_layout=AttentionTensorLayout.bshd,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        ),
+        device_num=0,
+    )
+
+    q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
+    q_lengths = np.asarray([6, 4], dtype=np.int32)
+    kv_lengths = np.asarray([7, 5], dtype=np.int32)
+    stream = Stream(gpu_num=0)
+    base_inputs = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+    }
+
+    bad_dtype = dict(base_inputs)
+    bad_dtype["q_offsets"] = _host_to_gpu(
+        _ragged_element_offsets(q_lengths, 2, 16).astype(np.int64), thor.DataType.int64, stream)
+    bad_dtype["kv_offsets"] = _host_to_gpu(
+        _ragged_element_offsets(kv_lengths, 2, 16), thor.DataType.int32, stream)
+    with pytest.raises(RuntimeError, match="ragged q_offsets dtype must be INT32"):
+        eq.stamp(bad_dtype, stream)
+
+    bad_shape = dict(base_inputs)
+    bad_shape["q_offsets"] = _host_to_gpu(np.asarray([0, 6], dtype=np.int32), thor.DataType.int32, stream)
+    bad_shape["kv_offsets"] = _host_to_gpu(_ragged_element_offsets(kv_lengths, 2, 16), thor.DataType.int32, stream)
+    with pytest.raises(RuntimeError, match=r"ragged q_offsets shape must be \[B \+ 1\]"):
+        eq.stamp(bad_shape, stream)
+
+
+
+@pytest.mark.cuda
+def test_attention_ragged_offsets_reject_unsupported_combinations_early():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    dropout_seed = ex.input("dropout_seed")
+    dropout_offset = ex.input("dropout_offset")
+
+    with pytest.raises(RuntimeError, match="q_ragged_offsets and kv_ragged_offsets"):
+        ex.scaled_dot_product_attention(
+            q, k, v, q_ragged_offsets=q_offsets, output_dtype=dtype, compute_dtype=thor.DataType.fp32)
+
+    with pytest.raises(RuntimeError, match="ragged attention requires q_seq_len and kv_seq_len"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            q_ragged_offsets=q_offsets,
+            kv_ragged_offsets=kv_offsets,
+            q_layout=AttentionTensorLayout.bshd,
+            k_layout=AttentionTensorLayout.bshd,
+            v_layout=AttentionTensorLayout.bshd,
+            o_layout=AttentionTensorLayout.bshd,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        )
+
+    with pytest.raises(RuntimeError, match="ragged attention cannot currently be combined"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            bias=bias,
+            q_seq_len=q_seq_len,
+            kv_seq_len=kv_seq_len,
+            q_ragged_offsets=q_offsets,
+            kv_ragged_offsets=kv_offsets,
+            q_layout=AttentionTensorLayout.bshd,
+            k_layout=AttentionTensorLayout.bshd,
+            v_layout=AttentionTensorLayout.bshd,
+            o_layout=AttentionTensorLayout.bshd,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        )
+
+    with pytest.raises(RuntimeError, match="ragged attention cannot currently be combined"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            q_seq_len=q_seq_len,
+            kv_seq_len=kv_seq_len,
+            q_ragged_offsets=q_offsets,
+            kv_ragged_offsets=kv_offsets,
+            q_layout=AttentionTensorLayout.bshd,
+            k_layout=AttentionTensorLayout.bshd,
+            v_layout=AttentionTensorLayout.bshd,
+            o_layout=AttentionTensorLayout.bshd,
+            dropout_probability=0.25,
+            dropout_seed=dropout_seed,
+            dropout_offset=dropout_offset,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        )
+
+
+
+@pytest.mark.cuda
+def test_attention_ragged_offsets_feeds_fused_epilogue_and_multi_output_reuses_stage():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    attn = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    outputs = ex.outputs({"attention": attn, "shifted": attn * 1.25 + 0.125})
+    eq = ex.compile(outputs, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
+    q_lengths = np.asarray([6, 4], dtype=np.int32)
+    kv_lengths = np.asarray([7, 5], dtype=np.int32)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(
+            _ragged_element_offsets(q_lengths, 2, 16), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(
+            _ragged_element_offsets(kv_lengths, 2, 16), thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shapes(inputs_gpu) == {"attention": [2, 2, 6, 16], "shifted": [2, 2, 6, 16]}
+    kinds = eq._debug_stage_kinds(inputs_gpu)
+    assert kinds.count("Attention") == 1
 
 
 @pytest.mark.cuda
@@ -1093,6 +1640,342 @@ def test_attention_compile_backward_qkv_uses_single_attention_backward_stage_and
     _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
     _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
     _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+
+
+
+@pytest.mark.cuda
+def test_attention_compile_backward_qkv_with_ragged_offsets_bshd_packed_matches_reference():
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    scale = 0.63 / math.sqrt(64.0)
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["q", "k", "v"], error_input_name=upstream_name)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=2, query_heads=2, kv_heads=2, query_len=64, kv_len=64, qk_dim=64, v_dim=64, dtype=dtype)
+    q_lengths = np.asarray([48, 24], dtype=np.int32)
+    kv_lengths = np.asarray([55, 31], dtype=np.int32)
+    rng = np.random.default_rng(9901)
+    dO_np = rng.normal(0.0, 0.25, size=(2, 2, 64, 64)).astype(_numpy_storage_dtype(dtype))
+    expected_dq, expected_dk, expected_dv = _attention_backward_reference(
+        q_np,
+        k_np,
+        v_np,
+        dO_np,
+        scale=scale,
+        q_seq_len=q_lengths,
+        kv_seq_len=kv_lengths,
+    )
+
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
+    dO_storage = _pack_bshd_ragged_storage(dO_np, q_lengths)
+    expected_dq_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dq, dtype), q_lengths)
+    expected_dk_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dk, dtype), kv_lengths)
+    expected_dv_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dv, dtype), kv_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=64), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=64), thor.DataType.int32, stream),
+        upstream_name: _host_to_gpu(dO_storage, dtype, stream),
+    }
+
+    assert bwd_eq.output_shapes(inputs_gpu) == {
+        "q_grad": [2, 2, 64, 64],
+        "k_grad": [2, 2, 64, 64],
+        "v_grad": [2, 2, 64, 64],
+    }
+    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = stamped.outputs()
+    got_dq = _copy_to_host(got["q_grad"], dtype, stream)
+    got_dk = _copy_to_host(got["k_grad"], dtype, stream)
+    got_dv = _copy_to_host(got["v_grad"], dtype, stream)
+    np.testing.assert_allclose(
+        _packed_bshd_ragged_valid_values(got_dq, q_lengths).astype(np.float32),
+        _packed_bshd_ragged_valid_values(expected_dq_storage, q_lengths).astype(np.float32),
+        rtol=5e-2,
+        atol=5e-2,
+    )
+    np.testing.assert_allclose(
+        _packed_bshd_ragged_valid_values(got_dk, kv_lengths).astype(np.float32),
+        _packed_bshd_ragged_valid_values(expected_dk_storage, kv_lengths).astype(np.float32),
+        rtol=5e-2,
+        atol=5e-2,
+    )
+    np.testing.assert_allclose(
+        _packed_bshd_ragged_valid_values(got_dv, kv_lengths).astype(np.float32),
+        _packed_bshd_ragged_valid_values(expected_dv_storage, kv_lengths).astype(np.float32),
+        rtol=5e-2,
+        atol=5e-2,
+    )
+
+
+@pytest.mark.cuda
+def test_attention_compile_backward_qkv_with_ragged_offsets_gqa_bshd_packed_matches_reference():
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    scale = 0.67 / math.sqrt(64.0)
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["q", "k", "v"], error_input_name=upstream_name)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=2, query_heads=4, kv_heads=2, query_len=64, kv_len=64, qk_dim=64, v_dim=64, dtype=dtype)
+    q_lengths = np.asarray([48, 24], dtype=np.int32)
+    kv_lengths = np.asarray([55, 31], dtype=np.int32)
+    rng = np.random.default_rng(9902)
+    dO_np = rng.normal(0.0, 0.25, size=(2, 4, 64, 64)).astype(_numpy_storage_dtype(dtype))
+    expected_dq, expected_dk, expected_dv = _attention_backward_reference(
+        q_np,
+        k_np,
+        v_np,
+        dO_np,
+        scale=scale,
+        q_seq_len=q_lengths,
+        kv_seq_len=kv_lengths,
+    )
+
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
+    dO_storage = _pack_bshd_ragged_storage(dO_np, q_lengths)
+    expected_dq_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dq, dtype), q_lengths)
+    expected_dk_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dk, dtype), kv_lengths)
+    expected_dv_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dv, dtype), kv_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=4, dim=64), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=64), thor.DataType.int32, stream),
+        upstream_name: _host_to_gpu(dO_storage, dtype, stream),
+    }
+
+    assert bwd_eq.output_shapes(inputs_gpu) == {
+        "q_grad": [2, 4, 64, 64],
+        "k_grad": [2, 2, 64, 64],
+        "v_grad": [2, 2, 64, 64],
+    }
+    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = stamped.outputs()
+    _assert_packed_bshd_ragged_close(_copy_to_host(got["q_grad"], dtype, stream), expected_dq_storage, q_lengths)
+    _assert_packed_bshd_ragged_close(_copy_to_host(got["k_grad"], dtype, stream), expected_dk_storage, kv_lengths)
+    _assert_packed_bshd_ragged_close(_copy_to_host(got["v_grad"], dtype, stream), expected_dv_storage, kv_lengths)
+
+
+@pytest.mark.cuda
+def test_attention_compile_backward_qkv_with_ragged_offsets_causal_top_left_bshd_packed_matches_reference():
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    scale = 0.62 / math.sqrt(64.0)
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        mask_kind=AttentionMaskKind.causal_top_left,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["q", "k", "v"], error_input_name=upstream_name)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=2, query_heads=2, kv_heads=2, query_len=64, kv_len=64, qk_dim=64, v_dim=64, dtype=dtype)
+    q_lengths = np.asarray([48, 24], dtype=np.int32)
+    kv_lengths = np.asarray([55, 31], dtype=np.int32)
+    rng = np.random.default_rng(9903)
+    dO_np = rng.normal(0.0, 0.25, size=(2, 2, 64, 64)).astype(_numpy_storage_dtype(dtype))
+    expected_dq, expected_dk, expected_dv = _attention_backward_reference(
+        q_np,
+        k_np,
+        v_np,
+        dO_np,
+        scale=scale,
+        mask_kind=AttentionMaskKind.causal_top_left,
+        q_seq_len=q_lengths,
+        kv_seq_len=kv_lengths,
+    )
+
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
+    dO_storage = _pack_bshd_ragged_storage(dO_np, q_lengths)
+    expected_dq_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dq, dtype), q_lengths)
+    expected_dk_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dk, dtype), kv_lengths)
+    expected_dv_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dv, dtype), kv_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=64), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=64), thor.DataType.int32, stream),
+        upstream_name: _host_to_gpu(dO_storage, dtype, stream),
+    }
+
+    assert bwd_eq.output_shapes(inputs_gpu) == {
+        "q_grad": [2, 2, 64, 64],
+        "k_grad": [2, 2, 64, 64],
+        "v_grad": [2, 2, 64, 64],
+    }
+    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = stamped.outputs()
+    _assert_packed_bshd_ragged_close(_copy_to_host(got["q_grad"], dtype, stream), expected_dq_storage, q_lengths)
+    _assert_packed_bshd_ragged_close(_copy_to_host(got["k_grad"], dtype, stream), expected_dk_storage, kv_lengths)
+    _assert_packed_bshd_ragged_close(_copy_to_host(got["v_grad"], dtype, stream), expected_dv_storage, kv_lengths)
+
+
+@pytest.mark.cuda
+def test_attention_backward_with_ragged_offsets_reuses_same_plan_forward_stats_metadata():
+    dtype = thor.DataType.fp16
+    scale = 0.66 / math.sqrt(64.0)
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    attn = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    loss = ex.reduce_sum(attn * attn, axis=[0, 1, 2, 3], squeeze=False)
+    fwd_eq = ex.compile(loss, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["q", "k", "v"])
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=2, query_heads=2, kv_heads=2, query_len=64, kv_len=64, qk_dim=64, v_dim=64, dtype=dtype)
+    q_lengths = np.asarray([48, 24], dtype=np.int32)
+    kv_lengths = np.asarray([55, 31], dtype=np.int32)
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=64), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=64), thor.DataType.int32, stream),
+    }
+
+    assert bwd_eq.output_shapes(inputs_gpu) == {
+        "q_grad": [2, 2, 64, 64],
+        "k_grad": [2, 2, 64, 64],
+        "v_grad": [2, 2, 64, 64],
+    }
+    kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert kinds.count("Attention") == 1
+    assert kinds.count("AttentionBackward") == 1
+    assert kinds.index("Attention") < kinds.index("AttentionBackward")
+
+    # Stamping is enough to verify that the same-plan cloned forward attention keeps both the
+    # ragged-offset metadata and the seq-len metadata required by the retained cuDNN stats path.
+    bwd_eq.stamp(inputs_gpu, stream)
 
 
 @pytest.mark.cuda

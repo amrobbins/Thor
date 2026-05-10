@@ -70,6 +70,12 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
                                                    checkedDim(oDims, 2, "o"),
                                                    checkedDim(oDims, 3, "o"),
                                                    oTensor.getDataType());
+    if (use_ragged_offsets) {
+        descriptor.q.ragged = true;
+        descriptor.k.ragged = true;
+        descriptor.v.ragged = true;
+        descriptor.o.ragged = true;
+    }
     descriptor.computeDataType = compute_dtype;
     descriptor.intermediateDataType = TensorDescriptor::DataType::FP32;
     descriptor.attentionScale = attention_scale;
@@ -129,6 +135,12 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
                                                    checkedDim(oDims, 2, "o"),
                                                    checkedDim(oDims, 3, "o"),
                                                    oTensor.getDataType());
+    if (use_ragged_offsets) {
+        descriptor.q.ragged = true;
+        descriptor.k.ragged = true;
+        descriptor.v.ragged = true;
+        descriptor.o.ragged = true;
+    }
     descriptor.computeDataType = compute_dtype;
     descriptor.intermediateDataType = TensorDescriptor::DataType::FP32;
     descriptor.attentionScale = attention_scale;
@@ -186,7 +198,8 @@ bool attentionConfigMatchesBackward(const CompiledAttention& forward,
            forward.diagonal_right_bound == backward.diagonal_right_bound &&
            sameOptionalFloat(forward.attention_scale, backward.attention_scale) &&
            forward.use_alibi_mask == backward.use_alibi_mask && forward.use_bias == backward.use_bias &&
-           forward.use_padding_mask == backward.use_padding_mask && forward.dropout_probability == backward.dropout_probability &&
+           forward.use_padding_mask == backward.use_padding_mask && forward.use_ragged_offsets == backward.use_ragged_offsets &&
+           forward.dropout_probability == backward.dropout_probability &&
            forward.compute_dtype == backward.compute_dtype &&
            forward.output_dtype == output_dtype;
 }
@@ -220,6 +233,15 @@ void StampedAttention::runOn(Stream& run_stream) const {
         args.seqLenQ = seq_len_q.value();
         args.seqLenKv = seq_len_kv.value();
     }
+    if (compiled_attention->use_ragged_offsets) {
+        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
+            throw std::runtime_error("StampedAttention requires q/kv ragged offset tensors for ragged attention.");
+        }
+        args.raggedOffsetQ = q_ragged_offsets.value();
+        args.raggedOffsetO = q_ragged_offsets.value();
+        args.raggedOffsetK = kv_ragged_offsets.value();
+        args.raggedOffsetV = kv_ragged_offsets.value();
+    }
     if (compiled_attention->dropout_probability > 0.0f) {
         if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
             throw std::runtime_error("StampedAttention requires dropout seed/offset tensors for attention dropout.");
@@ -252,6 +274,8 @@ bool StampedAttention::canProvideForwardStateFor(const CompiledAttentionBackward
                                                  const std::optional<Tensor>& bias_tensor,
                                                  const std::optional<Tensor>& seq_len_q_tensor,
                                                  const std::optional<Tensor>& seq_len_kv_tensor,
+                                                 const std::optional<Tensor>& q_ragged_offsets_tensor,
+                                                 const std::optional<Tensor>& kv_ragged_offsets_tensor,
                                                  const std::optional<Tensor>& dropout_seed_tensor,
                                                  const std::optional<Tensor>& dropout_offset_tensor,
                                                  const Tensor& dO_tensor) const {
@@ -269,6 +293,13 @@ bool StampedAttention::canProvideForwardStateFor(const CompiledAttentionBackward
     if (compiled_attention->use_padding_mask) {
         if (!seq_len_q.has_value() || !seq_len_kv.has_value() || !seq_len_q_tensor.has_value() || !seq_len_kv_tensor.has_value() ||
             !tensorMatches(seq_len_q.value(), seq_len_q_tensor.value()) || !tensorMatches(seq_len_kv.value(), seq_len_kv_tensor.value())) {
+            return false;
+        }
+    }
+    if (compiled_attention->use_ragged_offsets) {
+        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value() || !q_ragged_offsets_tensor.has_value() ||
+            !kv_ragged_offsets_tensor.has_value() || !tensorMatches(q_ragged_offsets.value(), q_ragged_offsets_tensor.value()) ||
+            !tensorMatches(kv_ragged_offsets.value(), kv_ragged_offsets_tensor.value())) {
             return false;
         }
     }
@@ -293,6 +324,8 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
                                    const std::optional<Tensor>& bias,
                                    const std::optional<Tensor>& seq_len_q,
                                    const std::optional<Tensor>& seq_len_kv,
+                                   const std::optional<Tensor>& q_ragged_offsets,
+                                   const std::optional<Tensor>& kv_ragged_offsets,
                                    const std::optional<Tensor>& dropout_seed,
                                    const std::optional<Tensor>& dropout_offset,
                                    const Tensor& output,
@@ -305,6 +338,8 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
       bias(bias),
       seq_len_q(seq_len_q),
       seq_len_kv(seq_len_kv),
+      q_ragged_offsets(q_ragged_offsets),
+      kv_ragged_offsets(kv_ragged_offsets),
       dropout_seed(dropout_seed),
       dropout_offset(dropout_offset),
       output(output),
@@ -352,6 +387,15 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
             fwdArgs.seqLenQ = seq_len_q.value();
             fwdArgs.seqLenKv = seq_len_kv.value();
         }
+        if (compiled_attention_backward->use_ragged_offsets) {
+            if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
+                throw std::runtime_error("StampedAttentionBackward requires q/kv ragged offset tensors for ragged attention.");
+            }
+            fwdArgs.raggedOffsetQ = q_ragged_offsets.value();
+            fwdArgs.raggedOffsetO = q_ragged_offsets.value();
+            fwdArgs.raggedOffsetK = kv_ragged_offsets.value();
+            fwdArgs.raggedOffsetV = kv_ragged_offsets.value();
+        }
         if (compiled_attention_backward->dropout_probability > 0.0f) {
             if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
                 throw std::runtime_error("StampedAttentionBackward requires dropout seed/offset tensors for attention dropout.");
@@ -381,6 +425,19 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
         bwdArgs.seqLenQ = seq_len_q.value();
         bwdArgs.seqLenKv = seq_len_kv.value();
     }
+    if (compiled_attention_backward->use_ragged_offsets) {
+        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
+            throw std::runtime_error("StampedAttentionBackward requires q/kv ragged offset tensors for ragged attention.");
+        }
+        bwdArgs.raggedOffsetQ = q_ragged_offsets.value();
+        bwdArgs.raggedOffsetO = q_ragged_offsets.value();
+        bwdArgs.raggedOffsetDO = q_ragged_offsets.value();
+        bwdArgs.raggedOffsetDQ = q_ragged_offsets.value();
+        bwdArgs.raggedOffsetK = kv_ragged_offsets.value();
+        bwdArgs.raggedOffsetV = kv_ragged_offsets.value();
+        bwdArgs.raggedOffsetDK = kv_ragged_offsets.value();
+        bwdArgs.raggedOffsetDV = kv_ragged_offsets.value();
+    }
     if (compiled_attention_backward->dropout_probability > 0.0f) {
         if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
             throw std::runtime_error("StampedAttentionBackward requires dropout seed/offset tensors for attention dropout.");
@@ -398,6 +455,8 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
                                                    const std::optional<Tensor>& bias,
                                                    const std::optional<Tensor>& seq_len_q,
                                                    const std::optional<Tensor>& seq_len_kv,
+                                                   const std::optional<Tensor>& q_ragged_offsets,
+                                                   const std::optional<Tensor>& kv_ragged_offsets,
                                                    const std::optional<Tensor>& dropout_seed,
                                                    const std::optional<Tensor>& dropout_offset,
                                                    const Tensor& dO,
@@ -416,6 +475,8 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
       bias(bias),
       seq_len_q(seq_len_q),
       seq_len_kv(seq_len_kv),
+      q_ragged_offsets(q_ragged_offsets),
+      kv_ragged_offsets(kv_ragged_offsets),
       dropout_seed(dropout_seed),
       dropout_offset(dropout_offset),
       dO(dO),

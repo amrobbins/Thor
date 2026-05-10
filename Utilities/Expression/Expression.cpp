@@ -355,9 +355,12 @@ json exprNodeToJson(const ExprNode& node) {
     j["attention_use_alibi_mask"] = node.attention_use_alibi_mask;
     j["attention_use_bias"] = node.attention_use_bias;
     j["attention_use_padding_mask"] = node.attention_use_padding_mask;
+    j["attention_use_ragged_offsets"] = node.attention_use_ragged_offsets;
     j["attention_dropout_probability"] = node.attention_dropout_probability;
     j["attention_seq_len_q_node"] = node.attention_seq_len_q_node;
     j["attention_seq_len_kv_node"] = node.attention_seq_len_kv_node;
+    j["attention_ragged_offset_q_node"] = node.attention_ragged_offset_q_node;
+    j["attention_ragged_offset_kv_node"] = node.attention_ragged_offset_kv_node;
     j["attention_dropout_seed_node"] = node.attention_dropout_seed_node;
     j["attention_dropout_offset_node"] = node.attention_dropout_offset_node;
     j["rope_sequence_axis"] = node.rope_sequence_axis;
@@ -421,9 +424,12 @@ ExprNode exprNodeFromJson(const json& j) {
     node.attention_use_alibi_mask = j.value("attention_use_alibi_mask", false);
     node.attention_use_bias = j.value("attention_use_bias", false);
     node.attention_use_padding_mask = j.value("attention_use_padding_mask", false);
+    node.attention_use_ragged_offsets = j.value("attention_use_ragged_offsets", false);
     node.attention_dropout_probability = j.value("attention_dropout_probability", 0.0f);
     node.attention_seq_len_q_node = j.value("attention_seq_len_q_node", UINT32_MAX);
     node.attention_seq_len_kv_node = j.value("attention_seq_len_kv_node", UINT32_MAX);
+    node.attention_ragged_offset_q_node = j.value("attention_ragged_offset_q_node", UINT32_MAX);
+    node.attention_ragged_offset_kv_node = j.value("attention_ragged_offset_kv_node", UINT32_MAX);
     node.attention_dropout_seed_node = j.value("attention_dropout_seed_node", UINT32_MAX);
     node.attention_dropout_offset_node = j.value("attention_dropout_offset_node", UINT32_MAX);
     node.rope_sequence_axis = j.value("rope_sequence_axis", uint32_t{2});
@@ -790,6 +796,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 ";hasScale=" + std::to_string(n.attention_has_scale ? 1 : 0) + ";scale=" + formatFloatCanonical(n.attention_scale) +
                 ";alibi=" + std::to_string(n.attention_use_alibi_mask ? 1 : 0) + ";bias=" + std::to_string(n.attention_use_bias ? 1 : 0) +
                 ";padding=" + std::to_string(n.attention_use_padding_mask ? 1 : 0) +
+                ";ragged=" + std::to_string(n.attention_use_ragged_offsets ? 1 : 0) +
                 ";dropout=" + formatFloatCanonical(n.attention_dropout_probability);
             if (n.attention_use_padding_mask) {
                 if (n.attention_seq_len_q_node != UINT32_MAX) {
@@ -797,6 +804,14 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 }
                 if (n.attention_seq_len_kv_node != UINT32_MAX) {
                     out += ",seqKV=" + canonicalizeNode(expr, n.attention_seq_len_kv_node, memo, memoReady);
+                }
+            }
+            if (n.attention_use_ragged_offsets) {
+                if (n.attention_ragged_offset_q_node != UINT32_MAX) {
+                    out += ",raggedQ=" + canonicalizeNode(expr, n.attention_ragged_offset_q_node, memo, memoReady);
+                }
+                if (n.attention_ragged_offset_kv_node != UINT32_MAX) {
+                    out += ",raggedKV=" + canonicalizeNode(expr, n.attention_ragged_offset_kv_node, memo, memoReady);
                 }
             }
             if (n.attention_dropout_probability > 0.0f) {
@@ -1049,6 +1064,15 @@ void ExpressionDefinition::validate() const {
             validateNodeIndex(node.attention_seq_len_kv_node, "attention kv_seq_len");
             if (node.attention_seq_len_q_node >= node_index_u32 || node.attention_seq_len_kv_node >= node_index_u32) {
                 throw std::runtime_error("ExpressionDefinition ATTENTION padding-mask sequence length nodes must reference earlier nodes.");
+            }
+        }
+        if ((node.op == ExprOp::ATTENTION || node.op == ExprOp::ATTENTION_BACKWARD_Q || node.op == ExprOp::ATTENTION_BACKWARD_K ||
+             node.op == ExprOp::ATTENTION_BACKWARD_V) &&
+            node.attention_use_ragged_offsets) {
+            validateNodeIndex(node.attention_ragged_offset_q_node, "attention q ragged offset");
+            validateNodeIndex(node.attention_ragged_offset_kv_node, "attention kv ragged offset");
+            if (node.attention_ragged_offset_q_node >= node_index_u32 || node.attention_ragged_offset_kv_node >= node_index_u32) {
+                throw std::runtime_error("ExpressionDefinition ATTENTION ragged offset nodes must reference earlier nodes.");
             }
         }
         if ((node.op == ExprOp::ATTENTION || node.op == ExprOp::ATTENTION_BACKWARD_Q || node.op == ExprOp::ATTENTION_BACKWARD_K ||
@@ -1326,6 +1350,13 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
             newNode.attention_seq_len_q_node = cloneSubtree(src, srcNode.attention_seq_len_q_node, dst, oldToNew);
             newNode.attention_seq_len_kv_node = cloneSubtree(src, srcNode.attention_seq_len_kv_node, dst, oldToNew);
         }
+        if (srcNode.attention_use_ragged_offsets) {
+            if (srcNode.attention_ragged_offset_q_node == UINT32_MAX || srcNode.attention_ragged_offset_kv_node == UINT32_MAX) {
+                throw std::runtime_error("Malformed attention expression: missing ragged offset node while cloning.");
+            }
+            newNode.attention_ragged_offset_q_node = cloneSubtree(src, srcNode.attention_ragged_offset_q_node, dst, oldToNew);
+            newNode.attention_ragged_offset_kv_node = cloneSubtree(src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew);
+        }
         if (srcNode.attention_dropout_probability > 0.0f) {
             if (srcNode.attention_dropout_seed_node == UINT32_MAX || srcNode.attention_dropout_offset_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing dropout seed/offset node while cloning.");
@@ -1419,6 +1450,15 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
                 cloneSubtreeWithMergedInputs(src, srcNode.attention_seq_len_q_node, dst, oldToNew, dstInputSlotsByName);
             newNode.attention_seq_len_kv_node =
                 cloneSubtreeWithMergedInputs(src, srcNode.attention_seq_len_kv_node, dst, oldToNew, dstInputSlotsByName);
+        }
+        if (srcNode.attention_use_ragged_offsets) {
+            if (srcNode.attention_ragged_offset_q_node == UINT32_MAX || srcNode.attention_ragged_offset_kv_node == UINT32_MAX) {
+                throw std::runtime_error("Malformed attention expression: missing ragged offset node while merging outputs.");
+            }
+            newNode.attention_ragged_offset_q_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_ragged_offset_q_node, dst, oldToNew, dstInputSlotsByName);
+            newNode.attention_ragged_offset_kv_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew, dstInputSlotsByName);
         }
         if (srcNode.attention_dropout_probability > 0.0f) {
             if (srcNode.attention_dropout_seed_node == UINT32_MAX || srcNode.attention_dropout_offset_node == UINT32_MAX) {
@@ -2173,7 +2213,13 @@ void applyAttentionOptions(ExprNode& node, const AttentionOptions& options, bool
     }
 }
 
-void validateAttentionOptions(const AttentionOptions& options, bool use_bias) {
+void validateAttentionOptions(const AttentionOptions& options, bool use_bias, bool use_ragged_offsets = false) {
+    if (use_ragged_offsets &&
+        (options.q_layout != AttentionTensorLayout::BSHD || options.k_layout != AttentionTensorLayout::BSHD ||
+         options.v_layout != AttentionTensorLayout::BSHD || options.o_layout != AttentionTensorLayout::BSHD)) {
+        throw std::runtime_error(
+            "Ragged attention requires BSHD physical layouts for q/k/v/o because cuDNN ragged offsets index packed token-contiguous THD storage.");
+    }
     if (options.diagonal_left_bound < 0 || options.diagonal_right_bound < 0) {
         throw std::runtime_error("Attention diagonal/sliding-window bounds must be non-negative.");
     }
@@ -2190,6 +2236,10 @@ void validateAttentionOptions(const AttentionOptions& options, bool use_bias) {
     if (options.dropout_probability < 0.0f || options.dropout_probability >= 1.0f) {
         throw std::runtime_error("AttentionOptions::dropout_probability must be in [0, 1).");
     }
+    if (use_ragged_offsets && (use_bias || options.dropout_probability > 0.0f)) {
+        throw std::runtime_error(
+            "Ragged attention currently supports q/k/v plus q/kv sequence lengths and ragged offsets only; additive bias and dropout are disabled until their packed layouts are defined.");
+    }
     if (options.mask_kind == AttentionMaskKind::CausalBottomRight &&
         (use_bias || options.use_alibi_mask || options.dropout_probability > 0.0f)) {
         throw std::runtime_error(
@@ -2198,23 +2248,34 @@ void validateAttentionOptions(const AttentionOptions& options, bool use_bias) {
 }
 }  // namespace
 
-Expression Expression::attentionWithOptionalPadding(const Expression& q,
-                                                    const Expression& k,
-                                                    const Expression& v,
-                                                    const Expression* bias,
-                                                    const Expression* q_seq_len,
-                                                    const Expression* kv_seq_len,
-                                                    const Expression* dropout_seed,
-                                                    const Expression* dropout_offset,
-                                                    AttentionOptions options) {
+Expression Expression::attentionWithOptionalMetadata(const Expression& q,
+                                                     const Expression& k,
+                                                     const Expression& v,
+                                                     const Expression* bias,
+                                                     const Expression* q_seq_len,
+                                                     const Expression* kv_seq_len,
+                                                     const Expression* q_ragged_offsets,
+                                                     const Expression* kv_ragged_offsets,
+                                                     const Expression* dropout_seed,
+                                                     const Expression* dropout_offset,
+                                                     AttentionOptions options) {
     if (!q.expr || !k.expr || !v.expr || (bias != nullptr && !bias->expr) || (q_seq_len != nullptr && !q_seq_len->expr) ||
-        (kv_seq_len != nullptr && !kv_seq_len->expr) || (dropout_seed != nullptr && !dropout_seed->expr) ||
+        (kv_seq_len != nullptr && !kv_seq_len->expr) || (q_ragged_offsets != nullptr && !q_ragged_offsets->expr) ||
+        (kv_ragged_offsets != nullptr && !kv_ragged_offsets->expr) || (dropout_seed != nullptr && !dropout_seed->expr) ||
         (dropout_offset != nullptr && !dropout_offset->expr)) {
         throw std::runtime_error("Cannot build attention from empty expressions.");
     }
-    validateAttentionOptions(options, bias != nullptr);
+    const bool use_ragged_offsets = q_ragged_offsets != nullptr || kv_ragged_offsets != nullptr;
+    if ((q_ragged_offsets == nullptr) != (kv_ragged_offsets == nullptr)) {
+        throw std::runtime_error("q_ragged_offsets and kv_ragged_offsets must be provided together for ragged attention.");
+    }
+    validateAttentionOptions(options, bias != nullptr, use_ragged_offsets);
     if (options.use_padding_mask && (q_seq_len == nullptr || kv_seq_len == nullptr)) {
         throw std::runtime_error("AttentionOptions::use_padding_mask requires q_seq_len and kv_seq_len expressions.");
+    }
+    if (use_ragged_offsets && (q_seq_len == nullptr || kv_seq_len == nullptr)) {
+        throw std::runtime_error(
+            "Ragged attention requires q_seq_len and kv_seq_len expressions in addition to q/kv ragged offsets because cuDNN THD uses sequence lengths for padding-mask semantics.");
     }
     if (!options.use_padding_mask && (q_seq_len != nullptr || kv_seq_len != nullptr)) {
         throw std::runtime_error("q_seq_len/kv_seq_len were provided but AttentionOptions::use_padding_mask is false.");
@@ -2243,6 +2304,8 @@ Expression Expression::attentionWithOptionalPadding(const Expression& q,
     const uint32_t bias_node = bias != nullptr ? clone_root(*bias) : UINT32_MAX;
     const uint32_t q_len_node = q_seq_len != nullptr ? clone_root(*q_seq_len) : UINT32_MAX;
     const uint32_t kv_len_node = kv_seq_len != nullptr ? clone_root(*kv_seq_len) : UINT32_MAX;
+    const uint32_t q_ragged_node = q_ragged_offsets != nullptr ? clone_root(*q_ragged_offsets) : UINT32_MAX;
+    const uint32_t kv_ragged_node = kv_ragged_offsets != nullptr ? clone_root(*kv_ragged_offsets) : UINT32_MAX;
     const uint32_t dropout_seed_node = dropout_seed != nullptr ? clone_root(*dropout_seed) : UINT32_MAX;
     const uint32_t dropout_offset_node = dropout_offset != nullptr ? clone_root(*dropout_offset) : UINT32_MAX;
 
@@ -2254,6 +2317,9 @@ Expression Expression::attentionWithOptionalPadding(const Expression& q,
     node.alpha_node = bias_node;
     node.attention_seq_len_q_node = q_len_node;
     node.attention_seq_len_kv_node = kv_len_node;
+    node.attention_use_ragged_offsets = use_ragged_offsets;
+    node.attention_ragged_offset_q_node = q_ragged_node;
+    node.attention_ragged_offset_kv_node = kv_ragged_node;
     node.attention_dropout_seed_node = dropout_seed_node;
     node.attention_dropout_offset_node = dropout_offset_node;
     applyAttentionOptions(node, options, bias != nullptr);
@@ -2265,7 +2331,7 @@ Expression Expression::attentionWithOptionalPadding(const Expression& q,
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q, const Expression& k, const Expression& v, AttentionOptions options) {
-    return attentionWithOptionalPadding(q, k, v, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
+    return attentionWithOptionalMetadata(q, k, v, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttentionWithDropout(const Expression& q,
@@ -2274,12 +2340,12 @@ Expression Expression::scaledDotProductAttentionWithDropout(const Expression& q,
                                                             const Expression& dropout_seed,
                                                             const Expression& dropout_offset,
                                                             AttentionOptions options) {
-    return attentionWithOptionalPadding(q, k, v, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
+    return attentionWithOptionalMetadata(q, k, v, nullptr, nullptr, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttention(
     const Expression& q, const Expression& k, const Expression& v, const Expression& bias, AttentionOptions options) {
-    return attentionWithOptionalPadding(q, k, v, &bias, nullptr, nullptr, nullptr, nullptr, std::move(options));
+    return attentionWithOptionalMetadata(q, k, v, &bias, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttentionWithDropout(const Expression& q,
@@ -2289,7 +2355,7 @@ Expression Expression::scaledDotProductAttentionWithDropout(const Expression& q,
                                                             const Expression& dropout_seed,
                                                             const Expression& dropout_offset,
                                                             AttentionOptions options) {
-    return attentionWithOptionalPadding(q, k, v, &bias, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
+    return attentionWithOptionalMetadata(q, k, v, &bias, nullptr, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q,
@@ -2299,7 +2365,32 @@ Expression Expression::scaledDotProductAttention(const Expression& q,
                                                  const Expression& kv_seq_len,
                                                  AttentionOptions options) {
     options.use_padding_mask = true;
-    return attentionWithOptionalPadding(q, k, v, nullptr, &q_seq_len, &kv_seq_len, nullptr, nullptr, std::move(options));
+    return attentionWithOptionalMetadata(q, k, v, nullptr, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, std::move(options));
+}
+
+
+Expression Expression::scaledDotProductAttentionRagged(const Expression& q,
+                                                       const Expression& k,
+                                                       const Expression& v,
+                                                       const Expression& q_offsets,
+                                                       const Expression& kv_offsets,
+                                                       AttentionOptions options) {
+    options.use_padding_mask = false;
+    return attentionWithOptionalMetadata(
+        q, k, v, nullptr, nullptr, nullptr, &q_offsets, &kv_offsets, nullptr, nullptr, std::move(options));
+}
+
+Expression Expression::scaledDotProductAttentionRagged(const Expression& q,
+                                                       const Expression& k,
+                                                       const Expression& v,
+                                                       const Expression& q_seq_len,
+                                                       const Expression& kv_seq_len,
+                                                       const Expression& q_offsets,
+                                                       const Expression& kv_offsets,
+                                                       AttentionOptions options) {
+    options.use_padding_mask = true;
+    return attentionWithOptionalMetadata(
+        q, k, v, nullptr, &q_seq_len, &kv_seq_len, &q_offsets, &kv_offsets, nullptr, nullptr, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q,
@@ -2311,7 +2402,7 @@ Expression Expression::scaledDotProductAttention(const Expression& q,
                                                  const Expression& dropout_offset,
                                                  AttentionOptions options) {
     options.use_padding_mask = true;
-    return attentionWithOptionalPadding(q, k, v, nullptr, &q_seq_len, &kv_seq_len, &dropout_seed, &dropout_offset, std::move(options));
+    return attentionWithOptionalMetadata(q, k, v, nullptr, &q_seq_len, &kv_seq_len, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q,
@@ -2322,7 +2413,7 @@ Expression Expression::scaledDotProductAttention(const Expression& q,
                                                  const Expression& kv_seq_len,
                                                  AttentionOptions options) {
     options.use_padding_mask = true;
-    return attentionWithOptionalPadding(q, k, v, &bias, &q_seq_len, &kv_seq_len, nullptr, nullptr, std::move(options));
+    return attentionWithOptionalMetadata(q, k, v, &bias, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q,
@@ -2335,7 +2426,7 @@ Expression Expression::scaledDotProductAttention(const Expression& q,
                                                  const Expression& dropout_offset,
                                                  AttentionOptions options) {
     options.use_padding_mask = true;
-    return attentionWithOptionalPadding(q, k, v, &bias, &q_seq_len, &kv_seq_len, &dropout_seed, &dropout_offset, std::move(options));
+    return attentionWithOptionalMetadata(q, k, v, &bias, &q_seq_len, &kv_seq_len, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
 }
 
 Expression Expression::conv2d(const Expression& input,
