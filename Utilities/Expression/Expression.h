@@ -46,6 +46,7 @@ enum class ExprOp : uint16_t {
     SQRT,
     TANH,
     NORMCDF,
+    ROPE,
     SOFTMAX,
     FILL,
     UNSQUEEZE,
@@ -77,6 +78,30 @@ enum class ExprOp : uint16_t {
     REDUCE_NORM1,
     REDUCE_NORM2,
     ATTENTION,
+    ATTENTION_BACKWARD_Q,
+    ATTENTION_BACKWARD_K,
+    ATTENTION_BACKWARD_V,
+};
+
+enum class RotaryScalingKind : uint8_t {
+    None = 0,
+    Linear = 1,
+    DynamicNTK = 2,
+};
+
+struct RotaryPositionEmbeddingOptions {
+    uint32_t sequence_axis = 2;
+    uint32_t head_dim_axis = 3;
+    uint64_t rotary_dim = 0;  // 0 means use the full head-dimension extent at stamp/codegen time.
+    double base = 10000.0;
+    int64_t position_offset = 0;
+    bool interleaved = false;
+    bool inverse = false;
+    RotaryScalingKind scaling_kind = RotaryScalingKind::None;
+    double scaling_factor = 1.0;
+    uint64_t original_max_position_embeddings = 0;
+    std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt;
+    std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt;
 };
 
 inline bool isCudnnReduceOp(ExprOp op) {
@@ -143,6 +168,18 @@ struct ExprNode {
     bool attention_has_scale = false;
     float attention_scale = 0.0f;
     bool attention_use_alibi_mask = false;
+    bool attention_use_bias = false;
+
+    uint32_t rope_sequence_axis = 2;
+    uint32_t rope_head_dim_axis = 3;
+    uint64_t rope_rotary_dim = 0;
+    double rope_base = 10000.0;
+    int64_t rope_position_offset = 0;
+    bool rope_interleaved = false;
+    bool rope_inverse = false;
+    RotaryScalingKind rope_scaling_kind = RotaryScalingKind::None;
+    double rope_scaling_factor = 1.0;
+    uint64_t rope_original_max_position_embeddings = 0;
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     std::optional<TensorDescriptor::DataType> input_tensor_dtype = std::nullopt;
@@ -316,6 +353,14 @@ class Expression {
     [[nodiscard]] Expression sqrt() const;
     [[nodiscard]] static Expression sqrt(const Expression& expr);
     [[nodiscard]] Expression normcdf() const;
+    [[nodiscard]] Expression rotaryPositionEmbedding(RotaryPositionEmbeddingOptions options = {}) const;
+    [[nodiscard]] Expression rope(RotaryPositionEmbeddingOptions options = {}) const { return rotaryPositionEmbedding(std::move(options)); }
+    [[nodiscard]] static Expression rotaryPositionEmbedding(const Expression& input, RotaryPositionEmbeddingOptions options = {}) {
+        return input.rotaryPositionEmbedding(std::move(options));
+    }
+    [[nodiscard]] static Expression rope(const Expression& input, RotaryPositionEmbeddingOptions options = {}) {
+        return input.rotaryPositionEmbedding(std::move(options));
+    }
     [[nodiscard]] Expression unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const;
     [[nodiscard]] Expression squeeze(const std::vector<uint64_t>& squeeze_axes) const;
     [[nodiscard]] Expression transpose() const;
@@ -365,12 +410,25 @@ class Expression {
                                                               const Expression& k,
                                                               const Expression& v,
                                                               AttentionOptions options = {});
+    [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
+                                                              const Expression& k,
+                                                              const Expression& v,
+                                                              const Expression& bias,
+                                                              AttentionOptions options = {});
     [[nodiscard]] static Expression attention(const Expression& q,
                                               const Expression& k,
                                               const Expression& v,
                                               AttentionOptions options = {}) {
         return scaledDotProductAttention(q, k, v, std::move(options));
     }
+    [[nodiscard]] static Expression attention(const Expression& q,
+                                              const Expression& k,
+                                              const Expression& v,
+                                              const Expression& bias,
+                                              AttentionOptions options = {}) {
+        return scaledDotProductAttention(q, k, v, bias, std::move(options));
+    }
+
     [[nodiscard]] static Expression conv2d(
         const Expression& input,
         const Expression& filter,
@@ -457,6 +515,8 @@ class Expression {
 
     [[nodiscard]] static Expression binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprOp op);
     [[nodiscard]] static Expression ternaryOp(const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, ExprOp op);
+    [[nodiscard]] static Expression quaternaryOp(
+        const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, const Expression& fourthExpr, ExprOp op);
     [[nodiscard]] static Expression unaryOp(const Expression& inputExpr, ExprOp op);
 
     static uint32_t encodeLowerableGemmScaleExpression(const Expression& scale_expr,

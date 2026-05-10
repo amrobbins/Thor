@@ -22,7 +22,11 @@ bool isSupportedFusionFloatingType(DataType dtype) {
 
 bool isFp8Type(DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2; }
 
-static bool isReductionComputeOp(ExprOp op) { return isCudnnReduceOp(op) || op == ExprOp::ATTENTION; }
+static bool isAttentionBackwardOp(ExprOp op) {
+    return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V;
+}
+
+static bool isReductionComputeOp(ExprOp op) { return isCudnnReduceOp(op) || op == ExprOp::ATTENTION || isAttentionBackwardOp(op) || op == ExprOp::ROPE; }
 static bool isCudnnSingleInputStageOp(ExprOp op) { return isCudnnReduceOp(op) || isCudnnSoftmaxOp(op); }
 
 DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
@@ -162,7 +166,7 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
     }
 
     std::vector<DataType> tensor_parent_dtypes;
-    tensor_parent_dtypes.reserve(2);
+    tensor_parent_dtypes.reserve(4);
 
     auto add_tensor_parent = [&](uint32_t parent_idx) {
         if (parent_idx >= nodes.size()) {
@@ -183,6 +187,15 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
     }
     if (Expression::isTernaryOp(node.op)) {
         add_tensor_parent(node.aux);
+    }
+    if (node.op == ExprOp::ATTENTION && node.attention_use_bias) {
+        add_tensor_parent(node.alpha_node);
+    }
+    if (isAttentionBackwardOp(node.op)) {
+        add_tensor_parent(node.alpha_node);
+        if (node.attention_use_bias) {
+            add_tensor_parent(node.beta_node);
+        }
     }
 
     return tensor_parent_dtypes.empty() ? DataType::FP32 : promoteTensorValueDTypes(tensor_parent_dtypes);
@@ -212,7 +225,7 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
     }
 
     std::vector<DataType> tensor_parent_dtypes;
-    tensor_parent_dtypes.reserve(2);
+    tensor_parent_dtypes.reserve(4);
 
     auto add_tensor_parent = [&](uint32_t parent_idx) {
         if (parent_idx >= nodes.size()) {
@@ -233,6 +246,15 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
     }
     if (Expression::isTernaryOp(node.op)) {
         add_tensor_parent(node.aux);
+    }
+    if (node.op == ExprOp::ATTENTION && node.attention_use_bias) {
+        add_tensor_parent(node.alpha_node);
+    }
+    if (isAttentionBackwardOp(node.op)) {
+        add_tensor_parent(node.alpha_node);
+        if (node.attention_use_bias) {
+            add_tensor_parent(node.beta_node);
+        }
     }
 
     if (node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX) {
@@ -306,6 +328,15 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
         }
         if (Expression::isTernaryOp(node.op)) {
             propagate_to_parent(node.aux);
+        }
+        if (node.op == ExprOp::ATTENTION && node.attention_use_bias) {
+            propagate_to_parent(node.alpha_node);
+        }
+        if (isAttentionBackwardOp(node.op)) {
+            propagate_to_parent(node.alpha_node);
+            if (node.attention_use_bias) {
+                propagate_to_parent(node.beta_node);
+            }
         }
     }
 }

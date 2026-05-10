@@ -150,6 +150,27 @@ std::optional<TensorDescriptor::DataType> preferredGradValueDType(const ExprNode
     return std::nullopt;
 }
 
+static bool isAttentionBackwardOp(ExprOp op) {
+    return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V;
+}
+
+static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
+    switch (op) {
+        case ExprOp::ATTENTION_BACKWARD_Q:
+        case ExprOp::ATTENTION_BACKWARD_K:
+        case ExprOp::ATTENTION_BACKWARD_V:
+        case ExprOp::CONV2D_BACKWARD_DATA:
+        case ExprOp::CONV2D_BACKWARD_FILTER:
+        case ExprOp::CONV3D_BACKWARD_DATA:
+        case ExprOp::CONV3D_BACKWARD_FILTER:
+        case ExprOp::REDUCE_MIN_BACKWARD:
+        case ExprOp::REDUCE_MAX_BACKWARD:
+            return true;
+        default:
+            return false;
+    }
+}
+
 std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& expr, const std::vector<std::string>& wrt_names) {
     std::unordered_set<uint32_t> wrt_slots;
     wrt_slots.reserve(wrt_names.size());
@@ -208,6 +229,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::ROPE:
             case ExprOp::SOFTMAX:
             case ExprOp::TRANSPOSE:
             case ExprOp::UNSQUEEZE:
@@ -234,6 +256,16 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                 break;
             case ExprOp::GEMM:
                 reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs) || reaches.at(node.aux);
+                break;
+            case ExprOp::ATTENTION:
+                reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs) || reaches.at(node.aux) ||
+                             (node.attention_use_bias && node.alpha_node != UINT32_MAX && reaches.at(node.alpha_node));
+                break;
+            case ExprOp::ATTENTION_BACKWARD_Q:
+            case ExprOp::ATTENTION_BACKWARD_K:
+            case ExprOp::ATTENTION_BACKWARD_V:
+                reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs) || reaches.at(node.aux) || reaches.at(node.alpha_node) ||
+                             (node.attention_use_bias && node.beta_node != UINT32_MAX && reaches.at(node.beta_node));
                 break;
             default:
                 throw std::runtime_error("Unsupported op while computing reverse relevance: " + std::to_string((int)node.op));
@@ -287,6 +319,13 @@ class BackwardGraphBuilder {
                           const std::vector<uint64_t>& dims,
                           std::optional<TensorDescriptor::DataType> as_type = std::nullopt) {
         return dims.empty() ? scalar(value) : fill(value, dims, as_type);
+    }
+
+    const ExprNode& node(uint32_t node_idx) const {
+        if (node_idx >= grad_expr.nodes.size()) {
+            throw std::runtime_error("BackwardGraphBuilder node query index out of range.");
+        }
+        return grad_expr.nodes.at(node_idx);
     }
 
     bool tryGetScalarConstant(uint32_t node_idx, double& value) const {
@@ -731,6 +770,77 @@ class BackwardGraphBuilder {
         return push(std::move(node));
     }
 
+    uint32_t rotaryPositionEmbedding(uint32_t lhs,
+                                    const ExprNode& forward_rope,
+                                    bool inverse,
+                                    std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
+                                    std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
+        ExprNode node{};
+        node.op = ExprOp::ROPE;
+        node.lhs = lhs;
+        node.rope_sequence_axis = forward_rope.rope_sequence_axis;
+        node.rope_head_dim_axis = forward_rope.rope_head_dim_axis;
+        node.rope_rotary_dim = forward_rope.rope_rotary_dim;
+        node.rope_base = forward_rope.rope_base;
+        node.rope_position_offset = forward_rope.rope_position_offset;
+        node.rope_interleaved = forward_rope.rope_interleaved;
+        node.rope_inverse = inverse;
+        node.rope_scaling_kind = forward_rope.rope_scaling_kind;
+        node.rope_scaling_factor = forward_rope.rope_scaling_factor;
+        node.rope_original_max_position_embeddings = forward_rope.rope_original_max_position_embeddings;
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
+        }
+        if (compute_dtype.has_value()) {
+            node.compute_dtype = compute_dtype.value();
+        } else if (forward_rope.compute_dtype.has_value()) {
+            node.compute_dtype = forward_rope.compute_dtype.value();
+        }
+        return push(std::move(node));
+    }
+
+    uint32_t attentionBackward(ExprOp op,
+                               uint32_t q,
+                               uint32_t k,
+                               uint32_t v,
+                               uint32_t dO,
+                               uint32_t bias,
+                               const ExprNode& forward_attention,
+                               std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
+                               std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
+        if (!isAttentionBackwardOp(op)) {
+            throw std::runtime_error("attentionBackward builder called with non-attention-backward op.");
+        }
+
+        ExprNode node{};
+        node.op = op;
+        node.lhs = q;
+        node.rhs = k;
+        node.aux = v;
+        node.alpha_node = dO;
+        node.beta_node = bias;
+        node.attention_q_layout = forward_attention.attention_q_layout;
+        node.attention_k_layout = forward_attention.attention_k_layout;
+        node.attention_v_layout = forward_attention.attention_v_layout;
+        node.attention_o_layout = forward_attention.attention_o_layout;
+        node.attention_mask_kind = forward_attention.attention_mask_kind;
+        node.attention_diagonal_left_bound = forward_attention.attention_diagonal_left_bound;
+        node.attention_diagonal_right_bound = forward_attention.attention_diagonal_right_bound;
+        node.attention_has_scale = forward_attention.attention_has_scale;
+        node.attention_scale = forward_attention.attention_scale;
+        node.attention_use_alibi_mask = forward_attention.attention_use_alibi_mask;
+        node.attention_use_bias = forward_attention.attention_use_bias;
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
+        }
+        if (compute_dtype.has_value()) {
+            node.compute_dtype = compute_dtype.value();
+        } else if (forward_attention.compute_dtype.has_value()) {
+            node.compute_dtype = forward_attention.compute_dtype.value();
+        }
+        return push(std::move(node));
+    }
+
     uint32_t reduction(ExprOp op,
                        uint32_t lhs,
                        const std::vector<uint64_t>& reduction_axes,
@@ -1136,6 +1246,70 @@ std::vector<uint64_t> inferMatmulOutputDims(const ExprNode& node,
     return out_dims;
 }
 
+static std::vector<uint64_t> inferAttentionOutputDims(const std::vector<uint64_t>& q_dims,
+                                                        const std::vector<uint64_t>& k_dims,
+                                                        const std::vector<uint64_t>& v_dims) {
+    if (q_dims.size() != 4 || k_dims.size() != 4 || v_dims.size() != 4) {
+        throw std::runtime_error("Autodiff attention shape inference requires rank-4 q/k/v tensors in logical [B,H,S,D] order.");
+    }
+
+    const uint64_t batch = q_dims.at(0);
+    const uint64_t query_heads = q_dims.at(1);
+    const uint64_t query_len = q_dims.at(2);
+    const uint64_t qk_dim = q_dims.at(3);
+    const uint64_t kv_batch = k_dims.at(0);
+    const uint64_t kv_heads = k_dims.at(1);
+    const uint64_t kv_len = k_dims.at(2);
+    const uint64_t k_dim = k_dims.at(3);
+    const uint64_t v_batch = v_dims.at(0);
+    const uint64_t v_heads = v_dims.at(1);
+    const uint64_t v_len = v_dims.at(2);
+    const uint64_t v_dim = v_dims.at(3);
+
+    if (batch != kv_batch || batch != v_batch) {
+        throw std::runtime_error("Autodiff attention shape inference found mismatched q/k/v batch dimensions.");
+    }
+    if (kv_heads != v_heads) {
+        throw std::runtime_error("Autodiff attention shape inference found mismatched k/v head counts.");
+    }
+    if (kv_heads == 0 || query_heads == 0 || query_heads % kv_heads != 0) {
+        throw std::runtime_error("Autodiff attention query heads must be an integer multiple of key/value heads.");
+    }
+    if (kv_len != v_len) {
+        throw std::runtime_error("Autodiff attention shape inference found mismatched k/v sequence lengths.");
+    }
+    if (qk_dim != k_dim) {
+        throw std::runtime_error("Autodiff attention q/k head dimensions must match.");
+    }
+    if (query_len == 0 || kv_len == 0 || qk_dim == 0 || v_dim == 0) {
+        throw std::runtime_error("Autodiff attention q/k/v dimensions must be non-zero.");
+    }
+
+    return {batch, query_heads, query_len, v_dim};
+}
+
+static std::vector<uint64_t> inferAttentionBackwardOutputDims(ExprOp op,
+                                                              const std::vector<uint64_t>& q_dims,
+                                                              const std::vector<uint64_t>& k_dims,
+                                                              const std::vector<uint64_t>& v_dims,
+                                                              const std::vector<uint64_t>& dO_dims) {
+    const std::vector<uint64_t> forward_dims = inferAttentionOutputDims(q_dims, k_dims, v_dims);
+    if (dO_dims != forward_dims) {
+        throw std::runtime_error("Autodiff attention-backward dO shape must match attention output shape.");
+    }
+
+    switch (op) {
+        case ExprOp::ATTENTION_BACKWARD_Q:
+            return q_dims;
+        case ExprOp::ATTENTION_BACKWARD_K:
+            return k_dims;
+        case ExprOp::ATTENTION_BACKWARD_V:
+            return v_dims;
+        default:
+            throw std::runtime_error("Autodiff attention-backward shape inference received a non-attention-backward op.");
+    }
+}
+
 static bool isConv3DOp(ExprOp op) {
     return op == ExprOp::CONV3D || op == ExprOp::CONV3D_BACKWARD_DATA || op == ExprOp::CONV3D_BACKWARD_FILTER;
 }
@@ -1336,6 +1510,7 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::ROPE:
             case ExprOp::SOFTMAX:
                 node_dims[i] = node_dims[node.lhs];
                 break;
@@ -1387,6 +1562,18 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 break;
             case ExprOp::GEMM:
                 node_dims[i] = inferMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs], &node_dims[node.aux]);
+                break;
+            case ExprOp::ATTENTION:
+                node_dims[i] = inferAttentionOutputDims(node_dims[node.lhs], node_dims[node.rhs], node_dims[node.aux]);
+                break;
+            case ExprOp::ATTENTION_BACKWARD_Q:
+            case ExprOp::ATTENTION_BACKWARD_K:
+            case ExprOp::ATTENTION_BACKWARD_V:
+                node_dims[i] = inferAttentionBackwardOutputDims(node.op,
+                                                                node_dims[node.lhs],
+                                                                node_dims[node.rhs],
+                                                                node_dims[node.aux],
+                                                                node_dims[node.alpha_node]);
                 break;
             case ExprOp::CONV2D:
             case ExprOp::CONV3D:
@@ -1652,6 +1839,32 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         return broadcastGradToDims(grad_value, forward_node_output_dims, preferredGradValueDType(forward_expr.nodes.at(forward_node_idx)));
     };
 
+    auto shapeAttentionOutputGrad =
+        [&](uint32_t grad_value, uint32_t forward_node_idx, const std::vector<uint64_t>& forward_node_output_dims) -> uint32_t {
+        if (!has_forward_dims || forward_node_output_dims.empty()) {
+            return grad_value;
+        }
+
+        double constant_value = 0.0;
+        std::vector<uint64_t> constant_dims;
+        if (!builder.tryGetConstantLike(grad_value, constant_value, constant_dims)) {
+            // Non-constant upstream gradients are already tensor-valued gradients for
+            // the attention output. Do not materialize a fill(0)+grad fused kernel
+            // just to stamp cuDNN attention backward; that wrapper is a no-op for
+            // the common training path and incorrectly hides the single-stage
+            // attention-backward plan behind a synthetic fused stage.
+            return grad_value;
+        }
+
+        if (constant_dims == forward_node_output_dims) {
+            return grad_value;
+        }
+
+        return builder.fill(constant_value,
+                            forward_node_output_dims,
+                            preferredGradValueDType(forward_expr.nodes.at(forward_node_idx)));
+    };
+
     for (int64_t node_idx = static_cast<int64_t>(forward_expr.nodes.size()) - 1; node_idx >= 0; --node_idx) {
         const auto& grad_opt = builder.gradOf(static_cast<uint32_t>(node_idx));
         if (!grad_opt.has_value()) {
@@ -1910,6 +2123,19 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     const uint32_t inv_sqrt_two_pi = builder.scalar(0.3989422804014327);
                     const uint32_t pdf = builder.mul(inv_sqrt_two_pi, builder.exp(builder.mul(neg_half, builder.mul(lhs, lhs))));
                     addContributionToChild(node.lhs, builder.mul(grad, pdf), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ROPE: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs_grad = builder.rotaryPositionEmbedding(
+                        grad,
+                        node,
+                        !node.rope_inverse,
+                        preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
+                        node.compute_dtype);
+                    addContributionToChild(node.lhs, lhs_grad, node_dims);
                 }
                 break;
             }
@@ -2343,6 +2569,64 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 break;
             }
 
+            case ExprOp::ATTENTION: {
+                const uint32_t grad_like_output = shapeAttentionOutputGrad(grad, static_cast<uint32_t>(node_idx), node_dims);
+                const std::vector<uint64_t> q_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : std::vector<uint64_t>{};
+                const std::vector<uint64_t> k_dims = has_forward_dims ? forward_node_dims.at(node.rhs) : std::vector<uint64_t>{};
+                const std::vector<uint64_t> v_dims = has_forward_dims ? forward_node_dims.at(node.aux) : std::vector<uint64_t>{};
+                const uint32_t q = builder.cloneForward(node.lhs);
+                const uint32_t k = builder.cloneForward(node.rhs);
+                const uint32_t v = builder.cloneForward(node.aux);
+                const uint32_t bias = node.attention_use_bias ? builder.cloneForward(node.alpha_node) : UINT32_MAX;
+
+                if (node.attention_use_bias && node.alpha_node != UINT32_MAX && node_reaches_requested_inputs.at(node.alpha_node)) {
+                    throw std::runtime_error("Thor expressions autodiff does not yet expose dBias for cuDNN additive attention bias.");
+                }
+
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t dQ = builder.attentionBackward(ExprOp::ATTENTION_BACKWARD_Q,
+                                                                  q,
+                                                                  k,
+                                                                  v,
+                                                                  grad_like_output,
+                                                                  bias,
+                                                                  node,
+                                                                  preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
+                                                                  node.compute_dtype);
+                    addContributionToChild(node.lhs, dQ, q_dims);
+                }
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    const uint32_t dK = builder.attentionBackward(ExprOp::ATTENTION_BACKWARD_K,
+                                                                  q,
+                                                                  k,
+                                                                  v,
+                                                                  grad_like_output,
+                                                                  bias,
+                                                                  node,
+                                                                  preferredGradValueDType(forward_expr.nodes.at(node.rhs)),
+                                                                  node.compute_dtype);
+                    addContributionToChild(node.rhs, dK, k_dims);
+                }
+                if (node_reaches_requested_inputs.at(node.aux)) {
+                    const uint32_t dV = builder.attentionBackward(ExprOp::ATTENTION_BACKWARD_V,
+                                                                  q,
+                                                                  k,
+                                                                  v,
+                                                                  grad_like_output,
+                                                                  bias,
+                                                                  node,
+                                                                  preferredGradValueDType(forward_expr.nodes.at(node.aux)),
+                                                                  node.compute_dtype);
+                    addContributionToChild(node.aux, dV, v_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ATTENTION_BACKWARD_Q:
+            case ExprOp::ATTENTION_BACKWARD_K:
+            case ExprOp::ATTENTION_BACKWARD_V:
+                throw std::runtime_error("Thor expressions autodiff does not support second derivatives for attention backward yet.");
+
             case ExprOp::REDUCE_ARGMIN:
             case ExprOp::REDUCE_ARGMAX:
                 throw std::runtime_error("Thor expressions autodiff does not support backward for op " + opName(node.op) + ".");
@@ -2421,8 +2705,18 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
         // Create a dedicated terminal output node so we can force only the final
         // written grad dtype, while leaving internal promoted compute untouched.
+        // Stage-boundary gradients that already declare the requested output dtype
+        // can be written directly; wrapping them in grad + fill(0) only creates a
+        // synthetic fused kernel after the real backend stage.
         uint32_t terminal_grad = total_grad.value();
+        bool terminal_already_forces_dtype = false;
         if (grad_dtype.has_value()) {
+            const ExprNode& terminal_node = builder.node(terminal_grad);
+            terminal_already_forces_dtype = terminal_node.output_dtype.has_value() &&
+                                           terminal_node.output_dtype.value() == grad_dtype.value() &&
+                                           isStageBoundaryLikeBackwardOutputOp(terminal_node.op);
+        }
+        if (grad_dtype.has_value() && !terminal_already_forces_dtype) {
             uint32_t zero_like;
             if (has_forward_dims) {
                 zero_like = builder.fill(0.0, forward_node_dims.at(first_it->second), grad_dtype);

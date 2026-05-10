@@ -10,6 +10,7 @@
 
 #include <cuda_runtime.h>
 
+#include <functional>
 #include <limits>
 #include <stdexcept>
 #include "DeepLearning/Implementation/ThorError.h"
@@ -489,6 +490,25 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::NORMCDF:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::ROPE: {
+                node_dims[i] = node_dims[node.lhs];
+                const std::vector<uint64_t>& dims = node_dims[i];
+                if (dims.empty()) {
+                    throw std::runtime_error("RoPE requires a tensor input.");
+                }
+                if (node.rope_sequence_axis >= dims.size() || node.rope_head_dim_axis >= dims.size()) {
+                    throw std::runtime_error("RoPE sequence_axis/head_dim_axis are out of range for the input rank.");
+                }
+                if (node.rope_head_dim_axis + 1 != dims.size()) {
+                    throw std::runtime_error("RoPE currently requires head_dim_axis to be the innermost dimension for coalesced pair rotation.");
+                }
+                const uint64_t head_dim = dims[node.rope_head_dim_axis];
+                const uint64_t rotary_dim = node.rope_rotary_dim == 0 ? head_dim : node.rope_rotary_dim;
+                if (rotary_dim == 0 || (rotary_dim & 1ULL) != 0ULL || rotary_dim > head_dim) {
+                    throw std::runtime_error("RoPE rotary_dim must be even, non-zero, and <= the head dimension.");
+                }
+                break;
+            }
             case ExprOp::TRANSPOSE:
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
                 break;
@@ -927,8 +947,65 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
     if (kv_len == 0 || query_len == 0 || qk_dim == 0 || v_dim == 0) {
         throw std::runtime_error("Attention q/k/v dimensions must be non-zero.");
     }
+    if (compiled_stage.use_bias && stage_input_dims.size() >= 4) {
+        const std::vector<uint64_t> expected_bias_dims{batch, query_heads, query_len, kv_len};
+        if (stage_input_dims.at(3) != expected_bias_dims) {
+            throw std::runtime_error("Attention additive bias must have shape [B, Hq, Sq, Skv].");
+        }
+    }
 
     return std::vector<uint64_t>{batch, query_heads, query_len, v_dim};
+}
+
+static CompiledAttention makeForwardAttentionView(const CompiledAttentionBackward& backward,
+                                                  TensorDescriptor::DataType output_dtype,
+                                                  std::string debug_suffix = "") {
+    CompiledAttention forward;
+    forward.q_layout = backward.q_layout;
+    forward.k_layout = backward.k_layout;
+    forward.v_layout = backward.v_layout;
+    forward.o_layout = backward.o_layout;
+    forward.mask_kind = backward.mask_kind;
+    forward.diagonal_left_bound = backward.diagonal_left_bound;
+    forward.diagonal_right_bound = backward.diagonal_right_bound;
+    forward.attention_scale = backward.attention_scale;
+    forward.use_alibi_mask = backward.use_alibi_mask;
+    forward.use_bias = backward.use_bias;
+    forward.compute_dtype = backward.compute_dtype;
+    forward.output_dtype = output_dtype;
+    forward.debug_name = debug_suffix.empty() ? backward.debug_name : backward.debug_name + debug_suffix;
+    return forward;
+}
+
+static std::vector<uint64_t> resolveAttentionBackwardOutputDimsFromInputs(const CompiledAttentionBackward& compiled_stage,
+                                                                          const std::vector<std::vector<uint64_t>>& stage_input_dims,
+                                                                          ExprOp output_op) {
+    if (stage_input_dims.size() < 4) {
+        throw std::runtime_error("Attention-backward stage expected q/k/v/dO input shapes.");
+    }
+
+    std::vector<std::vector<uint64_t>> forward_input_dims{stage_input_dims.at(0), stage_input_dims.at(1), stage_input_dims.at(2)};
+    if (compiled_stage.use_bias && stage_input_dims.size() >= 5) {
+        forward_input_dims.push_back(stage_input_dims.at(4));
+    }
+    const std::vector<uint64_t> forward_out_dims = resolveAttentionOutputDimsFromInputs(
+        makeForwardAttentionView(compiled_stage, compiled_stage.dQ_dtype), forward_input_dims);
+
+    const auto& dO_dims = stage_input_dims.at(3);
+    if (dO_dims != forward_out_dims) {
+        throw std::runtime_error("Attention-backward dO shape must match the corresponding forward attention output shape.");
+    }
+
+    switch (output_op) {
+        case ExprOp::ATTENTION_BACKWARD_Q:
+            return stage_input_dims.at(0);
+        case ExprOp::ATTENTION_BACKWARD_K:
+            return stage_input_dims.at(1);
+        case ExprOp::ATTENTION_BACKWARD_V:
+            return stage_input_dims.at(2);
+        default:
+            throw std::runtime_error("Attention-backward output shape requested for non-attention-backward op.");
+    }
 }
 
 static std::vector<uint64_t> resolveConvolutionOutputDimsFromInputs(const CompiledConvolution& compiled_stage,
@@ -1707,6 +1784,25 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::NORMCDF:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::ROPE: {
+                node_dims[i] = node_dims[node.lhs];
+                const std::vector<uint64_t>& dims = node_dims[i];
+                if (dims.empty()) {
+                    throw std::runtime_error("RoPE requires a tensor input.");
+                }
+                if (node.rope_sequence_axis >= dims.size() || node.rope_head_dim_axis >= dims.size()) {
+                    throw std::runtime_error("RoPE sequence_axis/head_dim_axis are out of range for the input rank.");
+                }
+                if (node.rope_head_dim_axis + 1 != dims.size()) {
+                    throw std::runtime_error("RoPE currently requires head_dim_axis to be the innermost dimension for coalesced pair rotation.");
+                }
+                const uint64_t head_dim = dims[node.rope_head_dim_axis];
+                const uint64_t rotary_dim = node.rope_rotary_dim == 0 ? head_dim : node.rope_rotary_dim;
+                if (rotary_dim == 0 || (rotary_dim & 1ULL) != 0ULL || rotary_dim > head_dim) {
+                    throw std::runtime_error("RoPE rotary_dim must be even, non-zero, and <= the head dimension.");
+                }
+                break;
+            }
             case ExprOp::TRANSPOSE:
                 throw std::runtime_error("inferFusedStageNodeDims encountered unexpected transpose op in fused stage.");
             case ExprOp::UNSQUEEZE: {
@@ -1857,9 +1953,18 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::SUB:
         case ExprOp::MUL:
         case ExprOp::DIV:
-        case ExprOp::POW:
         case ExprOp::NEG:
         case ExprOp::ABS:
+        case ExprOp::SQRT:
+        case ExprOp::MIN:
+        case ExprOp::MAX:
+        case ExprOp::MIN_GRAD_LEFT:
+        case ExprOp::MIN_GRAD_RIGHT:
+        case ExprOp::MAX_GRAD_LEFT:
+        case ExprOp::MAX_GRAD_RIGHT:
+            return 1;
+
+        case ExprOp::POW:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -1868,16 +1973,10 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::LOG1P:
         case ExprOp::LOG2:
         case ExprOp::LOG10:
-        case ExprOp::SQRT:
         case ExprOp::TANH:
         case ExprOp::NORMCDF:
-        case ExprOp::MIN:
-        case ExprOp::MAX:
-        case ExprOp::MIN_GRAD_LEFT:
-        case ExprOp::MIN_GRAD_RIGHT:
-        case ExprOp::MAX_GRAD_LEFT:
-        case ExprOp::MAX_GRAD_RIGHT:
-            return 1;
+        case ExprOp::ROPE:
+            return 10;
 
         case ExprOp::INPUT:
         case ExprOp::RUNTIME_SCALAR:
@@ -1974,6 +2073,25 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::NORMCDF:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::ROPE: {
+                node_dims[i] = node_dims[node.lhs];
+                const std::vector<uint64_t>& dims = node_dims[i];
+                if (dims.empty()) {
+                    throw std::runtime_error("RoPE requires a tensor input.");
+                }
+                if (node.rope_sequence_axis >= dims.size() || node.rope_head_dim_axis >= dims.size()) {
+                    throw std::runtime_error("RoPE sequence_axis/head_dim_axis are out of range for the input rank.");
+                }
+                if (node.rope_head_dim_axis + 1 != dims.size()) {
+                    throw std::runtime_error("RoPE currently requires head_dim_axis to be the innermost dimension for coalesced pair rotation.");
+                }
+                const uint64_t head_dim = dims[node.rope_head_dim_axis];
+                const uint64_t rotary_dim = node.rope_rotary_dim == 0 ? head_dim : node.rope_rotary_dim;
+                if (rotary_dim == 0 || (rotary_dim & 1ULL) != 0ULL || rotary_dim > head_dim) {
+                    throw std::runtime_error("RoPE rotary_dim must be even, non-zero, and <= the head dimension.");
+                }
+                break;
+            }
             case ExprOp::UNSQUEEZE: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
                 node_dims[i] = applyNormalizedUnsqueezeDims(lhs_dims, node.unsqueeze_axes);
@@ -2065,6 +2183,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::ROPE:
             case ExprOp::MIN:
             case ExprOp::MAX:
             case ExprOp::MIN_GRAD_LEFT:
@@ -2095,6 +2214,9 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::TRANSPOSE:
             case ExprOp::SOFTMAX:
             case ExprOp::ATTENTION:
+            case ExprOp::ATTENTION_BACKWARD_Q:
+            case ExprOp::ATTENTION_BACKWARD_K:
+            case ExprOp::ATTENTION_BACKWARD_V:
             case ExprOp::MATMUL:
             case ExprOp::GEMM:
             case ExprOp::CONV2D:
@@ -2205,6 +2327,21 @@ static uint64_t multiplyDimsForFlops(uint64_t value, const std::vector<uint64_t>
     return value;
 }
 
+static uint64_t computeAttentionBackwardStageFlops(const CompiledAttentionBackward& attention_backward,
+                                                   const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    std::vector<std::vector<uint64_t>> forward_input_dims{stage_input_dims.at(0), stage_input_dims.at(1), stage_input_dims.at(2)};
+    if (attention_backward.use_bias) {
+        if (stage_input_dims.size() < 5) {
+            throw std::runtime_error("AttentionBackward FLOP accounting expected q/k/v/dO/bias input dims for biased attention.");
+        }
+        forward_input_dims.push_back(stage_input_dims.at(4));
+    }
+    const uint64_t forward = computeAttentionStageFlops(
+        makeForwardAttentionView(attention_backward, attention_backward.dQ_dtype), forward_input_dims);
+    // cuDNN backward internally does the reverse softmax path plus three dense-gradient products.
+    return checkedMulU64(forward, 4, "computeAttentionBackwardStageFlops");
+}
+
 static uint64_t computeConvolutionStageFlops(const CompiledConvolution& convolution,
                                              const std::vector<std::vector<uint64_t>>& stage_input_dims) {
     const std::vector<uint64_t> out_dims = resolveConvolutionOutputDimsFromInputs(convolution, stage_input_dims);
@@ -2252,15 +2389,17 @@ static uint64_t computeConvolutionBackwardStageFlops(const CompiledConvolutionBa
 
 static uint64_t computeReduceMinMaxBackwardStageFlops(const CompiledReduceMinMaxBackward& backward,
                                                       const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    (void)backward;
     if (stage_input_dims.size() < 2) {
         throw std::runtime_error("ReduceMinMaxBackward stage missing input dims while computing FLOPs.");
     }
 
-    const ExprOp forward_reduce = backward.op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX;
-    const uint64_t grad_out_numel = numelFromDims(stage_input_dims[1]);
-    const uint64_t red_extent = reductionExtent(stage_input_dims[0], backward.reduction_axes);
-
-    return reductionSemanticFlops(forward_reduce, grad_out_numel, red_extent);
+    // Reduce-min/max backward compares every original input element with the retained extremum and then
+    // conditionally routes the upstream gradient. The compile-backward graph may also include a tiny helper
+    // stage to materialize/broadcast the upstream reduced gradient; do not double count that helper here.
+    const uint64_t input_flops = checkedMulU64(numelFromDims(stage_input_dims[0]), 2, "computeReduceMinMaxBackwardStageFlops");
+    const uint64_t upstream_numel = numelFromDims(stage_input_dims[1]);
+    return input_flops > upstream_numel ? input_flops - upstream_numel : input_flops;
 }
 
 static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std::vector<std::vector<uint64_t>>& stage_input_dims) {
@@ -2292,6 +2431,11 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
             if (!stage.attention)
                 throw std::runtime_error("Attention stage missing payload while computing FLOPs.");
             return computeAttentionStageFlops(*stage.attention, stage_input_dims);
+
+        case CompiledExecutionStage::Kind::AttentionBackward:
+            if (!stage.attention_backward)
+                throw std::runtime_error("AttentionBackward stage missing payload while computing FLOPs.");
+            return computeAttentionBackwardStageFlops(*stage.attention_backward, stage_input_dims);
 
         case CompiledExecutionStage::Kind::Convolution:
             if (!stage.convolution)
@@ -2375,6 +2519,17 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 throw std::runtime_error("resolveOutputDimsForStageOutput attention stage missing payload.");
             }
             return resolveAttentionOutputDimsFromInputs(*stage.attention, stage_input_dims);
+        }
+
+        case CompiledExecutionStage::Kind::AttentionBackward: {
+            if (!stage.attention_backward) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput attention-backward stage missing payload.");
+            }
+            if (stage.outputs[output_idx].local_node_idx >= stage.expr.nodes.size()) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput attention-backward output node index out of range.");
+            }
+            return resolveAttentionBackwardOutputDimsFromInputs(
+                *stage.attention_backward, stage_input_dims, stage.expr.nodes[stage.outputs[output_idx].local_node_idx].op);
         }
 
         case CompiledExecutionStage::Kind::Convolution: {
@@ -2463,6 +2618,10 @@ static std::vector<uint64_t> logicalDimsForBroadcastComparison(const CompiledExe
 struct ResolvedBroadcastGroup {
     SpecializedBroadcastGroup specialized;
 };
+
+static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return node.op == ExprOp::ROPE; });
+}
 
 static bool stageHasShapeOnlyOps(const CompiledExecutionStage& stage) {
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
@@ -2583,6 +2742,7 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::SQRT:
         case ExprOp::TANH:
         case ExprOp::NORMCDF:
+        case ExprOp::ROPE:
         case ExprOp::REDUCE_SUM:
         case ExprOp::REDUCE_PROD:
         case ExprOp::REDUCE_MIN:
@@ -2623,6 +2783,13 @@ static bool fusedStageRequiresBroadcastLaunch(const CompiledExecutionStage& stag
 
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
         return false;
+    }
+
+    if (expressionHasIndexAwareOps(stage.expr)) {
+        if (!stage.outputs.empty()) {
+            resolved_output_dims = resolveOutputDimsForStageOutput(stage, 0, stage_inputs);
+        }
+        return true;
     }
 
     if (stageHasShapeOnlyOps(stage)) {
@@ -2849,6 +3016,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
             specialized.used_input_slots = used_input_slots;
 
             const std::vector<uint64_t> output_strides = computePackedOutputStrides(output_dims);
+            const bool force_all_output_axes = expressionHasIndexAwareOps(stage.expr);
 
             std::vector<std::vector<uint64_t>> input_strides_by_used;
             input_strides_by_used.reserve(used_input_slots.size());
@@ -2895,7 +3063,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
             }
 
             for (size_t axis = 0; axis < output_dims.size(); ++axis) {
-                if (output_dims[axis] == 1ULL) {
+                if (!force_all_output_axes && output_dims[axis] == 1ULL) {
                     continue;
                 }
 
@@ -2912,7 +3080,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
                     }
                 }
 
-                if (any_nonzero) {
+                if (any_nonzero || force_all_output_axes) {
                     specialized.active_axes.push_back(std::move(axis_desc));
                 }
             }
@@ -3185,6 +3353,17 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("Attention stage expected exactly one output.");
             }
             value_dims[stage.outputs[0].value_id] = resolveAttentionOutputDimsFromInputs(*stage.attention, stage_input_dims);
+        } else if (stage.kind == CompiledExecutionStage::Kind::AttentionBackward) {
+            if (!stage.attention_backward) {
+                throw std::runtime_error("Missing compiled attention-backward stage.");
+            }
+            for (size_t i = 0; i < stage.outputs.size(); ++i) {
+                if (stage.outputs[i].local_node_idx >= stage.expr.nodes.size()) {
+                    throw std::runtime_error("Attention-backward stage output node index out of range.");
+                }
+                value_dims[stage.outputs[i].value_id] = resolveAttentionBackwardOutputDimsFromInputs(
+                    *stage.attention_backward, stage_input_dims, stage.expr.nodes[stage.outputs[i].local_node_idx].op);
+            }
         } else if (stage.kind == CompiledExecutionStage::Kind::Convolution) {
             if (!stage.convolution) {
                 throw std::runtime_error("Missing compiled convolution stage.");
@@ -4368,8 +4547,10 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
                                                                 const Tensor& q,
                                                                 const Tensor& k,
                                                                 const Tensor& v,
+                                                                const std::optional<Tensor>& bias,
                                                                 std::optional<Tensor> preallocatedOutput,
-                                                                const Stream& stream) const {
+                                                                const Stream& stream,
+                                                                std::shared_ptr<AttentionForwardState> forward_state) const {
     if (!compiledStage) {
         throw std::runtime_error("stampAttention requires non-null compiled stage.");
     }
@@ -4377,6 +4558,13 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
     Tensor adaptedQ = adaptMatmulInputDTypeIfNeeded(q, compiledStage->output_dtype, stream);
     Tensor adaptedK = adaptMatmulInputDTypeIfNeeded(k, compiledStage->output_dtype, stream);
     Tensor adaptedV = adaptMatmulInputDTypeIfNeeded(v, compiledStage->output_dtype, stream);
+    std::optional<Tensor> adaptedBias = std::nullopt;
+    if (compiledStage->use_bias) {
+        if (!bias.has_value()) {
+            throw std::runtime_error("stampAttention requires an additive bias tensor for this compiled stage.");
+        }
+        adaptedBias = adaptMatmulInputDTypeIfNeeded(bias.value(), compiledStage->compute_dtype, stream);
+    }
 
     std::vector<std::vector<uint64_t>> stage_input_dims(3);
     stage_input_dims[0] = adaptedQ.getDimensions();
@@ -4403,8 +4591,100 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
 
     // Build and validate the cuDNN descriptor during stamping so shape/layout errors fail before execution.
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, output);
+    if (compiledStage->use_bias && adaptedBias.has_value()) {
+        const std::vector<uint64_t> expected_bias_dims{adaptedQ.getDimensions().at(0), adaptedQ.getDimensions().at(1), adaptedQ.getDimensions().at(2), adaptedK.getDimensions().at(2)};
+        if (adaptedBias->getDimensions() != expected_bias_dims) {
+            throw std::runtime_error("Attention additive bias must have shape [B, Hq, Sq, Skv].");
+        }
+        if (adaptedBias->getDataType() != compiledStage->compute_dtype) {
+            throw std::runtime_error("Attention additive bias dtype must match attention compute dtype.");
+        }
+    }
 
-    return make_shared<StampedAttention>(compiledStage, adaptedQ, adaptedK, adaptedV, output, stream);
+    if (forward_state) {
+        forward_state->output = output;
+        forward_state->has_valid_stats = false;
+    }
+
+    return make_shared<StampedAttention>(compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, output, stream, std::move(forward_state));
+}
+
+std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
+    const std::shared_ptr<CompiledAttentionBackward>& compiledStage,
+    const Tensor& q,
+    const Tensor& k,
+    const Tensor& v,
+    const std::optional<Tensor>& bias,
+    const Tensor& dO,
+    const std::vector<std::optional<Tensor>>& preallocatedOutputs,
+    const Stream& stream,
+    std::shared_ptr<AttentionForwardState> saved_forward_state) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampAttentionBackward requires non-null compiled stage.");
+    }
+
+    Tensor adaptedQ = adaptMatmulInputDTypeIfNeeded(q, compiledStage->dQ_dtype, stream);
+    Tensor adaptedK = adaptMatmulInputDTypeIfNeeded(k, compiledStage->dK_dtype, stream);
+    Tensor adaptedV = adaptMatmulInputDTypeIfNeeded(v, compiledStage->dV_dtype, stream);
+    std::optional<Tensor> adaptedBias = std::nullopt;
+    if (compiledStage->use_bias) {
+        if (!bias.has_value()) {
+            throw std::runtime_error("stampAttentionBackward requires an additive bias tensor for this compiled stage.");
+        }
+        adaptedBias = adaptMatmulInputDTypeIfNeeded(bias.value(), compiledStage->compute_dtype, stream);
+    }
+    Tensor adaptedDO = adaptMatmulInputDTypeIfNeeded(dO, dO.getDataType(), stream);
+
+    std::vector<std::vector<uint64_t>> stage_input_dims{adaptedQ.getDimensions(), adaptedK.getDimensions(), adaptedV.getDimensions(), adaptedDO.getDimensions()};
+    std::vector<std::vector<uint64_t>> forward_input_dims{stage_input_dims[0], stage_input_dims[1], stage_input_dims[2]};
+    if (compiledStage->use_bias) {
+        forward_input_dims.push_back(adaptedBias->getDimensions());
+    }
+    const std::vector<uint64_t> o_dims = resolveAttentionOutputDimsFromInputs(
+        makeForwardAttentionView(*compiledStage, adaptedDO.getDataType(), ".stats_forward"), forward_input_dims);
+    if (adaptedDO.getDimensions() != o_dims) {
+        throw std::runtime_error("Attention-backward dO dimensions do not match the corresponding forward attention output shape.");
+    }
+
+    auto make_or_validate_output = [&](size_t idx, TensorDescriptor::DataType dtype, const std::vector<uint64_t>& dims, const char* label) {
+        if (idx < preallocatedOutputs.size() && preallocatedOutputs[idx].has_value()) {
+            Tensor out = preallocatedOutputs[idx].value();
+            if (out.getPlacement() != adaptedQ.getPlacement()) {
+                throw std::runtime_error(std::string("Preallocated attention-backward ") + label + " placement does not match q placement.");
+            }
+            if (out.getDescriptor().getDataType() != dtype) {
+                throw std::runtime_error(std::string("Preallocated attention-backward ") + label + " dtype does not match compiled dtype.");
+            }
+            if (out.getDimensions() != dims) {
+                throw std::runtime_error(std::string("Preallocated attention-backward ") + label + " dimensions are incompatible.");
+            }
+            return out;
+        }
+        return Tensor(adaptedQ.getPlacement(), TensorDescriptor(dtype, dims));
+    };
+
+    Tensor dQ = make_or_validate_output(0, compiledStage->dQ_dtype, adaptedQ.getDimensions(), "dQ");
+    Tensor dK = make_or_validate_output(1, compiledStage->dK_dtype, adaptedK.getDimensions(), "dK");
+    Tensor dV = make_or_validate_output(2, compiledStage->dV_dtype, adaptedV.getDimensions(), "dV");
+    Tensor oScratch(adaptedQ.getPlacement(), TensorDescriptor(adaptedDO.getDataType(), o_dims));
+    Tensor stats(adaptedQ.getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1}));
+    std::optional<Tensor> dBiasScratch = std::nullopt;
+    if (compiledStage->use_bias) {
+        dBiasScratch = Tensor(adaptedQ.getPlacement(), TensorDescriptor(adaptedQ.getDataType(), adaptedBias->getDimensions()));
+    }
+
+    (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, oScratch);
+    if (compiledStage->use_bias && adaptedBias.has_value()) {
+        const std::vector<uint64_t> expected_bias_dims{adaptedQ.getDimensions().at(0), adaptedQ.getDimensions().at(1), adaptedQ.getDimensions().at(2), adaptedK.getDimensions().at(2)};
+        if (adaptedBias->getDimensions() != expected_bias_dims) {
+            throw std::runtime_error("Attention-backward additive bias must have shape [B, Hq, Sq, Skv].");
+        }
+        if (adaptedBias->getDataType() != compiledStage->compute_dtype) {
+            throw std::runtime_error("Attention-backward additive bias dtype must match attention compute dtype.");
+        }
+    }
+    return make_shared<StampedAttentionBackward>(
+        compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, adaptedDO, dQ, dK, dV, oScratch, stats, dBiasScratch, stream, std::move(saved_forward_state));
 }
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
@@ -4549,6 +4829,34 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
     std::unordered_map<uint32_t, uint32_t> producer_stage_by_value_id;
     producer_stage_by_value_id.reserve(compiled_outputs->stages.size() * 2);
+
+    std::unordered_map<uint32_t, std::shared_ptr<AttentionForwardState>> attention_forward_state_by_stage_idx;
+    attention_forward_state_by_stage_idx.reserve(compiled_outputs->stages.size());
+
+    auto stageDependsOn = [&](const std::vector<uint32_t>& direct_dependencies, uint32_t candidate_stage_idx) {
+        std::unordered_set<uint32_t> visited;
+        std::function<bool(uint32_t)> visit = [&](uint32_t stage_idx) -> bool {
+            if (stage_idx == candidate_stage_idx) {
+                return true;
+            }
+            if (stage_idx >= stampedStages.size() || !visited.insert(stage_idx).second) {
+                return false;
+            }
+            for (uint32_t dep : stampedStages[stage_idx].dependency_stage_indices) {
+                if (visit(dep)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        for (uint32_t dep : direct_dependencies) {
+            if (visit(dep)) {
+                return true;
+            }
+        }
+        return false;
+    };
 
     for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
         std::vector<RuntimeInputValue> stageInputs;
@@ -4892,8 +5200,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (!stage.attention) {
                     throw std::runtime_error("Attention stage missing compiled payload.");
                 }
-                if (stageInputs.size() != 3) {
-                    throw std::runtime_error("Attention stage expects exactly three inputs: q, k, and v.");
+                const size_t expected_attention_stage_inputs = stage.attention->use_bias ? 4 : 3;
+                if (stageInputs.size() != expected_attention_stage_inputs) {
+                    throw std::runtime_error(stage.attention->use_bias ?
+                        "Attention stage expects exactly four inputs: q, k, v, and bias." :
+                        "Attention stage expects exactly three inputs: q, k, and v.");
                 }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Attention stage expects exactly one output.");
@@ -4901,6 +5212,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 Tensor qTensor = runtimeInputTensor(stageInputs[0]);
                 Tensor kTensor = runtimeInputTensor(stageInputs[1]);
                 Tensor vTensor = runtimeInputTensor(stageInputs[2]);
+                std::optional<Tensor> biasTensor = std::nullopt;
+                if (stage.attention->use_bias) {
+                    biasTensor = runtimeInputTensor(stageInputs[3]);
+                }
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
                 auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
@@ -4908,15 +5223,95 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (preallocated_it != preallocated_final_outputs_by_name.end()) {
                     preallocated = preallocated_it->second;
                 }
+                std::shared_ptr<AttentionForwardState> forwardState = std::make_shared<AttentionForwardState>();
                 std::shared_ptr<StampedAttention> stampedAttention =
-                    stampAttention(stage.attention, qTensor, kTensor, vTensor, preallocated, stream);
+                    stampAttention(stage.attention, qTensor, kTensor, vTensor, biasTensor, preallocated, stream, forwardState);
                 Tensor outputTensor = stampedAttention->getOutputTensor();
                 if (outputTensor.getDimensions() != output_dims) {
                     throw std::runtime_error("Stamped attention output tensor dimensions are incompatible with the staged output shape.");
                 }
                 values[stageOutput.value_id] = outputTensor;
-                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                const uint32_t attention_stage_idx = static_cast<uint32_t>(stampedStages.size());
+                producer_stage_by_value_id[stageOutput.value_id] = attention_stage_idx;
+                attention_forward_state_by_stage_idx[attention_stage_idx] = std::move(forwardState);
                 stampedStages.emplace_back(stampedAttention, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
+            case CompiledExecutionStage::Kind::AttentionBackward: {
+                if (!stage.attention_backward) {
+                    throw std::runtime_error("Attention-backward stage missing compiled payload.");
+                }
+                const size_t expected_attention_backward_stage_inputs = stage.attention_backward && stage.attention_backward->use_bias ? 5 : 4;
+                if (stageInputs.size() != expected_attention_backward_stage_inputs) {
+                    throw std::runtime_error(stage.attention_backward && stage.attention_backward->use_bias ?
+                        "Attention-backward stage expects exactly five inputs: q, k, v, dO, and bias." :
+                        "Attention-backward stage expects exactly four inputs: q, k, v, and dO.");
+                }
+                Tensor qTensor = runtimeInputTensor(stageInputs[0]);
+                Tensor kTensor = runtimeInputTensor(stageInputs[1]);
+                Tensor vTensor = runtimeInputTensor(stageInputs[2]);
+                Tensor dOTensor = runtimeInputTensor(stageInputs[3]);
+                std::optional<Tensor> biasTensor = std::nullopt;
+                if (stage.attention_backward && stage.attention_backward->use_bias) {
+                    biasTensor = runtimeInputTensor(stageInputs[4]);
+                }
+
+                std::vector<std::optional<Tensor>> preallocated(3, std::nullopt);
+                for (size_t i = 0; i < stage.outputs.size(); ++i) {
+                    if (stage.outputs[i].local_node_idx >= stage.expr.nodes.size()) {
+                        throw std::runtime_error("Attention-backward stage output node index out of range while stamping.");
+                    }
+                    const ExprOp out_op = stage.expr.nodes[stage.outputs[i].local_node_idx].op;
+                    size_t slot = out_op == ExprOp::ATTENTION_BACKWARD_Q ? 0 :
+                                  out_op == ExprOp::ATTENTION_BACKWARD_K ? 1 :
+                                  out_op == ExprOp::ATTENTION_BACKWARD_V ? 2 : 3;
+                    if (slot >= 3) {
+                        throw std::runtime_error("Attention-backward stage output op is invalid while stamping.");
+                    }
+                    auto preallocated_it = preallocated_final_outputs_by_name.find(stage.outputs[i].name);
+                    if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                        preallocated[slot] = preallocated_it->second;
+                    }
+                }
+
+                std::shared_ptr<AttentionForwardState> savedForwardState = nullptr;
+                for (const auto& [candidate_stage_idx, candidate_state] : attention_forward_state_by_stage_idx) {
+                    if (!candidate_state || !stageDependsOn(dependency_stage_indices, candidate_stage_idx)) {
+                        continue;
+                    }
+                    const StampedExecutionStage& candidate_stage = stampedStages.at(candidate_stage_idx);
+                    if (candidate_stage.kind != StampedExecutionStage::Kind::Attention || !candidate_stage.attention) {
+                        continue;
+                    }
+                    if (candidate_stage.attention->canProvideForwardStateFor(*stage.attention_backward, qTensor, kTensor, vTensor, biasTensor, dOTensor)) {
+                        if (!candidate_state->stats.isInitialized()) {
+                            const std::vector<uint64_t> o_dims = candidate_state->output.getDimensions();
+                            TensorDescriptor statsDescriptor(TensorDescriptor::DataType::FP32, {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1});
+                            candidate_state->stats = Tensor(candidate_state->output.getPlacement(), statsDescriptor);
+                        }
+                        candidate_state->retain_for_backward = true;
+                        savedForwardState = candidate_state;
+                        break;
+                    }
+                }
+
+                std::shared_ptr<StampedAttentionBackward> stampedAttentionBackward =
+                    stampAttentionBackward(stage.attention_backward, qTensor, kTensor, vTensor, biasTensor, dOTensor, preallocated, stream, savedForwardState);
+                const std::vector<Tensor>& outputTensors = stampedAttentionBackward->getOutputTensors();
+                if (outputTensors.size() != 3) {
+                    throw std::runtime_error("Stamped attention-backward should expose dQ/dK/dV tensors.");
+                }
+                for (size_t i = 0; i < stage.outputs.size(); ++i) {
+                    const ExprOp out_op = stage.expr.nodes[stage.outputs[i].local_node_idx].op;
+                    size_t slot = out_op == ExprOp::ATTENTION_BACKWARD_Q ? 0 : out_op == ExprOp::ATTENTION_BACKWARD_K ? 1 : 2;
+                    const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, i, stageInputs);
+                    if (outputTensors.at(slot).getDimensions() != output_dims) {
+                        throw std::runtime_error("Stamped attention-backward output tensor dimensions are incompatible with staged shape.");
+                    }
+                    values[stage.outputs[i].value_id] = outputTensors.at(slot);
+                    producer_stage_by_value_id[stage.outputs[i].value_id] = static_cast<uint32_t>(stampedStages.size());
+                }
+                stampedStages.emplace_back(stampedAttentionBackward, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
             case CompiledExecutionStage::Kind::Convolution: {
@@ -5265,6 +5660,8 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             addMatmulParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
         } else if (stage.kind == CompiledExecutionStage::Kind::Attention) {
             // Attention stages do not currently infer initializer fan overrides for q/k/v inputs.
+        } else if (stage.kind == CompiledExecutionStage::Kind::AttentionBackward) {
+            // Attention-backward stages do not infer initializer fan overrides.
         } else if (stage.kind == CompiledExecutionStage::Kind::Convolution) {
             addConvolutionParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
         } else if (stage.kind == CompiledExecutionStage::Kind::ConvolutionBackward) {
@@ -5332,6 +5729,17 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                 throw std::runtime_error("Attention stage expected exactly one output.");
             }
             value_dims[stage.outputs[0].value_id] = resolveAttentionOutputDimsFromInputs(*stage.attention, stage_input_dims);
+        } else if (stage.kind == CompiledExecutionStage::Kind::AttentionBackward) {
+            if (!stage.attention_backward) {
+                throw std::runtime_error("Missing compiled attention-backward stage.");
+            }
+            for (size_t i = 0; i < stage.outputs.size(); ++i) {
+                if (stage.outputs[i].local_node_idx >= stage.expr.nodes.size()) {
+                    throw std::runtime_error("Attention-backward stage output node index out of range.");
+                }
+                value_dims[stage.outputs[i].value_id] = resolveAttentionBackwardOutputDimsFromInputs(
+                    *stage.attention_backward, stage_input_dims, stage.expr.nodes[stage.outputs[i].local_node_idx].op);
+            }
         } else if (stage.kind == CompiledExecutionStage::Kind::Convolution) {
             if (!stage.convolution) {
                 throw std::runtime_error("Missing compiled convolution stage.");

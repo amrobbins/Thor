@@ -197,11 +197,34 @@ struct CompiledAttention {
     int64_t diagonal_right_bound = 0;
     std::optional<float> attention_scale = std::nullopt;
     bool use_alibi_mask = false;
+    bool use_bias = false;
     TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
     TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP16;
     std::string debug_name = "thor_expr_attention";
 
     CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o) const;
+};
+
+struct CompiledAttentionBackward {
+    AttentionTensorLayout q_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout k_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout v_layout = AttentionTensorLayout::BHSD;
+    AttentionTensorLayout o_layout = AttentionTensorLayout::BHSD;
+    AttentionMaskKind mask_kind = AttentionMaskKind::None;
+    int64_t diagonal_left_bound = 0;
+    int64_t diagonal_right_bound = 0;
+    std::optional<float> attention_scale = std::nullopt;
+    bool use_alibi_mask = false;
+    bool deterministic_backward = false;
+    bool use_bias = false;
+    TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
+    TensorDescriptor::DataType dQ_dtype = TensorDescriptor::DataType::FP16;
+    TensorDescriptor::DataType dK_dtype = TensorDescriptor::DataType::FP16;
+    TensorDescriptor::DataType dV_dtype = TensorDescriptor::DataType::FP16;
+    std::string debug_name = "thor_expr_attention_backward";
+
+    CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o) const;
+    [[nodiscard]] TensorDescriptor::DataType outputDTypeFor(ExprOp op) const;
 };
 
 struct BuiltConvolution {
@@ -451,6 +474,13 @@ class StampedMatmul {
     const std::optional<Tensor> beta_host_scratch;
 };
 
+struct AttentionForwardState {
+    Tensor output;
+    Tensor stats;
+    bool retain_for_backward = false;
+    bool has_valid_stats = false;
+};
+
 class StampedAttention {
    public:
     void run();
@@ -459,21 +489,75 @@ class StampedAttention {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    std::shared_ptr<AttentionForwardState> getForwardState() const { return forward_state; }
+
+    bool canProvideForwardStateFor(const CompiledAttentionBackward& backward,
+                                   const Tensor& q_tensor,
+                                   const Tensor& k_tensor,
+                                   const Tensor& v_tensor,
+                                   const std::optional<Tensor>& bias_tensor,
+                                   const Tensor& dO_tensor) const;
 
     StampedAttention(std::shared_ptr<CompiledAttention> compiled,
                      const Tensor& q,
                      const Tensor& k,
                      const Tensor& v,
+                     const std::optional<Tensor>& bias,
                      const Tensor& output,
-                     const Stream& stream);
+                     const Stream& stream,
+                     std::shared_ptr<AttentionForwardState> forward_state = nullptr);
 
    private:
     const std::shared_ptr<CompiledAttention> compiled_attention;
     const Tensor q;
     const Tensor k;
     const Tensor v;
+    const std::optional<Tensor> bias;
     Tensor output;
     Stream stream;
+    std::shared_ptr<AttentionForwardState> forward_state;
+};
+
+class StampedAttentionBackward {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return dQ.getPlacement().getDeviceNum(); }
+
+    const std::vector<Tensor>& getOutputTensors() const { return outputs; }
+
+    StampedAttentionBackward(std::shared_ptr<CompiledAttentionBackward> compiled,
+                             const Tensor& q,
+                             const Tensor& k,
+                             const Tensor& v,
+                             const std::optional<Tensor>& bias,
+                             const Tensor& dO,
+                             const Tensor& dQ,
+                             const Tensor& dK,
+                             const Tensor& dV,
+                             const Tensor& oScratch,
+                             const Tensor& stats,
+                             const std::optional<Tensor>& dBiasScratch,
+                             const Stream& stream,
+                             std::shared_ptr<AttentionForwardState> saved_forward_state = nullptr);
+
+   private:
+    const std::shared_ptr<CompiledAttentionBackward> compiled_attention_backward;
+    const Tensor q;
+    const Tensor k;
+    const Tensor v;
+    const std::optional<Tensor> bias;
+    const Tensor dO;
+    Tensor dQ;
+    Tensor dK;
+    Tensor dV;
+    Tensor oScratch;
+    Tensor stats;
+    std::optional<Tensor> dBiasScratch;
+    Stream stream;
+    std::shared_ptr<AttentionForwardState> saved_forward_state;
+    std::vector<Tensor> outputs;
 };
 
 class StampedConvolution {
@@ -565,7 +649,7 @@ class StampedReduceMinMaxBackward {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Attention, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     const Kind kind;
 
     const std::vector<uint32_t> dependency_stage_indices;
@@ -578,6 +662,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedSoftmax> softmax = nullptr;
     const std::shared_ptr<StampedMatmul> matmul = nullptr;
     const std::shared_ptr<StampedAttention> attention = nullptr;
+    const std::shared_ptr<StampedAttentionBackward> attention_backward = nullptr;
     const std::shared_ptr<StampedConvolution> convolution = nullptr;
     const std::shared_ptr<StampedConvolutionBackward> convolution_backward = nullptr;
     const std::shared_ptr<StampedReduceMinMaxBackward> reduce_minmax_backward = nullptr;
@@ -636,6 +721,15 @@ struct StampedExecutionStage {
           flop_count(flop_count),
           attention(attention) {}
 
+    explicit StampedExecutionStage(const std::shared_ptr<StampedAttentionBackward>& attention_backward,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::AttentionBackward),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(attention_backward->gpuNum()),
+          flop_count(flop_count),
+          attention_backward(attention_backward) {}
+
     explicit StampedExecutionStage(const std::shared_ptr<StampedConvolution>& convolution,
                                    std::vector<uint32_t> dependency_stage_indices = {},
                                    uint64_t flop_count = 0)
@@ -692,6 +786,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::Attention) {
             THOR_THROW_IF_FALSE(attention != nullptr);
             attention->runOn(run_stream);
+        } else if (kind == Kind::AttentionBackward) {
+            THOR_THROW_IF_FALSE(attention_backward != nullptr);
+            attention_backward->runOn(run_stream);
         } else if (kind == Kind::Convolution) {
             THOR_THROW_IF_FALSE(convolution != nullptr);
             convolution->runOn(run_stream);
