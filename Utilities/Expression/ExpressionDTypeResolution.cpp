@@ -22,6 +22,24 @@ bool isSupportedFusionFloatingType(DataType dtype) {
 
 bool isFp8Type(DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2; }
 
+static bool isPassthroughInputDType(DataType dtype) {
+    switch (dtype) {
+        case DataType::BOOLEAN:
+        case DataType::PACKED_BOOLEAN:
+        case DataType::UINT8:
+        case DataType::INT8:
+        case DataType::UINT16:
+        case DataType::INT16:
+        case DataType::UINT32:
+        case DataType::INT32:
+        case DataType::UINT64:
+        case DataType::INT64:
+            return true;
+        default:
+            return isSupportedFusionFloatingType(dtype);
+    }
+}
+
 static bool isAttentionBackwardOp(ExprOp op) {
     return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V;
 }
@@ -360,15 +378,30 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
             }
 
             const DataType actual_input_dtype = root_input_dtypes[node.input_slot];
+            if (!isPassthroughInputDType(actual_input_dtype)) {
+                throw std::runtime_error("Unsupported input dtype in resolveExpressionDTypesInPlace: " +
+                                         TensorDescriptor::getElementTypeName(actual_input_dtype));
+            }
+
             node.input_tensor_dtype = actual_input_dtype;
             const DataType output_dtype = node.output_dtype.has_value() ? node.output_dtype.value() : actual_input_dtype;
-            const DataType requested_compute_dtype =
-                node.compute_dtype.has_value() ? node.compute_dtype.value() : defaultComputeDType(actual_input_dtype, output_dtype);
-            const DataType compute_dtype = toSupportedComputeDType(node.op, requested_compute_dtype);
+
+            DataType compute_dtype = output_dtype;
+            if (isSupportedFusionFloatingType(actual_input_dtype) && isSupportedFusionFloatingType(output_dtype)) {
+                const DataType requested_compute_dtype =
+                    node.compute_dtype.has_value() ? node.compute_dtype.value() : defaultComputeDType(actual_input_dtype, output_dtype);
+                compute_dtype = toSupportedComputeDType(node.op, requested_compute_dtype);
+            } else if (node.compute_dtype.has_value()) {
+                compute_dtype = node.compute_dtype.value();
+            }
+
             const DataType backward_output_dtype = node.backward_output_dtype.has_value() ? node.backward_output_dtype.value() : output_dtype;
-            const DataType backward_compute_dtype = node.backward_compute_dtype.has_value()
-                                                        ? toSupportedComputeDType(node.op, node.backward_compute_dtype.value())
-                                                        : compute_dtype;
+            DataType backward_compute_dtype = compute_dtype;
+            if (node.backward_compute_dtype.has_value()) {
+                backward_compute_dtype = isSupportedFusionFloatingType(node.backward_compute_dtype.value())
+                                             ? toSupportedComputeDType(node.op, node.backward_compute_dtype.value())
+                                             : node.backward_compute_dtype.value();
+            }
 
             node.output_dtype = output_dtype;
             node.compute_dtype = compute_dtype;

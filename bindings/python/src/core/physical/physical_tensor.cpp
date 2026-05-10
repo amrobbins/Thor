@@ -280,6 +280,10 @@ int
                 return view_bytes_as_ml_dtype(self.getMemPtr<__nv_fp8_e5m2>(), sizeof(__nv_fp8_e5m2), mld.attr("float8_e5m2"));
             }
 
+            case DataType::INT32:
+                return nb::cast(
+                    nb::ndarray<int32_t, nb::numpy>(self.getMemPtr<int32_t>(), shape.size(), shape.data(), owner, strides.data()));
+
             case DataType::UINT32:
                 return nb::cast(
                     nb::ndarray<uint32_t, nb::numpy>(self.getMemPtr<uint32_t>(), shape.size(), shape.data(), owner, strides.data()));

@@ -947,10 +947,24 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
     if (kv_len == 0 || query_len == 0 || qk_dim == 0 || v_dim == 0) {
         throw std::runtime_error("Attention q/k/v dimensions must be non-zero.");
     }
-    if (compiled_stage.use_bias && stage_input_dims.size() >= 4) {
+    size_t next_optional_idx = 3;
+    if (compiled_stage.use_bias) {
+        if (stage_input_dims.size() <= next_optional_idx) {
+            throw std::runtime_error("Attention stage with additive bias expected a bias input shape.");
+        }
         const std::vector<uint64_t> expected_bias_dims{batch, query_heads, query_len, kv_len};
-        if (stage_input_dims.at(3) != expected_bias_dims) {
+        if (stage_input_dims.at(next_optional_idx) != expected_bias_dims) {
             throw std::runtime_error("Attention additive bias must have shape [B, Hq, Sq, Skv].");
+        }
+        ++next_optional_idx;
+    }
+    if (compiled_stage.use_padding_mask) {
+        if (stage_input_dims.size() <= next_optional_idx + 1) {
+            throw std::runtime_error("Attention stage with padding mask expected q_seq_len and kv_seq_len input shapes.");
+        }
+        const std::vector<uint64_t> expected_seq_dims{batch};
+        if (stage_input_dims.at(next_optional_idx) != expected_seq_dims || stage_input_dims.at(next_optional_idx + 1) != expected_seq_dims) {
+            throw std::runtime_error("Attention padding-mask sequence lengths must have shape [B].");
         }
     }
 
@@ -971,6 +985,7 @@ static CompiledAttention makeForwardAttentionView(const CompiledAttentionBackwar
     forward.attention_scale = backward.attention_scale;
     forward.use_alibi_mask = backward.use_alibi_mask;
     forward.use_bias = backward.use_bias;
+    forward.use_padding_mask = backward.use_padding_mask;
     forward.compute_dtype = backward.compute_dtype;
     forward.output_dtype = output_dtype;
     forward.debug_name = debug_suffix.empty() ? backward.debug_name : backward.debug_name + debug_suffix;
@@ -987,6 +1002,14 @@ static std::vector<uint64_t> resolveAttentionBackwardOutputDimsFromInputs(const 
     std::vector<std::vector<uint64_t>> forward_input_dims{stage_input_dims.at(0), stage_input_dims.at(1), stage_input_dims.at(2)};
     if (compiled_stage.use_bias && stage_input_dims.size() >= 5) {
         forward_input_dims.push_back(stage_input_dims.at(4));
+    }
+    if (compiled_stage.use_padding_mask) {
+        const size_t seq_start = 4 + (compiled_stage.use_bias ? 1 : 0);
+        if (stage_input_dims.size() <= seq_start + 1) {
+            throw std::runtime_error("Attention-backward stage with padding mask expected q_seq_len and kv_seq_len input shapes.");
+        }
+        forward_input_dims.push_back(stage_input_dims.at(seq_start));
+        forward_input_dims.push_back(stage_input_dims.at(seq_start + 1));
     }
     const std::vector<uint64_t> forward_out_dims = resolveAttentionOutputDimsFromInputs(
         makeForwardAttentionView(compiled_stage, compiled_stage.dQ_dtype), forward_input_dims);
@@ -2330,11 +2353,20 @@ static uint64_t multiplyDimsForFlops(uint64_t value, const std::vector<uint64_t>
 static uint64_t computeAttentionBackwardStageFlops(const CompiledAttentionBackward& attention_backward,
                                                    const std::vector<std::vector<uint64_t>>& stage_input_dims) {
     std::vector<std::vector<uint64_t>> forward_input_dims{stage_input_dims.at(0), stage_input_dims.at(1), stage_input_dims.at(2)};
+    size_t next_optional_idx = 4;  // q, k, v, dO are always present in the backward stage input list.
     if (attention_backward.use_bias) {
-        if (stage_input_dims.size() < 5) {
+        if (stage_input_dims.size() <= next_optional_idx) {
             throw std::runtime_error("AttentionBackward FLOP accounting expected q/k/v/dO/bias input dims for biased attention.");
         }
-        forward_input_dims.push_back(stage_input_dims.at(4));
+        forward_input_dims.push_back(stage_input_dims.at(next_optional_idx++));
+    }
+    if (attention_backward.use_padding_mask) {
+        if (stage_input_dims.size() <= next_optional_idx + 1) {
+            throw std::runtime_error(
+                "AttentionBackward FLOP accounting expected q/k/v/dO plus q/kv sequence length input dims for padding-mask attention.");
+        }
+        forward_input_dims.push_back(stage_input_dims.at(next_optional_idx++));
+        forward_input_dims.push_back(stage_input_dims.at(next_optional_idx++));
     }
     const uint64_t forward = computeAttentionStageFlops(
         makeForwardAttentionView(attention_backward, attention_backward.dQ_dtype), forward_input_dims);
@@ -4548,6 +4580,8 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
                                                                 const Tensor& k,
                                                                 const Tensor& v,
                                                                 const std::optional<Tensor>& bias,
+                                                                const std::optional<Tensor>& seq_len_q,
+                                                                const std::optional<Tensor>& seq_len_kv,
                                                                 std::optional<Tensor> preallocatedOutput,
                                                                 const Stream& stream,
                                                                 std::shared_ptr<AttentionForwardState> forward_state) const {
@@ -4566,10 +4600,17 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         adaptedBias = adaptMatmulInputDTypeIfNeeded(bias.value(), compiledStage->compute_dtype, stream);
     }
 
-    std::vector<std::vector<uint64_t>> stage_input_dims(3);
-    stage_input_dims[0] = adaptedQ.getDimensions();
-    stage_input_dims[1] = adaptedK.getDimensions();
-    stage_input_dims[2] = adaptedV.getDimensions();
+    std::vector<std::vector<uint64_t>> stage_input_dims{adaptedQ.getDimensions(), adaptedK.getDimensions(), adaptedV.getDimensions()};
+    if (compiledStage->use_bias && adaptedBias.has_value()) {
+        stage_input_dims.push_back(adaptedBias->getDimensions());
+    }
+    if (compiledStage->use_padding_mask) {
+        if (!seq_len_q.has_value() || !seq_len_kv.has_value()) {
+            throw std::runtime_error("stampAttention requires q/kv sequence length tensors for padding-mask attention.");
+        }
+        stage_input_dims.push_back(seq_len_q->getDimensions());
+        stage_input_dims.push_back(seq_len_kv->getDimensions());
+    }
     const std::vector<uint64_t> output_dims = resolveAttentionOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
     Tensor output;
@@ -4589,6 +4630,25 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         output = Tensor(adaptedQ.getPlacement(), outputDescriptor);
     }
 
+    if (compiledStage->use_padding_mask) {
+        auto validate_seq_len = [&](const std::optional<Tensor>& tensor, const char* label) {
+            if (!tensor.has_value()) {
+                throw std::runtime_error(std::string("Attention padding-mask missing ") + label + " tensor.");
+            }
+            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+                throw std::runtime_error(std::string("Attention padding-mask ") + label + " placement must match q.");
+            }
+            if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
+                throw std::runtime_error(std::string("Attention padding-mask ") + label + " dtype must be INT32.");
+            }
+            if (tensor->getDimensions() != std::vector<uint64_t>{adaptedQ.getDimensions().at(0)}) {
+                throw std::runtime_error(std::string("Attention padding-mask ") + label + " shape must be [B].");
+            }
+        };
+        validate_seq_len(seq_len_q, "q_seq_len");
+        validate_seq_len(seq_len_kv, "kv_seq_len");
+    }
+
     // Build and validate the cuDNN descriptor during stamping so shape/layout errors fail before execution.
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, output);
     if (compiledStage->use_bias && adaptedBias.has_value()) {
@@ -4606,7 +4666,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         forward_state->has_valid_stats = false;
     }
 
-    return make_shared<StampedAttention>(compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, output, stream, std::move(forward_state));
+    return make_shared<StampedAttention>(compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, seq_len_q, seq_len_kv, output, stream, std::move(forward_state));
 }
 
 std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
@@ -4615,6 +4675,8 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     const Tensor& k,
     const Tensor& v,
     const std::optional<Tensor>& bias,
+    const std::optional<Tensor>& seq_len_q,
+    const std::optional<Tensor>& seq_len_kv,
     const Tensor& dO,
     const std::vector<std::optional<Tensor>>& preallocatedOutputs,
     const Stream& stream,
@@ -4639,6 +4701,16 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     std::vector<std::vector<uint64_t>> forward_input_dims{stage_input_dims[0], stage_input_dims[1], stage_input_dims[2]};
     if (compiledStage->use_bias) {
         forward_input_dims.push_back(adaptedBias->getDimensions());
+        stage_input_dims.push_back(adaptedBias->getDimensions());
+    }
+    if (compiledStage->use_padding_mask) {
+        if (!seq_len_q.has_value() || !seq_len_kv.has_value()) {
+            throw std::runtime_error("stampAttentionBackward requires q/kv sequence length tensors for padding-mask attention.");
+        }
+        forward_input_dims.push_back(seq_len_q->getDimensions());
+        forward_input_dims.push_back(seq_len_kv->getDimensions());
+        stage_input_dims.push_back(seq_len_q->getDimensions());
+        stage_input_dims.push_back(seq_len_kv->getDimensions());
     }
     const std::vector<uint64_t> o_dims = resolveAttentionOutputDimsFromInputs(
         makeForwardAttentionView(*compiledStage, adaptedDO.getDataType(), ".stats_forward"), forward_input_dims);
@@ -4673,6 +4745,25 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         dBiasScratch = Tensor(adaptedQ.getPlacement(), TensorDescriptor(adaptedQ.getDataType(), adaptedBias->getDimensions()));
     }
 
+    if (compiledStage->use_padding_mask) {
+        auto validate_seq_len = [&](const std::optional<Tensor>& tensor, const char* label) {
+            if (!tensor.has_value()) {
+                throw std::runtime_error(std::string("Attention-backward padding-mask missing ") + label + " tensor.");
+            }
+            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+                throw std::runtime_error(std::string("Attention-backward padding-mask ") + label + " placement must match q.");
+            }
+            if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
+                throw std::runtime_error(std::string("Attention-backward padding-mask ") + label + " dtype must be INT32.");
+            }
+            if (tensor->getDimensions() != std::vector<uint64_t>{adaptedQ.getDimensions().at(0)}) {
+                throw std::runtime_error(std::string("Attention-backward padding-mask ") + label + " shape must be [B].");
+            }
+        };
+        validate_seq_len(seq_len_q, "q_seq_len");
+        validate_seq_len(seq_len_kv, "kv_seq_len");
+    }
+
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, oScratch);
     if (compiledStage->use_bias && adaptedBias.has_value()) {
         const std::vector<uint64_t> expected_bias_dims{adaptedQ.getDimensions().at(0), adaptedQ.getDimensions().at(1), adaptedQ.getDimensions().at(2), adaptedK.getDimensions().at(2)};
@@ -4684,7 +4775,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         }
     }
     return make_shared<StampedAttentionBackward>(
-        compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, adaptedDO, dQ, dK, dV, oScratch, stats, dBiasScratch, stream, std::move(saved_forward_state));
+        compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, seq_len_q, seq_len_kv, adaptedDO, dQ, dK, dV, oScratch, stats, dBiasScratch, stream, std::move(saved_forward_state));
 }
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
@@ -5200,11 +5291,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (!stage.attention) {
                     throw std::runtime_error("Attention stage missing compiled payload.");
                 }
-                const size_t expected_attention_stage_inputs = stage.attention->use_bias ? 4 : 3;
+                const size_t expected_attention_stage_inputs = 3 + (stage.attention->use_bias ? 1 : 0) + (stage.attention->use_padding_mask ? 2 : 0);
                 if (stageInputs.size() != expected_attention_stage_inputs) {
-                    throw std::runtime_error(stage.attention->use_bias ?
-                        "Attention stage expects exactly four inputs: q, k, v, and bias." :
-                        "Attention stage expects exactly three inputs: q, k, and v.");
+                    throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias and optional q/kv sequence lengths.");
                 }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Attention stage expects exactly one output.");
@@ -5212,9 +5301,16 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 Tensor qTensor = runtimeInputTensor(stageInputs[0]);
                 Tensor kTensor = runtimeInputTensor(stageInputs[1]);
                 Tensor vTensor = runtimeInputTensor(stageInputs[2]);
+                size_t next_attention_input = 3;
                 std::optional<Tensor> biasTensor = std::nullopt;
                 if (stage.attention->use_bias) {
-                    biasTensor = runtimeInputTensor(stageInputs[3]);
+                    biasTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                }
+                std::optional<Tensor> seqLenQTensor = std::nullopt;
+                std::optional<Tensor> seqLenKvTensor = std::nullopt;
+                if (stage.attention->use_padding_mask) {
+                    seqLenQTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    seqLenKvTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
                 }
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
@@ -5225,7 +5321,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
                 std::shared_ptr<AttentionForwardState> forwardState = std::make_shared<AttentionForwardState>();
                 std::shared_ptr<StampedAttention> stampedAttention =
-                    stampAttention(stage.attention, qTensor, kTensor, vTensor, biasTensor, preallocated, stream, forwardState);
+                    stampAttention(stage.attention, qTensor, kTensor, vTensor, biasTensor, seqLenQTensor, seqLenKvTensor, preallocated, stream, forwardState);
                 Tensor outputTensor = stampedAttention->getOutputTensor();
                 if (outputTensor.getDimensions() != output_dims) {
                     throw std::runtime_error("Stamped attention output tensor dimensions are incompatible with the staged output shape.");
@@ -5241,19 +5337,26 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (!stage.attention_backward) {
                     throw std::runtime_error("Attention-backward stage missing compiled payload.");
                 }
-                const size_t expected_attention_backward_stage_inputs = stage.attention_backward && stage.attention_backward->use_bias ? 5 : 4;
+                const size_t expected_attention_backward_stage_inputs =
+                    4 + (stage.attention_backward && stage.attention_backward->use_bias ? 1 : 0) +
+                    (stage.attention_backward && stage.attention_backward->use_padding_mask ? 2 : 0);
                 if (stageInputs.size() != expected_attention_backward_stage_inputs) {
-                    throw std::runtime_error(stage.attention_backward && stage.attention_backward->use_bias ?
-                        "Attention-backward stage expects exactly five inputs: q, k, v, dO, and bias." :
-                        "Attention-backward stage expects exactly four inputs: q, k, v, and dO.");
+                    throw std::runtime_error("Attention-backward stage input count mismatch for q/k/v/dO plus optional bias and optional q/kv sequence lengths.");
                 }
                 Tensor qTensor = runtimeInputTensor(stageInputs[0]);
                 Tensor kTensor = runtimeInputTensor(stageInputs[1]);
                 Tensor vTensor = runtimeInputTensor(stageInputs[2]);
                 Tensor dOTensor = runtimeInputTensor(stageInputs[3]);
+                size_t next_attention_backward_input = 4;
                 std::optional<Tensor> biasTensor = std::nullopt;
                 if (stage.attention_backward && stage.attention_backward->use_bias) {
-                    biasTensor = runtimeInputTensor(stageInputs[4]);
+                    biasTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
+                }
+                std::optional<Tensor> seqLenQTensor = std::nullopt;
+                std::optional<Tensor> seqLenKvTensor = std::nullopt;
+                if (stage.attention_backward && stage.attention_backward->use_padding_mask) {
+                    seqLenQTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
+                    seqLenKvTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
                 }
 
                 std::vector<std::optional<Tensor>> preallocated(3, std::nullopt);
@@ -5283,7 +5386,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     if (candidate_stage.kind != StampedExecutionStage::Kind::Attention || !candidate_stage.attention) {
                         continue;
                     }
-                    if (candidate_stage.attention->canProvideForwardStateFor(*stage.attention_backward, qTensor, kTensor, vTensor, biasTensor, dOTensor)) {
+                    if (candidate_stage.attention->canProvideForwardStateFor(
+                            *stage.attention_backward, qTensor, kTensor, vTensor, biasTensor, seqLenQTensor, seqLenKvTensor, dOTensor)) {
                         if (!candidate_state->stats.isInitialized()) {
                             const std::vector<uint64_t> o_dims = candidate_state->output.getDimensions();
                             TensorDescriptor statsDescriptor(TensorDescriptor::DataType::FP32, {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1});
@@ -5296,7 +5400,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
 
                 std::shared_ptr<StampedAttentionBackward> stampedAttentionBackward =
-                    stampAttentionBackward(stage.attention_backward, qTensor, kTensor, vTensor, biasTensor, dOTensor, preallocated, stream, savedForwardState);
+                    stampAttentionBackward(
+                        stage.attention_backward, qTensor, kTensor, vTensor, biasTensor, seqLenQTensor, seqLenKvTensor, dOTensor, preallocated, stream, savedForwardState);
                 const std::vector<Tensor>& outputTensors = stampedAttentionBackward->getOutputTensors();
                 if (outputTensors.size() != 3) {
                     throw std::runtime_error("Stamped attention-backward should expose dQ/dK/dV tensors.");

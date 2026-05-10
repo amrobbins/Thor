@@ -545,10 +545,18 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
         if (node.op == ExprOp::ATTENTION && node.attention_use_bias) {
             addExternalValue(node.alpha_node);
         }
+        if (node.op == ExprOp::ATTENTION && node.attention_use_padding_mask) {
+            addExternalValue(node.attention_seq_len_q_node);
+            addExternalValue(node.attention_seq_len_kv_node);
+        }
         if (isAttentionBackwardOp(node.op)) {
             addExternalValue(node.alpha_node);
             if (node.attention_use_bias) {
                 addExternalValue(node.beta_node);
+            }
+            if (node.attention_use_padding_mask) {
+                addExternalValue(node.attention_seq_len_q_node);
+                addExternalValue(node.attention_seq_len_kv_node);
             }
         }
     }
@@ -823,7 +831,8 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",hasScale=" + std::to_string(node.attention_has_scale ? 1 : 0) +
                 ",scale=" + std::to_string(node.attention_scale) +
                 ",alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0) +
-                ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0);
+                ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0) +
+                ",padding=" + std::to_string(node.attention_use_padding_mask ? 1 : 0);
             if (node.attention_use_bias && node.alpha_node != UINT32_MAX) {
                 s += ",biasNode=" + fusedRegionSignatureRec(expr, node.alpha_node);
             }
@@ -843,7 +852,8 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",hasScale=" + std::to_string(node.attention_has_scale ? 1 : 0) +
                 ",scale=" + std::to_string(node.attention_scale) +
                 ",alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0) +
-                ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0);
+                ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0) +
+                ",padding=" + std::to_string(node.attention_use_padding_mask ? 1 : 0);
             if (node.attention_use_bias && node.beta_node != UINT32_MAX) {
                 s += ",biasNode=" + fusedRegionSignatureRec(expr, node.beta_node);
             }
@@ -1457,11 +1467,9 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     if (!isAttentionOp(node.op)) {
         throw std::runtime_error("Attention stage output node is not ATTENTION.");
     }
-    const uint32_t expected_attention_inputs = node.attention_use_bias ? 4u : 3u;
+    const uint32_t expected_attention_inputs = 3u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u);
     if (expr.numInputs() != expected_attention_inputs) {
-        throw std::runtime_error(node.attention_use_bias ?
-            "Attention stage with additive bias must have exactly four tensor inputs: q, k, v, and bias." :
-            "Attention stage must have exactly three tensor inputs: q, k, and v.");
+        throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias and optional q/kv sequence lengths.");
     }
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX) {
         throw std::runtime_error("Attention node is missing q/k/v inputs.");
@@ -1490,6 +1498,16 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
         }
         (void)validate_local_input(node.alpha_node, "bias");
     }
+    if (node.attention_use_padding_mask) {
+        if (node.attention_seq_len_q_node == UINT32_MAX || node.attention_seq_len_kv_node == UINT32_MAX) {
+            throw std::runtime_error("Attention node marked as using padding mask but is missing q/kv sequence length inputs.");
+        }
+        const ExprNode& q_len = validate_local_input(node.attention_seq_len_q_node, "q_seq_len");
+        const ExprNode& kv_len = validate_local_input(node.attention_seq_len_kv_node, "kv_seq_len");
+        if (q_len.input_tensor_dtype.value() != DataType::INT32 || kv_len.input_tensor_dtype.value() != DataType::INT32) {
+            throw std::runtime_error("Attention padding-mask sequence length inputs must be INT32 tensors.");
+        }
+    }
 
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Attention node missing resolved output_dtype.");
@@ -1517,6 +1535,7 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     compiled->attention_scale = node.attention_has_scale ? std::optional<float>(node.attention_scale) : std::nullopt;
     compiled->use_alibi_mask = node.attention_use_alibi_mask;
     compiled->use_bias = node.attention_use_bias;
+    compiled->use_padding_mask = node.attention_use_padding_mask;
     compiled->compute_dtype = node.compute_dtype.value();
     compiled->output_dtype = node.output_dtype.value();
     return compiled;
@@ -1531,11 +1550,9 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     if (!isAttentionBackwardOp(node.op)) {
         throw std::runtime_error("Attention-backward stage output node is not an attention backward op.");
     }
-    const uint32_t expected_attention_backward_inputs = node.attention_use_bias ? 5u : 4u;
+    const uint32_t expected_attention_backward_inputs = 4u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u);
     if (expr.numInputs() != expected_attention_backward_inputs) {
-        throw std::runtime_error(node.attention_use_bias ?
-            "Attention-backward stage with additive bias must have exactly five tensor inputs: q, k, v, dO, and bias." :
-            "Attention-backward stage must have exactly four tensor inputs: q, k, v, and dO.");
+        throw std::runtime_error("Attention-backward stage input count mismatch for q/k/v/dO plus optional bias and optional q/kv sequence lengths.");
     }
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX || node.alpha_node == UINT32_MAX) {
         throw std::runtime_error("Attention-backward node is missing q/k/v/dO input(s).");
@@ -1565,6 +1582,16 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
         }
         (void)validate_local_input(node.beta_node, "bias");
     }
+    if (node.attention_use_padding_mask) {
+        if (node.attention_seq_len_q_node == UINT32_MAX || node.attention_seq_len_kv_node == UINT32_MAX) {
+            throw std::runtime_error("Attention-backward node marked as using padding mask but is missing q/kv sequence length inputs.");
+        }
+        const ExprNode& q_len = validate_local_input(node.attention_seq_len_q_node, "q_seq_len");
+        const ExprNode& kv_len = validate_local_input(node.attention_seq_len_kv_node, "kv_seq_len");
+        if (q_len.input_tensor_dtype.value() != DataType::INT32 || kv_len.input_tensor_dtype.value() != DataType::INT32) {
+            throw std::runtime_error("Attention-backward padding-mask sequence length inputs must be INT32 tensors.");
+        }
+    }
 
     if (!node.compute_dtype.has_value()) {
         throw std::runtime_error("Attention-backward node missing resolved compute_dtype.");
@@ -1587,6 +1614,7 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     compiled->attention_scale = node.attention_has_scale ? std::optional<float>(node.attention_scale) : std::nullopt;
     compiled->use_alibi_mask = node.attention_use_alibi_mask;
     compiled->use_bias = node.attention_use_bias;
+    compiled->use_padding_mask = node.attention_use_padding_mask;
     compiled->compute_dtype = node.compute_dtype.value();
     compiled->dQ_dtype = q.output_dtype.value();
     compiled->dK_dtype = k.output_dtype.value();
@@ -2384,6 +2412,25 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
 }
 
 
+static void forceAttentionSeqLenLocalInputDType(PhysicalExpression& stage_expr, uint32_t local_idx, const char* label) {
+    if (local_idx >= stage_expr.nodes.size()) {
+        throw std::runtime_error(std::string("Attention sequence-length local input index out of range for ") + label + ".");
+    }
+    ExprNode& input_node = stage_expr.nodes.at(local_idx);
+    if (input_node.op != ExprOp::INPUT) {
+        throw std::runtime_error(std::string("Attention sequence-length local node must be an INPUT for ") + label + ".");
+    }
+
+    // Runtime sequence lengths are metadata tensors consumed by cuDNN SDPA, not floating-point expression values.
+    // Keep both storage and logical metadata pinned to INT32 so dtype resolution for cloned/specialized backward
+    // graphs cannot accidentally inherit the surrounding attention compute dtype.
+    input_node.input_tensor_dtype = DataType::INT32;
+    input_node.output_dtype = DataType::INT32;
+    input_node.compute_dtype = DataType::INT32;
+    input_node.backward_output_dtype = DataType::INT32;
+    input_node.backward_compute_dtype = DataType::INT32;
+}
+
 static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr,
                                                   uint32_t node_idx,
                                                   uint32_t output_value_id,
@@ -2399,7 +2446,7 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
 
     PhysicalExpression stage_expr;
     std::vector<uint32_t> input_value_ids;
-    input_value_ids.reserve(node.attention_use_bias ? 4 : 3);
+    input_value_ids.reserve(3 + (node.attention_use_bias ? 1 : 0) + (node.attention_use_padding_mask ? 2 : 0));
 
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
@@ -2446,12 +2493,24 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
     const uint32_t q_local = bind_parent_to_local_tensor_input(node.lhs, 0);
     const uint32_t k_local = bind_parent_to_local_tensor_input(node.rhs, 1);
     const uint32_t v_local = bind_parent_to_local_tensor_input(node.aux, 2);
+    uint32_t next_local_slot = 3;
     uint32_t bias_local = UINT32_MAX;
     if (node.attention_use_bias) {
         if (node.alpha_node == UINT32_MAX) {
             throw std::runtime_error("Attention node marked as using bias but missing bias input.");
         }
-        bias_local = bind_parent_to_local_tensor_input(node.alpha_node, 3);
+        bias_local = bind_parent_to_local_tensor_input(node.alpha_node, next_local_slot++);
+    }
+    uint32_t q_seq_len_local = UINT32_MAX;
+    uint32_t kv_seq_len_local = UINT32_MAX;
+    if (node.attention_use_padding_mask) {
+        if (node.attention_seq_len_q_node == UINT32_MAX || node.attention_seq_len_kv_node == UINT32_MAX) {
+            throw std::runtime_error("Attention node marked as using padding mask but missing q/kv sequence length inputs.");
+        }
+        q_seq_len_local = bind_parent_to_local_tensor_input(node.attention_seq_len_q_node, next_local_slot++);
+        kv_seq_len_local = bind_parent_to_local_tensor_input(node.attention_seq_len_kv_node, next_local_slot++);
+        forceAttentionSeqLenLocalInputDType(stage_expr, q_seq_len_local, "q_seq_len");
+        forceAttentionSeqLenLocalInputDType(stage_expr, kv_seq_len_local, "kv_seq_len");
     }
 
     ExprNode route = node;
@@ -2460,6 +2519,8 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
     route.aux = v_local;
     route.alpha_node = bias_local;
     route.beta_node = UINT32_MAX;
+    route.attention_seq_len_q_node = q_seq_len_local;
+    route.attention_seq_len_kv_node = kv_seq_len_local;
     stage_expr.nodes.push_back(std::move(route));
     stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
 
@@ -2493,7 +2554,7 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
 
     PhysicalExpression stage_expr;
     std::vector<uint32_t> input_value_ids;
-    input_value_ids.reserve(node.attention_use_bias ? 5 : 4);
+    input_value_ids.reserve(4 + (node.attention_use_bias ? 1 : 0) + (node.attention_use_padding_mask ? 2 : 0));
 
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
@@ -2541,12 +2602,24 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
     const uint32_t k_local = bind_parent_to_local_tensor_input(node.rhs, 1);
     const uint32_t v_local = bind_parent_to_local_tensor_input(node.aux, 2);
     const uint32_t dO_local = bind_parent_to_local_tensor_input(node.alpha_node, 3);
+    uint32_t next_local_slot = 4;
     uint32_t bias_local = UINT32_MAX;
     if (node.attention_use_bias) {
         if (node.beta_node == UINT32_MAX) {
             throw std::runtime_error("Attention-backward node marked as using bias but missing bias input.");
         }
-        bias_local = bind_parent_to_local_tensor_input(node.beta_node, 4);
+        bias_local = bind_parent_to_local_tensor_input(node.beta_node, next_local_slot++);
+    }
+    uint32_t q_seq_len_local = UINT32_MAX;
+    uint32_t kv_seq_len_local = UINT32_MAX;
+    if (node.attention_use_padding_mask) {
+        if (node.attention_seq_len_q_node == UINT32_MAX || node.attention_seq_len_kv_node == UINT32_MAX) {
+            throw std::runtime_error("Attention-backward node marked as using padding mask but missing q/kv sequence length inputs.");
+        }
+        q_seq_len_local = bind_parent_to_local_tensor_input(node.attention_seq_len_q_node, next_local_slot++);
+        kv_seq_len_local = bind_parent_to_local_tensor_input(node.attention_seq_len_kv_node, next_local_slot++);
+        forceAttentionSeqLenLocalInputDType(stage_expr, q_seq_len_local, "q_seq_len");
+        forceAttentionSeqLenLocalInputDType(stage_expr, kv_seq_len_local, "kv_seq_len");
     }
 
     ExprNode route = node;
@@ -2555,6 +2628,8 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
     route.aux = v_local;
     route.alpha_node = dO_local;
     route.beta_node = bias_local;
+    route.attention_seq_len_q_node = q_seq_len_local;
+    route.attention_seq_len_kv_node = kv_seq_len_local;
     stage_expr.nodes.push_back(std::move(route));
     stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
 
@@ -2593,6 +2668,7 @@ static std::string attentionBackwardMergeKey(const PhysicalExecutionStage& stage
     key += ";scale=" + formatFloatCanonical(node.attention_scale);
     key += ";alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0);
     key += ";bias=" + std::to_string(node.attention_use_bias ? 1 : 0);
+    key += ";padding=" + std::to_string(node.attention_use_padding_mask ? 1 : 0);
     key += ";compute=" + optionalDTypeSignature(node.compute_dtype);
     return key;
 }
@@ -3117,10 +3193,18 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (root.op == ExprOp::ATTENTION && root.attention_use_bias) {
                 ensureBoundaryParentEmitted(root.alpha_node, "bias", false);
             }
+            if (root.op == ExprOp::ATTENTION && root.attention_use_padding_mask) {
+                ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
+                ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
+            }
             if (isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.alpha_node, "dO", false);
                 if (root.attention_use_bias) {
                     ensureBoundaryParentEmitted(root.beta_node, "bias", false);
+                }
+                if (root.attention_use_padding_mask) {
+                    ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
+                    ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
                 }
             }
             if (root.op == ExprOp::GEMM) {
@@ -3329,10 +3413,18 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (root.op == ExprOp::ATTENTION && root.attention_use_bias) {
                 ensureBoundaryParentEmitted(root.alpha_node, "bias", false);
             }
+            if (root.op == ExprOp::ATTENTION && root.attention_use_padding_mask) {
+                ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
+                ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
+            }
             if (isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.alpha_node, "dO", false);
                 if (root.attention_use_bias) {
                     ensureBoundaryParentEmitted(root.beta_node, "bias", false);
+                }
+                if (root.attention_use_padding_mask) {
+                    ensureBoundaryParentEmitted(root.attention_seq_len_q_node, "q_seq_len", false);
+                    ensureBoundaryParentEmitted(root.attention_seq_len_kv_node, "kv_seq_len", false);
                 }
             }
             if (root.op == ExprOp::GEMM) {
