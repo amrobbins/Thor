@@ -85,6 +85,8 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
     descriptor.useAlibiMask = use_alibi_mask;
     descriptor.useBias = use_bias;
     descriptor.usePaddingMask = use_padding_mask;
+    descriptor.usePagedKvCache = use_paged_kv_cache;
+    descriptor.pagedKv.maxSequenceLengthKv = paged_kv_max_sequence_length;
     descriptor.dropout.probability = dropout_probability;
     descriptor.dropout.usePhilox = true;
     descriptor.debugName = debug_name;
@@ -150,6 +152,8 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
     descriptor.useAlibiMask = use_alibi_mask;
     descriptor.useBias = use_bias;
     descriptor.usePaddingMask = use_padding_mask;
+    descriptor.usePagedKvCache = use_paged_kv_cache;
+    descriptor.pagedKv.maxSequenceLengthKv = paged_kv_max_sequence_length;
     descriptor.dropout.probability = dropout_probability;
     descriptor.dropout.usePhilox = true;
     descriptor.generateStats = true;
@@ -172,6 +176,8 @@ TensorDescriptor::DataType CompiledAttentionBackward::outputDTypeFor(ExprOp op) 
             return dK_dtype;
         case ExprOp::ATTENTION_BACKWARD_V:
             return dV_dtype;
+        case ExprOp::ATTENTION_BACKWARD_BIAS:
+            return dQ_dtype;
         default:
             throw std::runtime_error("CompiledAttentionBackward::outputDTypeFor expected an attention-backward output op.");
     }
@@ -199,6 +205,8 @@ bool attentionConfigMatchesBackward(const CompiledAttention& forward,
            sameOptionalFloat(forward.attention_scale, backward.attention_scale) &&
            forward.use_alibi_mask == backward.use_alibi_mask && forward.use_bias == backward.use_bias &&
            forward.use_padding_mask == backward.use_padding_mask && forward.use_ragged_offsets == backward.use_ragged_offsets &&
+           forward.use_paged_kv_cache == backward.use_paged_kv_cache &&
+           forward.paged_kv_max_sequence_length == backward.paged_kv_max_sequence_length &&
            forward.dropout_probability == backward.dropout_probability &&
            forward.compute_dtype == backward.compute_dtype &&
            forward.output_dtype == output_dtype;
@@ -241,6 +249,13 @@ void StampedAttention::runOn(Stream& run_stream) const {
         args.raggedOffsetO = q_ragged_offsets.value();
         args.raggedOffsetK = kv_ragged_offsets.value();
         args.raggedOffsetV = kv_ragged_offsets.value();
+    }
+    if (compiled_attention->use_paged_kv_cache) {
+        if (!page_table_k.has_value() || !page_table_v.has_value()) {
+            throw std::runtime_error("StampedAttention requires K/V page-table tensors for paged KV attention.");
+        }
+        args.pageTableK = page_table_k.value();
+        args.pageTableV = page_table_v.value();
     }
     if (compiled_attention->dropout_probability > 0.0f) {
         if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
@@ -326,6 +341,8 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
                                    const std::optional<Tensor>& seq_len_kv,
                                    const std::optional<Tensor>& q_ragged_offsets,
                                    const std::optional<Tensor>& kv_ragged_offsets,
+                                   const std::optional<Tensor>& page_table_k,
+                                   const std::optional<Tensor>& page_table_v,
                                    const std::optional<Tensor>& dropout_seed,
                                    const std::optional<Tensor>& dropout_offset,
                                    const Tensor& output,
@@ -340,6 +357,8 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
       seq_len_kv(seq_len_kv),
       q_ragged_offsets(q_ragged_offsets),
       kv_ragged_offsets(kv_ragged_offsets),
+      page_table_k(page_table_k),
+      page_table_v(page_table_v),
       dropout_seed(dropout_seed),
       dropout_offset(dropout_offset),
       output(output),
@@ -488,7 +507,11 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
       dBiasScratch(dBiasScratch),
       stream(stream),
       saved_forward_state(std::move(saved_forward_state)),
-      outputs{this->dQ, this->dK, this->dV} {}
+      outputs{this->dQ, this->dK, this->dV} {
+    if (this->dBiasScratch.has_value()) {
+        outputs.push_back(this->dBiasScratch.value());
+    }
+}
 
 void StampedEquation::run() { runOn(stream); }
 

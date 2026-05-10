@@ -93,6 +93,33 @@ def _dropout_scalar_gpu(value: int, stream: Stream, gpu_num: int = 0) -> Physica
     return _host_to_gpu(arr, thor.DataType.int64, stream, gpu_num=gpu_num)
 
 
+def _page_table(batch: int, kv_len: int, block_size: int) -> np.ndarray:
+    pages = int(math.ceil(float(kv_len) / float(block_size)))
+    return np.arange(batch * pages, dtype=np.int32).reshape(batch, 1, pages, 1)
+
+
+def _paged_kv_container_from_page_table(logical: np.ndarray, block_size: int, page_table: np.ndarray) -> np.ndarray:
+    batch, heads, sequence_length, head_dim = logical.shape
+    pages = int(math.ceil(float(sequence_length) / float(block_size)))
+    assert page_table.shape == (batch, 1, pages, 1)
+    max_block_id = int(np.max(page_table))
+    container = np.zeros((max_block_id + 1, heads, block_size, head_dim), dtype=logical.dtype)
+    for b in range(batch):
+        for page in range(pages):
+            block_id = int(page_table[b, 0, page, 0])
+            src_begin = page * block_size
+            src_end = min(src_begin + block_size, sequence_length)
+            valid = src_end - src_begin
+            if valid > 0:
+                container[block_id, :, :valid, :] = logical[b, :, src_begin:src_end, :]
+    return container
+
+
+def _paged_kv_container(logical: np.ndarray, block_size: int) -> np.ndarray:
+    batch, _, sequence_length, _ = logical.shape
+    return _paged_kv_container_from_page_table(logical, block_size, _page_table(batch, sequence_length, block_size))
+
+
 def _cast_reference_to_storage_dtype(values: np.ndarray, dtype: thor.DataType) -> np.ndarray:
     return values.astype(np.float32).astype(_numpy_storage_dtype(dtype))
 
@@ -147,12 +174,37 @@ def _mask_for(kind: AttentionMaskKind, query_len: int, kv_len: int, left: int = 
     raise AssertionError(f"Unhandled mask kind: {kind}")
 
 
+def _bottom_right_mask_for_batch(
+    kind: AttentionMaskKind,
+    query_len: int,
+    kv_len: int,
+    q_seq_len: np.ndarray,
+    kv_seq_len: np.ndarray,
+    left: int = 0,
+    right: int = 0,
+) -> np.ndarray:
+    q_pos = np.arange(query_len)[None, :, None]
+    kv_pos = np.arange(kv_len)[None, None, :]
+    q_valid_len = q_seq_len.astype(np.int64)[:, None, None]
+    kv_valid_len = kv_seq_len.astype(np.int64)[:, None, None]
+    center = q_pos + (kv_valid_len - q_valid_len)
+
+    if kind == AttentionMaskKind.causal_bottom_right:
+        return kv_pos <= center
+    if kind == AttentionMaskKind.sliding_window_bottom_right:
+        # cuDNN's sliding-window left bound is exclusive.  For bottom-right decode masks,
+        # the diagonal is anchored to each batch item's effective q/kv sequence lengths,
+        # not to the padded maximum tensor extents.
+        return (kv_pos > (center - left)) & (kv_pos <= (center + right))
+    raise AssertionError(f"Unhandled bottom-right mask kind: {kind}")
+
+
 def _alibi_slopes(num_heads: int) -> np.ndarray:
-    closest_power_of_2 = 2 ** math.floor(math.log2(num_heads))
-    base = 2.0 ** (-8.0 / float(closest_power_of_2))
+    closest_power_of_2 = 2**math.floor(math.log2(num_heads))
+    base = 2.0**(-8.0 / float(closest_power_of_2))
     slopes = np.power(base, np.arange(1, closest_power_of_2 + 1, dtype=np.float32)).astype(np.float32)
     if closest_power_of_2 < num_heads:
-        extra_base = 2.0 ** (-4.0 / float(closest_power_of_2))
+        extra_base = 2.0**(-4.0 / float(closest_power_of_2))
         extra_count = num_heads - closest_power_of_2
         extra_exponents = np.arange(1, 1 + 2 * extra_count, 2, dtype=np.float32)
         slopes = np.concatenate([slopes, np.power(extra_base, extra_exponents).astype(np.float32)])
@@ -201,9 +253,18 @@ def _attention_reference(
     if use_alibi_mask:
         scores = scores + _alibi_bias(query_heads, query_len, kv_len)
 
-    mask = _mask_for(mask_kind, query_len, kv_len, diagonal_left_bound, diagonal_right_bound)
-    if mask is not None:
-        scores = np.where(mask[None, None, :, :], scores, np.float32(-1.0e30))
+    if (
+        mask_kind in (AttentionMaskKind.causal_bottom_right, AttentionMaskKind.sliding_window_bottom_right)
+        and q_seq_len is not None
+        and kv_seq_len is not None
+    ):
+        mask = _bottom_right_mask_for_batch(
+            mask_kind, query_len, kv_len, q_seq_len, kv_seq_len, diagonal_left_bound, diagonal_right_bound)
+        scores = np.where(mask[:, None, :, :], scores, np.float32(-1.0e30))
+    else:
+        mask = _mask_for(mask_kind, query_len, kv_len, diagonal_left_bound, diagonal_right_bound)
+        if mask is not None:
+            scores = np.where(mask[None, None, :, :], scores, np.float32(-1.0e30))
     if q_seq_len is not None or kv_seq_len is not None:
         assert q_seq_len is not None and kv_seq_len is not None
         q_valid = np.arange(query_len)[None, :] < q_seq_len.astype(np.int64)[:, None]
@@ -352,7 +413,8 @@ def test_attention_forward_alibi_causal_top_left_mask_matches_reference_and_diff
         mask_kind=AttentionMaskKind.causal_top_left,
         use_alibi_mask=True,
     )
-    plain_causal_expected = _attention_reference(q_np, k_np, v_np, scale=scale, mask_kind=AttentionMaskKind.causal_top_left)
+    plain_causal_expected = _attention_reference(
+        q_np, k_np, v_np, scale=scale, mask_kind=AttentionMaskKind.causal_top_left)
     assert not np.allclose(expected.astype(np.float32), plain_causal_expected.astype(np.float32), rtol=1e-3, atol=1e-3)
 
     stream = Stream(gpu_num=0)
@@ -521,7 +583,544 @@ def test_attention_forward_sliding_window_bottom_right_decode_mask_matches_refer
     _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
 
 
+@pytest.mark.cuda
+def test_attention_paged_kv_cache_forward_decode_matches_reference():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+    kv_len = 8
+    block_size = 4
+    scale = 0.91 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        page_table_k=page_table_k,
+        page_table_v=page_table_v,
+        paged_kv_max_sequence_length=kv_len,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
 
+    q_np, k_ref, v_ref = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=1, kv_len=kv_len, dtype=dtype)
+    k_container = _paged_kv_container(k_ref, block_size)
+    v_container = _paged_kv_container(v_ref, block_size)
+    q_lengths = np.ones((2,), dtype=np.int32)
+    kv_lengths = np.asarray([8, 5], dtype=np.int32)
+    expected = _attention_reference(q_np, k_ref, v_ref, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_container, dtype, stream),
+        "v": _host_to_gpu(v_container, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "page_table_k": _host_to_gpu(_page_table(2, kv_len, block_size), thor.DataType.int32, stream),
+        "page_table_v": _host_to_gpu(_page_table(2, kv_len, block_size), thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 2, 1, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_attention_paged_kv_cache_forward_gqa_indirect_page_table_matches_reference():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+    query_len = 2
+    kv_len = 9
+    block_size = 4
+    page_table = np.asarray([[[[2], [5], [1]]], [[[7], [0], [6]]]], dtype=np.int32)
+    scale = 0.83 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        page_table_k=page_table_k,
+        page_table_v=page_table_v,
+        paged_kv_max_sequence_length=kv_len,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_ref, v_ref = _attention_inputs(
+        batch=2, query_heads=4, kv_heads=2, query_len=query_len, kv_len=kv_len, dtype=dtype)
+    k_container = _paged_kv_container_from_page_table(k_ref, block_size, page_table)
+    v_container = _paged_kv_container_from_page_table(v_ref, block_size, page_table)
+    q_lengths = np.full((2,), query_len, dtype=np.int32)
+    kv_lengths = np.asarray([9, 6], dtype=np.int32)
+    expected = _attention_reference(q_np, k_ref, v_ref, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_container, dtype, stream),
+        "v": _host_to_gpu(v_container, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "page_table_k": _host_to_gpu(page_table, thor.DataType.int32, stream),
+        "page_table_v": _host_to_gpu(page_table, thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 4, query_len, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+
+
+@pytest.mark.cuda
+def test_attention_paged_kv_cache_forward_mqa_distinct_kv_page_tables_matches_reference():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+    query_len = 1
+    kv_len = 10
+    block_size = 4
+    page_table_k_np = np.asarray([[[[4], [1], [6]]], [[[0], [5], [2]]]], dtype=np.int32)
+    page_table_v_np = np.asarray([[[[3], [7], [1]]], [[[8], [2], [5]]]], dtype=np.int32)
+    scale = 0.79 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        page_table_k=page_table_k,
+        page_table_v=page_table_v,
+        paged_kv_max_sequence_length=kv_len,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_ref, v_ref = _attention_inputs(
+        batch=2, query_heads=4, kv_heads=1, query_len=query_len, kv_len=kv_len, dtype=dtype)
+    k_container = _paged_kv_container_from_page_table(k_ref, block_size, page_table_k_np)
+    v_container = _paged_kv_container_from_page_table(v_ref, block_size, page_table_v_np)
+    q_lengths = np.full((2,), query_len, dtype=np.int32)
+    kv_lengths = np.asarray([10, 7], dtype=np.int32)
+    expected = _attention_reference(q_np, k_ref, v_ref, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_container, dtype, stream),
+        "v": _host_to_gpu(v_container, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "page_table_k": _host_to_gpu(page_table_k_np, thor.DataType.int32, stream),
+        "page_table_v": _host_to_gpu(page_table_v_np, thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 4, query_len, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_attention_paged_kv_cache_forward_bf16_decode_matches_reference():
+    dtype = thor.DataType.bf16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+    kv_len = 8
+    block_size = 4
+    scale = 0.67 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        page_table_k=page_table_k,
+        page_table_v=page_table_v,
+        paged_kv_max_sequence_length=kv_len,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_ref, v_ref = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=1, kv_len=kv_len, dtype=dtype)
+    k_container = _paged_kv_container(k_ref, block_size)
+    v_container = _paged_kv_container(v_ref, block_size)
+    q_lengths = np.ones((2,), dtype=np.int32)
+    kv_lengths = np.asarray([8, 6], dtype=np.int32)
+    expected = _attention_reference(q_np, k_ref, v_ref, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_container, dtype, stream),
+        "v": _host_to_gpu(v_container, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "page_table_k": _host_to_gpu(_page_table(2, kv_len, block_size), thor.DataType.int32, stream),
+        "page_table_v": _host_to_gpu(_page_table(2, kv_len, block_size), thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 2, 1, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_attention_paged_kv_cache_forward_sliding_window_bottom_right_decode_matches_reference():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+    query_len = 3
+    kv_len = 11
+    block_size = 4
+    scale = 0.73 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        page_table_k=page_table_k,
+        page_table_v=page_table_v,
+        paged_kv_max_sequence_length=kv_len,
+        mask_kind=AttentionMaskKind.sliding_window_bottom_right,
+        diagonal_left_bound=3,
+        diagonal_right_bound=1,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_ref, v_ref = _attention_inputs(
+        batch=2, query_heads=2, kv_heads=2, query_len=query_len, kv_len=kv_len, dtype=dtype)
+    k_container = _paged_kv_container(k_ref, block_size)
+    v_container = _paged_kv_container(v_ref, block_size)
+    q_lengths = np.full((2,), query_len, dtype=np.int32)
+    kv_lengths = np.asarray([11, 8], dtype=np.int32)
+    expected = _attention_reference(
+        q_np,
+        k_ref,
+        v_ref,
+        scale=scale,
+        mask_kind=AttentionMaskKind.sliding_window_bottom_right,
+        diagonal_left_bound=3,
+        diagonal_right_bound=1,
+        q_seq_len=q_lengths,
+        kv_seq_len=kv_lengths,
+    )
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_container, dtype, stream),
+        "v": _host_to_gpu(v_container, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "page_table_k": _host_to_gpu(_page_table(2, kv_len, block_size), thor.DataType.int32, stream),
+        "page_table_v": _host_to_gpu(_page_table(2, kv_len, block_size), thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 2, query_len, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_attention_paged_kv_cache_forward_multitoken_bottom_right_decode_matches_reference():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+    query_len = 3
+    kv_len = 9
+    block_size = 4
+    scale = 0.71 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        page_table_k=page_table_k,
+        page_table_v=page_table_v,
+        paged_kv_max_sequence_length=kv_len,
+        mask_kind=AttentionMaskKind.causal_bottom_right,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_ref, v_ref = _attention_inputs(
+        batch=2, query_heads=2, kv_heads=2, query_len=query_len, kv_len=kv_len, dtype=dtype)
+    k_container = _paged_kv_container(k_ref, block_size)
+    v_container = _paged_kv_container(v_ref, block_size)
+    q_lengths = np.full((2,), query_len, dtype=np.int32)
+    kv_lengths = np.full((2,), kv_len, dtype=np.int32)
+    expected = _attention_reference(
+        q_np,
+        k_ref,
+        v_ref,
+        scale=scale,
+        mask_kind=AttentionMaskKind.causal_bottom_right,
+        q_seq_len=q_lengths,
+        kv_seq_len=kv_lengths,
+    )
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_container, dtype, stream),
+        "v": _host_to_gpu(v_container, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "page_table_k": _host_to_gpu(_page_table(2, kv_len, block_size), thor.DataType.int32, stream),
+        "page_table_v": _host_to_gpu(_page_table(2, kv_len, block_size), thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 2, query_len, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_attention_paged_kv_cache_requires_int32_page_table_shape():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+    kv_len = 8
+    block_size = 4
+    eq = ex.compile(
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            q_seq_len=q_seq_len,
+            kv_seq_len=kv_seq_len,
+            page_table_k=page_table_k,
+            page_table_v=page_table_v,
+            paged_kv_max_sequence_length=kv_len,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        ),
+        device_num=0,
+    )
+
+    q_np, k_ref, v_ref = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=1, kv_len=kv_len, dtype=dtype)
+    stream = Stream(gpu_num=0)
+    base_inputs = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(_paged_kv_container(k_ref, block_size), dtype, stream),
+        "v": _host_to_gpu(_paged_kv_container(v_ref, block_size), dtype, stream),
+        "q_seq_len": _host_to_gpu(np.ones((2,), dtype=np.int32), thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(np.asarray([8, 5], dtype=np.int32), thor.DataType.int32, stream),
+    }
+
+    bad_dtype = dict(base_inputs)
+    bad_dtype["page_table_k"] = _host_to_gpu(
+        _page_table(2, kv_len, block_size).astype(np.int64), thor.DataType.int64, stream)
+    bad_dtype["page_table_v"] = _host_to_gpu(_page_table(2, kv_len, block_size), thor.DataType.int32, stream)
+    with pytest.raises(RuntimeError, match="paged KV page_table_k dtype must be INT32"):
+        eq.stamp(bad_dtype, stream)
+
+    bad_shape = dict(base_inputs)
+    bad_shape["page_table_k"] = _host_to_gpu(np.zeros((2, 1, 3, 1), dtype=np.int32), thor.DataType.int32, stream)
+    bad_shape["page_table_v"] = _host_to_gpu(_page_table(2, kv_len, block_size), thor.DataType.int32, stream)
+    with pytest.raises(RuntimeError, match=r"paged KV page_table_k shape must be \[B,1,ceil\(Skv/block_k\),1\]"):
+        eq.stamp(bad_shape, stream)
+
+
+def test_attention_paged_kv_cache_rejects_unsupported_combinations_early():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    dropout_seed = ex.input("dropout_seed")
+    dropout_offset = ex.input("dropout_offset")
+
+    with pytest.raises(RuntimeError, match="page_table_k and page_table_v"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            page_table_k=page_table_k,
+            paged_kv_max_sequence_length=64,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32)
+
+    with pytest.raises(RuntimeError, match="paged KV attention requires paged_kv_max_sequence_length > 0"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            q_seq_len=q_seq_len,
+            kv_seq_len=kv_seq_len,
+            page_table_k=page_table_k,
+            page_table_v=page_table_v,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        )
+
+    with pytest.raises(RuntimeError, match="paged KV attention requires q_seq_len and kv_seq_len"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            page_table_k=page_table_k,
+            page_table_v=page_table_v,
+            paged_kv_max_sequence_length=64,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        )
+
+    with pytest.raises(RuntimeError, match="paged KV attention cannot currently be combined with additive bias"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            bias=bias,
+            q_seq_len=q_seq_len,
+            kv_seq_len=kv_seq_len,
+            page_table_k=page_table_k,
+            page_table_v=page_table_v,
+            paged_kv_max_sequence_length=64,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        )
+
+    with pytest.raises(RuntimeError, match="paged KV attention is inference-only"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            q_seq_len=q_seq_len,
+            kv_seq_len=kv_seq_len,
+            page_table_k=page_table_k,
+            page_table_v=page_table_v,
+            paged_kv_max_sequence_length=64,
+            dropout_probability=0.25,
+            dropout_seed=dropout_seed,
+            dropout_offset=dropout_offset,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        )
+
+    with pytest.raises(RuntimeError, match="ragged attention and paged KV cache cannot be combined"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            q_seq_len=q_seq_len,
+            kv_seq_len=kv_seq_len,
+            q_ragged_offsets=q_offsets,
+            kv_ragged_offsets=kv_offsets,
+            page_table_k=page_table_k,
+            page_table_v=page_table_v,
+            paged_kv_max_sequence_length=64,
+            q_layout=AttentionTensorLayout.bshd,
+            k_layout=AttentionTensorLayout.bshd,
+            v_layout=AttentionTensorLayout.bshd,
+            o_layout=AttentionTensorLayout.bshd,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        )
+
+
+def test_attention_paged_kv_cache_backward_rejects_until_training_semantics_are_defined():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        page_table_k=page_table_k,
+        page_table_v=page_table_v,
+        paged_kv_max_sequence_length=64,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+    with pytest.raises(RuntimeError, match="paged KV cache is not enabled"):
+        fwd_eq.compile_backward(["q", "k", "v"])
 
 
 @pytest.mark.cuda
@@ -573,7 +1172,6 @@ def test_attention_forward_ragged_offsets_plans_single_stage_and_validates_shape
     assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
     stamped = eq.stamp(inputs_gpu, stream)
     assert list(stamped.output().dimensions) == [2, 2, 6, 16]
-
 
 
 @pytest.mark.cuda
@@ -637,7 +1235,6 @@ def test_attention_forward_ragged_offsets_bshd_packed_matches_reference():
     np.testing.assert_allclose(got_valid, expected_valid, rtol=5e-2, atol=5e-2)
 
 
-
 @pytest.mark.cuda
 def test_attention_forward_ragged_offsets_gqa_bshd_packed_matches_reference():
     dtype = thor.DataType.fp16
@@ -667,8 +1264,7 @@ def test_attention_forward_ragged_offsets_gqa_bshd_packed_matches_reference():
     )
     eq = ex.compile(out, device_num=0)
 
-    q_np, k_np, v_np = _attention_inputs(
-        batch=2, query_heads=4, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
+    q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=4, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
     q_lengths = np.asarray([4, 2], dtype=np.int32)
     kv_lengths = np.asarray([5, 3], dtype=np.int32)
     expected = _attention_reference(q_np, k_np, v_np, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
@@ -727,8 +1323,7 @@ def test_attention_forward_ragged_offsets_mqa_bshd_packed_matches_reference():
     )
     eq = ex.compile(out, device_num=0)
 
-    q_np, k_np, v_np = _attention_inputs(
-        batch=2, query_heads=4, kv_heads=1, query_len=6, kv_len=7, dtype=dtype)
+    q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=4, kv_heads=1, query_len=6, kv_len=7, dtype=dtype)
     q_lengths = np.asarray([6, 3], dtype=np.int32)
     kv_lengths = np.asarray([7, 4], dtype=np.int32)
     expected = _attention_reference(q_np, k_np, v_np, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
@@ -850,7 +1445,6 @@ def test_attention_ragged_offsets_require_bshd_physical_layouts():
         )
 
 
-
 @pytest.mark.cuda
 def test_attention_ragged_offsets_require_int32_and_batch_plus_one_shape():
     dtype = thor.DataType.fp16
@@ -895,8 +1489,7 @@ def test_attention_ragged_offsets_require_int32_and_batch_plus_one_shape():
     bad_dtype = dict(base_inputs)
     bad_dtype["q_offsets"] = _host_to_gpu(
         _ragged_element_offsets(q_lengths, 2, 16).astype(np.int64), thor.DataType.int64, stream)
-    bad_dtype["kv_offsets"] = _host_to_gpu(
-        _ragged_element_offsets(kv_lengths, 2, 16), thor.DataType.int32, stream)
+    bad_dtype["kv_offsets"] = _host_to_gpu(_ragged_element_offsets(kv_lengths, 2, 16), thor.DataType.int32, stream)
     with pytest.raises(RuntimeError, match="ragged q_offsets dtype must be INT32"):
         eq.stamp(bad_dtype, stream)
 
@@ -905,7 +1498,6 @@ def test_attention_ragged_offsets_require_int32_and_batch_plus_one_shape():
     bad_shape["kv_offsets"] = _host_to_gpu(_ragged_element_offsets(kv_lengths, 2, 16), thor.DataType.int32, stream)
     with pytest.raises(RuntimeError, match=r"ragged q_offsets shape must be \[B \+ 1\]"):
         eq.stamp(bad_shape, stream)
-
 
 
 @pytest.mark.cuda
@@ -980,7 +1572,6 @@ def test_attention_ragged_offsets_reject_unsupported_combinations_early():
         )
 
 
-
 @pytest.mark.cuda
 def test_attention_ragged_offsets_feeds_fused_epilogue_and_multi_output_reuses_stage():
     dtype = thor.DataType.fp16
@@ -1006,7 +1597,10 @@ def test_attention_ragged_offsets_feeds_fused_epilogue_and_multi_output_reuses_s
         output_dtype=dtype,
         compute_dtype=thor.DataType.fp32,
     )
-    outputs = ex.outputs({"attention": attn, "shifted": attn * 1.25 + 0.125})
+    outputs = ex.outputs({
+        "attention": attn,
+        "shifted": attn * 1.25 + 0.125
+    })
     eq = ex.compile(outputs, device_num=0)
 
     q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
@@ -1019,13 +1613,14 @@ def test_attention_ragged_offsets_feeds_fused_epilogue_and_multi_output_reuses_s
         "v": _host_to_gpu(v_np, dtype, stream),
         "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
         "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(
-            _ragged_element_offsets(q_lengths, 2, 16), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(
-            _ragged_element_offsets(kv_lengths, 2, 16), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, 2, 16), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, 2, 16), thor.DataType.int32, stream),
     }
 
-    assert eq.output_shapes(inputs_gpu) == {"attention": [2, 2, 6, 16], "shifted": [2, 2, 6, 16]}
+    assert eq.output_shapes(inputs_gpu) == {
+        "attention": [2, 2, 6, 16],
+        "shifted": [2, 2, 6, 16]
+    }
     kinds = eq._debug_stage_kinds(inputs_gpu)
     assert kinds.count("Attention") == 1
 
@@ -1531,7 +2126,8 @@ def _attention_backward_reference(
     use_alibi_mask: bool = False,
     q_seq_len: np.ndarray | None = None,
     kv_seq_len: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return_bias_grad: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     q32 = q.astype(np.float32)
     k32 = k.astype(np.float32)
     v32 = v.astype(np.float32)
@@ -1589,6 +2185,11 @@ def _attention_backward_reference(
         dK[:, kv_h, :, :] += dK_expanded[:, h, :, :]
         dV[:, kv_h, :, :] += dV_expanded[:, h, :, :]
 
+    if return_bias_grad:
+        if bias is None:
+            raise AssertionError("return_bias_grad=True requires additive bias in the reference helper.")
+        return dQ, dK, dV, dS
+
     return dQ, dK, dV
 
 
@@ -1637,10 +2238,12 @@ def test_attention_compile_backward_qkv_uses_single_attention_backward_stage_and
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
-
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
 
 
 @pytest.mark.cuda
@@ -2032,9 +2635,12 @@ def test_attention_compile_backward_qkv_with_alibi_causal_mask_matches_reference
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
 
 
 @pytest.mark.cuda
@@ -2088,9 +2694,12 @@ def test_attention_backward_with_alibi_reuses_same_plan_forward_stats_when_forwa
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
 
 
 @pytest.mark.cuda
@@ -2145,9 +2754,12 @@ def test_attention_compile_backward_qkv_with_causal_bottom_right_decode_mask_mat
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
 
 
 @pytest.mark.cuda
@@ -2198,9 +2810,12 @@ def test_attention_backward_with_causal_bottom_right_decode_mask_reuses_same_pla
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
 
 
 @pytest.mark.cuda
@@ -2263,9 +2878,12 @@ def test_attention_compile_backward_qkv_with_padding_mask_stays_single_attention
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
 
 
 @pytest.mark.cuda
@@ -2333,9 +2951,12 @@ def test_attention_compile_backward_qkv_with_padding_mask_and_additive_bias_matc
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
 
 
 @pytest.mark.cuda
@@ -2400,9 +3021,12 @@ def test_attention_compile_backward_qkv_with_padding_mask_and_causal_mask_matche
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
 
 
 @pytest.mark.cuda
@@ -2461,9 +3085,12 @@ def test_attention_backward_with_padding_mask_reuses_same_plan_forward_stats_whe
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
 
 
 @pytest.mark.cuda
@@ -2536,9 +3163,12 @@ def test_attention_backward_with_padding_mask_and_additive_bias_reuses_same_plan
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
 
 
 @pytest.mark.cuda
@@ -2564,7 +3194,8 @@ def test_attention_backward_reuses_same_plan_forward_stats_when_forward_output_i
     q_np, k_np, v_np = _attention_inputs(
         batch=1, query_heads=2, kv_heads=2, query_len=64, kv_len=64, qk_dim=64, v_dim=64, dtype=dtype)
     expected_attn = _attention_reference(q_np, k_np, v_np, scale=scale)
-    expected_dq, expected_dk, expected_dv = _attention_backward_reference(q_np, k_np, v_np, np.float32(2.0) * expected_attn, scale=scale)
+    expected_dq, expected_dk, expected_dv = _attention_backward_reference(
+        q_np, k_np, v_np, np.float32(2.0) * expected_attn, scale=scale)
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
@@ -2581,9 +3212,12 @@ def test_attention_backward_reuses_same_plan_forward_stats_when_forward_output_i
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
 
 
 def _rope_reference(
@@ -2618,11 +3252,11 @@ def _rope_reference(
         seq_for_ntk = max(float(seq_len + max(0, position_offset)), 1.0)
         if seq_for_ntk > float(original_max_position_embeddings) and effective_rotary_dim > 2:
             ratio = (scaling_factor * seq_for_ntk / float(original_max_position_embeddings)) - (scaling_factor - 1.0)
-            rope_base = np.float32(base * (ratio ** (float(effective_rotary_dim) / float(effective_rotary_dim - 2))))
+            rope_base = np.float32(base * (ratio**(float(effective_rotary_dim) / float(effective_rotary_dim - 2))))
 
     half = effective_rotary_dim // 2
     pair_indices = np.arange(half, dtype=np.float32)
-    inv_freq = rope_base ** (-2.0 * pair_indices / np.float32(effective_rotary_dim))
+    inv_freq = rope_base**(-2.0 * pair_indices / np.float32(effective_rotary_dim))
     positions = np.arange(seq_len, dtype=np.float32) + np.float32(position_offset)
     if scaling_kind == RotaryScalingKind.linear:
         positions = positions / np.float32(scaling_factor)
@@ -2671,7 +3305,9 @@ def test_rope_forward_standard_and_linear_scaling_match_reference():
     )
 
     stream = Stream(gpu_num=0)
-    inputs_gpu = {"q": _host_to_gpu(q_np, dtype, stream)}
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream)
+    }
     assert eq.output_shape(inputs_gpu) == [1, 2, 6, 16]
     assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
 
@@ -2707,7 +3343,9 @@ def test_rope_forward_interleaved_dynamic_ntk_scaling_matches_reference():
     )
 
     stream = Stream(gpu_num=0)
-    inputs_gpu = {"q": _host_to_gpu(q_np, dtype, stream)}
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream)
+    }
     assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
 
     stamped = eq.stamp(inputs_gpu, stream)
@@ -2783,7 +3421,9 @@ def test_rope_compile_backward_is_inverse_rope_and_matches_reference():
         "q": _host_to_gpu(q_np, dtype, stream),
         upstream_name: _host_to_gpu(dO_np, dtype, stream),
     }
-    assert bwd_eq.output_shapes(inputs_gpu) == {"q_grad": [1, 2, 5, 16]}
+    assert bwd_eq.output_shapes(inputs_gpu) == {
+        "q_grad": [1, 2, 5, 16]
+    }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
 
     stamped = bwd_eq.stamp(inputs_gpu, stream)
@@ -2841,7 +3481,8 @@ def test_attention_forward_with_additive_bias_matches_reference_and_stays_single
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_additive_bias_stays_single_attention_backward_stage_and_matches_reference():
+def test_attention_compile_backward_qkv_with_additive_bias_stays_single_attention_backward_stage_and_matches_reference(
+):
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.7 / math.sqrt(64.0)
@@ -2867,7 +3508,8 @@ def test_attention_compile_backward_qkv_with_additive_bias_stays_single_attentio
     rng = np.random.default_rng(888)
     bias_np = rng.normal(0.0, 0.2, size=(1, 2, 64, 64)).astype(np.float32)
     dO_np = rng.normal(0.0, 0.25, size=(1, 2, 64, 64)).astype(_numpy_storage_dtype(dtype))
-    expected_dq, expected_dk, expected_dv = _attention_backward_reference(q_np, k_np, v_np, dO_np, scale=scale, bias=bias_np)
+    expected_dq, expected_dk, expected_dv = _attention_backward_reference(
+        q_np, k_np, v_np, dO_np, scale=scale, bias=bias_np)
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
@@ -2887,9 +3529,313 @@ def test_attention_compile_backward_qkv_with_additive_bias_stays_single_attentio
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_attention_compile_backward_qkv_and_dbias_with_additive_bias_matches_reference():
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    scale = 0.7 / math.sqrt(64.0)
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["q", "k", "v", "bias"], error_input_name=upstream_name)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=1, query_heads=2, kv_heads=2, query_len=64, kv_len=64, qk_dim=64, v_dim=64, dtype=dtype)
+    rng = np.random.default_rng(1888)
+    bias_np = rng.normal(0.0, 0.2, size=(1, 2, 64, 64)).astype(np.float32)
+    dO_np = rng.normal(0.0, 0.25, size=(1, 2, 64, 64)).astype(_numpy_storage_dtype(dtype))
+    expected_dq, expected_dk, expected_dv, expected_dbias = _attention_backward_reference(
+        q_np, k_np, v_np, dO_np, scale=scale, bias=bias_np, return_bias_grad=True)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        upstream_name: _host_to_gpu(dO_np, dtype, stream),
+    }
+
+    assert bwd_eq.output_shapes(inputs_gpu) == {
+        "q_grad": [1, 2, 64, 64],
+        "k_grad": [1, 2, 64, 64],
+        "v_grad": [1, 2, 64, 64],
+        "bias_grad": [1, 2, 64, 64],
+    }
+    kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert kinds.count("AttentionBackward") == 1
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = stamped.outputs()
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    np.testing.assert_allclose(
+        _copy_to_host(got["bias_grad"], thor.DataType.fp32, stream).astype(np.float32),
+        expected_dbias.astype(np.float32),
+        rtol=7e-2,
+        atol=7e-2,
+    )
+
+
+@pytest.mark.cuda
+def test_attention_compile_backward_dbias_only_with_additive_bias_matches_reference():
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    scale = 0.69 / math.sqrt(64.0)
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["bias"], error_input_name=upstream_name)
+    assert bwd_eq.output_names() == ["bias_grad"]
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=1, query_heads=2, kv_heads=2, query_len=64, kv_len=64, qk_dim=64, v_dim=64, dtype=dtype)
+    rng = np.random.default_rng(2888)
+    bias_np = rng.normal(0.0, 0.2, size=(1, 2, 64, 64)).astype(np.float32)
+    dO_np = rng.normal(0.0, 0.25, size=(1, 2, 64, 64)).astype(_numpy_storage_dtype(dtype))
+    _, _, _, expected_dbias = _attention_backward_reference(
+        q_np, k_np, v_np, dO_np, scale=scale, bias=bias_np, return_bias_grad=True)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        upstream_name: _host_to_gpu(dO_np, dtype, stream),
+    }
+
+    assert bwd_eq.output_shapes(inputs_gpu) == {"bias_grad": [1, 2, 64, 64]}
+    kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert kinds == ["AttentionBackward", "FusedKernel"]
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = stamped.outputs()
+    np.testing.assert_allclose(
+        _copy_to_host(got["bias_grad"], thor.DataType.fp32, stream).astype(np.float32),
+        expected_dbias.astype(np.float32),
+        rtol=7e-2,
+        atol=7e-2,
+    )
+
+
+@pytest.mark.cuda
+def test_attention_compile_backward_dbias_gqa_with_additive_bias_matches_reference():
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    scale = 0.74 / math.sqrt(64.0)
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["q", "k", "v", "bias"], error_input_name=upstream_name)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=1, query_heads=4, kv_heads=2, query_len=64, kv_len=64, qk_dim=64, v_dim=64, dtype=dtype)
+    rng = np.random.default_rng(3888)
+    bias_np = rng.normal(0.0, 0.2, size=(1, 4, 64, 64)).astype(np.float32)
+    dO_np = rng.normal(0.0, 0.25, size=(1, 4, 64, 64)).astype(_numpy_storage_dtype(dtype))
+    expected_dq, expected_dk, expected_dv, expected_dbias = _attention_backward_reference(
+        q_np, k_np, v_np, dO_np, scale=scale, bias=bias_np, return_bias_grad=True)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        upstream_name: _host_to_gpu(dO_np, dtype, stream),
+    }
+
+    assert bwd_eq.output_shapes(inputs_gpu) == {
+        "q_grad": [1, 4, 64, 64],
+        "k_grad": [1, 2, 64, 64],
+        "v_grad": [1, 2, 64, 64],
+        "bias_grad": [1, 4, 64, 64],
+    }
+    kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert kinds == ["AttentionBackward", "FusedKernel"]
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = stamped.outputs()
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    np.testing.assert_allclose(
+        _copy_to_host(got["bias_grad"], thor.DataType.fp32, stream).astype(np.float32),
+        expected_dbias.astype(np.float32),
+        rtol=7e-2,
+        atol=7e-2,
+    )
+
+
+@pytest.mark.cuda
+def test_attention_compile_backward_dbias_with_padding_mask_matches_reference_and_zeroes_invalid_positions():
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    scale = 0.66 / math.sqrt(64.0)
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["bias"], error_input_name=upstream_name)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=2, query_heads=2, kv_heads=2, query_len=64, kv_len=64, qk_dim=64, v_dim=64, dtype=dtype)
+    rng = np.random.default_rng(4888)
+    bias_np = rng.normal(0.0, 0.2, size=(2, 2, 64, 64)).astype(np.float32)
+    dO_np = rng.normal(0.0, 0.25, size=(2, 2, 64, 64)).astype(_numpy_storage_dtype(dtype))
+    q_lengths = np.asarray([64, 37], dtype=np.int32)
+    kv_lengths = np.asarray([59, 41], dtype=np.int32)
+    _, _, _, expected_dbias = _attention_backward_reference(
+        q_np,
+        k_np,
+        v_np,
+        dO_np,
+        scale=scale,
+        bias=bias_np,
+        q_seq_len=q_lengths,
+        kv_seq_len=kv_lengths,
+        return_bias_grad=True,
+    )
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        upstream_name: _host_to_gpu(dO_np, dtype, stream),
+    }
+
+    assert bwd_eq.output_shapes(inputs_gpu) == {"bias_grad": [2, 2, 64, 64]}
+    kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert kinds == ["AttentionBackward", "FusedKernel"]
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got_dbias = _copy_to_host(stamped.outputs()["bias_grad"], thor.DataType.fp32, stream).astype(np.float32)
+    np.testing.assert_allclose(got_dbias, expected_dbias.astype(np.float32), rtol=7e-2, atol=7e-2)
+    assert np.count_nonzero(got_dbias[1, :, q_lengths[1]:, :]) == 0
+    assert np.count_nonzero(got_dbias[1, :, :, kv_lengths[1]:]) == 0
+
+
+@pytest.mark.cuda
+def test_attention_compile_backward_dbias_with_bf16_inputs_matches_reference():
+    dtype = thor.DataType.bf16
+    upstream_name = "__grad_output"
+    scale = 0.62 / math.sqrt(64.0)
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["bias"], error_input_name=upstream_name)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=1, query_heads=2, kv_heads=2, query_len=64, kv_len=64, qk_dim=64, v_dim=64, dtype=dtype)
+    rng = np.random.default_rng(5888)
+    bias_np = rng.normal(0.0, 0.2, size=(1, 2, 64, 64)).astype(np.float32)
+    dO_np = rng.normal(0.0, 0.25, size=(1, 2, 64, 64)).astype(_numpy_storage_dtype(dtype))
+    _, _, _, expected_dbias = _attention_backward_reference(
+        q_np, k_np, v_np, dO_np, scale=scale, bias=bias_np, return_bias_grad=True)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        upstream_name: _host_to_gpu(dO_np, dtype, stream),
+    }
+
+    assert bwd_eq.output_shapes(inputs_gpu) == {"bias_grad": [1, 2, 64, 64]}
+    kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert kinds == ["AttentionBackward", "FusedKernel"]
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    np.testing.assert_allclose(
+        _copy_to_host(stamped.outputs()["bias_grad"], thor.DataType.fp32, stream).astype(np.float32),
+        expected_dbias.astype(np.float32),
+        rtol=1.2e-1,
+        atol=1.2e-1,
+    )
 
 
 @pytest.mark.cuda

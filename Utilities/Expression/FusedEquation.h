@@ -468,6 +468,8 @@ class FusedEquation {
         const std::optional<Tensor>& seq_len_kv,
         const std::optional<Tensor>& q_ragged_offsets,
         const std::optional<Tensor>& kv_ragged_offsets,
+        const std::optional<Tensor>& page_table_k,
+        const std::optional<Tensor>& page_table_v,
         const std::optional<Tensor>& dropout_seed,
         const std::optional<Tensor>& dropout_offset,
         std::optional<Tensor> preallocatedOutput,

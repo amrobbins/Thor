@@ -221,13 +221,30 @@ void requireDropoutScalarMatchesDescriptor(const Tensor& scalar, string_view nam
     }
 }
 
+int64_t ceilDivPositive(int64_t numerator, int64_t denominator) {
+    if (numerator <= 0 || denominator <= 0)
+        throw invalid_argument("ceilDivPositive requires positive operands");
+    return (numerator + denominator - 1) / denominator;
+}
+
+int64_t pagedKvBlockSizeForTable(const CudnnAttentionDescriptor& descriptor, string_view name) {
+    const string label(name);
+    if (label.find('V') != string::npos || label.find("_v") != string::npos || label.find("v_") != string::npos)
+        return descriptor.v.dimensions.at(2);
+    return descriptor.k.dimensions.at(2);
+}
+
+int64_t pagedKvPageCountForTable(const CudnnAttentionDescriptor& descriptor, string_view name) {
+    return ceilDivPositive(descriptor.pagedKv.maxSequenceLengthKv, pagedKvBlockSizeForTable(descriptor, name));
+}
+
 void requirePagedKvTableMatchesDescriptor(const Tensor& table, const CudnnAttentionDescriptor& descriptor, string_view name) {
     requireInitialized(table, name);
     if (table.getDataType() != TensorDescriptor::DataType::INT32) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT32, got " +
                                TensorDescriptor::getElementTypeName(table.getDataType()));
     }
-    const vector<int64_t> expected{descriptor.batchSize(), 1, 1, descriptor.keyValueLength()};
+    const vector<int64_t> expected{descriptor.batchSize(), 1, pagedKvPageCountForTable(descriptor, name), 1};
     const vector<int64_t> dims = asInt64(table.getDimensions());
     if (dims != expected) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
@@ -484,20 +501,22 @@ class AttentionGraphCache {
                             1},
                            descriptor.computeDataType));
             if (descriptor.usePagedKvCache) {
+                const int64_t k_pages = pagedKvPageCountForTable(descriptor, "page_table_k");
+                const int64_t v_pages = pagedKvPageCountForTable(descriptor, "page_table_v");
                 attrs
                     .set_paged_attention_k_table(
                         tensor(built.graph,
                                "page_table_k",
                                UID_PAGE_TABLE_K,
-                               {descriptor.batchSize(), 1, 1, descriptor.keyValueLength()},
-                               {descriptor.keyValueLength(), descriptor.keyValueLength(), descriptor.keyValueLength(), 1},
+                               {descriptor.batchSize(), 1, k_pages, 1},
+                               {k_pages, k_pages, 1, 1},
                                TensorDescriptor::DataType::INT32))
                     .set_paged_attention_v_table(
                         tensor(built.graph,
                                "page_table_v",
                                UID_PAGE_TABLE_V,
-                               {descriptor.batchSize(), 1, 1, descriptor.keyValueLength()},
-                               {descriptor.keyValueLength(), descriptor.keyValueLength(), descriptor.keyValueLength(), 1},
+                               {descriptor.batchSize(), 1, v_pages, 1},
+                               {v_pages, v_pages, 1, 1},
                                TensorDescriptor::DataType::INT32))
                     .set_paged_attention_max_seq_len_kv(static_cast<int>(descriptor.pagedKv.maxSequenceLengthKv));
             }
@@ -716,7 +735,7 @@ int64_t CudnnAttentionDescriptor::batchSize() const { return q.dimensions.at(0);
 int64_t CudnnAttentionDescriptor::queryHeads() const { return q.dimensions.at(1); }
 int64_t CudnnAttentionDescriptor::keyValueHeads() const { return k.dimensions.at(1); }
 int64_t CudnnAttentionDescriptor::queryLength() const { return q.dimensions.at(2); }
-int64_t CudnnAttentionDescriptor::keyValueLength() const { return k.dimensions.at(2); }
+int64_t CudnnAttentionDescriptor::keyValueLength() const { return usePagedKvCache ? pagedKv.maxSequenceLengthKv : k.dimensions.at(2); }
 int64_t CudnnAttentionDescriptor::qkHeadDim() const { return q.dimensions.at(3); }
 int64_t CudnnAttentionDescriptor::vHeadDim() const { return v.dimensions.at(3); }
 
@@ -741,15 +760,17 @@ void CudnnAttentionDescriptor::validateForward() const {
     checkSpec(v, "v");
     checkSpec(o, "o");
 
-    if (q.dimensions[0] != k.dimensions[0] || q.dimensions[0] != v.dimensions[0] || q.dimensions[0] != o.dimensions[0])
-        throwInvalidAttention("q/k/v/o batch dimensions must match");
+    if (q.dimensions[0] != o.dimensions[0])
+        throwInvalidAttention("q/o batch dimensions must match");
+    if (!usePagedKvCache && (q.dimensions[0] != k.dimensions[0] || q.dimensions[0] != v.dimensions[0]))
+        throwInvalidAttention("non-paged attention requires q/k/v batch dimensions to match");
     if (k.dimensions[1] != v.dimensions[1])
         throwInvalidAttention("k/v head counts must match");
     if (q.dimensions[1] % k.dimensions[1] != 0)
         throwInvalidAttention("query heads must be an integer multiple of key/value heads for MHA/MQA/GQA");
     if (q.dimensions[2] != o.dimensions[2])
         throwInvalidAttention("q and o sequence lengths must match");
-    if (k.dimensions[2] != v.dimensions[2])
+    if (!usePagedKvCache && k.dimensions[2] != v.dimensions[2])
         throwInvalidAttention("k/v sequence lengths must match");
     if (q.dimensions[3] != k.dimensions[3])
         throwInvalidAttention("q/k head dimensions must match");
@@ -810,8 +831,18 @@ void CudnnAttentionDescriptor::validateForward() const {
     if (maskKind == AttentionMaskKind::CausalBottomRight && (useBias || useAlibiMask || dropout.probability > 0.0f))
         throwInvalidAttention(
             "causal bottom-right attention currently requires additive bias, ALiBi, and dropout to be disabled in the cuDNN primary SDPA path");
-    if (usePagedKvCache && pagedKv.maxSequenceLengthKv <= 0)
-        throwInvalidAttention("paged KV attention requires pagedKv.maxSequenceLengthKv > 0");
+    if (usePagedKvCache) {
+        if (pagedKv.maxSequenceLengthKv <= 0)
+            throwInvalidAttention("paged KV attention requires pagedKv.maxSequenceLengthKv > 0");
+        if (!usePaddingMask)
+            throwInvalidAttention("paged KV attention requires usePaddingMask=true with q/kv sequence length tensors");
+        if (useBias)
+            throwInvalidAttention("paged KV attention with additive bias is disabled until the paged-bias layout is defined");
+        if (dropout.probability > 0.0f)
+            throwInvalidAttention("paged KV attention is inference-only and cannot currently be combined with dropout");
+        if (k.dimensions[2] <= 0 || v.dimensions[2] <= 0)
+            throwInvalidAttention("paged KV K/V container block sizes must be positive");
+    }
     if (dropout.probability < 0.0f || dropout.probability >= 1.0f)
         throwInvalidAttention("dropout probability must be in [0, 1)");
 }
