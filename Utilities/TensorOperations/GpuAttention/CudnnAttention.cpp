@@ -184,6 +184,34 @@ void requireSeqLenMatchesDescriptor(const Tensor& seq_len, const CudnnAttentionD
     }
 }
 
+void requireRaggedOffsetMatchesDescriptor(const Tensor& offset, const CudnnAttentionDescriptor& descriptor, string_view name) {
+    requireInitialized(offset, name);
+    if (offset.getDataType() != TensorDescriptor::DataType::INT32) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT32, got " +
+                               TensorDescriptor::getElementTypeName(offset.getDataType()));
+    }
+    const vector<int64_t> expected{descriptor.batchSize() + 1};
+    const vector<int64_t> dims = asInt64(offset.getDimensions());
+    if (dims != expected) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
+                               joinInts(expected) + ", got " + joinInts(dims));
+    }
+}
+
+void requireDropoutScalarMatchesDescriptor(const Tensor& scalar, string_view name) {
+    requireInitialized(scalar, name);
+    if (scalar.getDataType() != TensorDescriptor::DataType::INT64) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT64, got " +
+                               TensorDescriptor::getElementTypeName(scalar.getDataType()));
+    }
+    const vector<int64_t> expected{1, 1, 1, 1};
+    const vector<int64_t> dims = asInt64(scalar.getDimensions());
+    if (dims != expected) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
+                               joinInts(expected) + ", got " + joinInts(dims));
+    }
+}
+
 namespace fe = cudnn_frontend;
 
 fe::DataType_t toFrontendDataType(TensorDescriptor::DataType dtype) {
@@ -575,6 +603,14 @@ class AttentionGraphCache {
             attrs.set_bias(tensor(built.graph, "bias", UID_BIAS, bias_dim, bias_stride, descriptor.computeDataType));
             attrs.set_dbias(tensor(built.graph, "dBias", UID_DBIA, bias_dim, bias_stride, descriptor.q.dataType));
         }
+        if (descriptor.dropout.probability > 0.0f) {
+            if (!descriptor.dropout.usePhilox) {
+                throwInvalidAttention("attention backward currently supports only Philox dropout seed/offset");
+            }
+            attrs.set_dropout(descriptor.dropout.probability,
+                              scalar(built.graph, "dropout_seed", UID_DROPOUT_SEED, TensorDescriptor::DataType::INT64),
+                              scalar(built.graph, "dropout_offset", UID_DROPOUT_OFFSET, TensorDescriptor::DataType::INT64));
+        }
 
         auto [dQ, dK, dV] = built.graph->sdpa_backward(q, k, v, o, dO, stats, attrs);
         dQ->set_output(true).set_uid(UID_DQ).set_dim(descriptor.q.dimensions).set_stride(descriptor.q.strides);
@@ -716,8 +752,32 @@ void CudnnAttentionDescriptor::validateForward() const {
         throwInvalidAttention("computeDataType should be FP32 for numerically stable cuDNN SDPA");
     if (intermediateDataType != TensorDescriptor::DataType::FP32)
         throwInvalidAttention("intermediateDataType should be FP32 for numerically stable cuDNN SDPA");
-    if (usePaddingMask && (q.ragged || k.ragged || v.ragged || o.ragged))
+    const bool anyRagged = q.ragged || k.ragged || v.ragged || o.ragged;
+    if (usePaddingMask && anyRagged)
         throwInvalidAttention("use either padding masks or ragged offsets, not both in the same descriptor");
+    if (anyRagged) {
+        if (q.ragged != o.ragged)
+            throwInvalidAttention("ragged attention requires q and o to either both use ragged offsets or both be dense");
+        if (k.ragged != v.ragged)
+            throwInvalidAttention("ragged attention requires k and v to either both use ragged offsets or both be dense");
+        if (useBias)
+            throwInvalidAttention("ragged attention with additive bias is not enabled until the packed bias layout is explicitly defined");
+        if (usePagedKvCache)
+            throwInvalidAttention("ragged attention and paged KV cache are separate variable-length modes and cannot be combined");
+        if (useFp8)
+            throwInvalidAttention("ragged FP8 attention is not enabled until FP8 forward is validated for packed variable-length layouts");
+    }
+    if (useAlibiMask) {
+        const bool usesCausalDiagonal = maskKind == AttentionMaskKind::CausalTopLeft ||
+                                        maskKind == AttentionMaskKind::CausalBottomRight ||
+                                        maskKind == AttentionMaskKind::SlidingWindowTopLeft ||
+                                        maskKind == AttentionMaskKind::SlidingWindowBottomRight;
+        if (!usesCausalDiagonal || diagonalRightBound != 0)
+            throwInvalidAttention("ALiBi requires causal diagonal masking with diagonalRightBound == 0");
+    }
+    if (maskKind == AttentionMaskKind::CausalBottomRight && (useBias || useAlibiMask || dropout.probability > 0.0f))
+        throwInvalidAttention(
+            "causal bottom-right attention currently requires additive bias, ALiBi, and dropout to be disabled in the cuDNN primary SDPA path");
     if (usePagedKvCache && pagedKv.maxSequenceLengthKv <= 0)
         throwInvalidAttention("paged KV attention requires pagedKv.maxSequenceLengthKv > 0");
     if (dropout.probability < 0.0f || dropout.probability >= 1.0f)
@@ -793,24 +853,30 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
     }
     if (descriptor.q.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetQ, "raggedOffsetQ", gpuNum);
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetQ.value(), descriptor, "raggedOffsetQ");
         insertTensor(pack, UID_RAGGED_Q, args.raggedOffsetQ.value());
     }
     if (descriptor.k.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetK, "raggedOffsetK", gpuNum);
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetK.value(), descriptor, "raggedOffsetK");
         insertTensor(pack, UID_RAGGED_K, args.raggedOffsetK.value());
     }
     if (descriptor.v.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetV, "raggedOffsetV", gpuNum);
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetV.value(), descriptor, "raggedOffsetV");
         insertTensor(pack, UID_RAGGED_V, args.raggedOffsetV.value());
     }
     if (descriptor.o.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetO, "raggedOffsetO", gpuNum);
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetO.value(), descriptor, "raggedOffsetO");
         insertTensor(pack, UID_RAGGED_O, args.raggedOffsetO.value());
     }
     if (descriptor.dropout.probability > 0.0f) {
         if (descriptor.dropout.usePhilox) {
             requireOptionalGpuTensor(args.dropoutSeed, "dropoutSeed", gpuNum);
             requireOptionalGpuTensor(args.dropoutOffset, "dropoutOffset", gpuNum);
+            requireDropoutScalarMatchesDescriptor(args.dropoutSeed.value(), "dropoutSeed");
+            requireDropoutScalarMatchesDescriptor(args.dropoutOffset.value(), "dropoutOffset");
             insertTensor(pack, UID_DROPOUT_SEED, args.dropoutSeed.value());
             insertTensor(pack, UID_DROPOUT_OFFSET, args.dropoutOffset.value());
         } else {
@@ -893,23 +959,29 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
     }
     if (descriptor.q.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetQ, "raggedOffsetQ", gpuNum);
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetQ.value(), descriptor, "raggedOffsetQ");
         insertTensor(pack, UID_RAGGED_Q, args.raggedOffsetQ.value());
     }
     if (descriptor.k.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetK, "raggedOffsetK", gpuNum);
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetK.value(), descriptor, "raggedOffsetK");
         insertTensor(pack, UID_RAGGED_K, args.raggedOffsetK.value());
     }
     if (descriptor.v.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetV, "raggedOffsetV", gpuNum);
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetV.value(), descriptor, "raggedOffsetV");
         insertTensor(pack, UID_RAGGED_V, args.raggedOffsetV.value());
     }
     if (descriptor.o.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetO, "raggedOffsetO", gpuNum);
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetO.value(), descriptor, "raggedOffsetO");
         insertTensor(pack, UID_RAGGED_O, args.raggedOffsetO.value());
     }
     if (descriptor.dropout.probability > 0.0f && descriptor.dropout.usePhilox) {
         requireOptionalGpuTensor(args.dropoutSeed, "dropoutSeed", gpuNum);
         requireOptionalGpuTensor(args.dropoutOffset, "dropoutOffset", gpuNum);
+        requireDropoutScalarMatchesDescriptor(args.dropoutSeed.value(), "dropoutSeed");
+        requireDropoutScalarMatchesDescriptor(args.dropoutOffset.value(), "dropoutOffset");
         insertTensor(pack, UID_DROPOUT_SEED, args.dropoutSeed.value());
         insertTensor(pack, UID_DROPOUT_OFFSET, args.dropoutOffset.value());
     }

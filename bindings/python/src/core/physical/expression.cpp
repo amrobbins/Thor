@@ -9,6 +9,7 @@
 
 #include <sstream>
 #include <optional>
+#include <utility>
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
@@ -391,6 +392,108 @@ Shorthand for ``self.transpose()``.
         return nb::cast<DataType>(dtype_obj);
     };
 
+    auto build_attention_from_python_args = [parse_optional_dtype](const Expression& q,
+                                                                 const Expression& k,
+                                                                 const Expression& v,
+                                                                 AttentionTensorLayout q_layout,
+                                                                 AttentionTensorLayout k_layout,
+                                                                 AttentionTensorLayout v_layout,
+                                                                 AttentionTensorLayout o_layout,
+                                                                 AttentionMaskKind mask_kind,
+                                                                 int64_t diagonal_left_bound,
+                                                                 int64_t diagonal_right_bound,
+                                                                 nb::object attention_scale_obj,
+                                                                 bool use_alibi_mask,
+                                                                 nb::object output_dtype_obj,
+                                                                 nb::object compute_dtype_obj,
+                                                                 nb::object bias_obj,
+                                                                 nb::object q_seq_len_obj,
+                                                                 nb::object kv_seq_len_obj,
+                                                                 float dropout_probability,
+                                                                 nb::object dropout_seed_obj,
+                                                                 nb::object dropout_offset_obj) -> Expression {
+        AttentionOptions options;
+        options.q_layout = q_layout;
+        options.k_layout = k_layout;
+        options.v_layout = v_layout;
+        options.o_layout = o_layout;
+        options.mask_kind = mask_kind;
+        options.diagonal_left_bound = diagonal_left_bound;
+        options.diagonal_right_bound = diagonal_right_bound;
+        if (!attention_scale_obj.is_none()) {
+            options.attention_scale = nb::cast<float>(attention_scale_obj);
+        }
+        options.use_alibi_mask = use_alibi_mask;
+        options.output_dtype = parse_optional_dtype(output_dtype_obj);
+        options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
+        options.dropout_probability = dropout_probability;
+
+        const bool has_bias = !bias_obj.is_none();
+        const bool has_q_seq_len = !q_seq_len_obj.is_none();
+        const bool has_kv_seq_len = !kv_seq_len_obj.is_none();
+        const bool has_dropout_seed = !dropout_seed_obj.is_none();
+        const bool has_dropout_offset = !dropout_offset_obj.is_none();
+        const bool uses_dropout = dropout_probability > 0.0f;
+
+        if (has_q_seq_len != has_kv_seq_len) {
+            throw std::runtime_error("q_seq_len and kv_seq_len must be provided together for padding-mask attention.");
+        }
+        if (has_dropout_seed != has_dropout_offset) {
+            throw std::runtime_error("dropout_seed and dropout_offset must be provided together for attention dropout.");
+        }
+        if (uses_dropout && !has_dropout_seed) {
+            throw std::runtime_error("attention dropout_probability > 0 requires dropout_seed and dropout_offset expressions.");
+        }
+        if (!uses_dropout && has_dropout_seed) {
+            throw std::runtime_error("dropout_seed/dropout_offset were provided but attention dropout_probability is zero.");
+        }
+
+        if (has_q_seq_len) {
+            options.use_padding_mask = true;
+        }
+
+        if (uses_dropout) {
+            const Expression& dropout_seed = nb::cast<Expression>(dropout_seed_obj);
+            const Expression& dropout_offset = nb::cast<Expression>(dropout_offset_obj);
+            if (has_q_seq_len) {
+                const Expression& q_seq_len = nb::cast<Expression>(q_seq_len_obj);
+                const Expression& kv_seq_len = nb::cast<Expression>(kv_seq_len_obj);
+                if (has_bias) {
+                    return Expression::scaledDotProductAttention(q,
+                                                                 k,
+                                                                 v,
+                                                                 nb::cast<Expression>(bias_obj),
+                                                                 q_seq_len,
+                                                                 kv_seq_len,
+                                                                 dropout_seed,
+                                                                 dropout_offset,
+                                                                 std::move(options));
+                }
+                return Expression::scaledDotProductAttention(
+                    q, k, v, q_seq_len, kv_seq_len, dropout_seed, dropout_offset, std::move(options));
+            }
+            if (has_bias) {
+                return Expression::scaledDotProductAttentionWithDropout(
+                    q, k, v, nb::cast<Expression>(bias_obj), dropout_seed, dropout_offset, std::move(options));
+            }
+            return Expression::scaledDotProductAttentionWithDropout(q, k, v, dropout_seed, dropout_offset, std::move(options));
+        }
+
+        if (has_q_seq_len) {
+            const Expression& q_seq_len = nb::cast<Expression>(q_seq_len_obj);
+            const Expression& kv_seq_len = nb::cast<Expression>(kv_seq_len_obj);
+            if (has_bias) {
+                return Expression::scaledDotProductAttention(
+                    q, k, v, nb::cast<Expression>(bias_obj), q_seq_len, kv_seq_len, std::move(options));
+            }
+            return Expression::scaledDotProductAttention(q, k, v, q_seq_len, kv_seq_len, std::move(options));
+        }
+        if (has_bias) {
+            return Expression::scaledDotProductAttention(q, k, v, nb::cast<Expression>(bias_obj), std::move(options));
+        }
+        return Expression::scaledDotProductAttention(q, k, v, std::move(options));
+    };
+
 
     expr.def_static(
         "rotary_position_embedding",
@@ -491,61 +594,46 @@ which is used by autodiff.
 
     expr.def_static(
         "scaled_dot_product_attention",
-        [parse_optional_dtype](const Expression& q,
-                               const Expression& k,
-                               const Expression& v,
-                               AttentionTensorLayout q_layout,
-                               AttentionTensorLayout k_layout,
-                               AttentionTensorLayout v_layout,
-                               AttentionTensorLayout o_layout,
-                               AttentionMaskKind mask_kind,
-                               int64_t diagonal_left_bound,
-                               int64_t diagonal_right_bound,
-                               nb::object attention_scale_obj,
-                               bool use_alibi_mask,
-                               nb::object output_dtype_obj,
-                               nb::object compute_dtype_obj,
-                               nb::object bias_obj,
-                               nb::object q_seq_len_obj,
-                               nb::object kv_seq_len_obj) {
-            AttentionOptions options;
-            options.q_layout = q_layout;
-            options.k_layout = k_layout;
-            options.v_layout = v_layout;
-            options.o_layout = o_layout;
-            options.mask_kind = mask_kind;
-            options.diagonal_left_bound = diagonal_left_bound;
-            options.diagonal_right_bound = diagonal_right_bound;
-            if (!attention_scale_obj.is_none()) {
-                options.attention_scale = nb::cast<float>(attention_scale_obj);
-            }
-            options.use_alibi_mask = use_alibi_mask;
-            options.output_dtype = parse_optional_dtype(output_dtype_obj);
-            options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
-            const bool has_bias = !bias_obj.is_none();
-            const bool has_q_seq_len = !q_seq_len_obj.is_none();
-            const bool has_kv_seq_len = !kv_seq_len_obj.is_none();
-            if (has_q_seq_len != has_kv_seq_len) {
-                throw std::runtime_error("q_seq_len and kv_seq_len must be provided together for padding-mask attention.");
-            }
-            if (has_q_seq_len) {
-                options.use_padding_mask = true;
-                if (has_bias) {
-                    return Expression::scaledDotProductAttention(q,
-                                                                 k,
-                                                                 v,
-                                                                 nb::cast<Expression>(bias_obj),
-                                                                 nb::cast<Expression>(q_seq_len_obj),
-                                                                 nb::cast<Expression>(kv_seq_len_obj),
-                                                                 std::move(options));
-                }
-                return Expression::scaledDotProductAttention(
-                    q, k, v, nb::cast<Expression>(q_seq_len_obj), nb::cast<Expression>(kv_seq_len_obj), std::move(options));
-            }
-            if (has_bias) {
-                return Expression::scaledDotProductAttention(q, k, v, nb::cast<Expression>(bias_obj), std::move(options));
-            }
-            return Expression::scaledDotProductAttention(q, k, v, std::move(options));
+        [build_attention_from_python_args](const Expression& q,
+                                           const Expression& k,
+                                           const Expression& v,
+                                           AttentionTensorLayout q_layout,
+                                           AttentionTensorLayout k_layout,
+                                           AttentionTensorLayout v_layout,
+                                           AttentionTensorLayout o_layout,
+                                           AttentionMaskKind mask_kind,
+                                           int64_t diagonal_left_bound,
+                                           int64_t diagonal_right_bound,
+                                           nb::object attention_scale_obj,
+                                           bool use_alibi_mask,
+                                           nb::object output_dtype_obj,
+                                           nb::object compute_dtype_obj,
+                                           nb::object bias_obj,
+                                           nb::object q_seq_len_obj,
+                                           nb::object kv_seq_len_obj,
+                                           float dropout_probability,
+                                           nb::object dropout_seed_obj,
+                                           nb::object dropout_offset_obj) {
+            return build_attention_from_python_args(q,
+                                                    k,
+                                                    v,
+                                                    q_layout,
+                                                    k_layout,
+                                                    v_layout,
+                                                    o_layout,
+                                                    mask_kind,
+                                                    diagonal_left_bound,
+                                                    diagonal_right_bound,
+                                                    std::move(attention_scale_obj),
+                                                    use_alibi_mask,
+                                                    std::move(output_dtype_obj),
+                                                    std::move(compute_dtype_obj),
+                                                    std::move(bias_obj),
+                                                    std::move(q_seq_len_obj),
+                                                    std::move(kv_seq_len_obj),
+                                                    dropout_probability,
+                                                    std::move(dropout_seed_obj),
+                                                    std::move(dropout_offset_obj));
         },
         "q"_a,
         "k"_a,
@@ -564,6 +652,9 @@ which is used by autodiff.
         "bias"_a.none() = nb::none(),
         "q_seq_len"_a.none() = nb::none(),
         "kv_seq_len"_a.none() = nb::none(),
+        "dropout_probability"_a = 0.0f,
+        "dropout_seed"_a.none() = nb::none(),
+        "dropout_offset"_a.none() = nb::none(),
         R"nbdoc(
 Create a cuDNN scaled-dot-product attention expression stage.
 
@@ -572,69 +663,54 @@ how the stage should hand those logical tensors to cuDNN.  The default layout is
 BHSD, matching Thor's row-major physical tensor layout for rank-4 attention
 inputs.  output_dtype should normally match q/k/v for the current cuDNN SDPA
 path; compute_dtype should normally be thor.DataType.fp32.
+
+When dropout_probability > 0, dropout_seed and dropout_offset must be INT64 GPU
+scalar expressions with shape [1, 1, 1, 1].  They are passed to cuDNN's Philox
+attention dropout path and are part of the attention stage metadata.
 )nbdoc");
 
     expr.def_static(
         "attention",
-        [](const Expression& q,
-           const Expression& k,
-           const Expression& v,
-           AttentionTensorLayout q_layout,
-           AttentionTensorLayout k_layout,
-           AttentionTensorLayout v_layout,
-           AttentionTensorLayout o_layout,
-           AttentionMaskKind mask_kind,
-           int64_t diagonal_left_bound,
-           int64_t diagonal_right_bound,
-           nb::object attention_scale_obj,
-           bool use_alibi_mask,
-           nb::object output_dtype_obj,
-           nb::object compute_dtype_obj,
-           nb::object bias_obj,
-           nb::object q_seq_len_obj,
-           nb::object kv_seq_len_obj) {
-            AttentionOptions options;
-            options.q_layout = q_layout;
-            options.k_layout = k_layout;
-            options.v_layout = v_layout;
-            options.o_layout = o_layout;
-            options.mask_kind = mask_kind;
-            options.diagonal_left_bound = diagonal_left_bound;
-            options.diagonal_right_bound = diagonal_right_bound;
-            if (!attention_scale_obj.is_none()) {
-                options.attention_scale = nb::cast<float>(attention_scale_obj);
-            }
-            options.use_alibi_mask = use_alibi_mask;
-            if (!output_dtype_obj.is_none()) {
-                options.output_dtype = nb::cast<DataType>(output_dtype_obj);
-            }
-            if (!compute_dtype_obj.is_none()) {
-                options.compute_dtype = nb::cast<DataType>(compute_dtype_obj);
-            }
-            const bool has_bias = !bias_obj.is_none();
-            const bool has_q_seq_len = !q_seq_len_obj.is_none();
-            const bool has_kv_seq_len = !kv_seq_len_obj.is_none();
-            if (has_q_seq_len != has_kv_seq_len) {
-                throw std::runtime_error("q_seq_len and kv_seq_len must be provided together for padding-mask attention.");
-            }
-            if (has_q_seq_len) {
-                options.use_padding_mask = true;
-                if (has_bias) {
-                    return Expression::scaledDotProductAttention(q,
-                                                                 k,
-                                                                 v,
-                                                                 nb::cast<Expression>(bias_obj),
-                                                                 nb::cast<Expression>(q_seq_len_obj),
-                                                                 nb::cast<Expression>(kv_seq_len_obj),
-                                                                 std::move(options));
-                }
-                return Expression::scaledDotProductAttention(
-                    q, k, v, nb::cast<Expression>(q_seq_len_obj), nb::cast<Expression>(kv_seq_len_obj), std::move(options));
-            }
-            if (has_bias) {
-                return Expression::scaledDotProductAttention(q, k, v, nb::cast<Expression>(bias_obj), std::move(options));
-            }
-            return Expression::scaledDotProductAttention(q, k, v, std::move(options));
+        [build_attention_from_python_args](const Expression& q,
+                                           const Expression& k,
+                                           const Expression& v,
+                                           AttentionTensorLayout q_layout,
+                                           AttentionTensorLayout k_layout,
+                                           AttentionTensorLayout v_layout,
+                                           AttentionTensorLayout o_layout,
+                                           AttentionMaskKind mask_kind,
+                                           int64_t diagonal_left_bound,
+                                           int64_t diagonal_right_bound,
+                                           nb::object attention_scale_obj,
+                                           bool use_alibi_mask,
+                                           nb::object output_dtype_obj,
+                                           nb::object compute_dtype_obj,
+                                           nb::object bias_obj,
+                                           nb::object q_seq_len_obj,
+                                           nb::object kv_seq_len_obj,
+                                           float dropout_probability,
+                                           nb::object dropout_seed_obj,
+                                           nb::object dropout_offset_obj) {
+            return build_attention_from_python_args(q,
+                                                    k,
+                                                    v,
+                                                    q_layout,
+                                                    k_layout,
+                                                    v_layout,
+                                                    o_layout,
+                                                    mask_kind,
+                                                    diagonal_left_bound,
+                                                    diagonal_right_bound,
+                                                    std::move(attention_scale_obj),
+                                                    use_alibi_mask,
+                                                    std::move(output_dtype_obj),
+                                                    std::move(compute_dtype_obj),
+                                                    std::move(bias_obj),
+                                                    std::move(q_seq_len_obj),
+                                                    std::move(kv_seq_len_obj),
+                                                    dropout_probability,
+                                                    std::move(dropout_seed_obj),
+                                                    std::move(dropout_offset_obj));
         },
         "q"_a,
         "k"_a,
@@ -653,6 +729,9 @@ path; compute_dtype should normally be thor.DataType.fp32.
         "bias"_a.none() = nb::none(),
         "q_seq_len"_a.none() = nb::none(),
         "kv_seq_len"_a.none() = nb::none(),
+        "dropout_probability"_a = 0.0f,
+        "dropout_seed"_a.none() = nb::none(),
+        "dropout_offset"_a.none() = nb::none(),
         R"nbdoc(Alias for scaled_dot_product_attention().)nbdoc");
     expr.def("__rpow__", [](const Expression& a, const Expression& b) { return b.pow(a); }, "other"_a);
 

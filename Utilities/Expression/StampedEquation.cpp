@@ -79,6 +79,8 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
     descriptor.useAlibiMask = use_alibi_mask;
     descriptor.useBias = use_bias;
     descriptor.usePaddingMask = use_padding_mask;
+    descriptor.dropout.probability = dropout_probability;
+    descriptor.dropout.usePhilox = true;
     descriptor.debugName = debug_name;
     descriptor.useFp8 =
         qTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || qTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
@@ -136,6 +138,8 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
     descriptor.useAlibiMask = use_alibi_mask;
     descriptor.useBias = use_bias;
     descriptor.usePaddingMask = use_padding_mask;
+    descriptor.dropout.probability = dropout_probability;
+    descriptor.dropout.usePhilox = true;
     descriptor.generateStats = true;
     descriptor.deterministicBackward = deterministic_backward;
     descriptor.debugName = debug_name;
@@ -182,7 +186,8 @@ bool attentionConfigMatchesBackward(const CompiledAttention& forward,
            forward.diagonal_right_bound == backward.diagonal_right_bound &&
            sameOptionalFloat(forward.attention_scale, backward.attention_scale) &&
            forward.use_alibi_mask == backward.use_alibi_mask && forward.use_bias == backward.use_bias &&
-           forward.use_padding_mask == backward.use_padding_mask && forward.compute_dtype == backward.compute_dtype &&
+           forward.use_padding_mask == backward.use_padding_mask && forward.dropout_probability == backward.dropout_probability &&
+           forward.compute_dtype == backward.compute_dtype &&
            forward.output_dtype == output_dtype;
 }
 
@@ -215,6 +220,13 @@ void StampedAttention::runOn(Stream& run_stream) const {
         args.seqLenQ = seq_len_q.value();
         args.seqLenKv = seq_len_kv.value();
     }
+    if (compiled_attention->dropout_probability > 0.0f) {
+        if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
+            throw std::runtime_error("StampedAttention requires dropout seed/offset tensors for attention dropout.");
+        }
+        args.dropoutSeed = dropout_seed.value();
+        args.dropoutOffset = dropout_offset.value();
+    }
 
     if (forward_state && forward_state->retain_for_backward) {
         if (!forward_state->stats.isInitialized()) {
@@ -240,6 +252,8 @@ bool StampedAttention::canProvideForwardStateFor(const CompiledAttentionBackward
                                                  const std::optional<Tensor>& bias_tensor,
                                                  const std::optional<Tensor>& seq_len_q_tensor,
                                                  const std::optional<Tensor>& seq_len_kv_tensor,
+                                                 const std::optional<Tensor>& dropout_seed_tensor,
+                                                 const std::optional<Tensor>& dropout_offset_tensor,
                                                  const Tensor& dO_tensor) const {
     if (!compiled_attention || !forward_state) {
         return false;
@@ -258,6 +272,13 @@ bool StampedAttention::canProvideForwardStateFor(const CompiledAttentionBackward
             return false;
         }
     }
+    if (compiled_attention->dropout_probability > 0.0f) {
+        if (!dropout_seed.has_value() || !dropout_offset.has_value() || !dropout_seed_tensor.has_value() ||
+            !dropout_offset_tensor.has_value() || !tensorMatches(dropout_seed.value(), dropout_seed_tensor.value()) ||
+            !tensorMatches(dropout_offset.value(), dropout_offset_tensor.value())) {
+            return false;
+        }
+    }
     if (output.getDimensions() != dO_tensor.getDimensions() || output.getDataType() != dO_tensor.getDataType() ||
         output.getPlacement() != dO_tensor.getPlacement()) {
         return false;
@@ -272,6 +293,8 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
                                    const std::optional<Tensor>& bias,
                                    const std::optional<Tensor>& seq_len_q,
                                    const std::optional<Tensor>& seq_len_kv,
+                                   const std::optional<Tensor>& dropout_seed,
+                                   const std::optional<Tensor>& dropout_offset,
                                    const Tensor& output,
                                    const Stream& stream,
                                    std::shared_ptr<AttentionForwardState> forward_state)
@@ -282,6 +305,8 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
       bias(bias),
       seq_len_q(seq_len_q),
       seq_len_kv(seq_len_kv),
+      dropout_seed(dropout_seed),
+      dropout_offset(dropout_offset),
       output(output),
       stream(stream),
       forward_state(std::move(forward_state)) {}
@@ -327,6 +352,13 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
             fwdArgs.seqLenQ = seq_len_q.value();
             fwdArgs.seqLenKv = seq_len_kv.value();
         }
+        if (compiled_attention_backward->dropout_probability > 0.0f) {
+            if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
+                throw std::runtime_error("StampedAttentionBackward requires dropout seed/offset tensors for attention dropout.");
+            }
+            fwdArgs.dropoutSeed = dropout_seed.value();
+            fwdArgs.dropoutOffset = dropout_offset.value();
+        }
         CudnnScaledDotProductAttention::instance().forward(descriptor, fwdArgs, run_stream);
     }
 
@@ -349,6 +381,13 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
         bwdArgs.seqLenQ = seq_len_q.value();
         bwdArgs.seqLenKv = seq_len_kv.value();
     }
+    if (compiled_attention_backward->dropout_probability > 0.0f) {
+        if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
+            throw std::runtime_error("StampedAttentionBackward requires dropout seed/offset tensors for attention dropout.");
+        }
+        bwdArgs.dropoutSeed = dropout_seed.value();
+        bwdArgs.dropoutOffset = dropout_offset.value();
+    }
     CudnnScaledDotProductAttention::instance().backward(descriptor, bwdArgs, run_stream);
 }
 
@@ -359,6 +398,8 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
                                                    const std::optional<Tensor>& bias,
                                                    const std::optional<Tensor>& seq_len_q,
                                                    const std::optional<Tensor>& seq_len_kv,
+                                                   const std::optional<Tensor>& dropout_seed,
+                                                   const std::optional<Tensor>& dropout_offset,
                                                    const Tensor& dO,
                                                    const Tensor& dQ,
                                                    const Tensor& dK,
@@ -375,6 +416,8 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
       bias(bias),
       seq_len_q(seq_len_q),
       seq_len_kv(seq_len_kv),
+      dropout_seed(dropout_seed),
+      dropout_offset(dropout_offset),
       dO(dO),
       dQ(dQ),
       dK(dK),

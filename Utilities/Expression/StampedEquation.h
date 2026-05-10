@@ -199,6 +199,7 @@ struct CompiledAttention {
     bool use_alibi_mask = false;
     bool use_bias = false;
     bool use_padding_mask = false;
+    float dropout_probability = 0.0f;
     TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
     TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP16;
     std::string debug_name = "thor_expr_attention";
@@ -219,6 +220,7 @@ struct CompiledAttentionBackward {
     bool deterministic_backward = false;
     bool use_bias = false;
     bool use_padding_mask = false;
+    float dropout_probability = 0.0f;
     TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
     TensorDescriptor::DataType dQ_dtype = TensorDescriptor::DataType::FP16;
     TensorDescriptor::DataType dK_dtype = TensorDescriptor::DataType::FP16;
@@ -500,6 +502,8 @@ class StampedAttention {
                                    const std::optional<Tensor>& bias_tensor,
                                    const std::optional<Tensor>& seq_len_q_tensor,
                                    const std::optional<Tensor>& seq_len_kv_tensor,
+                                   const std::optional<Tensor>& dropout_seed_tensor,
+                                   const std::optional<Tensor>& dropout_offset_tensor,
                                    const Tensor& dO_tensor) const;
 
     StampedAttention(std::shared_ptr<CompiledAttention> compiled,
@@ -509,6 +513,8 @@ class StampedAttention {
                      const std::optional<Tensor>& bias,
                      const std::optional<Tensor>& seq_len_q,
                      const std::optional<Tensor>& seq_len_kv,
+                     const std::optional<Tensor>& dropout_seed,
+                     const std::optional<Tensor>& dropout_offset,
                      const Tensor& output,
                      const Stream& stream,
                      std::shared_ptr<AttentionForwardState> forward_state = nullptr);
@@ -521,6 +527,8 @@ class StampedAttention {
     const std::optional<Tensor> bias;
     const std::optional<Tensor> seq_len_q;
     const std::optional<Tensor> seq_len_kv;
+    const std::optional<Tensor> dropout_seed;
+    const std::optional<Tensor> dropout_offset;
     Tensor output;
     Stream stream;
     std::shared_ptr<AttentionForwardState> forward_state;
@@ -542,6 +550,8 @@ class StampedAttentionBackward {
                              const std::optional<Tensor>& bias,
                              const std::optional<Tensor>& seq_len_q,
                              const std::optional<Tensor>& seq_len_kv,
+                             const std::optional<Tensor>& dropout_seed,
+                             const std::optional<Tensor>& dropout_offset,
                              const Tensor& dO,
                              const Tensor& dQ,
                              const Tensor& dK,
@@ -560,6 +570,8 @@ class StampedAttentionBackward {
     const std::optional<Tensor> bias;
     const std::optional<Tensor> seq_len_q;
     const std::optional<Tensor> seq_len_kv;
+    const std::optional<Tensor> dropout_seed;
+    const std::optional<Tensor> dropout_offset;
     const Tensor dO;
     Tensor dQ;
     Tensor dK;

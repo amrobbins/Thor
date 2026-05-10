@@ -986,6 +986,7 @@ static CompiledAttention makeForwardAttentionView(const CompiledAttentionBackwar
     forward.use_alibi_mask = backward.use_alibi_mask;
     forward.use_bias = backward.use_bias;
     forward.use_padding_mask = backward.use_padding_mask;
+    forward.dropout_probability = backward.dropout_probability;
     forward.compute_dtype = backward.compute_dtype;
     forward.output_dtype = output_dtype;
     forward.debug_name = debug_suffix.empty() ? backward.debug_name : backward.debug_name + debug_suffix;
@@ -4582,6 +4583,8 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
                                                                 const std::optional<Tensor>& bias,
                                                                 const std::optional<Tensor>& seq_len_q,
                                                                 const std::optional<Tensor>& seq_len_kv,
+                                                                const std::optional<Tensor>& dropout_seed,
+                                                                const std::optional<Tensor>& dropout_offset,
                                                                 std::optional<Tensor> preallocatedOutput,
                                                                 const Stream& stream,
                                                                 std::shared_ptr<AttentionForwardState> forward_state) const {
@@ -4610,6 +4613,13 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         }
         stage_input_dims.push_back(seq_len_q->getDimensions());
         stage_input_dims.push_back(seq_len_kv->getDimensions());
+    }
+    if (compiledStage->dropout_probability > 0.0f) {
+        if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
+            throw std::runtime_error("stampAttention requires dropout seed/offset tensors for attention dropout.");
+        }
+        stage_input_dims.push_back(dropout_seed->getDimensions());
+        stage_input_dims.push_back(dropout_offset->getDimensions());
     }
     const std::vector<uint64_t> output_dims = resolveAttentionOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
@@ -4648,6 +4658,24 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         validate_seq_len(seq_len_q, "q_seq_len");
         validate_seq_len(seq_len_kv, "kv_seq_len");
     }
+    if (compiledStage->dropout_probability > 0.0f) {
+        auto validate_dropout_scalar = [&](const std::optional<Tensor>& tensor, const char* label) {
+            if (!tensor.has_value()) {
+                throw std::runtime_error(std::string("Attention dropout missing ") + label + " tensor.");
+            }
+            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+                throw std::runtime_error(std::string("Attention dropout ") + label + " placement must match q.");
+            }
+            if (tensor->getDataType() != TensorDescriptor::DataType::INT64) {
+                throw std::runtime_error(std::string("Attention dropout ") + label + " dtype must be INT64.");
+            }
+            if (tensor->getDimensions() != std::vector<uint64_t>{1, 1, 1, 1}) {
+                throw std::runtime_error(std::string("Attention dropout ") + label + " shape must be [1,1,1,1].");
+            }
+        };
+        validate_dropout_scalar(dropout_seed, "seed");
+        validate_dropout_scalar(dropout_offset, "offset");
+    }
 
     // Build and validate the cuDNN descriptor during stamping so shape/layout errors fail before execution.
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, output);
@@ -4666,7 +4694,8 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         forward_state->has_valid_stats = false;
     }
 
-    return make_shared<StampedAttention>(compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, seq_len_q, seq_len_kv, output, stream, std::move(forward_state));
+    return make_shared<StampedAttention>(
+        compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, seq_len_q, seq_len_kv, dropout_seed, dropout_offset, output, stream, std::move(forward_state));
 }
 
 std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
@@ -4677,6 +4706,8 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     const std::optional<Tensor>& bias,
     const std::optional<Tensor>& seq_len_q,
     const std::optional<Tensor>& seq_len_kv,
+    const std::optional<Tensor>& dropout_seed,
+    const std::optional<Tensor>& dropout_offset,
     const Tensor& dO,
     const std::vector<std::optional<Tensor>>& preallocatedOutputs,
     const Stream& stream,
@@ -4711,6 +4742,15 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         forward_input_dims.push_back(seq_len_kv->getDimensions());
         stage_input_dims.push_back(seq_len_q->getDimensions());
         stage_input_dims.push_back(seq_len_kv->getDimensions());
+    }
+    if (compiledStage->dropout_probability > 0.0f) {
+        if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
+            throw std::runtime_error("stampAttentionBackward requires dropout seed/offset tensors for attention dropout.");
+        }
+        forward_input_dims.push_back(dropout_seed->getDimensions());
+        forward_input_dims.push_back(dropout_offset->getDimensions());
+        stage_input_dims.push_back(dropout_seed->getDimensions());
+        stage_input_dims.push_back(dropout_offset->getDimensions());
     }
     const std::vector<uint64_t> o_dims = resolveAttentionOutputDimsFromInputs(
         makeForwardAttentionView(*compiledStage, adaptedDO.getDataType(), ".stats_forward"), forward_input_dims);
@@ -4763,6 +4803,24 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         validate_seq_len(seq_len_q, "q_seq_len");
         validate_seq_len(seq_len_kv, "kv_seq_len");
     }
+    if (compiledStage->dropout_probability > 0.0f) {
+        auto validate_dropout_scalar = [&](const std::optional<Tensor>& tensor, const char* label) {
+            if (!tensor.has_value()) {
+                throw std::runtime_error(std::string("Attention-backward dropout missing ") + label + " tensor.");
+            }
+            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+                throw std::runtime_error(std::string("Attention-backward dropout ") + label + " placement must match q.");
+            }
+            if (tensor->getDataType() != TensorDescriptor::DataType::INT64) {
+                throw std::runtime_error(std::string("Attention-backward dropout ") + label + " dtype must be INT64.");
+            }
+            if (tensor->getDimensions() != std::vector<uint64_t>{1, 1, 1, 1}) {
+                throw std::runtime_error(std::string("Attention-backward dropout ") + label + " shape must be [1,1,1,1].");
+            }
+        };
+        validate_dropout_scalar(dropout_seed, "seed");
+        validate_dropout_scalar(dropout_offset, "offset");
+    }
 
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, oScratch);
     if (compiledStage->use_bias && adaptedBias.has_value()) {
@@ -4774,8 +4832,24 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             throw std::runtime_error("Attention-backward additive bias dtype must match attention compute dtype.");
         }
     }
-    return make_shared<StampedAttentionBackward>(
-        compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, seq_len_q, seq_len_kv, adaptedDO, dQ, dK, dV, oScratch, stats, dBiasScratch, stream, std::move(saved_forward_state));
+    return make_shared<StampedAttentionBackward>(compiledStage,
+                                                 adaptedQ,
+                                                 adaptedK,
+                                                 adaptedV,
+                                                 adaptedBias,
+                                                 seq_len_q,
+                                                 seq_len_kv,
+                                                 dropout_seed,
+                                                 dropout_offset,
+                                                 adaptedDO,
+                                                 dQ,
+                                                 dK,
+                                                 dV,
+                                                 oScratch,
+                                                 stats,
+                                                 dBiasScratch,
+                                                 stream,
+                                                 std::move(saved_forward_state));
 }
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
@@ -5291,9 +5365,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (!stage.attention) {
                     throw std::runtime_error("Attention stage missing compiled payload.");
                 }
-                const size_t expected_attention_stage_inputs = 3 + (stage.attention->use_bias ? 1 : 0) + (stage.attention->use_padding_mask ? 2 : 0);
+                const size_t expected_attention_stage_inputs = 3 + (stage.attention->use_bias ? 1 : 0) + (stage.attention->use_padding_mask ? 2 : 0) +
+                    (stage.attention->dropout_probability > 0.0f ? 2 : 0);
                 if (stageInputs.size() != expected_attention_stage_inputs) {
-                    throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias and optional q/kv sequence lengths.");
+                    throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, and optional dropout seed/offset.");
                 }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Attention stage expects exactly one output.");
@@ -5312,6 +5387,12 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     seqLenQTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
                     seqLenKvTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
                 }
+                std::optional<Tensor> dropoutSeedTensor = std::nullopt;
+                std::optional<Tensor> dropoutOffsetTensor = std::nullopt;
+                if (stage.attention->dropout_probability > 0.0f) {
+                    dropoutSeedTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    dropoutOffsetTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                }
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
                 auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
@@ -5320,8 +5401,18 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     preallocated = preallocated_it->second;
                 }
                 std::shared_ptr<AttentionForwardState> forwardState = std::make_shared<AttentionForwardState>();
-                std::shared_ptr<StampedAttention> stampedAttention =
-                    stampAttention(stage.attention, qTensor, kTensor, vTensor, biasTensor, seqLenQTensor, seqLenKvTensor, preallocated, stream, forwardState);
+                std::shared_ptr<StampedAttention> stampedAttention = stampAttention(stage.attention,
+                                                                                    qTensor,
+                                                                                    kTensor,
+                                                                                    vTensor,
+                                                                                    biasTensor,
+                                                                                    seqLenQTensor,
+                                                                                    seqLenKvTensor,
+                                                                                    dropoutSeedTensor,
+                                                                                    dropoutOffsetTensor,
+                                                                                    preallocated,
+                                                                                    stream,
+                                                                                    forwardState);
                 Tensor outputTensor = stampedAttention->getOutputTensor();
                 if (outputTensor.getDimensions() != output_dims) {
                     throw std::runtime_error("Stamped attention output tensor dimensions are incompatible with the staged output shape.");
@@ -5339,9 +5430,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
                 const size_t expected_attention_backward_stage_inputs =
                     4 + (stage.attention_backward && stage.attention_backward->use_bias ? 1 : 0) +
-                    (stage.attention_backward && stage.attention_backward->use_padding_mask ? 2 : 0);
+                    (stage.attention_backward && stage.attention_backward->use_padding_mask ? 2 : 0) +
+                    (stage.attention_backward && stage.attention_backward->dropout_probability > 0.0f ? 2 : 0);
                 if (stageInputs.size() != expected_attention_backward_stage_inputs) {
-                    throw std::runtime_error("Attention-backward stage input count mismatch for q/k/v/dO plus optional bias and optional q/kv sequence lengths.");
+                    throw std::runtime_error(
+                        "Attention-backward stage input count mismatch for q/k/v/dO plus optional bias, optional q/kv sequence lengths, and optional dropout seed/offset.");
                 }
                 Tensor qTensor = runtimeInputTensor(stageInputs[0]);
                 Tensor kTensor = runtimeInputTensor(stageInputs[1]);
@@ -5357,6 +5450,12 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (stage.attention_backward && stage.attention_backward->use_padding_mask) {
                     seqLenQTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
                     seqLenKvTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
+                }
+                std::optional<Tensor> dropoutSeedTensor = std::nullopt;
+                std::optional<Tensor> dropoutOffsetTensor = std::nullopt;
+                if (stage.attention_backward && stage.attention_backward->dropout_probability > 0.0f) {
+                    dropoutSeedTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
+                    dropoutOffsetTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
                 }
 
                 std::vector<std::optional<Tensor>> preallocated(3, std::nullopt);
@@ -5386,8 +5485,16 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     if (candidate_stage.kind != StampedExecutionStage::Kind::Attention || !candidate_stage.attention) {
                         continue;
                     }
-                    if (candidate_stage.attention->canProvideForwardStateFor(
-                            *stage.attention_backward, qTensor, kTensor, vTensor, biasTensor, seqLenQTensor, seqLenKvTensor, dOTensor)) {
+                    if (candidate_stage.attention->canProvideForwardStateFor(*stage.attention_backward,
+                                                                               qTensor,
+                                                                               kTensor,
+                                                                               vTensor,
+                                                                               biasTensor,
+                                                                               seqLenQTensor,
+                                                                               seqLenKvTensor,
+                                                                               dropoutSeedTensor,
+                                                                               dropoutOffsetTensor,
+                                                                               dOTensor)) {
                         if (!candidate_state->stats.isInitialized()) {
                             const std::vector<uint64_t> o_dims = candidate_state->output.getDimensions();
                             TensorDescriptor statsDescriptor(TensorDescriptor::DataType::FP32, {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1});
@@ -5399,9 +5506,19 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
                 }
 
-                std::shared_ptr<StampedAttentionBackward> stampedAttentionBackward =
-                    stampAttentionBackward(
-                        stage.attention_backward, qTensor, kTensor, vTensor, biasTensor, seqLenQTensor, seqLenKvTensor, dOTensor, preallocated, stream, savedForwardState);
+                std::shared_ptr<StampedAttentionBackward> stampedAttentionBackward = stampAttentionBackward(stage.attention_backward,
+                                                                                                             qTensor,
+                                                                                                             kTensor,
+                                                                                                             vTensor,
+                                                                                                             biasTensor,
+                                                                                                             seqLenQTensor,
+                                                                                                             seqLenKvTensor,
+                                                                                                             dropoutSeedTensor,
+                                                                                                             dropoutOffsetTensor,
+                                                                                                             dOTensor,
+                                                                                                             preallocated,
+                                                                                                             stream,
+                                                                                                             savedForwardState);
                 const std::vector<Tensor>& outputTensors = stampedAttentionBackward->getOutputTensors();
                 if (outputTensors.size() != 3) {
                     throw std::runtime_error("Stamped attention-backward should expose dQ/dK/dV tensors.");

@@ -288,6 +288,14 @@ int
                 return nb::cast(
                     nb::ndarray<uint32_t, nb::numpy>(self.getMemPtr<uint32_t>(), shape.size(), shape.data(), owner, strides.data()));
 
+            case DataType::INT64:
+                return nb::cast(
+                    nb::ndarray<int64_t, nb::numpy>(self.getMemPtr<int64_t>(), shape.size(), shape.data(), owner, strides.data()));
+
+            case DataType::UINT64:
+                return nb::cast(
+                    nb::ndarray<uint64_t, nb::numpy>(self.getMemPtr<uint64_t>(), shape.size(), shape.data(), owner, strides.data()));
+
             default:
                 throw nb::value_error("PhysicalTensor.numpy() does not support this dtype");
         }
