@@ -129,7 +129,7 @@ DynamicExpression Convolution2d::buildExpression(
         auto fin = Expression::input("feature_input");
         auto w = Expression::input("weights", weightsDType, weightsDType);
 
-        Expression fout = Expression::conv2d(fin, w, strideH, strideW, padH, padW);
+        Expression fout = Expression::conv2d(fin, w, strideH, strideW, padH, padW, DataType::FP32, std::nullopt);
 
         if (hasBias) {
             const Tensor& bTensor = inputs.at("biases");

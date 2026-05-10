@@ -185,7 +185,7 @@ def _conv2d_nchw_ref(
         stride_w: int = 1,
         pad_h: int = 0,
         pad_w: int = 0) -> np.ndarray:
-    """Reference matching Thor's current GpuConvolution path: true convolution with spatial kernel flip."""
+    """Reference matching Thor conv2d semantics: cross-correlation with natural KCRS filter order."""
     x32 = x.astype(np.float32)
     w32 = w.astype(np.float32)
 
@@ -197,7 +197,6 @@ def _conv2d_nchw_ref(
     out_w = (width + 2 * pad_w - s) // stride_w + 1
 
     xpad = np.pad(x32, ((0, 0), (0, 0), (pad_h, pad_h), (pad_w, pad_w)))
-    wflip = np.flip(w32, axis=(2, 3))
 
     out = np.zeros((n, k, out_h, out_w), dtype=np.float32)
     for ni in range(n):
@@ -207,7 +206,7 @@ def _conv2d_nchw_ref(
                 for ow in range(out_w):
                     iw = ow * stride_w
                     window = xpad[ni, :, ih:ih + r, iw:iw + s]
-                    out[ni, ko, oh, ow] = np.sum(window * wflip[ko])
+                    out[ni, ko, oh, ow] = np.sum(window * w32[ko])
     return out
 
 
