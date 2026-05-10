@@ -199,6 +199,7 @@ struct CompiledAttention {
     bool use_alibi_mask = false;
     bool use_bias = false;
     bool use_padding_mask = false;
+    bool use_ragged_offsets = false;
     float dropout_probability = 0.0f;
     TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
     TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP16;
@@ -220,6 +221,7 @@ struct CompiledAttentionBackward {
     bool deterministic_backward = false;
     bool use_bias = false;
     bool use_padding_mask = false;
+    bool use_ragged_offsets = false;
     float dropout_probability = 0.0f;
     TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
     TensorDescriptor::DataType dQ_dtype = TensorDescriptor::DataType::FP16;
@@ -502,6 +504,8 @@ class StampedAttention {
                                    const std::optional<Tensor>& bias_tensor,
                                    const std::optional<Tensor>& seq_len_q_tensor,
                                    const std::optional<Tensor>& seq_len_kv_tensor,
+                                   const std::optional<Tensor>& q_ragged_offsets_tensor,
+                                   const std::optional<Tensor>& kv_ragged_offsets_tensor,
                                    const std::optional<Tensor>& dropout_seed_tensor,
                                    const std::optional<Tensor>& dropout_offset_tensor,
                                    const Tensor& dO_tensor) const;
@@ -513,6 +517,8 @@ class StampedAttention {
                      const std::optional<Tensor>& bias,
                      const std::optional<Tensor>& seq_len_q,
                      const std::optional<Tensor>& seq_len_kv,
+                     const std::optional<Tensor>& q_ragged_offsets,
+                     const std::optional<Tensor>& kv_ragged_offsets,
                      const std::optional<Tensor>& dropout_seed,
                      const std::optional<Tensor>& dropout_offset,
                      const Tensor& output,
@@ -527,6 +533,8 @@ class StampedAttention {
     const std::optional<Tensor> bias;
     const std::optional<Tensor> seq_len_q;
     const std::optional<Tensor> seq_len_kv;
+    const std::optional<Tensor> q_ragged_offsets;
+    const std::optional<Tensor> kv_ragged_offsets;
     const std::optional<Tensor> dropout_seed;
     const std::optional<Tensor> dropout_offset;
     Tensor output;
@@ -550,6 +558,8 @@ class StampedAttentionBackward {
                              const std::optional<Tensor>& bias,
                              const std::optional<Tensor>& seq_len_q,
                              const std::optional<Tensor>& seq_len_kv,
+                             const std::optional<Tensor>& q_ragged_offsets,
+                             const std::optional<Tensor>& kv_ragged_offsets,
                              const std::optional<Tensor>& dropout_seed,
                              const std::optional<Tensor>& dropout_offset,
                              const Tensor& dO,
@@ -570,6 +580,8 @@ class StampedAttentionBackward {
     const std::optional<Tensor> bias;
     const std::optional<Tensor> seq_len_q;
     const std::optional<Tensor> seq_len_kv;
+    const std::optional<Tensor> q_ragged_offsets;
+    const std::optional<Tensor> kv_ragged_offsets;
     const std::optional<Tensor> dropout_seed;
     const std::optional<Tensor> dropout_offset;
     const Tensor dO;

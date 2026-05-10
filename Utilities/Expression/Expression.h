@@ -170,9 +170,12 @@ struct ExprNode {
     bool attention_use_alibi_mask = false;
     bool attention_use_bias = false;
     bool attention_use_padding_mask = false;
+    bool attention_use_ragged_offsets = false;
     float attention_dropout_probability = 0.0f;
     uint32_t attention_seq_len_q_node = UINT32_MAX;
     uint32_t attention_seq_len_kv_node = UINT32_MAX;
+    uint32_t attention_ragged_offset_q_node = UINT32_MAX;
+    uint32_t attention_ragged_offset_kv_node = UINT32_MAX;
     uint32_t attention_dropout_seed_node = UINT32_MAX;
     uint32_t attention_dropout_offset_node = UINT32_MAX;
 
@@ -435,6 +438,20 @@ class Expression {
                                                               const Expression& q_seq_len,
                                                               const Expression& kv_seq_len,
                                                               AttentionOptions options);
+    [[nodiscard]] static Expression scaledDotProductAttentionRagged(const Expression& q,
+                                                                    const Expression& k,
+                                                                    const Expression& v,
+                                                                    const Expression& q_offsets,
+                                                                    const Expression& kv_offsets,
+                                                                    AttentionOptions options);
+    [[nodiscard]] static Expression scaledDotProductAttentionRagged(const Expression& q,
+                                                                    const Expression& k,
+                                                                    const Expression& v,
+                                                                    const Expression& q_seq_len,
+                                                                    const Expression& kv_seq_len,
+                                                                    const Expression& q_offsets,
+                                                                    const Expression& kv_offsets,
+                                                                    AttentionOptions options);
     [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
                                                               const Expression& k,
                                                               const Expression& v,
@@ -565,15 +582,17 @@ class Expression {
         const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, const Expression& fourthExpr, ExprOp op);
     [[nodiscard]] static Expression unaryOp(const Expression& inputExpr, ExprOp op);
 
-    [[nodiscard]] static Expression attentionWithOptionalPadding(const Expression& q,
-                                                                 const Expression& k,
-                                                                 const Expression& v,
-                                                                 const Expression* bias,
-                                                                 const Expression* q_seq_len,
-                                                                 const Expression* kv_seq_len,
-                                                                 const Expression* dropout_seed,
-                                                                 const Expression* dropout_offset,
-                                                                 AttentionOptions options);
+    [[nodiscard]] static Expression attentionWithOptionalMetadata(const Expression& q,
+                                                                  const Expression& k,
+                                                                  const Expression& v,
+                                                                  const Expression* bias,
+                                                                  const Expression* q_seq_len,
+                                                                  const Expression* kv_seq_len,
+                                                                  const Expression* q_ragged_offsets,
+                                                                  const Expression* kv_ragged_offsets,
+                                                                  const Expression* dropout_seed,
+                                                                  const Expression* dropout_offset,
+                                                                  AttentionOptions options);
 
     static uint32_t encodeLowerableGemmScaleExpression(const Expression& scale_expr,
                                                        PhysicalExpression& dst,

@@ -409,6 +409,8 @@ Shorthand for ``self.transpose()``.
                                                                  nb::object bias_obj,
                                                                  nb::object q_seq_len_obj,
                                                                  nb::object kv_seq_len_obj,
+                                                                 nb::object q_ragged_offsets_obj,
+                                                                 nb::object kv_ragged_offsets_obj,
                                                                  float dropout_probability,
                                                                  nb::object dropout_seed_obj,
                                                                  nb::object dropout_offset_obj) -> Expression {
@@ -431,12 +433,24 @@ Shorthand for ``self.transpose()``.
         const bool has_bias = !bias_obj.is_none();
         const bool has_q_seq_len = !q_seq_len_obj.is_none();
         const bool has_kv_seq_len = !kv_seq_len_obj.is_none();
+        const bool has_q_ragged_offsets = !q_ragged_offsets_obj.is_none();
+        const bool has_kv_ragged_offsets = !kv_ragged_offsets_obj.is_none();
         const bool has_dropout_seed = !dropout_seed_obj.is_none();
         const bool has_dropout_offset = !dropout_offset_obj.is_none();
         const bool uses_dropout = dropout_probability > 0.0f;
 
         if (has_q_seq_len != has_kv_seq_len) {
             throw std::runtime_error("q_seq_len and kv_seq_len must be provided together for padding-mask attention.");
+        }
+        if (has_q_ragged_offsets != has_kv_ragged_offsets) {
+            throw std::runtime_error("q_ragged_offsets and kv_ragged_offsets must be provided together for ragged attention.");
+        }
+        if ((has_bias || uses_dropout) && has_q_ragged_offsets) {
+            throw std::runtime_error("ragged attention cannot currently be combined with additive bias or dropout.");
+        }
+        if (has_q_ragged_offsets && !has_q_seq_len) {
+            throw std::runtime_error(
+                "ragged attention requires q_seq_len and kv_seq_len along with q_ragged_offsets and kv_ragged_offsets.");
         }
         if (has_dropout_seed != has_dropout_offset) {
             throw std::runtime_error("dropout_seed and dropout_offset must be provided together for attention dropout.");
@@ -450,6 +464,14 @@ Shorthand for ``self.transpose()``.
 
         if (has_q_seq_len) {
             options.use_padding_mask = true;
+        }
+
+        if (has_q_ragged_offsets) {
+            const Expression& q_seq_len = nb::cast<Expression>(q_seq_len_obj);
+            const Expression& kv_seq_len = nb::cast<Expression>(kv_seq_len_obj);
+            const Expression& q_offsets = nb::cast<Expression>(q_ragged_offsets_obj);
+            const Expression& kv_offsets = nb::cast<Expression>(kv_ragged_offsets_obj);
+            return Expression::scaledDotProductAttentionRagged(q, k, v, q_seq_len, kv_seq_len, q_offsets, kv_offsets, std::move(options));
         }
 
         if (uses_dropout) {
@@ -611,6 +633,8 @@ which is used by autodiff.
                                            nb::object bias_obj,
                                            nb::object q_seq_len_obj,
                                            nb::object kv_seq_len_obj,
+                                           nb::object q_ragged_offsets_obj,
+                                           nb::object kv_ragged_offsets_obj,
                                            float dropout_probability,
                                            nb::object dropout_seed_obj,
                                            nb::object dropout_offset_obj) {
@@ -631,6 +655,8 @@ which is used by autodiff.
                                                     std::move(bias_obj),
                                                     std::move(q_seq_len_obj),
                                                     std::move(kv_seq_len_obj),
+                                                    std::move(q_ragged_offsets_obj),
+                                                    std::move(kv_ragged_offsets_obj),
                                                     dropout_probability,
                                                     std::move(dropout_seed_obj),
                                                     std::move(dropout_offset_obj));
@@ -652,6 +678,8 @@ which is used by autodiff.
         "bias"_a.none() = nb::none(),
         "q_seq_len"_a.none() = nb::none(),
         "kv_seq_len"_a.none() = nb::none(),
+        "q_ragged_offsets"_a.none() = nb::none(),
+        "kv_ragged_offsets"_a.none() = nb::none(),
         "dropout_probability"_a = 0.0f,
         "dropout_seed"_a.none() = nb::none(),
         "dropout_offset"_a.none() = nb::none(),
@@ -663,6 +691,10 @@ how the stage should hand those logical tensors to cuDNN.  The default layout is
 BHSD, matching Thor's row-major physical tensor layout for rank-4 attention
 inputs.  output_dtype should normally match q/k/v for the current cuDNN SDPA
 path; compute_dtype should normally be thor.DataType.fp32.
+
+When q_ragged_offsets and kv_ragged_offsets are provided, they must be INT32 GPU
+tensors with shape [B + 1].  They enable cuDNN packed/ragged variable-length
+attention and are passed through as q/o and k/v ragged offsets respectively.
 
 When dropout_probability > 0, dropout_seed and dropout_offset must be INT64 GPU
 scalar expressions with shape [1, 1, 1, 1].  They are passed to cuDNN's Philox
@@ -688,6 +720,8 @@ attention dropout path and are part of the attention stage metadata.
                                            nb::object bias_obj,
                                            nb::object q_seq_len_obj,
                                            nb::object kv_seq_len_obj,
+                                           nb::object q_ragged_offsets_obj,
+                                           nb::object kv_ragged_offsets_obj,
                                            float dropout_probability,
                                            nb::object dropout_seed_obj,
                                            nb::object dropout_offset_obj) {
@@ -708,6 +742,8 @@ attention dropout path and are part of the attention stage metadata.
                                                     std::move(bias_obj),
                                                     std::move(q_seq_len_obj),
                                                     std::move(kv_seq_len_obj),
+                                                    std::move(q_ragged_offsets_obj),
+                                                    std::move(kv_ragged_offsets_obj),
                                                     dropout_probability,
                                                     std::move(dropout_seed_obj),
                                                     std::move(dropout_offset_obj));
@@ -729,6 +765,8 @@ attention dropout path and are part of the attention stage metadata.
         "bias"_a.none() = nb::none(),
         "q_seq_len"_a.none() = nb::none(),
         "kv_seq_len"_a.none() = nb::none(),
+        "q_ragged_offsets"_a.none() = nb::none(),
+        "kv_ragged_offsets"_a.none() = nb::none(),
         "dropout_probability"_a = 0.0f,
         "dropout_seed"_a.none() = nb::none(),
         "dropout_offset"_a.none() = nb::none(),

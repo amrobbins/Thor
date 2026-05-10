@@ -107,6 +107,15 @@ bool isFp16OrBf16(TensorDescriptor::DataType dtype) {
     return dtype == TensorDescriptor::DataType::FP16 || dtype == TensorDescriptor::DataType::BF16;
 }
 
+bool hasBshdPackedStrides(const AttentionTensorSpec& spec) {
+    if (spec.dimensions.size() != 4 || spec.strides.size() != 4)
+        return false;
+    const int64_t heads = spec.dimensions.at(1);
+    const int64_t sequenceLength = spec.dimensions.at(2);
+    const int64_t headDim = spec.dimensions.at(3);
+    return spec.strides == vector<int64_t>{sequenceLength * heads * headDim, headDim, heads * headDim, 1};
+}
+
 void requireInitialized(const Tensor& tensor, string_view name) {
     if (!tensor.isInitialized())
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' is uninitialized");
@@ -206,6 +215,20 @@ void requireDropoutScalarMatchesDescriptor(const Tensor& scalar, string_view nam
     }
     const vector<int64_t> expected{1, 1, 1, 1};
     const vector<int64_t> dims = asInt64(scalar.getDimensions());
+    if (dims != expected) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
+                               joinInts(expected) + ", got " + joinInts(dims));
+    }
+}
+
+void requirePagedKvTableMatchesDescriptor(const Tensor& table, const CudnnAttentionDescriptor& descriptor, string_view name) {
+    requireInitialized(table, name);
+    if (table.getDataType() != TensorDescriptor::DataType::INT32) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT32, got " +
+                               TensorDescriptor::getElementTypeName(table.getDataType()));
+    }
+    const vector<int64_t> expected{descriptor.batchSize(), 1, 1, descriptor.keyValueLength()};
+    const vector<int64_t> dims = asInt64(table.getDimensions());
     if (dims != expected) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
                                joinInts(expected) + ", got " + joinInts(dims));
@@ -614,8 +637,14 @@ class AttentionGraphCache {
 
         auto [dQ, dK, dV] = built.graph->sdpa_backward(q, k, v, o, dO, stats, attrs);
         dQ->set_output(true).set_uid(UID_DQ).set_dim(descriptor.q.dimensions).set_stride(descriptor.q.strides);
+        if (descriptor.q.ragged)
+            dQ->set_ragged_offset(qRagged);
         dK->set_output(true).set_uid(UID_DK).set_dim(descriptor.k.dimensions).set_stride(descriptor.k.strides);
+        if (descriptor.k.ragged)
+            dK->set_ragged_offset(kRagged);
         dV->set_output(true).set_uid(UID_DV).set_dim(descriptor.v.dimensions).set_stride(descriptor.v.strides);
+        if (descriptor.v.ragged)
+            dV->set_ragged_offset(vRagged);
 
         finalize(built, gpuNum);
         return built;
@@ -753,9 +782,12 @@ void CudnnAttentionDescriptor::validateForward() const {
     if (intermediateDataType != TensorDescriptor::DataType::FP32)
         throwInvalidAttention("intermediateDataType should be FP32 for numerically stable cuDNN SDPA");
     const bool anyRagged = q.ragged || k.ragged || v.ragged || o.ragged;
-    if (usePaddingMask && anyRagged)
-        throwInvalidAttention("use either padding masks or ragged offsets, not both in the same descriptor");
+    if (anyRagged && !usePaddingMask)
+        throwInvalidAttention("ragged attention requires usePaddingMask=true so cuDNN receives q/kv sequence lengths for THD padding-mask semantics");
     if (anyRagged) {
+        if (!hasBshdPackedStrides(q) || !hasBshdPackedStrides(k) || !hasBshdPackedStrides(v) || !hasBshdPackedStrides(o))
+            throwInvalidAttention(
+                "ragged attention requires BSHD physical layouts for q/k/v/o because ragged offsets index packed token-contiguous THD storage");
         if (q.ragged != o.ragged)
             throwInvalidAttention("ragged attention requires q and o to either both use ragged offsets or both be dense");
         if (k.ragged != v.ragged)
@@ -786,6 +818,8 @@ void CudnnAttentionDescriptor::validateForward() const {
 
 void CudnnAttentionDescriptor::validateBackward() const {
     validateForward();
+    if (usePagedKvCache)
+        throwInvalidAttention("paged KV attention backward is not enabled; the paged KV cache path is inference-only until training semantics are defined");
     if (!generateStats)
         throwInvalidAttention("backward requires descriptor.generateStats=true in the corresponding forward pass");
 }
@@ -889,6 +923,8 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
     if (descriptor.usePagedKvCache) {
         requireOptionalGpuTensor(args.pageTableK, "pageTableK", gpuNum);
         requireOptionalGpuTensor(args.pageTableV, "pageTableV", gpuNum);
+        requirePagedKvTableMatchesDescriptor(args.pageTableK.value(), descriptor, "pageTableK");
+        requirePagedKvTableMatchesDescriptor(args.pageTableV.value(), descriptor, "pageTableV");
         insertTensor(pack, UID_PAGE_TABLE_K, args.pageTableK.value());
         insertTensor(pack, UID_PAGE_TABLE_V, args.pageTableV.value());
     }
