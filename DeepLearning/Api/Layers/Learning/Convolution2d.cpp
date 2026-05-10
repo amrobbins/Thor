@@ -69,7 +69,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
         auto fin = Expression::input("feature_input");
         auto w = Expression::input("weights", weightsDType, weightsDType);
 
-        Expression fout = Expression::conv2d(fin, w, strideH, strideW, padH, padW);
+        Expression fout = Expression::conv2d(fin, w, strideH, strideW, padH, padW, ImplDataType::FP32, featureOutputDType);
 
         if (hasBias) {
             const Tensor& bTensor = inputs.at("biases");

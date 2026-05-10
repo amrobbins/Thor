@@ -1108,16 +1108,20 @@ static void addConvolutionParameterFanOverrides(const CompiledExecutionStage& st
 
     const std::vector<uint64_t>& input_dims = stage_input_dims[0];
     const std::vector<uint64_t>& filter_dims = stage_input_dims[1];
-    if (input_dims.size() != 4 || filter_dims.size() != 4) {
+    if (input_dims.size() != filter_dims.size() || (input_dims.size() != 4 && input_dims.size() != 5)) {
         throw std::runtime_error(
-            "Convolution parameter fan override inference currently only supports rank-4 NCHW input and KCRS filter tensors.");
+            "Convolution parameter fan override inference currently only supports rank-4 NCHW/KCRS and rank-5 NCDHW/KCDHW "
+            "input/filter tensors.");
     }
 
     const uint64_t input_channels = input_dims[1];
     const uint64_t filter_out_channels = filter_dims[0];
     const uint64_t filter_in_channels = filter_dims[1];
-    const uint64_t filter_rows = filter_dims[2];
-    const uint64_t filter_cols = filter_dims[3];
+
+    uint64_t receptive_field = 1;
+    for (size_t dim = 2; dim < filter_dims.size(); ++dim) {
+        receptive_field *= filter_dims[dim];
+    }
 
     if (input_channels != filter_in_channels) {
         throw std::runtime_error("Convolution parameter fan override inference found mismatched input/filter channels.");
@@ -1144,11 +1148,11 @@ static void addConvolutionParameterFanOverrides(const CompiledExecutionStage& st
                                   });
     };
 
-    const uint64_t receptive_field = std::max<uint64_t>(1, filter_rows * filter_cols);
+    receptive_field = std::max<uint64_t>(1, receptive_field);
 
-    // For filter[K, C, R, S], convolution initializer semantics match standard conv kernels:
-    //  - filter parameter: fan_in = C * R * S
-    //  - filter parameter: fan_out = K * R * S
+    // For filter[K, C, spatial...], convolution initializer semantics match standard conv kernels:
+    //  - filter parameter: fan_in = C * product(spatial dims)
+    //  - filter parameter: fan_out = K * product(spatial dims)
     // If someone intentionally makes the activation tensor itself a parameterized stage input,
     // give it the symmetric swapped interpretation.
     maybe_add(0, filter_out_channels * receptive_field, filter_in_channels * receptive_field);
