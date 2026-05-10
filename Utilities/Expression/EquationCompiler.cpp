@@ -19,6 +19,38 @@ namespace ThorImplementation {
 
 using DataType = TensorDescriptor::DataType;
 
+static bool isThorCudnnConvolutionFloatingDType(DataType dtype) {
+    switch (dtype) {
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static const char* thorCudnnConvolutionFloatingDTypesMessage() {
+    return "supported Thor/cuDNN convolution floating dtypes are FP8_E4M3, FP8_E5M2, FP16, BF16, and FP32";
+}
+
+static bool convolutionComputeDTypeIsCompatibleWithTensorDTypes(const std::vector<DataType>& tensor_dtypes, DataType compute_dtype) {
+    bool requires_fp32_compute = false;
+    for (DataType dtype : tensor_dtypes) {
+        if (dtype == DataType::FP32 || dtype == DataType::BF16 || dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2) {
+            requires_fp32_compute = true;
+            break;
+        }
+    }
+
+    if (requires_fp32_compute) {
+        return compute_dtype == DataType::FP32;
+    }
+    return compute_dtype == DataType::FP16 || compute_dtype == DataType::FP32;
+}
+
 #define NVRTC_CHECK(call)                                                                                                      \
     do {                                                                                                                       \
         nvrtcResult err__ = (call);                                                                                            \
@@ -1785,12 +1817,27 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
         throw std::runtime_error("Convolution forward node missing resolved output_dtype.");
     }
 
-    const DataType logical_input_dtype =
-        promoteTensorValueDTypes(std::vector<DataType>{input_node.input_tensor_dtype.value(), filter_node.input_tensor_dtype.value()});
-    const DataType supported_input_dtype = toSupportedInputDType(node.op, logical_input_dtype);
+    if (!node.compute_dtype.has_value()) {
+        throw std::runtime_error("Convolution forward node missing resolved compute_dtype.");
+    }
 
-    if (supported_input_dtype != DataType::FP16 || node.output_dtype.value() != DataType::FP16) {
-        throw std::runtime_error("Convolution staged path currently supports FP16 input/filter/output tensors only.");
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
+    const DataType supported_filter_dtype = toSupportedInputDType(node.op, filter_node.input_tensor_dtype.value());
+    const DataType output_dtype = node.output_dtype.value();
+    const DataType compute_dtype = node.compute_dtype.value();
+
+    if (!isThorCudnnConvolutionFloatingDType(supported_input_dtype) ||
+        !isThorCudnnConvolutionFloatingDType(supported_filter_dtype) ||
+        !isThorCudnnConvolutionFloatingDType(output_dtype)) {
+        throw std::runtime_error(std::string(fusedOpTag(node.op)) + " staged path uses cuDNN Frontend; " +
+                                 thorCudnnConvolutionFloatingDTypesMessage() + ".");
+    }
+    if (!convolutionComputeDTypeIsCompatibleWithTensorDTypes({supported_input_dtype, supported_filter_dtype, output_dtype},
+                                                             compute_dtype)) {
+        throw std::runtime_error(
+            std::string(fusedOpTag(node.op)) +
+            " staged path received an unsupported cuDNN compute dtype for the tensor dtypes. "
+            "FP8, BF16, and FP32 tensors require FP32 compute; FP16 tensors support FP16 or FP32 compute.");
     }
 
     return make_shared<CompiledConvolution>(node.op == ExprOp::CONV3D,
@@ -1801,8 +1848,9 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
                                             node.conv_pad_h,
                                             node.conv_pad_w,
                                             supported_input_dtype,
-                                            node.output_dtype.value(),
-                                            node.compute_dtype);
+                                            supported_filter_dtype,
+                                            output_dtype,
+                                            compute_dtype);
 }
 
 shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBackward(const PhysicalExpression& expr) {
@@ -1842,12 +1890,27 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
         throw std::runtime_error("Convolution backward node missing resolved output_dtype.");
     }
 
-    const DataType logical_input_dtype =
-        promoteTensorValueDTypes(std::vector<DataType>{input_node.input_tensor_dtype.value(), grad_node.input_tensor_dtype.value()});
-    const DataType supported_input_dtype = toSupportedInputDType(node.op, logical_input_dtype);
+    if (!node.compute_dtype.has_value()) {
+        throw std::runtime_error("Convolution backward node missing resolved compute_dtype.");
+    }
 
-    if (supported_input_dtype != DataType::FP16 || node.output_dtype.value() != DataType::FP16) {
-        throw std::runtime_error("Convolution backward staged path currently supports FP16 input/grad/output tensors only.");
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
+    const DataType supported_grad_output_dtype = toSupportedInputDType(node.op, grad_node.input_tensor_dtype.value());
+    const DataType output_dtype = node.output_dtype.value();
+    const DataType compute_dtype = node.compute_dtype.value();
+
+    if (!isThorCudnnConvolutionFloatingDType(supported_input_dtype) ||
+        !isThorCudnnConvolutionFloatingDType(supported_grad_output_dtype) ||
+        !isThorCudnnConvolutionFloatingDType(output_dtype)) {
+        throw std::runtime_error(std::string(fusedOpTag(node.op)) + " staged path uses cuDNN Frontend; " +
+                                 thorCudnnConvolutionFloatingDTypesMessage() + ".");
+    }
+    if (!convolutionComputeDTypeIsCompatibleWithTensorDTypes({supported_input_dtype, supported_grad_output_dtype, output_dtype},
+                                                             compute_dtype)) {
+        throw std::runtime_error(
+            std::string(fusedOpTag(node.op)) +
+            " staged path received an unsupported cuDNN compute dtype for the tensor dtypes. "
+            "FP8, BF16, and FP32 tensors require FP32 compute; FP16 tensors support FP16 or FP32 compute.");
     }
 
     return make_shared<CompiledConvolutionBackward>(node.op,
@@ -1858,9 +1921,9 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
                                                     node.conv_pad_h,
                                                     node.conv_pad_w,
                                                     supported_input_dtype,
-                                                    grad_node.input_tensor_dtype.value(),
-                                                    node.output_dtype.value(),
-                                                    node.compute_dtype,
+                                                    supported_grad_output_dtype,
+                                                    output_dtype,
+                                                    compute_dtype,
                                                     node.fill_dims);
 }
 

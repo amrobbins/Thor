@@ -328,6 +328,39 @@ Shorthand for ``self.transpose()``.
         "compute_dtype"_a.none() = nb::none());
 
     expr.def_static(
+        "conv3d",
+        [](const Expression& x,
+           const Expression& w,
+           int32_t stride_d,
+           int32_t stride_h,
+           int32_t stride_w,
+           int32_t pad_d,
+           int32_t pad_h,
+           int32_t pad_w,
+           nb::object output_dtype_obj,
+           nb::object compute_dtype_obj) {
+            std::optional<DataType> output_dtype = std::nullopt;
+            if (!output_dtype_obj.is_none()) {
+                output_dtype = nb::cast<DataType>(output_dtype_obj);
+            }
+            std::optional<DataType> compute_dtype = std::nullopt;
+            if (!compute_dtype_obj.is_none()) {
+                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
+            }
+            return Expression::conv3d(x, w, stride_d, stride_h, stride_w, pad_d, pad_h, pad_w, compute_dtype, output_dtype);
+        },
+        "x"_a,
+        "w"_a,
+        "stride_d"_a = 1,
+        "stride_h"_a = 1,
+        "stride_w"_a = 1,
+        "pad_d"_a = 0,
+        "pad_h"_a = 0,
+        "pad_w"_a = 0,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none());
+
+    expr.def_static(
         "matmul",
         [](const Expression& a,
            const Expression& b,

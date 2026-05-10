@@ -209,6 +209,151 @@ def _conv2d_nchw_ref(
                     out[ni, ko, oh, ow] = np.sum(window * w32[ko])
     return out
 
+def _conv2d_grads_ref(
+        x: np.ndarray,
+        w: np.ndarray,
+        grad: np.ndarray,
+        stride_h: int = 1,
+        stride_w: int = 1,
+        pad_h: int = 0,
+        pad_w: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    x32 = x.astype(np.float32)
+    w32 = w.astype(np.float32)
+    grad32 = grad.astype(np.float32)
+
+    n, c, h, width = x32.shape
+    k, c2, r, s = w32.shape
+    assert c == c2
+
+    xpad = np.pad(x32, ((0, 0), (0, 0), (pad_h, pad_h), (pad_w, pad_w)))
+    xpad_grad = np.zeros_like(xpad, dtype=np.float32)
+    w_grad = np.zeros_like(w32, dtype=np.float32)
+
+    _, _, out_h, out_w = grad32.shape
+    for ni in range(n):
+        for ko in range(k):
+            for oh in range(out_h):
+                ih = oh * stride_h
+                for ow in range(out_w):
+                    iw = ow * stride_w
+                    g = grad32[ni, ko, oh, ow]
+                    x_window = xpad[ni, :, ih:ih + r, iw:iw + s]
+                    xpad_grad[ni, :, ih:ih + r, iw:iw + s] += g * w32[ko]
+                    w_grad[ko] += g * x_window
+
+    h_slice = slice(None) if pad_h == 0 else slice(pad_h, pad_h + h)
+    w_slice = slice(None) if pad_w == 0 else slice(pad_w, pad_w + width)
+    x_grad = xpad_grad[:, :, h_slice, w_slice]
+    return x_grad, w_grad
+
+
+
+def _conv3d_output_shape(
+        x_shape: tuple[int, int, int, int, int],
+        w_shape: tuple[int, int, int, int, int],
+        stride_d: int,
+        stride_h: int,
+        stride_w: int,
+        pad_d: int,
+        pad_h: int,
+        pad_w: int) -> tuple[int, int, int, int, int]:
+    n, _, d, h, width = x_shape
+    k, _, t, r, s = w_shape
+    out_d = (d + 2 * pad_d - t) // stride_d + 1
+    out_h = (h + 2 * pad_h - r) // stride_h + 1
+    out_w = (width + 2 * pad_w - s) // stride_w + 1
+    return n, k, out_d, out_h, out_w
+
+
+def _conv3d_ncdhw_ref(
+        x: np.ndarray,
+        w: np.ndarray,
+        stride_d: int = 1,
+        stride_h: int = 1,
+        stride_w: int = 1,
+        pad_d: int = 0,
+        pad_h: int = 0,
+        pad_w: int = 0) -> np.ndarray:
+    """Reference matching Thor conv3d semantics: cross-correlation with natural KCTRS filter order."""
+    x32 = x.astype(np.float32)
+    w32 = w.astype(np.float32)
+
+    n, c, depth, h, width = x32.shape
+    k, c2, t, r, s = w32.shape
+    assert c == c2
+
+    out_d = (depth + 2 * pad_d - t) // stride_d + 1
+    out_h = (h + 2 * pad_h - r) // stride_h + 1
+    out_w = (width + 2 * pad_w - s) // stride_w + 1
+
+    xpad = np.pad(x32, ((0, 0), (0, 0), (pad_d, pad_d), (pad_h, pad_h), (pad_w, pad_w)))
+
+    out = np.zeros((n, k, out_d, out_h, out_w), dtype=np.float32)
+    for ni in range(n):
+        for ko in range(k):
+            for od in range(out_d):
+                id_ = od * stride_d
+                for oh in range(out_h):
+                    ih = oh * stride_h
+                    for ow in range(out_w):
+                        iw = ow * stride_w
+                        window = xpad[ni, :, id_:id_ + t, ih:ih + r, iw:iw + s]
+                        out[ni, ko, od, oh, ow] = np.sum(window * w32[ko])
+    return out
+
+
+def _conv3d_grads_ref(
+        x: np.ndarray,
+        w: np.ndarray,
+        grad: np.ndarray,
+        stride_d: int = 1,
+        stride_h: int = 1,
+        stride_w: int = 1,
+        pad_d: int = 0,
+        pad_h: int = 0,
+        pad_w: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    x32 = x.astype(np.float32)
+    w32 = w.astype(np.float32)
+    grad32 = grad.astype(np.float32)
+
+    n, c, depth, h, width = x32.shape
+    k, c2, t, r, s = w32.shape
+    assert c == c2
+
+    xpad = np.pad(x32, ((0, 0), (0, 0), (pad_d, pad_d), (pad_h, pad_h), (pad_w, pad_w)))
+    xpad_grad = np.zeros_like(xpad, dtype=np.float32)
+    w_grad = np.zeros_like(w32, dtype=np.float32)
+
+    _, _, out_d, out_h, out_w = grad32.shape
+    for ni in range(n):
+        for ko in range(k):
+            for od in range(out_d):
+                id_ = od * stride_d
+                for oh in range(out_h):
+                    ih = oh * stride_h
+                    for ow in range(out_w):
+                        iw = ow * stride_w
+                        g = grad32[ni, ko, od, oh, ow]
+                        x_window = xpad[ni, :, id_:id_ + t, ih:ih + r, iw:iw + s]
+                        xpad_grad[ni, :, id_:id_ + t, ih:ih + r, iw:iw + s] += g * w32[ko]
+                        w_grad[ko] += g * x_window
+
+    if pad_d == 0:
+        d_slice = slice(None)
+    else:
+        d_slice = slice(pad_d, pad_d + depth)
+    if pad_h == 0:
+        h_slice = slice(None)
+    else:
+        h_slice = slice(pad_h, pad_h + h)
+    if pad_w == 0:
+        w_slice = slice(None)
+    else:
+        w_slice = slice(pad_w, pad_w + width)
+
+    x_grad = xpad_grad[:, :, d_slice, h_slice, w_slice]
+    return x_grad, w_grad
+
 
 def _conv2d_loss_with_upstream_ref(
         x: np.ndarray,
@@ -345,6 +490,127 @@ def test_conv2d_binding_exists_and_returns_expression():
     assert isinstance(out, thor.physical.Expression)
 
 
+@pytest.mark.cuda
+def test_conv3d_binding_exists_and_returns_expression():
+    x = ex.input("x")
+    w = ex.input("w")
+    out = ex.conv3d(x, w)
+    assert isinstance(out, thor.physical.Expression)
+
+
+@pytest.mark.parametrize(
+    ("stride_d", "stride_h", "stride_w", "pad_d", "pad_h", "pad_w", "match"),
+    [
+        (0, 1, 1, 0, 0, 0, "stride must be positive"),
+        (1, 0, 1, 0, 0, 0, "stride must be positive"),
+        (1, 1, 0, 0, 0, 0, "stride must be positive"),
+        (1, 1, 1, -1, 0, 0, "padding must be non-negative"),
+        (1, 1, 1, 0, -1, 0, "padding must be non-negative"),
+        (1, 1, 1, 0, 0, -1, "padding must be non-negative"),
+    ],
+)
+def test_conv3d_invalid_stride_or_padding_rejected(
+        stride_d: int, stride_h: int, stride_w: int, pad_d: int, pad_h: int, pad_w: int, match: str):
+    x = ex.input("x")
+    w = ex.input("w")
+    with pytest.raises(RuntimeError, match=match):
+        ex.conv3d(
+            x,
+            w,
+            stride_d=stride_d,
+            stride_h=stride_h,
+            stride_w=stride_w,
+            pad_d=pad_d,
+            pad_h=pad_h,
+            pad_w=pad_w,
+        )
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    ("dtype", "rtol", "atol"),
+    [
+        pytest.param(thor.DataType.fp16, 7e-2, 7e-2, id="fp16"),
+        pytest.param(thor.DataType.bf16, 1.5e-1, 1.5e-1, id="bf16"),
+        pytest.param(thor.DataType.fp32, 5e-4, 5e-4, id="fp32"),
+    ],
+)
+def test_conv3d_forward_numerical_cudnn_frontend_float_dtypes(dtype: thor.DataType, rtol: float, atol: float):
+    x = ex.input("x")
+    w = ex.input("w")
+    out = ex.conv3d(x, w, stride_d=1, stride_h=1, stride_w=1, pad_d=1, pad_h=1, pad_w=1, output_dtype=dtype)
+    eq = ex.compile(out, device_num=0)
+
+    x_shape = (1, 2, 3, 4, 4)
+    w_shape = (3, 2, 2, 3, 3)
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.linspace(-0.35, 0.40, num=np.prod(x_shape), dtype=np.float32).reshape(x_shape).astype(storage_dtype)
+    w_np = np.linspace(-0.20, 0.25, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape).astype(storage_dtype)
+    expected = _conv3d_ncdhw_ref(x_np, w_np, stride_d=1, stride_h=1, stride_w=1, pad_d=1, pad_h=1, pad_w=1)
+    expected = expected.astype(storage_dtype).astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "w": _host_to_gpu(w_np, dtype, stream),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host_fp32(stamped.output(), stream)
+
+    assert got.shape == _conv3d_output_shape(x_shape, w_shape, 1, 1, 1, 1, 1, 1)
+    np.testing.assert_allclose(got, expected, rtol=rtol, atol=atol)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    ("dtype", "rtol", "atol"),
+    [
+        pytest.param(thor.DataType.fp16, 2.5e-1, 2.5e-1, id="fp16"),
+        pytest.param(thor.DataType.fp32, 1e-3, 1e-3, id="fp32"),
+    ],
+)
+def test_conv3d_backward_numerical_cudnn_frontend(dtype: thor.DataType, rtol: float, atol: float):
+    upstream_name = "__grad_output"
+
+    x = ex.input("x")
+    w = ex.input("w")
+    out = ex.conv3d(x, w, stride_d=1, stride_h=1, stride_w=1, pad_d=1, pad_h=1, pad_w=1, output_dtype=dtype)
+
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x", "w"], error_input_name=upstream_name)
+    assert bwd_eq.output_names() == ["x_grad", "w_grad"]
+
+    x_shape = (1, 1, 3, 3, 3)
+    w_shape = (2, 1, 2, 2, 2)
+    y_shape = _conv3d_output_shape(x_shape, w_shape, 1, 1, 1, 1, 1, 1)
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.linspace(-0.25, 0.30, num=np.prod(x_shape), dtype=np.float32).reshape(x_shape).astype(storage_dtype)
+    w_np = np.linspace(-0.20, 0.35, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape).astype(storage_dtype)
+    grad_np = np.linspace(-0.40, 0.45, num=np.prod(y_shape), dtype=np.float32).reshape(y_shape).astype(storage_dtype)
+
+    expected_x, expected_w = _conv3d_grads_ref(x_np, w_np, grad_np, stride_d=1, stride_h=1, stride_w=1, pad_d=1, pad_h=1, pad_w=1)
+    expected_x = expected_x.astype(storage_dtype).astype(np.float32)
+    expected_w = expected_w.astype(storage_dtype).astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "w": _host_to_gpu(w_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got_x = _copy_to_host_fp32(stamped.output("x_grad"), stream)
+    got_w = _copy_to_host_fp32(stamped.output("w_grad"), stream)
+
+    np.testing.assert_allclose(got_x, expected_x, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(got_w, expected_w, rtol=rtol, atol=atol)
+
+
 @pytest.mark.parametrize(
     ("stride_h", "stride_w", "pad_h", "pad_w", "match"),
     [
@@ -359,6 +625,92 @@ def test_conv2d_invalid_stride_or_padding_rejected(stride_h: int, stride_w: int,
     w = ex.input("w")
     with pytest.raises(RuntimeError, match=match):
         ex.conv2d(x, w, stride_h=stride_h, stride_w=stride_w, pad_h=pad_h, pad_w=pad_w)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    ("dtype", "rtol", "atol"),
+    [
+        pytest.param(thor.DataType.fp16, 7e-2, 7e-2, id="fp16"),
+        pytest.param(thor.DataType.bf16, 1.5e-1, 1.5e-1, id="bf16"),
+        pytest.param(thor.DataType.fp32, 5e-4, 5e-4, id="fp32"),
+    ],
+)
+def test_conv2d_forward_numerical_cudnn_frontend_float_dtypes(dtype: thor.DataType, rtol: float, atol: float):
+    x = ex.input("x")
+    w = ex.input("w")
+    out = ex.conv2d(x, w, stride_h=1, stride_w=1, pad_h=1, pad_w=1, output_dtype=dtype)
+    eq = ex.compile(out, device_num=0)
+
+    x_shape = (1, 4, 4, 4)
+    w_shape = (3, 4, 3, 3)
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.linspace(-0.35, 0.40, num=np.prod(x_shape), dtype=np.float32).reshape(x_shape).astype(storage_dtype)
+    w_np = np.linspace(-0.20, 0.25, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape).astype(storage_dtype)
+    expected = _conv2d_nchw_ref(x_np, w_np, stride_h=1, stride_w=1, pad_h=1, pad_w=1)
+    expected = expected.astype(storage_dtype).astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "w": _host_to_gpu(w_np, dtype, stream),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host_fp32(stamped.output(), stream)
+
+    assert got.shape == _conv2d_output_shape(x_shape, w_shape, 1, 1, 1, 1)
+    np.testing.assert_allclose(got, expected, rtol=rtol, atol=atol)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    ("dtype", "rtol", "atol"),
+    [
+        pytest.param(thor.DataType.fp16, 2.5e-1, 2.5e-1, id="fp16"),
+        pytest.param(thor.DataType.bf16, 3.5e-1, 3.5e-1, id="bf16"),
+        pytest.param(thor.DataType.fp32, 1e-3, 1e-3, id="fp32"),
+    ],
+)
+def test_conv2d_backward_numerical_cudnn_frontend_float_dtypes(dtype: thor.DataType, rtol: float, atol: float):
+    upstream_name = "__grad_output"
+
+    x = ex.input("x")
+    w = ex.input("w")
+    out = ex.conv2d(x, w, stride_h=1, stride_w=1, pad_h=1, pad_w=1, output_dtype=dtype)
+
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x", "w"], error_input_name=upstream_name)
+    assert bwd_eq.output_names() == ["x_grad", "w_grad"]
+
+    x_shape = (1, 4, 4, 4)
+    w_shape = (3, 4, 2, 2)
+    y_shape = _conv2d_output_shape(x_shape, w_shape, 1, 1, 1, 1)
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.linspace(-0.25, 0.30, num=np.prod(x_shape), dtype=np.float32).reshape(x_shape).astype(storage_dtype)
+    w_np = np.linspace(-0.20, 0.35, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape).astype(storage_dtype)
+    grad_np = np.linspace(-0.40, 0.45, num=np.prod(y_shape), dtype=np.float32).reshape(y_shape).astype(storage_dtype)
+
+    expected_x, expected_w = _conv2d_grads_ref(x_np, w_np, grad_np, stride_h=1, stride_w=1, pad_h=1, pad_w=1)
+    expected_x = expected_x.astype(storage_dtype).astype(np.float32)
+    expected_w = expected_w.astype(storage_dtype).astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "w": _host_to_gpu(w_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got_x = _copy_to_host_fp32(stamped.output("x_grad"), stream)
+    got_w = _copy_to_host_fp32(stamped.output("w_grad"), stream)
+
+    np.testing.assert_allclose(got_x, expected_x, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(got_w, expected_w, rtol=rtol, atol=atol)
 
 
 @pytest.mark.cuda

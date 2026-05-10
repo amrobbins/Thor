@@ -46,6 +46,10 @@ static bool isAttentionBackwardOp(ExprOp op) {
 }
 
 static bool isReductionComputeOp(ExprOp op) { return isCudnnReduceOp(op) || op == ExprOp::ATTENTION || isAttentionBackwardOp(op) || op == ExprOp::ROPE; }
+static bool isConvolutionOp(ExprOp op) {
+    return op == ExprOp::CONV2D || op == ExprOp::CONV3D || op == ExprOp::CONV2D_BACKWARD_DATA ||
+           op == ExprOp::CONV2D_BACKWARD_FILTER || op == ExprOp::CONV3D_BACKWARD_DATA || op == ExprOp::CONV3D_BACKWARD_FILTER;
+}
 static bool isCudnnSingleInputStageOp(ExprOp op) { return isCudnnReduceOp(op) || isCudnnSoftmaxOp(op); }
 
 DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
@@ -63,6 +67,20 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
                 return DataType::FP32;
             default:
                 throw std::runtime_error("Unhandled reduction dtype in toSupportedComputeDType.");
+        }
+    }
+
+    if (isConvolutionOp(op)) {
+        switch (requested_compute_dtype) {
+            case DataType::FP16:
+                return DataType::FP16;
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+            case DataType::BF16:
+            case DataType::FP32:
+                return DataType::FP32;
+            default:
+                throw std::runtime_error("Unhandled convolution dtype in toSupportedComputeDType.");
         }
     }
 
@@ -416,8 +434,12 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
         const DataType output_dtype = resolveNodeOutputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
         const DataType logical_input_dtype = resolveNodeLogicalInputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
-        const DataType requested_compute_dtype =
+        DataType requested_compute_dtype =
             node.compute_dtype.has_value() ? node.compute_dtype.value() : defaultComputeDType(logical_input_dtype, output_dtype);
+        if (isConvolutionOp(node.op) && !node.compute_dtype.has_value() &&
+            (isFp8Type(logical_input_dtype) || isFp8Type(output_dtype))) {
+            requested_compute_dtype = DataType::FP32;
+        }
         const DataType compute_dtype = toSupportedComputeDType(node.op, requested_compute_dtype);
 
         const DataType backward_output_dtype = node.backward_output_dtype.has_value() ? node.backward_output_dtype.value() : output_dtype;

@@ -4384,7 +4384,7 @@ std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::s
     }
 
     Tensor adaptedInput = adaptMatmulInputDTypeIfNeeded(input, compiledStage->input_dtype, stream);
-    Tensor adaptedFilter = adaptMatmulInputDTypeIfNeeded(filter, compiledStage->input_dtype, stream);
+    Tensor adaptedFilter = adaptMatmulInputDTypeIfNeeded(filter, compiledStage->filter_dtype, stream);
 
     const std::vector<std::vector<uint64_t>> stage_input_dims = {adaptedInput.getDimensions(), adaptedFilter.getDimensions()};
     const std::vector<uint64_t> output_dims = resolveConvolutionOutputDimsFromInputs(*compiledStage, stage_input_dims);

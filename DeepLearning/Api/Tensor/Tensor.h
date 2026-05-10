@@ -62,7 +62,29 @@ class Tensor {
     bool operator<(const Tensor &other) const { return id < other.id; }
     bool operator>(const Tensor &other) const { return id > other.id; }
 
-    static bool dataTypeValid(DataType dataType) { return dataType >= DataType::FP16 && dataType <= DataType::PACKED_BOOLEAN; }
+    static bool dataTypeValid(DataType dataType) {
+        switch (dataType) {
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+            case DataType::FP16:
+            case DataType::BF16:
+            case DataType::FP32:
+            case DataType::FP64:
+            case DataType::INT8:
+            case DataType::UINT8:
+            case DataType::INT16:
+            case DataType::UINT16:
+            case DataType::INT32:
+            case DataType::UINT32:
+            case DataType::INT64:
+            case DataType::UINT64:
+            case DataType::BOOLEAN:
+            case DataType::PACKED_BOOLEAN:
+                return true;
+            default:
+                return false;
+        }
+    }
 
     uint64_t getTotalNumElements() const {
         uint64_t elements = 1;

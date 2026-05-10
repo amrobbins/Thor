@@ -6,6 +6,7 @@
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <memory>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -15,8 +16,13 @@
 
 #include "Utilities/Cache/LruCache.h"
 #include "Utilities/Expression/CompiledEquation.h"
-#include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
+
+namespace cudnn_frontend {
+namespace graph {
+class Graph;
+}
+}
 
 namespace ThorImplementation {
 
@@ -238,30 +244,14 @@ struct CompiledAttentionBackward {
 };
 
 struct BuiltConvolution {
-    std::optional<ConvolutionKernelRequirement> requirement = std::nullopt;
-    bool use_cudnn_nd = false;
-    cudnnTensorDescriptor_t x_desc = nullptr;
-    cudnnFilterDescriptor_t w_desc = nullptr;
-    cudnnTensorDescriptor_t y_desc = nullptr;
-    cudnnConvolutionDescriptor_t conv_desc = nullptr;
-    cudnnConvolutionFwdAlgo_t fwd_algo{};
-    cudnnConvolutionBwdDataAlgo_t bwd_data_algo{};
-    cudnnConvolutionBwdFilterAlgo_t bwd_filter_algo{};
+    bool use_cudnn_frontend = false;
+    std::shared_ptr<cudnn_frontend::graph::Graph> frontend_graph;
     size_t workspace_bytes = 0;
 
     BuiltConvolution() = default;
     BuiltConvolution(const BuiltConvolution&) = delete;
     BuiltConvolution& operator=(const BuiltConvolution&) = delete;
-    ~BuiltConvolution() {
-        if (x_desc != nullptr)
-            (void)cudnnDestroyTensorDescriptor(x_desc);
-        if (w_desc != nullptr)
-            (void)cudnnDestroyFilterDescriptor(w_desc);
-        if (y_desc != nullptr)
-            (void)cudnnDestroyTensorDescriptor(y_desc);
-        if (conv_desc != nullptr)
-            (void)cudnnDestroyConvolutionDescriptor(conv_desc);
-    }
+    ~BuiltConvolution() = default;
 };
 
 class StampedEquation {
