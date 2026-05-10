@@ -170,8 +170,11 @@ struct ExprNode {
     bool attention_use_alibi_mask = false;
     bool attention_use_bias = false;
     bool attention_use_padding_mask = false;
+    float attention_dropout_probability = 0.0f;
     uint32_t attention_seq_len_q_node = UINT32_MAX;
     uint32_t attention_seq_len_kv_node = UINT32_MAX;
+    uint32_t attention_dropout_seed_node = UINT32_MAX;
+    uint32_t attention_dropout_offset_node = UINT32_MAX;
 
     uint32_t rope_sequence_axis = 2;
     uint32_t rope_head_dim_axis = 3;
@@ -296,6 +299,7 @@ struct AttentionOptions {
     std::optional<float> attention_scale = std::nullopt;
     bool use_alibi_mask = false;
     bool use_padding_mask = false;
+    float dropout_probability = 0.0f;
     std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt;
     std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt;
 };
@@ -410,8 +414,21 @@ class Expression {
                                                               const Expression& k,
                                                               const Expression& v,
                                                               AttentionOptions options = {});
+    [[nodiscard]] static Expression scaledDotProductAttentionWithDropout(const Expression& q,
+                                                                         const Expression& k,
+                                                                         const Expression& v,
+                                                                         const Expression& dropout_seed,
+                                                                         const Expression& dropout_offset,
+                                                                         AttentionOptions options);
     [[nodiscard]] static Expression scaledDotProductAttention(
         const Expression& q, const Expression& k, const Expression& v, const Expression& bias, AttentionOptions options = {});
+    [[nodiscard]] static Expression scaledDotProductAttentionWithDropout(const Expression& q,
+                                                                         const Expression& k,
+                                                                         const Expression& v,
+                                                                         const Expression& bias,
+                                                                         const Expression& dropout_seed,
+                                                                         const Expression& dropout_offset,
+                                                                         AttentionOptions options);
     [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
                                                               const Expression& k,
                                                               const Expression& v,
@@ -421,9 +438,26 @@ class Expression {
     [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
                                                               const Expression& k,
                                                               const Expression& v,
+                                                              const Expression& q_seq_len,
+                                                              const Expression& kv_seq_len,
+                                                              const Expression& dropout_seed,
+                                                              const Expression& dropout_offset,
+                                                              AttentionOptions options);
+    [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
+                                                              const Expression& k,
+                                                              const Expression& v,
                                                               const Expression& bias,
                                                               const Expression& q_seq_len,
                                                               const Expression& kv_seq_len,
+                                                              AttentionOptions options);
+    [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
+                                                              const Expression& k,
+                                                              const Expression& v,
+                                                              const Expression& bias,
+                                                              const Expression& q_seq_len,
+                                                              const Expression& kv_seq_len,
+                                                              const Expression& dropout_seed,
+                                                              const Expression& dropout_offset,
                                                               AttentionOptions options);
     [[nodiscard]] static Expression attention(const Expression& q,
                                               const Expression& k,
@@ -537,6 +571,8 @@ class Expression {
                                                                  const Expression* bias,
                                                                  const Expression* q_seq_len,
                                                                  const Expression* kv_seq_len,
+                                                                 const Expression* dropout_seed,
+                                                                 const Expression* dropout_offset,
                                                                  AttentionOptions options);
 
     static uint32_t encodeLowerableGemmScaleExpression(const Expression& scale_expr,

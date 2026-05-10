@@ -1,5 +1,5 @@
-#include <optional>
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include <optional>
 
 #include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
@@ -365,6 +365,8 @@ ElementDataType *Tensor::getMemPtr() {
             THOR_THROW_IF_FALSE((is_same<BaseT, half>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
             THOR_THROW_IF_FALSE((is_same<BaseT, float>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP64)
+            THOR_THROW_IF_FALSE((is_same<BaseT, double>::value));
         else if (is_same<BaseT, char>::value)
             THOR_THROW_IF_FALSE(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
                                 descriptor.getDataType() == TensorDescriptor::DataType::INT8);
@@ -374,12 +376,16 @@ ElementDataType *Tensor::getMemPtr() {
             THOR_THROW_IF_FALSE((is_same<BaseT, int16_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
             THOR_THROW_IF_FALSE((is_same<BaseT, int32_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT64)
+            THOR_THROW_IF_FALSE((is_same<BaseT, int64_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint16_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint32_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT64)
+            THOR_THROW_IF_FALSE((is_same<BaseT, uint64_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
             THOR_THROW_IF_FALSE((is_same<BaseT, bool>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
@@ -409,6 +415,8 @@ const ElementDataType *Tensor::getMemPtr() const {
             THOR_THROW_IF_FALSE((is_same<BaseT, half>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
             THOR_THROW_IF_FALSE((is_same<BaseT, float>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP64)
+            THOR_THROW_IF_FALSE((is_same<BaseT, double>::value));
         else if (is_same<BaseT, char>::value)
             THOR_THROW_IF_FALSE(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
                                 descriptor.getDataType() == TensorDescriptor::DataType::INT8);
@@ -418,12 +426,16 @@ const ElementDataType *Tensor::getMemPtr() const {
             THOR_THROW_IF_FALSE((is_same<BaseT, int16_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
             THOR_THROW_IF_FALSE((is_same<BaseT, int32_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT64)
+            THOR_THROW_IF_FALSE((is_same<BaseT, int64_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint16_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint32_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT64)
+            THOR_THROW_IF_FALSE((is_same<BaseT, uint64_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
             THOR_THROW_IF_FALSE((is_same<BaseT, bool>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
@@ -451,18 +463,24 @@ ElementDataType Tensor::getElement(vector<unsigned long> dimensionIndex) {
         THOR_THROW_IF_FALSE((is_same<ElementDataType, half>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, float>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP64)
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, double>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT64)
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int64_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT64)
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint64_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
@@ -491,18 +509,24 @@ void Tensor::setElement(std::vector<unsigned long> dimensionIndex, const Element
         THOR_THROW_IF_FALSE((is_same<ElementDataType, half>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, float>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP64)
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, double>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT64)
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int64_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT64)
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint64_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
@@ -531,18 +555,24 @@ ElementDataType *Tensor::getElementPointer(std::vector<unsigned long> dimensionI
         THOR_THROW_IF_FALSE((is_same<ElementDataType, half>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, float>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP64)
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, double>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT64)
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, int64_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint16_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT64)
+        THOR_THROW_IF_FALSE((is_same<ElementDataType, uint64_t>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
@@ -1716,12 +1746,15 @@ Tensor Tensor::transposeMatrix(Stream stream) {
 template void *Tensor::getMemPtr();
 template half *Tensor::getMemPtr();
 template float *Tensor::getMemPtr();
+template double *Tensor::getMemPtr();
 template int8_t *Tensor::getMemPtr();
 template int16_t *Tensor::getMemPtr();
 template int32_t *Tensor::getMemPtr();
+template int64_t *Tensor::getMemPtr();
 template uint8_t *Tensor::getMemPtr();
 template uint16_t *Tensor::getMemPtr();
 template uint32_t *Tensor::getMemPtr();
+template uint64_t *Tensor::getMemPtr();
 template char *Tensor::getMemPtr();
 template __nv_bfloat16 *Tensor::getMemPtr();
 template __nv_fp8_e4m3 *Tensor::getMemPtr();
@@ -1730,12 +1763,15 @@ template __nv_fp8_e5m2 *Tensor::getMemPtr();
 template const void *Tensor::getMemPtr<void>() const;
 template const half *Tensor::getMemPtr<half>() const;
 template const float *Tensor::getMemPtr<float>() const;
+template const double *Tensor::getMemPtr<double>() const;
 template const int8_t *Tensor::getMemPtr<int8_t>() const;
 template const int16_t *Tensor::getMemPtr<int16_t>() const;
 template const int32_t *Tensor::getMemPtr<int32_t>() const;
+template const int64_t *Tensor::getMemPtr<int64_t>() const;
 template const uint8_t *Tensor::getMemPtr<uint8_t>() const;
 template const uint16_t *Tensor::getMemPtr<uint16_t>() const;
 template const uint32_t *Tensor::getMemPtr<uint32_t>() const;
+template const uint64_t *Tensor::getMemPtr<uint64_t>() const;
 template const char *Tensor::getMemPtr<char>() const;
 template const __nv_bfloat16 *Tensor::getMemPtr<__nv_bfloat16>() const;
 template const __nv_fp8_e4m3 *Tensor::getMemPtr<__nv_fp8_e4m3>() const;
@@ -1743,12 +1779,15 @@ template const __nv_fp8_e5m2 *Tensor::getMemPtr<__nv_fp8_e5m2>() const;
 
 template half Tensor::getElement(vector<unsigned long> dimensionIndex);
 template float Tensor::getElement(vector<unsigned long> dimensionIndex);
+template double Tensor::getElement(vector<unsigned long> dimensionIndex);
 template int8_t Tensor::getElement(vector<unsigned long> dimensionIndex);
 template int16_t Tensor::getElement(vector<unsigned long> dimensionIndex);
 template int32_t Tensor::getElement(vector<unsigned long> dimensionIndex);
+template int64_t Tensor::getElement(vector<unsigned long> dimensionIndex);
 template uint8_t Tensor::getElement(vector<unsigned long> dimensionIndex);
 template uint16_t Tensor::getElement(vector<unsigned long> dimensionIndex);
 template uint32_t Tensor::getElement(vector<unsigned long> dimensionIndex);
+template uint64_t Tensor::getElement(vector<unsigned long> dimensionIndex);
 template char Tensor::getElement(vector<unsigned long> dimensionIndex);
 template __nv_bfloat16 Tensor::getElement(vector<unsigned long> dimensionIndex);
 template __nv_fp8_e4m3 Tensor::getElement(vector<unsigned long> dimensionIndex);
@@ -1756,12 +1795,15 @@ template __nv_fp8_e5m2 Tensor::getElement(vector<unsigned long> dimensionIndex);
 
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const half &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const float &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const double &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const int8_t &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const int16_t &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const int32_t &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const int64_t &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const uint8_t &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const uint16_t &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const uint32_t &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const uint64_t &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const char &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const __nv_bfloat16 &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const __nv_fp8_e4m3 &value);
@@ -1770,12 +1812,15 @@ template void Tensor::setElement(vector<unsigned long> dimensionIndex, const __n
 template void *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template half *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template float *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template double *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template int8_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template int16_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template int32_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template int64_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template uint8_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template uint16_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template uint32_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template uint64_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template char *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template __nv_bfloat16 *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template __nv_fp8_e4m3 *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
