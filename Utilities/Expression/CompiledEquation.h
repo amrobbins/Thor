@@ -211,6 +211,7 @@ struct CompiledConvolution {
     const int32_t pad_h;
     const int32_t pad_w;
     const TensorDescriptor::DataType input_dtype;
+    const TensorDescriptor::DataType filter_dtype;
     const TensorDescriptor::DataType output_dtype;
     const TensorDescriptor::DataType compute_dtype;
 
@@ -224,6 +225,7 @@ struct CompiledConvolution {
                         int32_t pad_h,
                         int32_t pad_w,
                         TensorDescriptor::DataType input_dtype,
+                        TensorDescriptor::DataType filter_dtype,
                         TensorDescriptor::DataType output_dtype,
                         std::optional<TensorDescriptor::DataType> compute_dtype)
         : is_3d(is_3d),
@@ -234,6 +236,7 @@ struct CompiledConvolution {
           pad_h(pad_h),
           pad_w(pad_w),
           input_dtype(input_dtype),
+          filter_dtype(filter_dtype),
           output_dtype(output_dtype),
           compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : TensorDescriptor::DataType::FP32) {}
 };

@@ -77,7 +77,7 @@ class Convolution3d : public TrainableLayer {
     }
 
    protected:
-    virtual bool isMultiLayer() const { return featureInputs.front().getDataType() != Tensor::DataType::FP16; }
+    virtual bool isMultiLayer() const { return false; }
     virtual void buildSupportLayersAndAddToNetwork(Network* network);
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -195,7 +195,8 @@ class Convolution3d::Builder {
         convolution3d.weightsOptimizer = _weightsOptimizer;
         convolution3d.biasesOptimizer = _biasesOptimizer;
 
-        const Tensor::DataType weightsDataType = Tensor::DataType::FP16;
+        const Tensor::DataType convolutionDataType = convolution3d.featureInputs.front().getDataType();
+        const Tensor::DataType weightsDataType = convolutionDataType;
         const uint64_t inputChannels = convolution3d.featureInputs.front().getDimensions()[0];
 
         ParameterSpecification::Builder weightsParameterBuilder;
@@ -227,7 +228,7 @@ class Convolution3d::Builder {
         } else {
             for (uint32_t i = 0; i < convolution3d.featureInputs.size(); ++i) {
                 convolution3d.featureOutputs.push_back(
-                    Tensor(Tensor::DataType::FP16, {_numOutputChannels.value(), outputDepth, outputHeight, outputWidth}));
+                    Tensor(convolutionDataType, {_numOutputChannels.value(), outputDepth, outputHeight, outputWidth}));
                 convolution3d.outputTensorFromInputTensor[convolution3d.featureInputs[i]] = convolution3d.featureOutputs[i];
                 convolution3d.inputTensorFromOutputTensor[convolution3d.featureOutputs[i]] = convolution3d.featureInputs[i];
             }

@@ -168,18 +168,6 @@ void Convolution2d::buildSupportLayersAndAddToNetwork(Network* network) {
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         currentFeatureInputs.push_back(featureInputs[i]);
 
-    // Force the input tensor to this type of layer to be FP16
-    if (featureInputs.front().getDataType() != Tensor::DataType::FP16) {
-        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            TypeConverter typeConverter = TypeConverter::Builder()
-                                              .network(*network)
-                                              .featureInput(currentFeatureInputs[i])
-                                              .newDataType(Tensor::DataType::FP16)
-                                              .build();
-            currentFeatureInputs[i] = typeConverter.getFeatureOutput().value();
-        }
-    }
-
     if (useBatchNormalization) {
         BatchNormalization::Builder batchNormBuilder;
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {

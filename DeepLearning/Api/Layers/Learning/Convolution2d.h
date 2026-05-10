@@ -81,33 +81,16 @@ class Convolution2d : public TrainableLayer {
 
    protected:
     virtual bool isMultiLayer() const {
-        return useBatchNormalization || dropProportion > 0.0f || featureInputs.front().getDataType() != Tensor::DataType::FP16;
+        return useBatchNormalization || dropProportion > 0.0f;
     }
     virtual void buildSupportLayersAndAddToNetwork(Network *network);
 
     void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) override {
-        std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
-        THOR_THROW_IF_FALSE(inputDimensions.size() == 3);
-
-        uint32_t numInputChannels = inputDimensions[0];
-        uint32_t numInputRows = inputDimensions[1];
-        uint32_t numInputColumns = inputDimensions[2];
-        std::string gpuType = MachineEvaluator::instance().getGpuType(stream.getGpuNum());
-        ConvolutionKernelRequirement convolutionKernelRequirement(gpuType,
-                                                                  filterWidth,
-                                                                  filterHeight,
-                                                                  horizontalStride,
-                                                                  verticalStride,
-                                                                  horizontalPadding,
-                                                                  verticalPadding,
-                                                                  numInputChannels,
-                                                                  numOutputChannels,
-                                                                  batchSize,
-                                                                  numInputColumns,
-                                                                  numInputRows);
-
-        ThorImplementation::GpuConvolution::instance().chooseOptimalKernelForward(convolutionKernelRequirement, stream);
-        ThorImplementation::GpuConvolution::instance().chooseOptimalKernelBackward(convolutionKernelRequirement, stream);
+        (void)inputTensor;
+        (void)batchSize;
+        (void)stream;
+        // Conv2D now lowers through cuDNN Frontend expression graphs, so there is no
+        // legacy GpuConvolution kernel selection to pre-warm here.
     }
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -242,7 +225,8 @@ class Convolution2d::Builder {
         convolution2d.weightsOptimizer = _weightsOptimizer;
         convolution2d.biasesOptimizer = _biasesOptimizer;
 
-        const Tensor::DataType weightsDataType = Tensor::DataType::FP16;
+        const Tensor::DataType convolutionDataType = convolution2d.featureInputs.front().getDataType();
+        const Tensor::DataType weightsDataType = convolutionDataType;
         const uint64_t inputChannels = convolution2d.featureInputs.front().getDimensions()[0];
 
         ParameterSpecification::Builder weightsParameterBuilder;
@@ -273,7 +257,7 @@ class Convolution2d::Builder {
             convolution2d.buildSupportLayersAndAddToNetwork(_network.value());
         } else {
             for (uint32_t i = 0; i < convolution2d.featureInputs.size(); ++i) {
-                convolution2d.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {_numOutputChannels.value(), outputHeight, outputWidth}));
+                convolution2d.featureOutputs.push_back(Tensor(convolutionDataType, {_numOutputChannels.value(), outputHeight, outputWidth}));
                 convolution2d.outputTensorFromInputTensor[convolution2d.featureInputs[i]] = convolution2d.featureOutputs[i];
                 convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs[i]] = convolution2d.featureInputs[i];
             }
