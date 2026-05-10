@@ -78,6 +78,7 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
     descriptor.diagonalRightBound = diagonal_right_bound;
     descriptor.useAlibiMask = use_alibi_mask;
     descriptor.useBias = use_bias;
+    descriptor.usePaddingMask = use_padding_mask;
     descriptor.debugName = debug_name;
     descriptor.useFp8 =
         qTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || qTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
@@ -134,6 +135,7 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
     descriptor.diagonalRightBound = diagonal_right_bound;
     descriptor.useAlibiMask = use_alibi_mask;
     descriptor.useBias = use_bias;
+    descriptor.usePaddingMask = use_padding_mask;
     descriptor.generateStats = true;
     descriptor.deterministicBackward = deterministic_backward;
     descriptor.debugName = debug_name;
@@ -179,7 +181,8 @@ bool attentionConfigMatchesBackward(const CompiledAttention& forward,
            forward.mask_kind == backward.mask_kind && forward.diagonal_left_bound == backward.diagonal_left_bound &&
            forward.diagonal_right_bound == backward.diagonal_right_bound &&
            sameOptionalFloat(forward.attention_scale, backward.attention_scale) &&
-           forward.use_alibi_mask == backward.use_alibi_mask && forward.use_bias == backward.use_bias && forward.compute_dtype == backward.compute_dtype &&
+           forward.use_alibi_mask == backward.use_alibi_mask && forward.use_bias == backward.use_bias &&
+           forward.use_padding_mask == backward.use_padding_mask && forward.compute_dtype == backward.compute_dtype &&
            forward.output_dtype == output_dtype;
 }
 
@@ -205,6 +208,13 @@ void StampedAttention::runOn(Stream& run_stream) const {
         }
         args.bias = bias.value();
     }
+    if (compiled_attention->use_padding_mask) {
+        if (!seq_len_q.has_value() || !seq_len_kv.has_value()) {
+            throw std::runtime_error("StampedAttention requires q/kv sequence length tensors for padding-mask attention.");
+        }
+        args.seqLenQ = seq_len_q.value();
+        args.seqLenKv = seq_len_kv.value();
+    }
 
     if (forward_state && forward_state->retain_for_backward) {
         if (!forward_state->stats.isInitialized()) {
@@ -228,6 +238,8 @@ bool StampedAttention::canProvideForwardStateFor(const CompiledAttentionBackward
                                                  const Tensor& k_tensor,
                                                  const Tensor& v_tensor,
                                                  const std::optional<Tensor>& bias_tensor,
+                                                 const std::optional<Tensor>& seq_len_q_tensor,
+                                                 const std::optional<Tensor>& seq_len_kv_tensor,
                                                  const Tensor& dO_tensor) const {
     if (!compiled_attention || !forward_state) {
         return false;
@@ -237,6 +249,12 @@ bool StampedAttention::canProvideForwardStateFor(const CompiledAttentionBackward
     }
     if (compiled_attention->use_bias) {
         if (!bias.has_value() || !bias_tensor.has_value() || !tensorMatches(bias.value(), bias_tensor.value())) {
+            return false;
+        }
+    }
+    if (compiled_attention->use_padding_mask) {
+        if (!seq_len_q.has_value() || !seq_len_kv.has_value() || !seq_len_q_tensor.has_value() || !seq_len_kv_tensor.has_value() ||
+            !tensorMatches(seq_len_q.value(), seq_len_q_tensor.value()) || !tensorMatches(seq_len_kv.value(), seq_len_kv_tensor.value())) {
             return false;
         }
     }
@@ -252,10 +270,21 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
                                    const Tensor& k,
                                    const Tensor& v,
                                    const std::optional<Tensor>& bias,
+                                   const std::optional<Tensor>& seq_len_q,
+                                   const std::optional<Tensor>& seq_len_kv,
                                    const Tensor& output,
                                    const Stream& stream,
                                    std::shared_ptr<AttentionForwardState> forward_state)
-    : compiled_attention(std::move(compiled)), q(q), k(k), v(v), bias(bias), output(output), stream(stream), forward_state(std::move(forward_state)) {}
+    : compiled_attention(std::move(compiled)),
+      q(q),
+      k(k),
+      v(v),
+      bias(bias),
+      seq_len_q(seq_len_q),
+      seq_len_kv(seq_len_kv),
+      output(output),
+      stream(stream),
+      forward_state(std::move(forward_state)) {}
 
 
 void StampedAttentionBackward::run() { runOn(stream); }
@@ -291,6 +320,13 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
             }
             fwdArgs.bias = bias.value();
         }
+        if (compiled_attention_backward->use_padding_mask) {
+            if (!seq_len_q.has_value() || !seq_len_kv.has_value()) {
+                throw std::runtime_error("StampedAttentionBackward requires q/kv sequence length tensors for padding-mask attention.");
+            }
+            fwdArgs.seqLenQ = seq_len_q.value();
+            fwdArgs.seqLenKv = seq_len_kv.value();
+        }
         CudnnScaledDotProductAttention::instance().forward(descriptor, fwdArgs, run_stream);
     }
 
@@ -306,6 +342,13 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
         }
         bwdArgs.dBias = dBiasScratch.value();
     }
+    if (compiled_attention_backward->use_padding_mask) {
+        if (!seq_len_q.has_value() || !seq_len_kv.has_value()) {
+            throw std::runtime_error("StampedAttentionBackward requires q/kv sequence length tensors for padding-mask attention.");
+        }
+        bwdArgs.seqLenQ = seq_len_q.value();
+        bwdArgs.seqLenKv = seq_len_kv.value();
+    }
     CudnnScaledDotProductAttention::instance().backward(descriptor, bwdArgs, run_stream);
 }
 
@@ -314,6 +357,8 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
                                                    const Tensor& k,
                                                    const Tensor& v,
                                                    const std::optional<Tensor>& bias,
+                                                   const std::optional<Tensor>& seq_len_q,
+                                                   const std::optional<Tensor>& seq_len_kv,
                                                    const Tensor& dO,
                                                    const Tensor& dQ,
                                                    const Tensor& dK,
@@ -328,6 +373,8 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
       k(k),
       v(v),
       bias(bias),
+      seq_len_q(seq_len_q),
+      seq_len_kv(seq_len_kv),
       dO(dO),
       dQ(dQ),
       dK(dK),

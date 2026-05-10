@@ -169,6 +169,9 @@ struct ExprNode {
     float attention_scale = 0.0f;
     bool attention_use_alibi_mask = false;
     bool attention_use_bias = false;
+    bool attention_use_padding_mask = false;
+    uint32_t attention_seq_len_q_node = UINT32_MAX;
+    uint32_t attention_seq_len_kv_node = UINT32_MAX;
 
     uint32_t rope_sequence_axis = 2;
     uint32_t rope_head_dim_axis = 3;
@@ -292,6 +295,7 @@ struct AttentionOptions {
     int64_t diagonal_right_bound = 0;
     std::optional<float> attention_scale = std::nullopt;
     bool use_alibi_mask = false;
+    bool use_padding_mask = false;
     std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt;
     std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt;
 };
@@ -307,18 +311,15 @@ class Expression {
     [[nodiscard]] static Outputs outputs(const std::vector<std::pair<std::string, Expression>>& named_exprs);
     [[nodiscard]] static Outputs outputs(std::initializer_list<std::pair<std::string, Expression>> named_exprs);
 
-    [[nodiscard]] static Expression input(
-        const std::string& name,
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
-        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
-    [[nodiscard]] static Expression runtimeScalar(
-        const std::string& name,
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
-        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
-    [[nodiscard]] static Expression tensorRuntimeScalar(
-        const std::string& name,
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
-        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
+    [[nodiscard]] static Expression input(const std::string& name,
+                                          std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                                          std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
+    [[nodiscard]] static Expression runtimeScalar(const std::string& name,
+                                                  std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                                                  std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
+    [[nodiscard]] static Expression tensorRuntimeScalar(const std::string& name,
+                                                        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                                                        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
     [[nodiscard]] static Expression constantScalar(double value);
 
     [[nodiscard]] static Expression fromPhysicalNode(std::shared_ptr<PhysicalExpression> expr, uint32_t nodeIndex) {
@@ -379,13 +380,12 @@ class Expression {
                                      cudnnSoftmaxMode_t mode = CUDNN_SOFTMAX_MODE_CHANNEL) const;
     [[nodiscard]] Expression logSoftmax(cudnnSoftmaxMode_t mode = CUDNN_SOFTMAX_MODE_CHANNEL) const;
 
-    [[nodiscard]] static Expression matmul(
-        const Expression& lhs,
-        const Expression& rhs,
-        bool transpose_lhs = false,
-        bool transpose_rhs = false,
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
-        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
+    [[nodiscard]] static Expression matmul(const Expression& lhs,
+                                           const Expression& rhs,
+                                           bool transpose_lhs = false,
+                                           bool transpose_rhs = false,
+                                           std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                                           std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
     [[nodiscard]] static Expression gemm(const Expression& lhs,
                                          const Expression& rhs,
                                          const Expression& addend,
@@ -410,93 +410,105 @@ class Expression {
                                                               const Expression& k,
                                                               const Expression& v,
                                                               AttentionOptions options = {});
+    [[nodiscard]] static Expression scaledDotProductAttention(
+        const Expression& q, const Expression& k, const Expression& v, const Expression& bias, AttentionOptions options = {});
+    [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
+                                                              const Expression& k,
+                                                              const Expression& v,
+                                                              const Expression& q_seq_len,
+                                                              const Expression& kv_seq_len,
+                                                              AttentionOptions options);
     [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
                                                               const Expression& k,
                                                               const Expression& v,
                                                               const Expression& bias,
-                                                              AttentionOptions options = {});
+                                                              const Expression& q_seq_len,
+                                                              const Expression& kv_seq_len,
+                                                              AttentionOptions options);
     [[nodiscard]] static Expression attention(const Expression& q,
                                               const Expression& k,
                                               const Expression& v,
                                               AttentionOptions options = {}) {
         return scaledDotProductAttention(q, k, v, std::move(options));
     }
+    [[nodiscard]] static Expression attention(
+        const Expression& q, const Expression& k, const Expression& v, const Expression& bias, AttentionOptions options = {}) {
+        return scaledDotProductAttention(q, k, v, bias, std::move(options));
+    }
+    [[nodiscard]] static Expression attention(const Expression& q,
+                                              const Expression& k,
+                                              const Expression& v,
+                                              const Expression& q_seq_len,
+                                              const Expression& kv_seq_len,
+                                              AttentionOptions options) {
+        return scaledDotProductAttention(q, k, v, q_seq_len, kv_seq_len, std::move(options));
+    }
     [[nodiscard]] static Expression attention(const Expression& q,
                                               const Expression& k,
                                               const Expression& v,
                                               const Expression& bias,
-                                              AttentionOptions options = {}) {
-        return scaledDotProductAttention(q, k, v, bias, std::move(options));
+                                              const Expression& q_seq_len,
+                                              const Expression& kv_seq_len,
+                                              AttentionOptions options) {
+        return scaledDotProductAttention(q, k, v, bias, q_seq_len, kv_seq_len, std::move(options));
     }
 
-    [[nodiscard]] static Expression conv2d(
-        const Expression& input,
-        const Expression& filter,
-        int32_t stride_h = 1,
-        int32_t stride_w = 1,
-        int32_t pad_h = 0,
-        int32_t pad_w = 0,
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
-        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
-    [[nodiscard]] static Expression conv3d(
-        const Expression& input,
-        const Expression& filter,
-        int32_t stride_d = 1,
-        int32_t stride_h = 1,
-        int32_t stride_w = 1,
-        int32_t pad_d = 0,
-        int32_t pad_h = 0,
-        int32_t pad_w = 0,
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
-        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
+    [[nodiscard]] static Expression conv2d(const Expression& input,
+                                           const Expression& filter,
+                                           int32_t stride_h = 1,
+                                           int32_t stride_w = 1,
+                                           int32_t pad_h = 0,
+                                           int32_t pad_w = 0,
+                                           std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                                           std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
+    [[nodiscard]] static Expression conv3d(const Expression& input,
+                                           const Expression& filter,
+                                           int32_t stride_d = 1,
+                                           int32_t stride_h = 1,
+                                           int32_t stride_w = 1,
+                                           int32_t pad_d = 0,
+                                           int32_t pad_h = 0,
+                                           int32_t pad_w = 0,
+                                           std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                                           std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
 
     [[nodiscard]] Expression reduction(ExprOp op,
                                        const std::vector<uint64_t>& reduction_axes,
                                        const std::vector<uint64_t>& squeeze_axes,
                                        std::optional<TensorDescriptor::DataType> compute_dtype) const;
-    [[nodiscard]] Expression reduce_sum(
-        const std::vector<uint64_t>& reduction_axes = {},
-        const std::vector<uint64_t>& squeeze_axes = {},
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
-    [[nodiscard]] Expression reduce_prod(
-        const std::vector<uint64_t>& reduction_axes = {},
-        const std::vector<uint64_t>& squeeze_axes = {},
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
-    [[nodiscard]] Expression reduce_min(
-        const std::vector<uint64_t>& reduction_axes = {},
-        const std::vector<uint64_t>& squeeze_axes = {},
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
-    [[nodiscard]] Expression reduce_max(
-        const std::vector<uint64_t>& reduction_axes = {},
-        const std::vector<uint64_t>& squeeze_axes = {},
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
-    [[nodiscard]] Expression argmin(
-        const std::vector<uint64_t>& reduction_axes = {},
-        const std::vector<uint64_t>& squeeze_axes = {},
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
-    [[nodiscard]] Expression argmax(
-        const std::vector<uint64_t>& reduction_axes = {},
-        const std::vector<uint64_t>& squeeze_axes = {},
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
-    [[nodiscard]] Expression reduce_mean(
-        const std::vector<uint64_t>& reduction_axes = {},
-        const std::vector<uint64_t>& squeeze_axes = {},
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
-    [[nodiscard]] Expression reduce_norm1(
-        const std::vector<uint64_t>& reduction_axes = {},
-        const std::vector<uint64_t>& squeeze_axes = {},
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
-    [[nodiscard]] Expression reduce_norm2(
-        const std::vector<uint64_t>& reduction_axes = {},
-        const std::vector<uint64_t>& squeeze_axes = {},
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
+    [[nodiscard]] Expression reduce_sum(const std::vector<uint64_t>& reduction_axes = {},
+                                        const std::vector<uint64_t>& squeeze_axes = {},
+                                        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
+    [[nodiscard]] Expression reduce_prod(const std::vector<uint64_t>& reduction_axes = {},
+                                         const std::vector<uint64_t>& squeeze_axes = {},
+                                         std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
+    [[nodiscard]] Expression reduce_min(const std::vector<uint64_t>& reduction_axes = {},
+                                        const std::vector<uint64_t>& squeeze_axes = {},
+                                        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
+    [[nodiscard]] Expression reduce_max(const std::vector<uint64_t>& reduction_axes = {},
+                                        const std::vector<uint64_t>& squeeze_axes = {},
+                                        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
+    [[nodiscard]] Expression argmin(const std::vector<uint64_t>& reduction_axes = {},
+                                    const std::vector<uint64_t>& squeeze_axes = {},
+                                    std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
+    [[nodiscard]] Expression argmax(const std::vector<uint64_t>& reduction_axes = {},
+                                    const std::vector<uint64_t>& squeeze_axes = {},
+                                    std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
+    [[nodiscard]] Expression reduce_mean(const std::vector<uint64_t>& reduction_axes = {},
+                                         const std::vector<uint64_t>& squeeze_axes = {},
+                                         std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
+    [[nodiscard]] Expression reduce_norm1(const std::vector<uint64_t>& reduction_axes = {},
+                                          const std::vector<uint64_t>& squeeze_axes = {},
+                                          std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
+    [[nodiscard]] Expression reduce_norm2(const std::vector<uint64_t>& reduction_axes = {},
+                                          const std::vector<uint64_t>& squeeze_axes = {},
+                                          std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) const;
 
     [[nodiscard]] Expression min(const Expression& other) const;
     [[nodiscard]] Expression max(const Expression& other) const;
 
-    [[nodiscard]] Expression withDTypes(
-        std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
-        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt) const;
+    [[nodiscard]] Expression withDTypes(std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                                        std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt) const;
     [[nodiscard]] Expression withComputeDType(TensorDescriptor::DataType compute_dtype) const;
     [[nodiscard]] Expression withOutputDType(TensorDescriptor::DataType output_dtype) const;
 
@@ -518,6 +530,14 @@ class Expression {
     [[nodiscard]] static Expression quaternaryOp(
         const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, const Expression& fourthExpr, ExprOp op);
     [[nodiscard]] static Expression unaryOp(const Expression& inputExpr, ExprOp op);
+
+    [[nodiscard]] static Expression attentionWithOptionalPadding(const Expression& q,
+                                                                 const Expression& k,
+                                                                 const Expression& v,
+                                                                 const Expression* bias,
+                                                                 const Expression* q_seq_len,
+                                                                 const Expression* kv_seq_len,
+                                                                 AttentionOptions options);
 
     static uint32_t encodeLowerableGemmScaleExpression(const Expression& scale_expr,
                                                        PhysicalExpression& dst,

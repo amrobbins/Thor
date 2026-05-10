@@ -464,6 +464,8 @@ class FusedEquation {
         const Tensor& k,
         const Tensor& v,
         const std::optional<Tensor>& bias,
+        const std::optional<Tensor>& seq_len_q,
+        const std::optional<Tensor>& seq_len_kv,
         std::optional<Tensor> preallocatedOutput,
         const Stream& stream,
         std::shared_ptr<AttentionForwardState> forward_state = nullptr) const;
@@ -474,6 +476,8 @@ class FusedEquation {
         const Tensor& k,
         const Tensor& v,
         const std::optional<Tensor>& bias,
+        const std::optional<Tensor>& seq_len_q,
+        const std::optional<Tensor>& seq_len_kv,
         const Tensor& dO,
         const std::vector<std::optional<Tensor>>& preallocatedOutputs,
         const Stream& stream,

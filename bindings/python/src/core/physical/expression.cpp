@@ -505,7 +505,9 @@ which is used by autodiff.
                                bool use_alibi_mask,
                                nb::object output_dtype_obj,
                                nb::object compute_dtype_obj,
-                               nb::object bias_obj) {
+                               nb::object bias_obj,
+                               nb::object q_seq_len_obj,
+                               nb::object kv_seq_len_obj) {
             AttentionOptions options;
             options.q_layout = q_layout;
             options.k_layout = k_layout;
@@ -520,7 +522,27 @@ which is used by autodiff.
             options.use_alibi_mask = use_alibi_mask;
             options.output_dtype = parse_optional_dtype(output_dtype_obj);
             options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
-            if (!bias_obj.is_none()) {
+            const bool has_bias = !bias_obj.is_none();
+            const bool has_q_seq_len = !q_seq_len_obj.is_none();
+            const bool has_kv_seq_len = !kv_seq_len_obj.is_none();
+            if (has_q_seq_len != has_kv_seq_len) {
+                throw std::runtime_error("q_seq_len and kv_seq_len must be provided together for padding-mask attention.");
+            }
+            if (has_q_seq_len) {
+                options.use_padding_mask = true;
+                if (has_bias) {
+                    return Expression::scaledDotProductAttention(q,
+                                                                 k,
+                                                                 v,
+                                                                 nb::cast<Expression>(bias_obj),
+                                                                 nb::cast<Expression>(q_seq_len_obj),
+                                                                 nb::cast<Expression>(kv_seq_len_obj),
+                                                                 std::move(options));
+                }
+                return Expression::scaledDotProductAttention(
+                    q, k, v, nb::cast<Expression>(q_seq_len_obj), nb::cast<Expression>(kv_seq_len_obj), std::move(options));
+            }
+            if (has_bias) {
                 return Expression::scaledDotProductAttention(q, k, v, nb::cast<Expression>(bias_obj), std::move(options));
             }
             return Expression::scaledDotProductAttention(q, k, v, std::move(options));
@@ -540,6 +562,8 @@ which is used by autodiff.
         "output_dtype"_a.none() = nb::none(),
         "compute_dtype"_a.none() = nb::none(),
         "bias"_a.none() = nb::none(),
+        "q_seq_len"_a.none() = nb::none(),
+        "kv_seq_len"_a.none() = nb::none(),
         R"nbdoc(
 Create a cuDNN scaled-dot-product attention expression stage.
 
@@ -566,7 +590,9 @@ path; compute_dtype should normally be thor.DataType.fp32.
            bool use_alibi_mask,
            nb::object output_dtype_obj,
            nb::object compute_dtype_obj,
-           nb::object bias_obj) {
+           nb::object bias_obj,
+           nb::object q_seq_len_obj,
+           nb::object kv_seq_len_obj) {
             AttentionOptions options;
             options.q_layout = q_layout;
             options.k_layout = k_layout;
@@ -585,7 +611,27 @@ path; compute_dtype should normally be thor.DataType.fp32.
             if (!compute_dtype_obj.is_none()) {
                 options.compute_dtype = nb::cast<DataType>(compute_dtype_obj);
             }
-            if (!bias_obj.is_none()) {
+            const bool has_bias = !bias_obj.is_none();
+            const bool has_q_seq_len = !q_seq_len_obj.is_none();
+            const bool has_kv_seq_len = !kv_seq_len_obj.is_none();
+            if (has_q_seq_len != has_kv_seq_len) {
+                throw std::runtime_error("q_seq_len and kv_seq_len must be provided together for padding-mask attention.");
+            }
+            if (has_q_seq_len) {
+                options.use_padding_mask = true;
+                if (has_bias) {
+                    return Expression::scaledDotProductAttention(q,
+                                                                 k,
+                                                                 v,
+                                                                 nb::cast<Expression>(bias_obj),
+                                                                 nb::cast<Expression>(q_seq_len_obj),
+                                                                 nb::cast<Expression>(kv_seq_len_obj),
+                                                                 std::move(options));
+                }
+                return Expression::scaledDotProductAttention(
+                    q, k, v, nb::cast<Expression>(q_seq_len_obj), nb::cast<Expression>(kv_seq_len_obj), std::move(options));
+            }
+            if (has_bias) {
                 return Expression::scaledDotProductAttention(q, k, v, nb::cast<Expression>(bias_obj), std::move(options));
             }
             return Expression::scaledDotProductAttention(q, k, v, std::move(options));
@@ -605,6 +651,8 @@ path; compute_dtype should normally be thor.DataType.fp32.
         "output_dtype"_a.none() = nb::none(),
         "compute_dtype"_a.none() = nb::none(),
         "bias"_a.none() = nb::none(),
+        "q_seq_len"_a.none() = nb::none(),
+        "kv_seq_len"_a.none() = nb::none(),
         R"nbdoc(Alias for scaled_dot_product_attention().)nbdoc");
     expr.def("__rpow__", [](const Expression& a, const Expression& b) { return b.pow(a); }, "other"_a);
 

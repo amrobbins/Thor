@@ -170,6 +170,20 @@ void requireAttentionDBiasMatchesDescriptor(const Tensor& bias, const CudnnAtten
     requireBiasMatchesDescriptor(bias, descriptor, name, descriptor.q.dataType);
 }
 
+void requireSeqLenMatchesDescriptor(const Tensor& seq_len, const CudnnAttentionDescriptor& descriptor, string_view name) {
+    requireInitialized(seq_len, name);
+    if (seq_len.getDataType() != TensorDescriptor::DataType::INT32) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT32, got " +
+                               TensorDescriptor::getElementTypeName(seq_len.getDataType()));
+    }
+    const vector<int64_t> expected{descriptor.batchSize()};
+    const vector<int64_t> dims = asInt64(seq_len.getDimensions());
+    if (dims != expected) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
+                               joinInts(expected) + ", got " + joinInts(dims));
+    }
+}
+
 namespace fe = cudnn_frontend;
 
 fe::DataType_t toFrontendDataType(TensorDescriptor::DataType dtype) {
@@ -772,6 +786,8 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
     if (descriptor.usePaddingMask) {
         requireOptionalGpuTensor(args.seqLenQ, "seqLenQ", gpuNum);
         requireOptionalGpuTensor(args.seqLenKv, "seqLenKv", gpuNum);
+        requireSeqLenMatchesDescriptor(args.seqLenQ.value(), descriptor, "seqLenQ");
+        requireSeqLenMatchesDescriptor(args.seqLenKv.value(), descriptor, "seqLenKv");
         insertTensor(pack, UID_SEQ_Q, args.seqLenQ.value());
         insertTensor(pack, UID_SEQ_KV, args.seqLenKv.value());
     }
@@ -870,6 +886,8 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
     if (descriptor.usePaddingMask) {
         requireOptionalGpuTensor(args.seqLenQ, "seqLenQ", gpuNum);
         requireOptionalGpuTensor(args.seqLenKv, "seqLenKv", gpuNum);
+        requireSeqLenMatchesDescriptor(args.seqLenQ.value(), descriptor, "seqLenQ");
+        requireSeqLenMatchesDescriptor(args.seqLenKv.value(), descriptor, "seqLenKv");
         insertTensor(pack, UID_SEQ_Q, args.seqLenQ.value());
         insertTensor(pack, UID_SEQ_KV, args.seqLenKv.value());
     }

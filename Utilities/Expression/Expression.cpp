@@ -1,5 +1,5 @@
-#include <optional>
 #include "Utilities/Expression/Expression.h"
+#include <optional>
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 
@@ -354,6 +354,9 @@ json exprNodeToJson(const ExprNode& node) {
     j["attention_scale"] = node.attention_scale;
     j["attention_use_alibi_mask"] = node.attention_use_alibi_mask;
     j["attention_use_bias"] = node.attention_use_bias;
+    j["attention_use_padding_mask"] = node.attention_use_padding_mask;
+    j["attention_seq_len_q_node"] = node.attention_seq_len_q_node;
+    j["attention_seq_len_kv_node"] = node.attention_seq_len_kv_node;
     j["rope_sequence_axis"] = node.rope_sequence_axis;
     j["rope_head_dim_axis"] = node.rope_head_dim_axis;
     j["rope_rotary_dim"] = node.rope_rotary_dim;
@@ -399,10 +402,14 @@ ExprNode exprNodeFromJson(const json& j) {
     node.conv_pad_w = j.value("conv_pad_w", 0);
     node.softmax_algorithm = static_cast<cudnnSoftmaxAlgorithm_t>(j.value("softmax_algorithm", static_cast<int>(CUDNN_SOFTMAX_ACCURATE)));
     node.softmax_mode = static_cast<cudnnSoftmaxMode_t>(j.value("softmax_mode", static_cast<int>(CUDNN_SOFTMAX_MODE_CHANNEL)));
-    node.attention_q_layout = static_cast<AttentionTensorLayout>(j.value("attention_q_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
-    node.attention_k_layout = static_cast<AttentionTensorLayout>(j.value("attention_k_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
-    node.attention_v_layout = static_cast<AttentionTensorLayout>(j.value("attention_v_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
-    node.attention_o_layout = static_cast<AttentionTensorLayout>(j.value("attention_o_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
+    node.attention_q_layout =
+        static_cast<AttentionTensorLayout>(j.value("attention_q_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
+    node.attention_k_layout =
+        static_cast<AttentionTensorLayout>(j.value("attention_k_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
+    node.attention_v_layout =
+        static_cast<AttentionTensorLayout>(j.value("attention_v_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
+    node.attention_o_layout =
+        static_cast<AttentionTensorLayout>(j.value("attention_o_layout", static_cast<int>(AttentionTensorLayout::BHSD)));
     node.attention_mask_kind = static_cast<AttentionMaskKind>(j.value("attention_mask_kind", static_cast<int>(AttentionMaskKind::None)));
     node.attention_diagonal_left_bound = j.value("attention_diagonal_left_bound", int64_t{0});
     node.attention_diagonal_right_bound = j.value("attention_diagonal_right_bound", int64_t{0});
@@ -410,6 +417,9 @@ ExprNode exprNodeFromJson(const json& j) {
     node.attention_scale = j.value("attention_scale", 0.0f);
     node.attention_use_alibi_mask = j.value("attention_use_alibi_mask", false);
     node.attention_use_bias = j.value("attention_use_bias", false);
+    node.attention_use_padding_mask = j.value("attention_use_padding_mask", false);
+    node.attention_seq_len_q_node = j.value("attention_seq_len_q_node", UINT32_MAX);
+    node.attention_seq_len_kv_node = j.value("attention_seq_len_kv_node", UINT32_MAX);
     node.rope_sequence_axis = j.value("rope_sequence_axis", uint32_t{2});
     node.rope_head_dim_axis = j.value("rope_head_dim_axis", uint32_t{3});
     node.rope_rotary_dim = j.value("rope_rotary_dim", uint64_t{0});
@@ -651,14 +661,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ")";
             break;
         case ExprOp::ROPE:
-            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
-                  ";seqAxis=" + std::to_string(n.rope_sequence_axis) +
-                  ";dimAxis=" + std::to_string(n.rope_head_dim_axis) +
-                  ";rotaryDim=" + std::to_string(n.rope_rotary_dim) +
-                  ";base=" + formatFloatCanonical(n.rope_base) +
-                  ";offset=" + std::to_string(n.rope_position_offset) +
-                  ";interleaved=" + std::to_string(n.rope_interleaved ? 1 : 0) +
-                  ";inverse=" + std::to_string(n.rope_inverse ? 1 : 0) +
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ";seqAxis=" + std::to_string(n.rope_sequence_axis) +
+                  ";dimAxis=" + std::to_string(n.rope_head_dim_axis) + ";rotaryDim=" + std::to_string(n.rope_rotary_dim) +
+                  ";base=" + formatFloatCanonical(n.rope_base) + ";offset=" + std::to_string(n.rope_position_offset) +
+                  ";interleaved=" + std::to_string(n.rope_interleaved ? 1 : 0) + ";inverse=" + std::to_string(n.rope_inverse ? 1 : 0) +
                   ";scaling=" + std::to_string(static_cast<int>(n.rope_scaling_kind)) +
                   ";factor=" + formatFloatCanonical(n.rope_scaling_factor) +
                   ";originalMax=" + std::to_string(n.rope_original_max_position_embeddings) + ")";
@@ -768,17 +774,25 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             if (n.op != ExprOp::ATTENTION && n.beta_node != UINT32_MAX) {
                 out += ",bias=" + canonicalizeNode(expr, n.beta_node, memo, memoReady);
             }
-            out += ";qLayout=" + std::to_string(static_cast<int>(n.attention_q_layout)) +
-                   ";kLayout=" + std::to_string(static_cast<int>(n.attention_k_layout)) +
-                   ";vLayout=" + std::to_string(static_cast<int>(n.attention_v_layout)) +
-                   ";oLayout=" + std::to_string(static_cast<int>(n.attention_o_layout)) +
-                   ";mask=" + std::to_string(static_cast<int>(n.attention_mask_kind)) +
-                   ";left=" + std::to_string(n.attention_diagonal_left_bound) +
-                   ";right=" + std::to_string(n.attention_diagonal_right_bound) +
-                   ";hasScale=" + std::to_string(n.attention_has_scale ? 1 : 0) +
-                   ";scale=" + formatFloatCanonical(n.attention_scale) +
-                   ";alibi=" + std::to_string(n.attention_use_alibi_mask ? 1 : 0) +
-                   ";bias=" + std::to_string(n.attention_use_bias ? 1 : 0) + ")";
+            out +=
+                ";qLayout=" + std::to_string(static_cast<int>(n.attention_q_layout)) +
+                ";kLayout=" + std::to_string(static_cast<int>(n.attention_k_layout)) +
+                ";vLayout=" + std::to_string(static_cast<int>(n.attention_v_layout)) +
+                ";oLayout=" + std::to_string(static_cast<int>(n.attention_o_layout)) +
+                ";mask=" + std::to_string(static_cast<int>(n.attention_mask_kind)) +
+                ";left=" + std::to_string(n.attention_diagonal_left_bound) + ";right=" + std::to_string(n.attention_diagonal_right_bound) +
+                ";hasScale=" + std::to_string(n.attention_has_scale ? 1 : 0) + ";scale=" + formatFloatCanonical(n.attention_scale) +
+                ";alibi=" + std::to_string(n.attention_use_alibi_mask ? 1 : 0) + ";bias=" + std::to_string(n.attention_use_bias ? 1 : 0) +
+                ";padding=" + std::to_string(n.attention_use_padding_mask ? 1 : 0);
+            if (n.attention_use_padding_mask) {
+                if (n.attention_seq_len_q_node != UINT32_MAX) {
+                    out += ",seqQ=" + canonicalizeNode(expr, n.attention_seq_len_q_node, memo, memoReady);
+                }
+                if (n.attention_seq_len_kv_node != UINT32_MAX) {
+                    out += ",seqKV=" + canonicalizeNode(expr, n.attention_seq_len_kv_node, memo, memoReady);
+                }
+            }
+            out += ")";
             break;
         }
 
@@ -1013,7 +1027,17 @@ void ExpressionDefinition::validate() const {
                 throw std::runtime_error("ExpressionDefinition ATTENTION bias node must reference an earlier node.");
             }
         }
-        if ((node.op == ExprOp::ATTENTION_BACKWARD_Q || node.op == ExprOp::ATTENTION_BACKWARD_K || node.op == ExprOp::ATTENTION_BACKWARD_V) &&
+        if ((node.op == ExprOp::ATTENTION || node.op == ExprOp::ATTENTION_BACKWARD_Q || node.op == ExprOp::ATTENTION_BACKWARD_K ||
+             node.op == ExprOp::ATTENTION_BACKWARD_V) &&
+            node.attention_use_padding_mask) {
+            validateNodeIndex(node.attention_seq_len_q_node, "attention q_seq_len");
+            validateNodeIndex(node.attention_seq_len_kv_node, "attention kv_seq_len");
+            if (node.attention_seq_len_q_node >= node_index_u32 || node.attention_seq_len_kv_node >= node_index_u32) {
+                throw std::runtime_error("ExpressionDefinition ATTENTION padding-mask sequence length nodes must reference earlier nodes.");
+            }
+        }
+        if ((node.op == ExprOp::ATTENTION_BACKWARD_Q || node.op == ExprOp::ATTENTION_BACKWARD_K ||
+             node.op == ExprOp::ATTENTION_BACKWARD_V) &&
             node.attention_use_bias) {
             validateNodeIndex(node.beta_node, "attention backward bias");
             if (node.beta_node >= node_index_u32) {
@@ -1271,6 +1295,13 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
         if (srcNode.beta_node != UINT32_MAX) {
             newNode.beta_node = cloneSubtree(src, srcNode.beta_node, dst, oldToNew);
         }
+        if (srcNode.attention_use_padding_mask) {
+            if (srcNode.attention_seq_len_q_node == UINT32_MAX || srcNode.attention_seq_len_kv_node == UINT32_MAX) {
+                throw std::runtime_error("Malformed attention expression: missing padding-mask sequence length node while cloning.");
+            }
+            newNode.attention_seq_len_q_node = cloneSubtree(src, srcNode.attention_seq_len_q_node, dst, oldToNew);
+            newNode.attention_seq_len_kv_node = cloneSubtree(src, srcNode.attention_seq_len_kv_node, dst, oldToNew);
+        }
     } else if (Expression::isLeafOp(srcNode.op)) {
         // nothing to recurse into
     } else {
@@ -1348,6 +1379,16 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
         if (srcNode.beta_node != UINT32_MAX) {
             newNode.beta_node = cloneSubtreeWithMergedInputs(src, srcNode.beta_node, dst, oldToNew, dstInputSlotsByName);
         }
+        if (srcNode.attention_use_padding_mask) {
+            if (srcNode.attention_seq_len_q_node == UINT32_MAX || srcNode.attention_seq_len_kv_node == UINT32_MAX) {
+                throw std::runtime_error(
+                    "Malformed attention expression: missing padding-mask sequence length node while merging outputs.");
+            }
+            newNode.attention_seq_len_q_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_seq_len_q_node, dst, oldToNew, dstInputSlotsByName);
+            newNode.attention_seq_len_kv_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_seq_len_kv_node, dst, oldToNew, dstInputSlotsByName);
+        }
     } else if (srcNode.op == ExprOp::SCALAR_FP || srcNode.op == ExprOp::FILL) {
         // nothing to recurse into
     } else {
@@ -1422,11 +1463,20 @@ uint32_t cloneSubtreeWithInputSubstitution(const PhysicalExpression& src,
             newNode.beta_node =
                 cloneSubtreeWithInputSubstitution(src, srcNode.beta_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
         }
+        if (srcNode.attention_use_padding_mask) {
+            if (srcNode.attention_seq_len_q_node == UINT32_MAX || srcNode.attention_seq_len_kv_node == UINT32_MAX) {
+                throw std::runtime_error(
+                    "Malformed attention expression: missing padding-mask sequence length node while substituting input.");
+            }
+            newNode.attention_seq_len_q_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_seq_len_q_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+            newNode.attention_seq_len_kv_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_seq_len_kv_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        }
     } else if (Expression::isLeafOp(srcNode.op)) {
         // constants/fill nodes have no children and can be copied directly.
     } else {
-        throw std::runtime_error("Unsupported op while substituting expression input: " +
-                                 std::to_string(static_cast<int>(srcNode.op)));
+        throw std::runtime_error("Unsupported op while substituting expression input: " + std::to_string(static_cast<int>(srcNode.op)));
     }
 
     const uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
@@ -1481,7 +1531,9 @@ Expression Expression::runtimeScalar(const std::string& name, std::optional<Data
     return Expression(out, 0);
 }
 
-Expression Expression::tensorRuntimeScalar(const std::string& name, std::optional<DataType> compute_dtype, std::optional<DataType> output_dtype) {
+Expression Expression::tensorRuntimeScalar(const std::string& name,
+                                           std::optional<DataType> compute_dtype,
+                                           std::optional<DataType> output_dtype) {
     validateUserInputName(name);
     auto out = std::make_shared<PhysicalExpression>();
 
@@ -1707,7 +1759,6 @@ Expression Expression::ternaryOp(const Expression& lhsExpr, const Expression& rh
 
     return Expression(out, newIndex);
 }
-
 
 Expression Expression::quaternaryOp(
     const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, const Expression& fourthExpr, ExprOp op) {
@@ -2063,6 +2114,7 @@ void applyAttentionOptions(ExprNode& node, const AttentionOptions& options, bool
     node.attention_scale = options.attention_scale.value_or(0.0f);
     node.attention_use_alibi_mask = options.use_alibi_mask;
     node.attention_use_bias = use_bias;
+    node.attention_use_padding_mask = options.use_padding_mask;
     if (options.compute_dtype.has_value()) {
         node.compute_dtype = options.compute_dtype.value();
     }
@@ -2078,35 +2130,84 @@ void validateAttentionOptions(const AttentionOptions& options) {
 }
 }  // namespace
 
-Expression Expression::scaledDotProductAttention(const Expression& q,
-                                                        const Expression& k,
-                                                        const Expression& v,
-                                                        AttentionOptions options) {
-    if (!q.expr || !k.expr || !v.expr) {
+Expression Expression::attentionWithOptionalPadding(const Expression& q,
+                                                    const Expression& k,
+                                                    const Expression& v,
+                                                    const Expression* bias,
+                                                    const Expression* q_seq_len,
+                                                    const Expression* kv_seq_len,
+                                                    AttentionOptions options) {
+    if (!q.expr || !k.expr || !v.expr || (bias != nullptr && !bias->expr) || (q_seq_len != nullptr && !q_seq_len->expr) ||
+        (kv_seq_len != nullptr && !kv_seq_len->expr)) {
         throw std::runtime_error("Cannot build attention from empty expressions.");
     }
     validateAttentionOptions(options);
+    if (options.use_padding_mask && (q_seq_len == nullptr || kv_seq_len == nullptr)) {
+        throw std::runtime_error("AttentionOptions::use_padding_mask requires q_seq_len and kv_seq_len expressions.");
+    }
+    if (!options.use_padding_mask && (q_seq_len != nullptr || kv_seq_len != nullptr)) {
+        throw std::runtime_error("q_seq_len/kv_seq_len were provided but AttentionOptions::use_padding_mask is false.");
+    }
 
-    Expression out = ternaryOp(q, k, v, ExprOp::ATTENTION);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    applyAttentionOptions(node, options, false);
-    return out;
+    auto out = std::make_shared<PhysicalExpression>();
+    std::unordered_map<std::string, uint32_t> merged_by_name;
+
+    auto clone_root = [&](const Expression& src_expr) {
+        std::unordered_map<uint32_t, uint32_t> old_to_new;
+        return cloneSubtreeIntoMergedExpression(src_expr, *out, old_to_new, merged_by_name);
+    };
+
+    const uint32_t q_node = clone_root(q);
+    const uint32_t k_node = clone_root(k);
+    const uint32_t v_node = clone_root(v);
+    const uint32_t bias_node = bias != nullptr ? clone_root(*bias) : UINT32_MAX;
+    const uint32_t q_len_node = q_seq_len != nullptr ? clone_root(*q_seq_len) : UINT32_MAX;
+    const uint32_t kv_len_node = kv_seq_len != nullptr ? clone_root(*kv_seq_len) : UINT32_MAX;
+
+    ExprNode node{};
+    node.op = ExprOp::ATTENTION;
+    node.lhs = q_node;
+    node.rhs = k_node;
+    node.aux = v_node;
+    node.alpha_node = bias_node;
+    node.attention_seq_len_q_node = q_len_node;
+    node.attention_seq_len_kv_node = kv_len_node;
+    applyAttentionOptions(node, options, bias != nullptr);
+
+    const uint32_t new_index = static_cast<uint32_t>(out->nodes.size());
+    out->nodes.push_back(std::move(node));
+    out->output_node = new_index;
+    return Expression(out, new_index);
+}
+
+Expression Expression::scaledDotProductAttention(const Expression& q, const Expression& k, const Expression& v, AttentionOptions options) {
+    return attentionWithOptionalPadding(q, k, v, nullptr, nullptr, nullptr, std::move(options));
+}
+
+Expression Expression::scaledDotProductAttention(
+    const Expression& q, const Expression& k, const Expression& v, const Expression& bias, AttentionOptions options) {
+    return attentionWithOptionalPadding(q, k, v, &bias, nullptr, nullptr, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q,
-                                                        const Expression& k,
-                                                        const Expression& v,
-                                                        const Expression& bias,
-                                                        AttentionOptions options) {
-    if (!q.expr || !k.expr || !v.expr || !bias.expr) {
-        throw std::runtime_error("Cannot build attention with bias from empty expressions.");
-    }
-    validateAttentionOptions(options);
+                                                 const Expression& k,
+                                                 const Expression& v,
+                                                 const Expression& q_seq_len,
+                                                 const Expression& kv_seq_len,
+                                                 AttentionOptions options) {
+    options.use_padding_mask = true;
+    return attentionWithOptionalPadding(q, k, v, nullptr, &q_seq_len, &kv_seq_len, std::move(options));
+}
 
-    Expression out = quaternaryOp(q, k, v, bias, ExprOp::ATTENTION);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    applyAttentionOptions(node, options, true);
-    return out;
+Expression Expression::scaledDotProductAttention(const Expression& q,
+                                                 const Expression& k,
+                                                 const Expression& v,
+                                                 const Expression& bias,
+                                                 const Expression& q_seq_len,
+                                                 const Expression& kv_seq_len,
+                                                 AttentionOptions options) {
+    options.use_padding_mask = true;
+    return attentionWithOptionalPadding(q, k, v, &bias, &q_seq_len, &kv_seq_len, std::move(options));
 }
 
 Expression Expression::conv2d(const Expression& input,
