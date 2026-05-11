@@ -2,7 +2,7 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 
 #include "DeepLearning/Api/Initializers/Glorot.h"
-#include "DeepLearning/Api/Layers/Activations/SoftPlus.h"
+#include "DeepLearning/Api/Layers/Activations/Gelu.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
@@ -325,7 +325,7 @@ FullyConnected FullyConnected::Builder::build() {
     if (_biasInitializer == nullptr)
         _biasInitializer = Glorot::Builder().build();
     if (!_activation && !_activationExplicitlyRemoved) {
-        _activation = SoftPlus::Builder().build();
+        _activation = Gelu::Builder().build();
     } else if (_activation != nullptr) {
         _activation = std::dynamic_pointer_cast<Activation>(_activation->clone());
         if (_activation == nullptr) {

@@ -175,7 +175,7 @@ void bind_fully_connected(nb::module_ &m) {
             Number of output features (units) produced by this layer.
         has_bias : bool, default True
             Whether to learn an additive bias term.
-        activation : thor.Activation or None, default thor.activations.SoftPlus()
+        activation : thor.Activation or None, default thor.activations.Gelu()
             Activation to apply after the linear transform (and optional
             batch normalization). Pass ``None`` to not use any activation and
             keep the layer purely linear.

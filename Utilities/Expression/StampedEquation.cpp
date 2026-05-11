@@ -1042,6 +1042,8 @@ static ResolvedMatmulScales resolveMatmulRuntimeScales(const std::optional<Runti
     return resolved;
 }
 
+static CublasMatrixMultiply::EpilogueFusion toCublasEpilogueFusion(MatmulEpilogue epilogue);
+
 void StampedMatmul::run() { runOn(stream); }
 
 void StampedMatmul::runOn(Stream& run_stream) const { runOn(run_stream, {}); }
@@ -1064,20 +1066,45 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                               output.getDescriptor().getDataType(),
                                                               output.getDescriptor().getDataType(),
                                                               compiled_matmul->compute_dtype};
-        CublasMatrixMultiply::instance().multiply(lhs,
-                                                  rhs,
-                                                  output,
-                                                  workspace,
-                                                  a_rows,
-                                                  a_cols,
-                                                  b_rows,
-                                                  b_cols,
-                                                  compiled_matmul->transpose_lhs,
-                                                  compiled_matmul->transpose_rhs,
-                                                  false,
-                                                  false,
-                                                  dataTypes,
-                                                  run_stream);
+        if (compiled_matmul->epilogue == MatmulEpilogue::Default) {
+            CublasMatrixMultiply::instance().multiply(lhs,
+                                                      rhs,
+                                                      output,
+                                                      workspace,
+                                                      a_rows,
+                                                      a_cols,
+                                                      b_rows,
+                                                      b_cols,
+                                                      compiled_matmul->transpose_lhs,
+                                                      compiled_matmul->transpose_rhs,
+                                                      false,
+                                                      false,
+                                                      dataTypes,
+                                                      run_stream);
+            return;
+        }
+
+        if (compiled_matmul->transpose_lhs || compiled_matmul->transpose_rhs) {
+            throw std::runtime_error("cuBLASLt MATMUL activation epilogue fusion currently supports only non-transposed row-major stages.");
+        }
+        const float alphaOne = 1.0f;
+        const float betaZero = 0.0f;
+        CublasMatrixMultiply::instance().gemmWithEpilogueUsingHeuristicKernelChoice(lhs,
+                                                                                    rhs,
+                                                                                    std::nullopt,
+                                                                                    output,
+                                                                                    a_rows,
+                                                                                    a_cols,
+                                                                                    b_rows,
+                                                                                    b_cols,
+                                                                                    compiled_matmul->transpose_lhs,
+                                                                                    compiled_matmul->transpose_rhs,
+                                                                                    &alphaOne,
+                                                                                    &betaZero,
+                                                                                    dataTypes,
+                                                                                    toCublasEpilogueFusion(compiled_matmul->epilogue),
+                                                                                    false,
+                                                                                    run_stream);
         return;
     }
 
@@ -1107,30 +1134,39 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                           use_bias_epilogue ? output.getDescriptor().getDataType() : addend.value().getDescriptor().getDataType(),
                                                           output.getDescriptor().getDataType(),
                                                           compiled_matmul->compute_dtype};
-    if (use_bias_epilogue) {
+    const bool use_cublaslt_epilogue_wrapper = use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default;
+    if (use_cublaslt_epilogue_wrapper) {
         if (compiled_matmul->transpose_aux) {
-            throw std::runtime_error("GEMM bias epilogue does not support transpose_aux.");
+            throw std::runtime_error("GEMM cuBLASLt epilogue fusion does not support transpose_aux.");
         }
-        if (addend.value().getDescriptor().getDataType() != output.getDescriptor().getDataType()) {
-            throw std::runtime_error("GEMM bias epilogue requires the bias dtype to match the output dtype.");
+        if (compiled_matmul->transpose_lhs || compiled_matmul->transpose_rhs) {
+            throw std::runtime_error("GEMM cuBLASLt epilogue fusion currently supports only non-transposed row-major stages.");
         }
-        if (resolved_scales.beta.is_device_pointer || resolved_scales.beta.host_value != 1.0f) {
-            throw std::runtime_error("GEMM bias epilogue currently requires an unscaled +bias addend.");
+        if (use_bias_epilogue) {
+            if (addend.value().getDescriptor().getDataType() != output.getDescriptor().getDataType()) {
+                throw std::runtime_error("GEMM bias epilogue requires the bias dtype to match the output dtype.");
+            }
+            if (resolved_scales.beta.is_device_pointer || resolved_scales.beta.host_value != 1.0f) {
+                throw std::runtime_error("GEMM bias epilogue currently requires an unscaled +bias addend.");
+            }
         }
-        CublasMatrixMultiply::instance().gemmWithBiasUsingHeuristicKernelChoice(lhs,
-                                                                                rhs,
-                                                                                addend.value(),
-                                                                                output,
-                                                                                a_rows,
-                                                                                a_cols,
-                                                                                b_rows,
-                                                                                b_cols,
-                                                                                compiled_matmul->transpose_lhs,
-                                                                                compiled_matmul->transpose_rhs,
-                                                                                resolved_scales.alpha.ptr,
-                                                                                dataTypes,
-                                                                                run_stream,
-                                                                                resolved_scales.pointer_mode);
+        CublasMatrixMultiply::instance().gemmWithEpilogueUsingHeuristicKernelChoice(lhs,
+                                                                                    rhs,
+                                                                                    addend.value(),
+                                                                                    output,
+                                                                                    a_rows,
+                                                                                    a_cols,
+                                                                                    b_rows,
+                                                                                    b_cols,
+                                                                                    compiled_matmul->transpose_lhs,
+                                                                                    compiled_matmul->transpose_rhs,
+                                                                                    resolved_scales.alpha.ptr,
+                                                                                    resolved_scales.beta.ptr,
+                                                                                    dataTypes,
+                                                                                    toCublasEpilogueFusion(compiled_matmul->epilogue),
+                                                                                    use_bias_epilogue,
+                                                                                    run_stream,
+                                                                                    resolved_scales.pointer_mode);
         return;
     }
 
@@ -1656,6 +1692,18 @@ static size_t getReductionIndicesSize(int device_num,
     return indices_bytes;
 }
 
+static CublasMatrixMultiply::EpilogueFusion toCublasEpilogueFusion(MatmulEpilogue epilogue) {
+    switch (epilogue) {
+        case MatmulEpilogue::Default:
+            return CublasMatrixMultiply::EpilogueFusion::Default;
+        case MatmulEpilogue::Relu:
+            return CublasMatrixMultiply::EpilogueFusion::Relu;
+        case MatmulEpilogue::Gelu:
+            return CublasMatrixMultiply::EpilogueFusion::Gelu;
+    }
+    throw std::runtime_error("Unknown MatmulEpilogue value.");
+}
+
 static int32_t leadingDimensionForStoredMatrix(const Tensor& matrix) {
     const std::vector<uint64_t> dims = matrix.getDimensions();
     if (dims.size() != 2) {
@@ -1712,6 +1760,10 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     if (use_bias_epilogue && addend.value().getDescriptor().getDataType() != output.getDescriptor().getDataType()) {
         throw std::runtime_error("GEMM bias epilogue requires the bias dtype to match the output dtype.");
     }
+    if ((compiled_matmul->epilogue != MatmulEpilogue::Default || use_bias_epilogue) &&
+        (compiled_matmul->transpose_lhs || compiled_matmul->transpose_rhs || compiled_matmul->transpose_aux)) {
+        throw std::runtime_error("cuBLASLt GEMM epilogue fusion currently supports only non-transposed row-major matmul/gemm stages.");
+    }
     if (dataTypes.A != compiled_matmul->lhs_dtype || dataTypes.B != compiled_matmul->rhs_dtype ||
         dataTypes.C != (compiled_matmul->op == ExprOp::GEMM ? compiled_matmul->aux_dtype : compiled_matmul->output_dtype) ||
         dataTypes.D != compiled_matmul->output_dtype) {
@@ -1731,6 +1783,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                        compiled_matmul->transpose_rhs,
                        compiled_matmul->transpose_aux,
                        use_bias_epilogue,
+                       compiled_matmul->epilogue,
                        dataTypes.A,
                        dataTypes.B,
                        dataTypes.C,
@@ -1746,7 +1799,9 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     auto built = std::make_shared<BuiltMatmul>(key);
     bool kernelWillRunOnGpu = false;
 
-    if (compiled_matmul->op == ExprOp::MATMUL) {
+    const bool use_cublaslt_epilogue_wrapper = use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default;
+
+    if (compiled_matmul->op == ExprOp::MATMUL && !use_cublaslt_epilogue_wrapper) {
         CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(device_num,
                                                                            a_rows,
                                                                            a_cols,
@@ -1770,10 +1825,10 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                                                         compiled_matmul->transpose_rhs,
                                                                                                         dataTypes,
                                                                                                         kernelWillRunOnGpu);
-    } else if (use_bias_epilogue) {
-        // Bias-epilogue GEMM uses the cuBLASLt heuristic path directly for now.
-        // It has no workspace requirement in this staged wrapper; the stage-kind
-        // optimization still removes the separate broadcast-add FusedKernel.
+    } else if (use_cublaslt_epilogue_wrapper) {
+        // Fused cuBLASLt epilogues use the heuristic path directly for now.
+        // They have no workspace requirement in this staged wrapper; the stage-kind
+        // optimization still removes the separate expression FusedKernel.
         kernelWillRunOnGpu = true;
         built->workspace_bytes = 0;
     } else {

@@ -361,18 +361,14 @@ std::shared_ptr<LayerT> findOnlyLayerOfType(Api::Network& network) {
     return found;
 }
 
-float softplusReference(float x) {
-    if (x > 20.0f)
-        return x;
-    if (x < -20.0f)
-        return std::exp(x);
-    return std::log1p(std::exp(x));
+float geluReference(float x) {
+    return 0.5f * x * (1.0f + std::erf(x / std::sqrt(2.0f)));
 }
 
-vector<float> applySoftPlusThenTestEpilogue(const vector<float>& values) {
+vector<float> applyGeluThenTestEpilogue(const vector<float>& values) {
     vector<float> out(values.size());
     for (uint64_t i = 0; i < values.size(); ++i)
-        out[i] = 2.0f * softplusReference(values[i]) + 1.0f;
+        out[i] = 2.0f * geluReference(values[i]) + 1.0f;
     return out;
 }
 
@@ -458,7 +454,7 @@ TEST(FullyConnectedApi, StampsAsPhysicalCustomLayerAndAllocatesParameters) {
     EXPECT_EQ(biases.getDataType(), DataType::FP32);
 }
 
-TEST(FullyConnectedApi, DefaultsToSoftPlusActivationWhenActivationIsOmitted) {
+TEST(FullyConnectedApi, DefaultsToGeluActivationWhenActivationIsOmitted) {
     Api::Network network("testNetwork");
     Api::Tensor featureInput(DataType::FP32, {4});
 
@@ -468,10 +464,10 @@ TEST(FullyConnectedApi, DefaultsToSoftPlusActivationWhenActivationIsOmitted) {
     const nlohmann::json j = fc.architectureJson();
     ASSERT_TRUE(j.contains("activation"));
     ASSERT_FALSE(j.at("activation").is_null());
-    EXPECT_EQ(j.at("activation").at("layer_type").get<string>(), "soft_plus");
+    EXPECT_EQ(j.at("activation").at("layer_type").get<string>(), "gelu");
 }
 
-TEST(FullyConnectedApi, ArchitectureSaveLoadRoundTripPreservesSoftPlusActivationEpilogueParametersAndRuns) {
+TEST(FullyConnectedApi, ArchitectureSaveLoadRoundTripPreservesGeluActivationEpilogueParametersAndRuns) {
     constexpr uint32_t batchSize = 2;
     constexpr uint32_t numInputFeatures = 3;
     constexpr uint32_t numOutputFeatures = 2;
@@ -530,7 +526,7 @@ TEST(FullyConnectedApi, ArchitectureSaveLoadRoundTripPreservesSoftPlusActivation
         EXPECT_EQ(j.at("compute_data_type").get<DataType>(), dataType);
         EXPECT_EQ(j.at("output_data_type").get<DataType>(), dataType);
         ASSERT_FALSE(j.at("activation").is_null());
-        EXPECT_EQ(j.at("activation").at("layer_type").get<string>(), "soft_plus");
+        EXPECT_EQ(j.at("activation").at("layer_type").get<string>(), "gelu");
         ASSERT_FALSE(j.at("epilogue").is_null());
         ASSERT_TRUE(j.at("parameters").contains("weights"));
         ASSERT_TRUE(j.at("parameters").contains("biases"));
@@ -551,8 +547,8 @@ TEST(FullyConnectedApi, ArchitectureSaveLoadRoundTripPreservesSoftPlusActivation
         const vector<float> actual = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
         const vector<float> affine =
             fullyConnectedReference(inputValues, weightValues, biasValues, batchSize, numInputFeatures, numOutputFeatures, true);
-        const vector<float> expected = applySoftPlusThenTestEpilogue(affine);
-        expectAllClose(actual, expected, 2e-4f, 2e-4f, "loaded FC SoftPlus+epilogue output");
+        const vector<float> expected = applyGeluThenTestEpilogue(affine);
+        expectAllClose(actual, expected, 2e-4f, 2e-4f, "loaded FC Gelu+epilogue output");
     } catch (...) {
         std::filesystem::remove_all(archiveDir);
         throw;

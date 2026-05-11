@@ -205,7 +205,7 @@ void bind_convolution_3d(nb::module_ &m) {
         3D convolution layer.
 
         Builds a trainable 3D convolutional layer with optional activation.
-        Omitted activation defaults to ``thor.activations.SoftPlus()``; pass
+        Omitted activation defaults to ``thor.activations.Gelu()``; pass
         ``None`` to keep the layer linear.
         The API tensor layout is CDHW; the physical implementation adds the
         batch dimension and uses NCDHW. Activations are stitched into the

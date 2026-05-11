@@ -249,7 +249,7 @@ void bind_convolution_2d(nb::module_ &m) {
             input.
         has_bias : bool, default True
             Whether to learn an additive bias per output channel.
-        activation : thor.Activation or None, default thor.activations.SoftPlus()
+        activation : thor.Activation or None, default thor.activations.Gelu()
             Activation to apply after the convolution
             Pass ``None`` to not use any activation and keep the layer
             purely linear.

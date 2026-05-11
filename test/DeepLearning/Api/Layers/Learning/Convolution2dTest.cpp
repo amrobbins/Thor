@@ -332,7 +332,7 @@ std::shared_ptr<LayerT> findOnlyLayerOfType(Api::Network& network) {
 
 }  // namespace
 
-TEST(Convolution2dApi, DefaultsToSamePaddingSoftPlusActivationAndCanDisableActivation) {
+TEST(Convolution2dApi, DefaultsToSamePaddingGeluActivationAndCanDisableActivation) {
     Api::Network defaultNetwork("conv2dDefaults");
     Api::NetworkInput defaultInput =
         Api::NetworkInput::Builder().network(defaultNetwork).name("input").dimensions({3, 8, 10}).dataType(DataType::FP16).build();
@@ -349,7 +349,7 @@ TEST(Convolution2dApi, DefaultsToSamePaddingSoftPlusActivationAndCanDisableActiv
     const json defaultJson = defaultConv.architectureJson();
     ASSERT_TRUE(defaultJson.contains("activation"));
     ASSERT_FALSE(defaultJson.at("activation").is_null());
-    EXPECT_EQ(defaultJson.at("activation").at("layer_type").get<string>(), "soft_plus");
+    EXPECT_EQ(defaultJson.at("activation").at("layer_type").get<string>(), "gelu");
     EXPECT_EQ(defaultJson.at("vertical_padding").get<uint32_t>(), 1u);
     EXPECT_EQ(defaultJson.at("horizontal_padding").get<uint32_t>(), 2u);
 

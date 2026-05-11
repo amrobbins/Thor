@@ -4,7 +4,7 @@
 #include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
-#include "DeepLearning/Api/Layers/Activations/SoftPlus.h"
+#include "DeepLearning/Api/Layers/Activations/Gelu.h"
 #include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
@@ -151,7 +151,7 @@ class Convolution3d::Builder {
         if (_biasesInitializer == nullptr)
             _biasesInitializer = Glorot::Builder().build();
         if (!_activation && !_activationExplicitlyRemoved)
-            _activation = SoftPlus::Builder().build();
+            _activation = Gelu::Builder().build();
 
         if (_epilogue.has_value()) {
             Convolution3d::validateEpilogueExpression(_epilogue.value());

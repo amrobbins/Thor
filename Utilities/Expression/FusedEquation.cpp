@@ -310,7 +310,8 @@ static bool tryGetLowerableScaleNode(const PhysicalExpression& expr, uint32_t no
 
 static bool expressionHasPotentialGemmLoweringPattern(const PhysicalExpression& expr) {
     bool saw_matmul = false;
-    bool saw_add_or_sub = false;
+    bool saw_gemm_or_add_sub = false;
+    bool saw_activation_candidate = false;
 
     for (const ExprNode& node : expr.nodes) {
         switch (node.op) {
@@ -318,9 +319,16 @@ static bool expressionHasPotentialGemmLoweringPattern(const PhysicalExpression& 
                 saw_matmul = true;
                 break;
 
+            case ExprOp::GEMM:
             case ExprOp::ADD:
             case ExprOp::SUB:
-                saw_add_or_sub = true;
+                saw_gemm_or_add_sub = true;
+                break;
+
+            case ExprOp::MAX:
+            case ExprOp::MUL:
+            case ExprOp::NORMCDF:
+                saw_activation_candidate = true;
                 break;
 
             default:
@@ -328,7 +336,7 @@ static bool expressionHasPotentialGemmLoweringPattern(const PhysicalExpression& 
         }
     }
 
-    return saw_matmul && saw_add_or_sub;
+    return saw_matmul && (saw_gemm_or_add_sub || saw_activation_candidate);
 }
 
 static std::vector<uint64_t> inferExpressionMatmulOutputDims(const ExprNode& node,
@@ -723,6 +731,175 @@ struct GemmLoweringPattern {
     std::optional<DataType> inherited_backward_compute_dtype = std::nullopt;
 };
 
+struct MatmulActivationEpiloguePattern {
+    uint32_t source_idx = UINT32_MAX;
+    MatmulEpilogue epilogue = MatmulEpilogue::Default;
+};
+
+static bool isMatmulOp(ExprOp op) {
+    return op == ExprOp::MATMUL || op == ExprOp::GEMM;
+}
+
+static bool isZeroScalarNode(const PhysicalExpression& expr, uint32_t node_idx) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+    const ExprNode& node = expr.nodes[node_idx];
+    return node.op == ExprOp::SCALAR_FP && node.scalar_fp == 0.0;
+}
+
+static bool canFuseMatmulActivationEpilogue(const PhysicalExpression& expr,
+                                            uint32_t node_idx,
+                                            const std::vector<std::vector<uint64_t>>& node_dims) {
+    if (node_idx >= expr.nodes.size() || node_idx >= node_dims.size()) {
+        return false;
+    }
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isMatmulOp(node.op) || node.matmul_epilogue != MatmulEpilogue::Default || node_dims[node_idx].size() != 2) {
+        return false;
+    }
+
+    // The current cuBLASLt epilogue wrapper presents Thor row-major matrices through
+    // a column-major transposed view. Keep activation epilogue fusion on the same
+    // well-tested non-transposed projection path as the existing bias epilogue.
+    if (node.transpose_lhs || node.transpose_rhs || node.transpose_aux) {
+        return false;
+    }
+    return true;
+}
+
+static bool sameSubexpressionForMatmulEpilogue(const PhysicalExpression& expr,
+                                               uint32_t a_idx,
+                                               uint32_t b_idx,
+                                               uint32_t depth = 0) {
+    if (a_idx == b_idx) {
+        return true;
+    }
+    if (depth > 64 || a_idx >= expr.nodes.size() || b_idx >= expr.nodes.size()) {
+        return false;
+    }
+
+    const ExprNode& a = expr.nodes[a_idx];
+    const ExprNode& b = expr.nodes[b_idx];
+    if (a.op != b.op) {
+        return false;
+    }
+
+    if (a.output_dtype != b.output_dtype || a.compute_dtype != b.compute_dtype || a.input_tensor_dtype != b.input_tensor_dtype ||
+        a.backward_output_dtype != b.backward_output_dtype || a.backward_compute_dtype != b.backward_compute_dtype) {
+        return false;
+    }
+
+    switch (a.op) {
+        case ExprOp::INPUT:
+        case ExprOp::RUNTIME_SCALAR:
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
+            return a.input_slot == b.input_slot;
+        case ExprOp::SCALAR_FP:
+            return a.scalar_fp == b.scalar_fp;
+        case ExprOp::MATMUL:
+            return a.transpose_lhs == b.transpose_lhs && a.transpose_rhs == b.transpose_rhs && a.matmul_epilogue == b.matmul_epilogue &&
+                   sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
+                   sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1);
+        case ExprOp::GEMM:
+            return a.transpose_lhs == b.transpose_lhs && a.transpose_rhs == b.transpose_rhs && a.transpose_aux == b.transpose_aux &&
+                   a.alpha_fp == b.alpha_fp && a.beta_fp == b.beta_fp && a.matmul_epilogue == b.matmul_epilogue &&
+                   sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
+                   sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1) &&
+                   sameSubexpressionForMatmulEpilogue(expr, a.aux, b.aux, depth + 1) &&
+                   (a.alpha_node == b.alpha_node || sameSubexpressionForMatmulEpilogue(expr, a.alpha_node, b.alpha_node, depth + 1)) &&
+                   (a.beta_node == b.beta_node || sameSubexpressionForMatmulEpilogue(expr, a.beta_node, b.beta_node, depth + 1));
+        case ExprOp::NORMCDF:
+            return sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1);
+        case ExprOp::ADD:
+        case ExprOp::SUB:
+        case ExprOp::MUL:
+        case ExprOp::DIV:
+        case ExprOp::MIN:
+        case ExprOp::MAX:
+            return sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
+                   sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1);
+        default:
+            return false;
+    }
+}
+
+static bool tryBuildMatmulActivationEpiloguePattern(const PhysicalExpression& expr,
+                                                    uint32_t node_idx,
+                                                    const std::vector<std::vector<uint64_t>>& node_dims,
+                                                    MatmulActivationEpiloguePattern& out) {
+    if (node_idx >= expr.nodes.size() || node_idx >= node_dims.size()) {
+        return false;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (node.op == ExprOp::MAX) {
+        uint32_t source_idx = UINT32_MAX;
+        if (isZeroScalarNode(expr, node.lhs)) {
+            source_idx = node.rhs;
+        } else if (isZeroScalarNode(expr, node.rhs)) {
+            source_idx = node.lhs;
+        } else {
+            return false;
+        }
+
+        if (!canFuseMatmulActivationEpilogue(expr, source_idx, node_dims)) {
+            return false;
+        }
+        out.source_idx = source_idx;
+        out.epilogue = MatmulEpilogue::Relu;
+        return true;
+    }
+
+    if (node.op != ExprOp::MUL) {
+        return false;
+    }
+
+    auto attempt_gelu = [&](uint32_t source_idx, uint32_t normcdf_idx) -> bool {
+        if (normcdf_idx >= expr.nodes.size() || expr.nodes[normcdf_idx].op != ExprOp::NORMCDF) {
+            return false;
+        }
+        if (!canFuseMatmulActivationEpilogue(expr, source_idx, node_dims)) {
+            return false;
+        }
+        if (!sameSubexpressionForMatmulEpilogue(expr, source_idx, expr.nodes[normcdf_idx].lhs)) {
+            return false;
+        }
+        out.source_idx = source_idx;
+        out.epilogue = MatmulEpilogue::Gelu;
+        return true;
+    };
+
+    return attempt_gelu(node.lhs, node.rhs) || attempt_gelu(node.rhs, node.lhs);
+}
+
+static void rewriteAsMatmulActivationEpilogue(PhysicalExpression& expr,
+                                              uint32_t node_idx,
+                                              const MatmulActivationEpiloguePattern& pattern) {
+    if (node_idx >= expr.nodes.size() || pattern.source_idx >= expr.nodes.size()) {
+        throw std::runtime_error("Matmul activation epilogue rewrite received an out-of-range node index.");
+    }
+
+    const ExprNode activation_node = expr.nodes[node_idx];
+    ExprNode replacement = expr.nodes[pattern.source_idx];
+    replacement.matmul_epilogue = pattern.epilogue;
+
+    if (activation_node.output_dtype.has_value()) {
+        replacement.output_dtype = activation_node.output_dtype;
+    }
+    if (activation_node.compute_dtype.has_value()) {
+        replacement.compute_dtype = activation_node.compute_dtype;
+    }
+    if (activation_node.backward_output_dtype.has_value()) {
+        replacement.backward_output_dtype = activation_node.backward_output_dtype;
+    }
+    if (activation_node.backward_compute_dtype.has_value()) {
+        replacement.backward_compute_dtype = activation_node.backward_compute_dtype;
+    }
+
+    expr.nodes[node_idx] = std::move(replacement);
+}
+
 static bool tryMatchScaledMatmulPattern(const PhysicalExpression& expr, uint32_t node_idx, ScaledMatmulPattern& out) {
     if (node_idx >= expr.nodes.size()) {
         return false;
@@ -730,6 +907,9 @@ static bool tryMatchScaledMatmulPattern(const PhysicalExpression& expr, uint32_t
 
     const ExprNode& node = expr.nodes[node_idx];
     if (node.op == ExprOp::MATMUL) {
+        if (node.matmul_epilogue != MatmulEpilogue::Default) {
+            return false;
+        }
         out.matmul_node_idx = node_idx;
         out.lhs_idx = node.lhs;
         out.rhs_idx = node.rhs;
@@ -754,10 +934,16 @@ static bool tryMatchScaledMatmulPattern(const PhysicalExpression& expr, uint32_t
     if (tryGetLowerableScaleNode(expr, node.lhs, scale_fp, scale_node) && node.rhs < expr.nodes.size() &&
         expr.nodes[node.rhs].op == ExprOp::MATMUL) {
         matmul = &expr.nodes[node.rhs];
+        if (matmul->matmul_epilogue != MatmulEpilogue::Default) {
+            return false;
+        }
         matmul_idx = node.rhs;
     } else if (tryGetLowerableScaleNode(expr, node.rhs, scale_fp, scale_node) && node.lhs < expr.nodes.size() &&
                expr.nodes[node.lhs].op == ExprOp::MATMUL) {
         matmul = &expr.nodes[node.lhs];
+        if (matmul->matmul_epilogue != MatmulEpilogue::Default) {
+            return false;
+        }
         matmul_idx = node.lhs;
     } else {
         return false;
@@ -977,6 +1163,15 @@ static void optimizeExpressionGemmPatternsInPlace(PhysicalExpression& expr,
         if (!node.backward_compute_dtype.has_value() && pattern.inherited_backward_compute_dtype.has_value()) {
             node.backward_compute_dtype = pattern.inherited_backward_compute_dtype.value();
         }
+    }
+
+    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+        MatmulActivationEpiloguePattern pattern;
+        if (!tryBuildMatmulActivationEpiloguePattern(expr, node_idx, node_dims, pattern)) {
+            continue;
+        }
+        rewriteAsMatmulActivationEpilogue(expr, node_idx, pattern);
+        node_dims[node_idx] = node_dims[pattern.source_idx];
     }
 }
 

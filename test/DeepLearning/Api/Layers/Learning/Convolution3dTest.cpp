@@ -410,7 +410,7 @@ std::shared_ptr<LayerT> findOnlyLayerOfType(Api::Network& network) {
 
 }  // namespace
 
-TEST(Convolution3dApi, DefaultsToSoftPlusAndExplicitNoActivationShape) {
+TEST(Convolution3dApi, DefaultsToGeluAndExplicitNoActivationShape) {
     Api::Network defaultNetwork("conv3dDefaults");
     Api::NetworkInput defaultInput =
         Api::NetworkInput::Builder().network(defaultNetwork).name("input").dimensions({2, 5, 6, 7}).dataType(DataType::FP16).build();
@@ -431,7 +431,7 @@ TEST(Convolution3dApi, DefaultsToSoftPlusAndExplicitNoActivationShape) {
     const json defaultJson = defaultConv.architectureJson();
     ASSERT_TRUE(defaultJson.contains("activation"));
     ASSERT_FALSE(defaultJson.at("activation").is_null());
-    EXPECT_EQ(defaultJson.at("activation").at("layer_type").get<string>(), "soft_plus");
+    EXPECT_EQ(defaultJson.at("activation").at("layer_type").get<string>(), "gelu");
 
     Api::Network explicitNetwork("conv3dExplicit");
     Api::NetworkInput explicitInput =

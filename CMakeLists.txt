@@ -551,7 +551,7 @@ set_target_properties(createMasterHeader PROPERTIES
 add_custom_command(
         OUTPUT ${CMAKE_BINARY_DIR}/headerlist.txt
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMAND find . -name "*.h" | grep -v ./googletest/ | grep -v ./googlemock/ | grep -v ./_deps/ | grep -v ./build/ | grep -v ./test/ | grep -v ./.venv/ | grep -v ./bindings > ${CMAKE_BINARY_DIR}/headerlist.txt
+        COMMAND find . -name "*.h" | grep -v ./googletest/ | grep -v ./googlemock/ | grep -v ./_deps/ | grep -v ./build/ | grep -v ./cmake-build- | grep -v ./out/ | grep -v ./_build/ | grep -v ./generated/ | grep -v ./test/ | grep -v ./.venv/ | grep -v ./bindings > ${CMAKE_BINARY_DIR}/headerlist.txt
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         DEPENDS ${THOR_SOURCES}
         COMMENT "Collecting all headers into headerlist.txt"

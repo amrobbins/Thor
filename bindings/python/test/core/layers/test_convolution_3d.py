@@ -76,7 +76,7 @@ def test_conv3d_constructs_defaults_architecture_parameters_and_output_shape_dty
     assert arch["horizontal_padding"] == 0
     assert arch["num_output_channels"] == 6
     assert arch["has_bias"] is True
-    assert arch["activation"]["layer_type"] == "soft_plus"
+    assert arch["activation"]["layer_type"] == "gelu"
     assert arch["epilogue"] is None
     assert len(arch["inputs"]) == 1
     assert len(arch["outputs"]) == 1
@@ -181,12 +181,12 @@ def test_conv3d_has_bias_controls_architecture_and_parameter_set(has_bias: bool)
         assert "biases" not in arch["parameters"]
 
 
-def test_conv3d_omitted_activation_defaults_to_softplus_and_none_disables_activation():
+def test_conv3d_omitted_activation_defaults_to_gelu_and_none_disables_activation():
     default_net = _net("test_net_conv3d_default_activation")
     default_x = _cdhw_input(default_net, 3, 4, 8, 8, thor.DataType.fp16)
     thor.layers.Convolution3d(default_net, default_x, 4, 3, 3, 3)
     default_arch = _only_layer_architecture(default_net, "convolution_3d")
-    assert default_arch["activation"]["layer_type"] == "soft_plus"
+    assert default_arch["activation"]["layer_type"] == "gelu"
 
     linear_net = thor.Network("test_net_conv3d_linear")
     linear_x = _cdhw_input(linear_net, 3, 4, 8, 8, thor.DataType.fp16)

@@ -91,6 +91,12 @@ enum class RotaryScalingKind : uint8_t {
     DynamicNTK = 2,
 };
 
+enum class MatmulEpilogue : uint8_t {
+    Default = 0,
+    Relu = 1,
+    Gelu = 2,
+};
+
 struct RotaryPositionEmbeddingOptions {
     uint32_t sequence_axis = 2;
     uint32_t head_dim_axis = 3;
@@ -151,6 +157,7 @@ struct ExprNode {
     bool transpose_lhs = false;
     bool transpose_rhs = false;
     bool transpose_aux = false;
+    MatmulEpilogue matmul_epilogue = MatmulEpilogue::Default;
     int32_t conv_stride_d = 1;
     int32_t conv_stride_h = 1;
     int32_t conv_stride_w = 1;
