@@ -1084,8 +1084,9 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
     if (!addend.has_value()) {
         throw std::runtime_error("Stamped GEMM requires an addend tensor.");
     }
-    if (addend.value().getDimensions().size() != 2) {
-        throw std::runtime_error("Stamped GEMM currently only supports rank-2 addend tensors.");
+    const bool use_bias_epilogue = addend.value().getDimensions().size() == 1;
+    if (!use_bias_epilogue && addend.value().getDimensions().size() != 2) {
+        throw std::runtime_error("Stamped GEMM currently supports rank-2 addend tensors or rank-1 bias epilogue vectors.");
     }
 
     ResolvedMatmulScales resolved_scales = resolveMatmulRuntimeScales(alpha_input,
@@ -1103,9 +1104,36 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
 
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{lhs.getDescriptor().getDataType(),
                                                           rhs.getDescriptor().getDataType(),
-                                                          addend.value().getDescriptor().getDataType(),
+                                                          use_bias_epilogue ? output.getDescriptor().getDataType() : addend.value().getDescriptor().getDataType(),
                                                           output.getDescriptor().getDataType(),
                                                           compiled_matmul->compute_dtype};
+    if (use_bias_epilogue) {
+        if (compiled_matmul->transpose_aux) {
+            throw std::runtime_error("GEMM bias epilogue does not support transpose_aux.");
+        }
+        if (addend.value().getDescriptor().getDataType() != output.getDescriptor().getDataType()) {
+            throw std::runtime_error("GEMM bias epilogue requires the bias dtype to match the output dtype.");
+        }
+        if (resolved_scales.beta.is_device_pointer || resolved_scales.beta.host_value != 1.0f) {
+            throw std::runtime_error("GEMM bias epilogue currently requires an unscaled +bias addend.");
+        }
+        CublasMatrixMultiply::instance().gemmWithBiasUsingHeuristicKernelChoice(lhs,
+                                                                                rhs,
+                                                                                addend.value(),
+                                                                                output,
+                                                                                a_rows,
+                                                                                a_cols,
+                                                                                b_rows,
+                                                                                b_cols,
+                                                                                compiled_matmul->transpose_lhs,
+                                                                                compiled_matmul->transpose_rhs,
+                                                                                resolved_scales.alpha.ptr,
+                                                                                dataTypes,
+                                                                                run_stream,
+                                                                                resolved_scales.pointer_mode);
+        return;
+    }
+
     CublasMatrixMultiply::instance().gemm(lhs,
                                           rhs,
                                           addend.value(),
@@ -1648,12 +1676,15 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     if (lhs.getDimensions().size() != 2 || rhs.getDimensions().size() != 2 || output.getDimensions().size() != 2) {
         throw std::runtime_error("buildMatmul currently only supports rank-2 tensors.");
     }
+    bool use_bias_epilogue = false;
     if (compiled_matmul->op == ExprOp::GEMM) {
         if (!addend.has_value()) {
             throw std::runtime_error("buildMatmul requires an addend tensor for GEMM.");
         }
-        if (addend.value().getDimensions().size() != 2) {
-            throw std::runtime_error("buildMatmul currently only supports rank-2 GEMM addend tensors.");
+        const size_t addend_rank = addend.value().getDimensions().size();
+        use_bias_epilogue = addend_rank == 1;
+        if (addend_rank != 1 && addend_rank != 2) {
+            throw std::runtime_error("buildMatmul currently supports rank-2 GEMM addends or rank-1 bias epilogue vectors.");
         }
         if (compiled_matmul->transpose_aux) {
             throw std::runtime_error("GEMM transpose_aux/transposeC is not supported by CublasMatrixMultiply in this staged path.");
@@ -1669,15 +1700,18 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     const int32_t ld_a = leadingDimensionForStoredMatrix(lhs);
     const int32_t ld_b = leadingDimensionForStoredMatrix(rhs);
     const int32_t ld_d = leadingDimensionForStoredMatrix(output);
-    const int32_t ld_c = addend.has_value() ? leadingDimensionForStoredMatrix(addend.value()) : ld_d;
+    const int32_t ld_c = addend.has_value() ? (use_bias_epilogue ? ld_d : leadingDimensionForStoredMatrix(addend.value())) : ld_d;
 
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
         lhs.getDescriptor().getDataType(),
         rhs.getDescriptor().getDataType(),
-        addend.has_value() ? addend.value().getDescriptor().getDataType() : output.getDescriptor().getDataType(),
+        addend.has_value() ? (use_bias_epilogue ? output.getDescriptor().getDataType() : addend.value().getDescriptor().getDataType()) : output.getDescriptor().getDataType(),
         output.getDescriptor().getDataType(),
         compiled_matmul->compute_dtype};
 
+    if (use_bias_epilogue && addend.value().getDescriptor().getDataType() != output.getDescriptor().getDataType()) {
+        throw std::runtime_error("GEMM bias epilogue requires the bias dtype to match the output dtype.");
+    }
     if (dataTypes.A != compiled_matmul->lhs_dtype || dataTypes.B != compiled_matmul->rhs_dtype ||
         dataTypes.C != (compiled_matmul->op == ExprOp::GEMM ? compiled_matmul->aux_dtype : compiled_matmul->output_dtype) ||
         dataTypes.D != compiled_matmul->output_dtype) {
@@ -1696,6 +1730,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                        compiled_matmul->transpose_lhs,
                        compiled_matmul->transpose_rhs,
                        compiled_matmul->transpose_aux,
+                       use_bias_epilogue,
                        dataTypes.A,
                        dataTypes.B,
                        dataTypes.C,
@@ -1735,6 +1770,12 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                                                         compiled_matmul->transpose_rhs,
                                                                                                         dataTypes,
                                                                                                         kernelWillRunOnGpu);
+    } else if (use_bias_epilogue) {
+        // Bias-epilogue GEMM uses the cuBLASLt heuristic path directly for now.
+        // It has no workspace requirement in this staged wrapper; the stage-kind
+        // optimization still removes the separate broadcast-add FusedKernel.
+        kernelWillRunOnGpu = true;
+        built->workspace_bytes = 0;
     } else {
         CublasMatrixMultiply::instance().chooseOptimalGemmKernel(device_num,
                                                                  a_rows,

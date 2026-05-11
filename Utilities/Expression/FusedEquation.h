@@ -257,12 +257,19 @@ struct CompiledExecutionStage {
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
 };
 
+struct CompiledValueAlias {
+    uint32_t value_id = UINT32_MAX;
+    uint32_t source_value_id = UINT32_MAX;
+    std::vector<uint64_t> dimensions;
+};
+
 struct CompiledOutputs {
     EquationSignature signature;
     bool broadcast_support = false;
 
     std::vector<CompiledExecutionStage> stages;
     std::vector<CompiledStageOutput> final_outputs;
+    std::vector<CompiledValueAlias> value_aliases;
 };
 
 struct RuntimeDTypeKey {

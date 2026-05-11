@@ -259,6 +259,17 @@ Return a new expression whose result node uses the requested output dtype.
 Return a new expression whose result node uses the requested compute dtype.
 )nbdoc");
 
+    expr.def(
+        "reshape",
+        [](const Expression& self, const std::vector<uint64_t>& new_dims) { return self.reshape(new_dims); },
+        "shape"_a,
+        R"nbdoc(
+Return a metadata-only reshape expression.
+
+For contiguous tensors this is planned as a value alias rather than a materializing
+fused kernel when no dtype conversion is requested.
+)nbdoc");
+
     expr.def_static(
         "constant_scalar",
         [](double value) { return Expression::constantScalar(value); },

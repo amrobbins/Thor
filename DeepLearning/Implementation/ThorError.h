@@ -1,23 +1,24 @@
 #pragma once
 
+#include "ThorVersion.h"
+
 #include <sstream>
 #include <stdexcept>
 #include <string>
 
 namespace ThorImplementation::ThorError {
 
-[[noreturn]] inline void throwFailedCheck(const char *condition,
-                                          const char *file,
-                                          int line,
-                                          const char *function) {
+[[noreturn]] inline void throwFailedCheck(const char *condition, const char *file, int line, const char *function) {
     std::ostringstream message;
-    message << "Thor check failed: " << condition << " at " << file << ':' << line << " in " << function << "().";
+    message << "Thor check failed: " << condition << " at " << file << ':' << line << " in " << function << "(). Thor version "
+            << THOR_VERSION << " (" << THOR_GIT_VERSION << ")";
     throw std::logic_error(message.str());
 }
 
 [[noreturn]] inline void throwUnreachable(const char *file, int line, const char *function) {
     std::ostringstream message;
-    message << "Thor reached code that should be unreachable at " << file << ':' << line << " in " << function << "().";
+    message << "Thor reached code that should be unreachable at " << file << ':' << line << " in " << function << "(). Thor version "
+            << THOR_VERSION << " (" << THOR_GIT_VERSION << ")";
     throw std::logic_error(message.str());
 }
 

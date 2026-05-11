@@ -294,6 +294,14 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         }
     }
 
+    if (node.op == ExprOp::ATTENTION_BACKWARD_BIAS) {
+        if (node.lhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("Attention-backward dBias node has q input index out of range in resolveNodeOutputDType.");
+        }
+        const DataType cudnn_dbias_dtype = resolved_output_dtypes[node.lhs];
+        return node.output_dtype.has_value() ? node.output_dtype.value() : cudnn_dbias_dtype;
+    }
+
     if (node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX) {
         return node.output_dtype.has_value() ? node.output_dtype.value() : DataType::UINT32;
     }

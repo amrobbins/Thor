@@ -136,6 +136,7 @@ struct MatmulCacheKey {
     const bool transpose_a;
     const bool transpose_b;
     const bool transpose_c;
+    const bool bias_epilogue;
     const TensorDescriptor::DataType a_dtype;
     const TensorDescriptor::DataType b_dtype;
     const TensorDescriptor::DataType c_dtype;
@@ -157,6 +158,7 @@ struct MatmulCacheKey {
                    bool transpose_a,
                    bool transpose_b,
                    bool transpose_c,
+                   bool bias_epilogue,
                    TensorDescriptor::DataType a_dtype,
                    TensorDescriptor::DataType b_dtype,
                    TensorDescriptor::DataType c_dtype,
@@ -175,6 +177,7 @@ struct MatmulCacheKey {
           transpose_a(transpose_a),
           transpose_b(transpose_b),
           transpose_c(transpose_c),
+          bias_epilogue(bias_epilogue),
           a_dtype(a_dtype),
           b_dtype(b_dtype),
           c_dtype(c_dtype),
@@ -959,6 +962,7 @@ struct hash<ThorImplementation::MatmulCacheKey> {
         hashCombine(h, hash<bool>{}(k.transpose_a));
         hashCombine(h, hash<bool>{}(k.transpose_b));
         hashCombine(h, hash<bool>{}(k.transpose_c));
+        hashCombine(h, hash<bool>{}(k.bias_epilogue));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.a_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.b_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.c_dtype));

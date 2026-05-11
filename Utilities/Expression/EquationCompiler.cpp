@@ -276,7 +276,9 @@ static uint64_t scalarBits(double x) {
     return bits;
 }
 
-static int32_t optionalDTypeTag(const std::optional<DataType>& dtype) { return dtype.has_value() ? static_cast<int32_t>(dtype.value()) : -1; }
+static int32_t optionalDTypeTag(const std::optional<DataType>& dtype) {
+    return dtype.has_value() ? static_cast<int32_t>(dtype.value()) : -1;
+}
 
 static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     StageNodeKey key;
@@ -692,6 +694,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "SOFTMAX";
         case ExprOp::FILL:
             return "FILL";
+        case ExprOp::RESHAPE:
+            return "RESHAPE";
         case ExprOp::UNSQUEEZE:
             return "UNSQ";
         case ExprOp::SQUEEZE:
@@ -890,8 +894,7 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",mask=" + std::to_string(static_cast<int>(node.attention_mask_kind)) +
                 ",left=" + std::to_string(node.attention_diagonal_left_bound) +
                 ",right=" + std::to_string(node.attention_diagonal_right_bound) +
-                ",hasScale=" + std::to_string(node.attention_has_scale ? 1 : 0) +
-                ",scale=" + std::to_string(node.attention_scale) +
+                ",hasScale=" + std::to_string(node.attention_has_scale ? 1 : 0) + ",scale=" + std::to_string(node.attention_scale) +
                 ",alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0) +
                 ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0) +
                 ",padding=" + std::to_string(node.attention_use_padding_mask ? 1 : 0) +
@@ -926,8 +929,7 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",mask=" + std::to_string(static_cast<int>(node.attention_mask_kind)) +
                 ",left=" + std::to_string(node.attention_diagonal_left_bound) +
                 ",right=" + std::to_string(node.attention_diagonal_right_bound) +
-                ",hasScale=" + std::to_string(node.attention_has_scale ? 1 : 0) +
-                ",scale=" + std::to_string(node.attention_scale) +
+                ",hasScale=" + std::to_string(node.attention_has_scale ? 1 : 0) + ",scale=" + std::to_string(node.attention_scale) +
                 ",alibi=" + std::to_string(node.attention_use_alibi_mask ? 1 : 0) +
                 ",bias=" + std::to_string(node.attention_use_bias ? 1 : 0) +
                 ",padding=" + std::to_string(node.attention_use_padding_mask ? 1 : 0) +
@@ -966,19 +968,17 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
 
     if (!Expression::isBinaryOp(node.op)) {
         std::string s;
-        if (node.op == ExprOp::UNSQUEEZE) {
+        if (node.op == ExprOp::RESHAPE) {
+            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",dims=" + uintVecSignature(node.reshape_dims) + ")";
+        } else if (node.op == ExprOp::UNSQUEEZE) {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",axes=" + uintVecSignature(node.unsqueeze_axes) + ")";
         } else if (node.op == ExprOp::SQUEEZE) {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",axes=" + uintVecSignature(node.squeeze_axes) + ")";
         } else if (node.op == ExprOp::ROPE) {
-            s = std::string(fusedOpTag(node.op)) + "(" + lhs +
-                ",seqAxis=" + std::to_string(node.rope_sequence_axis) +
-                ",dimAxis=" + std::to_string(node.rope_head_dim_axis) +
-                ",rotaryDim=" + std::to_string(node.rope_rotary_dim) +
-                ",base=" + std::to_string(scalarBits(node.rope_base)) +
-                ",offset=" + std::to_string(node.rope_position_offset) +
-                ",interleaved=" + std::to_string(node.rope_interleaved ? 1 : 0) +
-                ",inverse=" + std::to_string(node.rope_inverse ? 1 : 0) +
+            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",seqAxis=" + std::to_string(node.rope_sequence_axis) +
+                ",dimAxis=" + std::to_string(node.rope_head_dim_axis) + ",rotaryDim=" + std::to_string(node.rope_rotary_dim) +
+                ",base=" + std::to_string(scalarBits(node.rope_base)) + ",offset=" + std::to_string(node.rope_position_offset) +
+                ",interleaved=" + std::to_string(node.rope_interleaved ? 1 : 0) + ",inverse=" + std::to_string(node.rope_inverse ? 1 : 0) +
                 ",scaling=" + std::to_string(static_cast<int>(node.rope_scaling_kind)) +
                 ",factor=" + std::to_string(scalarBits(node.rope_scaling_factor)) +
                 ",originalMax=" + std::to_string(node.rope_original_max_position_embeddings) + ")";
@@ -1560,9 +1560,13 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
         throw std::runtime_error("Attention stage output node is not ATTENTION.");
     }
     const uint32_t expected_attention_inputs = 3u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u) +
-        (node.attention_use_ragged_offsets ? 2u : 0u) + (node.attention_use_paged_kv_cache ? 2u : 0u) + (node.attention_dropout_probability > 0.0f ? 2u : 0u);
+                                               (node.attention_use_ragged_offsets ? 2u : 0u) +
+                                               (node.attention_use_paged_kv_cache ? 2u : 0u) +
+                                               (node.attention_dropout_probability > 0.0f ? 2u : 0u);
     if (expr.numInputs() != expected_attention_inputs) {
-        throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional ragged offsets, optional paged-KV page tables, and optional dropout seed/offset.");
+        throw std::runtime_error(
+            "Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional ragged offsets, "
+            "optional paged-KV page tables, and optional dropout seed/offset.");
     }
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX) {
         throw std::runtime_error("Attention node is missing q/k/v inputs.");
@@ -1677,10 +1681,14 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     if (!isAttentionBackwardOp(node.op)) {
         throw std::runtime_error("Attention-backward stage output node is not an attention backward op.");
     }
-    const uint32_t expected_attention_backward_inputs = 4u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u) +
-        (node.attention_use_ragged_offsets ? 2u : 0u) + (node.attention_use_paged_kv_cache ? 2u : 0u) + (node.attention_dropout_probability > 0.0f ? 2u : 0u);
+    const uint32_t expected_attention_backward_inputs =
+        4u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u) +
+        (node.attention_use_ragged_offsets ? 2u : 0u) + (node.attention_use_paged_kv_cache ? 2u : 0u) +
+        (node.attention_dropout_probability > 0.0f ? 2u : 0u);
     if (expr.numInputs() != expected_attention_backward_inputs) {
-        throw std::runtime_error("Attention-backward stage input count mismatch for q/k/v/dO plus optional bias, optional q/kv sequence lengths, optional ragged offsets, optional paged-KV page tables, and optional dropout seed/offset.");
+        throw std::runtime_error(
+            "Attention-backward stage input count mismatch for q/k/v/dO plus optional bias, optional q/kv sequence lengths, optional "
+            "ragged offsets, optional paged-KV page tables, and optional dropout seed/offset.");
     }
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX || node.alpha_node == UINT32_MAX) {
         throw std::runtime_error("Attention-backward node is missing q/k/v/dO input(s).");
@@ -1734,7 +1742,9 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
         }
     }
     if (node.attention_use_paged_kv_cache) {
-        throw std::runtime_error("Attention-backward with paged KV cache is not enabled; the paged KV path is inference-only until training semantics are defined.");
+        throw std::runtime_error(
+            "Attention-backward with paged KV cache is not enabled; the paged KV path is inference-only until training semantics are "
+            "defined.");
     }
     if (node.attention_dropout_probability > 0.0f) {
         if (node.attention_dropout_seed_node == UINT32_MAX || node.attention_dropout_offset_node == UINT32_MAX) {
@@ -1826,18 +1836,16 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
     const DataType output_dtype = node.output_dtype.value();
     const DataType compute_dtype = node.compute_dtype.value();
 
-    if (!isThorCudnnConvolutionFloatingDType(supported_input_dtype) ||
-        !isThorCudnnConvolutionFloatingDType(supported_filter_dtype) ||
+    if (!isThorCudnnConvolutionFloatingDType(supported_input_dtype) || !isThorCudnnConvolutionFloatingDType(supported_filter_dtype) ||
         !isThorCudnnConvolutionFloatingDType(output_dtype)) {
         throw std::runtime_error(std::string(fusedOpTag(node.op)) + " staged path uses cuDNN Frontend; " +
                                  thorCudnnConvolutionFloatingDTypesMessage() + ".");
     }
     if (!convolutionComputeDTypeIsCompatibleWithTensorDTypes({supported_input_dtype, supported_filter_dtype, output_dtype},
                                                              compute_dtype)) {
-        throw std::runtime_error(
-            std::string(fusedOpTag(node.op)) +
-            " staged path received an unsupported cuDNN compute dtype for the tensor dtypes. "
-            "FP8, BF16, and FP32 tensors require FP32 compute; FP16 tensors support FP16 or FP32 compute.");
+        throw std::runtime_error(std::string(fusedOpTag(node.op)) +
+                                 " staged path received an unsupported cuDNN compute dtype for the tensor dtypes. "
+                                 "FP8, BF16, and FP32 tensors require FP32 compute; FP16 tensors support FP16 or FP32 compute.");
     }
 
     return make_shared<CompiledConvolution>(node.op == ExprOp::CONV3D,
@@ -1899,18 +1907,16 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
     const DataType output_dtype = node.output_dtype.value();
     const DataType compute_dtype = node.compute_dtype.value();
 
-    if (!isThorCudnnConvolutionFloatingDType(supported_input_dtype) ||
-        !isThorCudnnConvolutionFloatingDType(supported_grad_output_dtype) ||
+    if (!isThorCudnnConvolutionFloatingDType(supported_input_dtype) || !isThorCudnnConvolutionFloatingDType(supported_grad_output_dtype) ||
         !isThorCudnnConvolutionFloatingDType(output_dtype)) {
         throw std::runtime_error(std::string(fusedOpTag(node.op)) + " staged path uses cuDNN Frontend; " +
                                  thorCudnnConvolutionFloatingDTypesMessage() + ".");
     }
     if (!convolutionComputeDTypeIsCompatibleWithTensorDTypes({supported_input_dtype, supported_grad_output_dtype, output_dtype},
                                                              compute_dtype)) {
-        throw std::runtime_error(
-            std::string(fusedOpTag(node.op)) +
-            " staged path received an unsupported cuDNN compute dtype for the tensor dtypes. "
-            "FP8, BF16, and FP32 tensors require FP32 compute; FP16 tensors support FP16 or FP32 compute.");
+        throw std::runtime_error(std::string(fusedOpTag(node.op)) +
+                                 " staged path received an unsupported cuDNN compute dtype for the tensor dtypes. "
+                                 "FP8, BF16, and FP32 tensors require FP32 compute; FP16 tensors support FP16 or FP32 compute.");
     }
 
     return make_shared<CompiledConvolutionBackward>(node.op,
@@ -2600,7 +2606,6 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
     };
 }
 
-
 static void forceAttentionSeqLenLocalInputDType(PhysicalExpression& stage_expr, uint32_t local_idx, const char* label) {
     if (local_idx >= stage_expr.nodes.size()) {
         throw std::runtime_error(std::string("Attention sequence-length local input index out of range for ") + label + ".");
@@ -2654,7 +2659,8 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
     PhysicalExpression stage_expr;
     std::vector<uint32_t> input_value_ids;
     input_value_ids.reserve(3 + (node.attention_use_bias ? 1 : 0) + (node.attention_use_padding_mask ? 2 : 0) +
-                            (node.attention_use_ragged_offsets ? 2 : 0) + (node.attention_use_paged_kv_cache ? 2 : 0) + (node.attention_dropout_probability > 0.0f ? 2 : 0));
+                            (node.attention_use_ragged_offsets ? 2 : 0) + (node.attention_use_paged_kv_cache ? 2 : 0) +
+                            (node.attention_dropout_probability > 0.0f ? 2 : 0));
 
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
@@ -2803,13 +2809,16 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
         throw std::runtime_error("Attention-backward dBias output requested for an unbiased attention node.");
     }
     if (node.attention_use_paged_kv_cache) {
-        throw std::runtime_error("Attention-backward with paged KV cache is not enabled; the paged KV path is inference-only until training semantics are defined.");
+        throw std::runtime_error(
+            "Attention-backward with paged KV cache is not enabled; the paged KV path is inference-only until training semantics are "
+            "defined.");
     }
 
     PhysicalExpression stage_expr;
     std::vector<uint32_t> input_value_ids;
     input_value_ids.reserve(4 + (node.attention_use_bias ? 1 : 0) + (node.attention_use_padding_mask ? 2 : 0) +
-                            (node.attention_use_ragged_offsets ? 2 : 0) + (node.attention_use_paged_kv_cache ? 2 : 0) + (node.attention_dropout_probability > 0.0f ? 2 : 0));
+                            (node.attention_use_ragged_offsets ? 2 : 0) + (node.attention_use_paged_kv_cache ? 2 : 0) +
+                            (node.attention_dropout_probability > 0.0f ? 2 : 0));
 
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
@@ -3240,6 +3249,7 @@ static PhysicalExecutionStage buildReduceMinMaxBackwardStage(const PhysicalExpre
 struct PlannedExecution {
     std::vector<PhysicalExecutionStage> stages;
     std::vector<CompiledStageOutput> final_outputs;
+    std::vector<CompiledValueAlias> value_aliases;
 };
 
 static bool regionContainsShapeOnlyOp(const PhysicalExpression& expr, const std::unordered_set<uint32_t>& region_nodes) {
@@ -3248,7 +3258,7 @@ static bool regionContainsShapeOnlyOp(const PhysicalExpression& expr, const std:
             throw std::runtime_error("regionContainsShapeOnlyOp node index out of range.");
         }
         const ExprNode& node = expr.nodes[node_idx];
-        if (node.op == ExprOp::UNSQUEEZE || node.op == ExprOp::SQUEEZE) {
+        if (node.op == ExprOp::RESHAPE || node.op == ExprOp::UNSQUEEZE || node.op == ExprOp::SQUEEZE) {
             return true;
         }
     }
@@ -3295,6 +3305,29 @@ static void forceReductionProducerOutputDTypeIfNeeded(PhysicalExpression& expr, 
     producer.output_dtype = DataType::FP16;
 }
 
+static bool isContiguousReshapeAliasOp(ExprOp op) { return op == ExprOp::RESHAPE; }
+
+static bool reshapeAliasPreservesDType(const PhysicalExpression& expr, uint32_t reshape_idx) {
+    if (reshape_idx >= expr.nodes.size()) {
+        throw std::runtime_error("reshapeAliasPreservesDType node index out of range.");
+    }
+    const ExprNode& reshape_node = expr.nodes[reshape_idx];
+    if (!isContiguousReshapeAliasOp(reshape_node.op)) {
+        return false;
+    }
+    if (reshape_node.lhs == UINT32_MAX || reshape_node.lhs >= expr.nodes.size()) {
+        throw std::runtime_error("Reshape alias node is missing a valid source while checking dtype preservation.");
+    }
+    if (!reshape_node.output_dtype.has_value()) {
+        throw std::runtime_error("Reshape alias node missing resolved output dtype.");
+    }
+    const ExprNode& source_node = expr.nodes[reshape_node.lhs];
+    if (!source_node.output_dtype.has_value()) {
+        throw std::runtime_error("Reshape alias source node missing resolved output dtype.");
+    }
+    return reshape_node.output_dtype.value() == source_node.output_dtype.value();
+}
+
 static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     if (!outputs.expr) {
         throw std::runtime_error("Cannot split null PhysicalOutputs expression.");
@@ -3334,6 +3367,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
     std::function<void(size_t)> materializeTerminalGroup;
     std::function<void(uint32_t)> emitForDependency;
+    std::function<uint32_t(uint32_t, std::optional<uint32_t>)> emitContiguousReshapeAlias;
     std::function<bool(uint32_t, uint32_t, const std::string&)> tryEmitTiledTransposeMaterializedFusedStage;
 
     materializeTerminalGroup = [&](size_t group_idx) {
@@ -3357,6 +3391,54 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
 
         group.emitted = true;
+    };
+
+    emitContiguousReshapeAlias = [&](uint32_t reshape_idx, std::optional<uint32_t> forced_value_id) -> uint32_t {
+        auto existing_it = node_output_value_id.find(reshape_idx);
+        if (existing_it != node_output_value_id.end()) {
+            return existing_it->second;
+        }
+        if (reshape_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Reshape alias node index out of range.");
+        }
+        const ExprNode& reshape_node = expr.nodes[reshape_idx];
+        if (!isContiguousReshapeAliasOp(reshape_node.op)) {
+            throw std::runtime_error("emitContiguousReshapeAlias called on a non-reshape node.");
+        }
+        if (!reshapeAliasPreservesDType(expr, reshape_idx)) {
+            throw std::runtime_error("emitContiguousReshapeAlias called on a reshape that requires dtype conversion.");
+        }
+        if (reshape_node.lhs == UINT32_MAX || reshape_node.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("Reshape alias node is missing a valid source.");
+        }
+        if (reshape_node.reshape_dims.empty()) {
+            throw std::runtime_error("Reshape alias node is missing output dimensions.");
+        }
+
+        const uint32_t source_node_idx = reshape_node.lhs;
+        const ExprNode& source_node = expr.nodes[source_node_idx];
+        uint32_t source_value_id = UINT32_MAX;
+        if (isContiguousReshapeAliasOp(source_node.op) && reshapeAliasPreservesDType(expr, source_node_idx)) {
+            source_value_id = emitContiguousReshapeAlias(source_node_idx, std::nullopt);
+        } else if (source_node.op == ExprOp::INPUT && !inputRequiresMaterialization(source_node)) {
+            source_value_id = source_node.input_slot;
+        } else {
+            emitForDependency(source_node_idx);
+            auto source_it = node_output_value_id.find(source_node_idx);
+            if (source_it == node_output_value_id.end()) {
+                throw std::runtime_error("Failed to materialize source value for reshape alias.");
+            }
+            source_value_id = source_it->second;
+        }
+
+        const uint32_t alias_value_id = forced_value_id.has_value() ? forced_value_id.value() : next_value_id++;
+        node_output_value_id[reshape_idx] = alias_value_id;
+        planned.value_aliases.push_back(CompiledValueAlias{
+            .value_id = alias_value_id,
+            .source_value_id = source_value_id,
+            .dimensions = reshape_node.reshape_dims,
+        });
+        return alias_value_id;
     };
 
     tryEmitTiledTransposeMaterializedFusedStage = [&](uint32_t transpose_idx, uint32_t output_value_id, const std::string& output_name) {
@@ -3417,6 +3499,10 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
 
         const ExprNode& root = expr.nodes[root_idx];
+        if (isContiguousReshapeAliasOp(root.op) && reshapeAliasPreservesDType(expr, root_idx)) {
+            emitContiguousReshapeAlias(root_idx, std::nullopt);
+            return;
+        }
         if (isTransposeOp(root.op)) {
             const uint32_t stage_out_id = next_value_id++;
             if (tryEmitTiledTransposeMaterializedFusedStage(root_idx, stage_out_id, "")) {
@@ -3470,7 +3556,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
 
             ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isConvolutionOp(root.op)) {
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
+                isConvolutionOp(root.op)) {
                 ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
             }
             if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
@@ -3643,6 +3730,16 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     for (const NamedOutput& named_output : outputs.outputs) {
         const ExprNode& root = expr.nodes[named_output.node_idx];
 
+        if (isContiguousReshapeAliasOp(root.op) && reshapeAliasPreservesDType(expr, named_output.node_idx)) {
+            const uint32_t alias_value_id = emitContiguousReshapeAlias(named_output.node_idx, std::nullopt);
+            planned.final_outputs.push_back(CompiledStageOutput{
+                .name = named_output.name,
+                .local_node_idx = UINT32_MAX,
+                .value_id = alias_value_id,
+            });
+            continue;
+        }
+
         if (isTransposeOp(root.op)) {
             const uint32_t stage_out_id = next_value_id++;
             if (tryEmitTiledTransposeMaterializedFusedStage(named_output.node_idx, stage_out_id, named_output.name)) {
@@ -3706,7 +3803,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
 
             ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isConvolutionOp(root.op)) {
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
+                isConvolutionOp(root.op)) {
                 ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
             }
             if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
@@ -3922,7 +4020,8 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             }
             case PhysicalExecutionStage::Kind::AttentionBackward: {
                 std::shared_ptr<CompiledAttentionBackward> attention_backward = compileAttentionBackward(stage.expr);
-                compiled->stages.emplace_back(stage.expr, attention_backward, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                compiled->stages.emplace_back(
+                    stage.expr, attention_backward, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::Convolution: {
@@ -3946,6 +4045,7 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
     }
 
     compiled->final_outputs = std::move(planned.final_outputs);
+    compiled->value_aliases = std::move(planned.value_aliases);
     return compiled;
 }
 
