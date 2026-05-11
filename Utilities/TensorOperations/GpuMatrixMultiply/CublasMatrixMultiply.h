@@ -82,6 +82,12 @@ class CublasMatrixMultiply {
 
     using Fp8MatmulScales = CublasFp8MatmulScales;
 
+    enum class EpilogueFusion {
+        Default,
+        Relu,
+        Gelu,
+    };
+
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
     // accumulate=true computes C += A * B. accumulate=false computes C = A * B.
@@ -307,6 +313,29 @@ class CublasMatrixMultiply {
                                         const Fp8MatmulScales fp8Scales,
                                         Stream stream,
                                         CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+
+    // D = epilogue(alpha*(A*B) + optional addend). If addendIsBiasVector is true, addend must
+    // be a packed rank-1 vector with one element per output column and is applied through
+    // the cuBLASLt bias epilogue. Otherwise addend, when present, must be a rank-2 C tensor.
+    // This heuristic-only wrapper is intended for fused cuBLASLt epilogue opportunities where
+    // avoiding a separate expression kernel is more important than preselecting a workspace-backed algorithm.
+    void gemmWithEpilogueUsingHeuristicKernelChoice(Tensor A,
+                                                    Tensor B,
+                                                    std::optional<Tensor> addend,
+                                                    Tensor D,
+                                                    const int32_t A_rows,
+                                                    const int32_t A_cols,
+                                                    const int32_t B_rows,
+                                                    const int32_t B_cols,
+                                                    bool transposeA,
+                                                    bool transposeB,
+                                                    const float *alpha,
+                                                    const float *beta,
+                                                    const MatmulDataTypes dataTypes,
+                                                    EpilogueFusion epilogue,
+                                                    bool addendIsBiasVector,
+                                                    Stream stream,
+                                                    CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
 
     // D = alpha*(A*B) + bias, where bias has one element per output column.
     // This uses the cuBLASLt bias epilogue instead of a separate broadcast add kernel.

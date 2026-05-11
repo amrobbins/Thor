@@ -1,3 +1,4 @@
+import math
 import subprocess
 
 import numpy as np
@@ -97,6 +98,25 @@ def _assert_close(got: np.ndarray, expected: np.ndarray, dtype: thor.DataType):
         np.testing.assert_allclose(got32, expected32, rtol=7e-2, atol=7e-2)
     else:
         raise AssertionError(f"Unhandled dtype: {dtype}")
+
+
+def _assert_cublaslt_gelu_close(got: np.ndarray, expected: np.ndarray, dtype: thor.DataType):
+    got32 = got.astype(np.float32)
+    expected32 = expected.astype(np.float32)
+
+    if dtype == thor.DataType.fp32:
+        # cuBLASLt's GELU epilogue uses the common tanh-polynomial GELU approximation,
+        # so fp32 fused-GELU results are close to, but not bitwise-equivalent to, the
+        # expression-level x * normcdf(x) reference.
+        np.testing.assert_allclose(got32, expected32, rtol=3e-3, atol=3e-4)
+    else:
+        _assert_close(got32, expected32, dtype)
+
+
+def _gelu_np(x: np.ndarray) -> np.ndarray:
+    erf = np.vectorize(math.erf, otypes=[np.float32])
+    x32 = x.astype(np.float32)
+    return 0.5 * x32 * (1.0 + erf(x32 / np.float32(math.sqrt(2.0))))
 
 
 def _host_to_gpu(arr: np.ndarray, dtype: thor.DataType, stream: Stream, gpu_num: int = 0) -> PhysicalTensor:
@@ -623,6 +643,141 @@ def test_operator_matmul_plus_vector_bias_lowers_to_cublaslt_bias_epilogue(dtype
     stamped.run()
     got = _copy_to_host(stamped.output(), dtype, stream)
     _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", MATMUL_DTYPES)
+def test_operator_matmul_relu_lowers_to_cublaslt_relu_epilogue(dtype: thor.DataType):
+    a = ex.input("a")
+    b = ex.input("b")
+    eq = ex.compile(ex.max(ex.matmul(a, b, compute_dtype=thor.DataType.fp32, output_dtype=dtype), 0.0), device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32).astype(storage_dtype)
+    b_np = np.array([[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]],
+                    dtype=np.float32).astype(storage_dtype)
+    expected = np.maximum(a_np.astype(np.float32) @ b_np.astype(np.float32), 0.0)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+    }
+
+    stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+    assert len(stage_kinds) == 1
+    assert stage_kinds[0].startswith("Matmul")
+    assert "epilogue=relu" in stage_kinds[0]
+    assert "FusedKernel" not in stage_kinds
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", MATMUL_DTYPES)
+def test_operator_matmul_bias_relu_lowers_to_cublaslt_relu_bias_epilogue(dtype: thor.DataType):
+    a = ex.input("a")
+    b = ex.input("b")
+    bias = ex.input("bias")
+    projected = ex.matmul(a, b, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + bias
+    eq = ex.compile(ex.max(projected, 0.0), device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32).astype(storage_dtype)
+    b_np = np.array([[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]],
+                    dtype=np.float32).astype(storage_dtype)
+    bias_np = np.array([0.25, -1.0, 2.0, 0.5], dtype=np.float32).astype(storage_dtype)
+    expected = np.maximum(a_np.astype(np.float32) @ b_np.astype(np.float32) + bias_np.astype(np.float32), 0.0)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, dtype, stream),
+    }
+
+    stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+    assert len(stage_kinds) == 1
+    assert stage_kinds[0].startswith("Matmul")
+    assert "epilogue=relu" in stage_kinds[0]
+    assert "FusedKernel" not in stage_kinds
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", MATMUL_DTYPES)
+def test_operator_matmul_gelu_lowers_to_cublaslt_gelu_epilogue(dtype: thor.DataType):
+    a = ex.input("a")
+    b = ex.input("b")
+    projected = ex.matmul(a, b, compute_dtype=thor.DataType.fp32, output_dtype=dtype)
+    eq = ex.compile(projected * ex.normcdf(projected), device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32).astype(storage_dtype)
+    b_np = np.array([[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]],
+                    dtype=np.float32).astype(storage_dtype)
+    projected_np = a_np.astype(np.float32) @ b_np.astype(np.float32)
+    expected = _gelu_np(projected_np)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+    }
+
+    stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+    assert len(stage_kinds) == 1
+    assert stage_kinds[0].startswith("Matmul")
+    assert "epilogue=gelu" in stage_kinds[0]
+    assert "FusedKernel" not in stage_kinds
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_cublaslt_gelu_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", MATMUL_DTYPES)
+def test_operator_matmul_bias_gelu_lowers_to_cublaslt_gelu_bias_epilogue(dtype: thor.DataType):
+    a = ex.input("a")
+    b = ex.input("b")
+    bias = ex.input("bias")
+    projected = ex.matmul(a, b, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + bias
+    eq = ex.compile(projected * ex.normcdf(projected), device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32).astype(storage_dtype)
+    b_np = np.array([[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]],
+                    dtype=np.float32).astype(storage_dtype)
+    bias_np = np.array([0.25, -1.0, 2.0, 0.5], dtype=np.float32).astype(storage_dtype)
+    projected_np = a_np.astype(np.float32) @ b_np.astype(np.float32) + bias_np.astype(np.float32)
+    expected = _gelu_np(projected_np)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, dtype, stream),
+    }
+
+    stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+    assert len(stage_kinds) == 1
+    assert stage_kinds[0].startswith("Matmul")
+    assert "epilogue=gelu" in stage_kinds[0]
+    assert "FusedKernel" not in stage_kinds
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_cublaslt_gelu_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
 
 
 @pytest.mark.cuda

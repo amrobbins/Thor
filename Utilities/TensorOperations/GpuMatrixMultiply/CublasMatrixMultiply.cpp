@@ -1234,20 +1234,35 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
 }
 
 
-void CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice(Tensor A,
-                                                                  Tensor B,
-                                                                  Tensor bias,
-                                                                  Tensor D,
-                                                                  const int32_t A_rows,
-                                                                  const int32_t A_cols,
-                                                                  const int32_t B_rows,
-                                                                  const int32_t B_cols,
-                                                                  bool transposeA,
-                                                                  bool transposeB,
-                                                                  const float *alpha,
-                                                                  const MatmulDataTypes dataTypes,
-                                                                  Stream stream,
-                                                                  CublasScalarPointerMode pointerMode) {
+static cublasLtEpilogue_t toCublasLtEpilogue(CublasMatrixMultiply::EpilogueFusion epilogue, bool hasBias) {
+    switch (epilogue) {
+        case CublasMatrixMultiply::EpilogueFusion::Default:
+            return hasBias ? CUBLASLT_EPILOGUE_BIAS : CUBLASLT_EPILOGUE_DEFAULT;
+        case CublasMatrixMultiply::EpilogueFusion::Relu:
+            return hasBias ? static_cast<cublasLtEpilogue_t>(CUBLASLT_EPILOGUE_RELU | CUBLASLT_EPILOGUE_BIAS) : CUBLASLT_EPILOGUE_RELU;
+        case CublasMatrixMultiply::EpilogueFusion::Gelu:
+            return hasBias ? static_cast<cublasLtEpilogue_t>(CUBLASLT_EPILOGUE_GELU | CUBLASLT_EPILOGUE_BIAS) : CUBLASLT_EPILOGUE_GELU;
+    }
+    throw std::runtime_error("Unknown cuBLASLt GEMM epilogue fusion kind.");
+}
+
+void CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice(Tensor A,
+                                                                      Tensor B,
+                                                                      std::optional<Tensor> addend,
+                                                                      Tensor D,
+                                                                      const int32_t A_rows,
+                                                                      const int32_t A_cols,
+                                                                      const int32_t B_rows,
+                                                                      const int32_t B_cols,
+                                                                      bool transposeA,
+                                                                      bool transposeB,
+                                                                      const float *alpha,
+                                                                      const float *beta,
+                                                                      const MatmulDataTypes dataTypes,
+                                                                      EpilogueFusion epilogue,
+                                                                      bool addendIsBiasVector,
+                                                                      Stream stream,
+                                                                      CublasScalarPointerMode pointerMode) {
     const int32_t C_rows = (transposeA == false ? A_rows : A_cols);
     const int32_t C_cols = (transposeB == false ? B_cols : B_rows);
     const int32_t D_rows = C_rows;
@@ -1255,28 +1270,40 @@ void CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice(Tensor A,
     const int32_t ld_A = A.getDimensions()[1];
     const int32_t ld_B = B.getDimensions()[1];
     const int32_t ld_D = D.getDimensions()[1];
+    const int32_t ld_C = (addend.has_value() && !addendIsBiasVector) ? addend.value().getDimensions()[1] : ld_D;
 
     THOR_THROW_IF_FALSE(A.getDimensions().size() == 2);
     THOR_THROW_IF_FALSE(B.getDimensions().size() == 2);
     THOR_THROW_IF_FALSE(D.getDimensions().size() == 2);
-    THOR_THROW_IF_FALSE(bias.getDimensions().size() == 1);
-    THOR_THROW_IF_FALSE(bias.getDimensions()[0] == static_cast<uint64_t>(D_cols));
     THOR_THROW_IF_FALSE(A.getDimensions()[0] == static_cast<uint32_t>(A_rows));
     THOR_THROW_IF_FALSE(A.getDimensions()[1] == static_cast<uint32_t>(ld_A));
     THOR_THROW_IF_FALSE(B.getDimensions()[0] == static_cast<uint32_t>(B_rows));
     THOR_THROW_IF_FALSE(B.getDimensions()[1] == static_cast<uint32_t>(ld_B));
     THOR_THROW_IF_FALSE(D.getDimensions()[0] == static_cast<uint32_t>(D_rows));
     THOR_THROW_IF_FALSE(D.getDimensions()[1] == static_cast<uint32_t>(ld_D));
-    THOR_THROW_IF_FALSE(bias.getDescriptor().getDataType() == D.getDescriptor().getDataType());
 
-    if (transposeA || transposeB) {
-        throw std::runtime_error(
-            "CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice currently supports only non-transposed row-major GEMM bias epilogues.");
+    if (addendIsBiasVector) {
+        THOR_THROW_IF_FALSE(addend.has_value());
+        THOR_THROW_IF_FALSE(addend.value().getDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(addend.value().getDimensions()[0] == static_cast<uint64_t>(D_cols));
+        THOR_THROW_IF_FALSE(addend.value().getDescriptor().getDataType() == D.getDescriptor().getDataType());
+    } else if (addend.has_value()) {
+        THOR_THROW_IF_FALSE(addend.value().getDimensions().size() == 2);
+        THOR_THROW_IF_FALSE(addend.value().getDimensions()[0] == static_cast<uint64_t>(D_rows));
+        THOR_THROW_IF_FALSE(addend.value().getDimensions()[1] == static_cast<uint64_t>(ld_C));
     }
 
-    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice");
+    if (!addend.has_value() && epilogue == EpilogueFusion::Default) {
+        throw std::runtime_error("CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice requires an addend or a non-default epilogue.");
+    }
+    if (transposeA || transposeB) {
+        throw std::runtime_error(
+            "CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice currently supports only non-transposed row-major GEMM epilogues.");
+    }
+
+    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice");
     validateFp8MatmulScaleConfigurationOrThrow(
-        dataTypes, Fp8MatmulScales::none(), "CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice");
+        dataTypes, Fp8MatmulScales::none(), "CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice");
 
     ScopedGpu scopedGpu(stream.getGpuNum());
 
@@ -1294,14 +1321,14 @@ void CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice(Tensor A,
                                                  B_cols,
                                                  ld_A,
                                                  ld_B,
-                                                 ld_D,
+                                                 ld_C,
                                                  ld_D,
                                                  transposeA,
                                                  transposeB,
-                                                 "CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice");
+                                                 "CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice");
     if (fp8NeedsRowMajorTransposeWorkspace(operationType, transposeA, transposeB)) {
         throw std::runtime_error(
-            "CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice FP8 row-major path requires non-bias workspace support.");
+            "CublasMatrixMultiply::gemmWithEpilogueUsingHeuristicKernelChoice FP8 row-major path requires non-epilogue workspace support.");
     }
 
     CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, operationType.computeDataType, operationType.scaleDataType));
@@ -1311,19 +1338,21 @@ void CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice(Tensor A,
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &cublasPointerMode, sizeof(cublasPointerMode)));
     configureTensorwideFp8Scales(operationDesc, operationType, Fp8MatmulScales::none());
 
-    cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_BIAS;
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)));
-    void *biasPtr = bias.getMemPtr();
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &biasPtr, sizeof(biasPtr)));
+    const cublasLtEpilogue_t cublasEpilogue = toCublasLtEpilogue(epilogue, addendIsBiasVector);
+    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &cublasEpilogue, sizeof(cublasEpilogue)));
+    if (addendIsBiasVector) {
+        void *biasPtr = addend.value().getMemPtr();
+        CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &biasPtr, sizeof(biasPtr)));
+    }
 
     // cuBLASLt's bias epilogue is most reliable in the column-major convention where the
     // bias vector has one element per row of D.  Thor tensors are row-major, so present the
     // public D[M,N] buffer as a column-major D^T[N,M] view and compute:
     //
-    //     D^T = B^T * A^T + bias
+    //     D^T = B^T * A^T + optional C^T/bias, then activation if requested
     //
     // This preserves the public row-major D = A * B API, makes the rank-1 bias length N,
-    // and avoids a separate broadcast-add kernel.
+    // and avoids a separate expression kernel for bias/ReLU/GELU epilogues.
     const cublasLtOrder_t columnMajorOrder = CUBLASLT_ORDER_COL;
     int64_t ld = 0;
 
@@ -1337,9 +1366,10 @@ void CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice(Tensor A,
     ld = ld_A;
     CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
 
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&CDesc, operationType.DDataType, D_cols, D_rows, ld_D));
+    const cudaDataType_t cDescType = addend.has_value() && !addendIsBiasVector ? operationType.CDataType : operationType.DDataType;
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&CDesc, cDescType, D_cols, D_rows, ld_C));
     CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
-    ld = ld_D;
+    ld = ld_C;
     CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
 
     CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&DDesc, operationType.DDataType, D_cols, D_rows, ld_D));
@@ -1349,7 +1379,15 @@ void CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice(Tensor A,
 
     const void *ltA = B.getMemPtr();
     const void *ltB = A.getMemPtr();
+    const void *ltC = (addend.has_value() && !addendIsBiasVector) ? addend.value().getMemPtr() : D.getMemPtr();
     const float betaZero = 0.0f;
+    const float betaOne = 1.0f;
+    const float *effectiveBeta = addend.has_value() && !addendIsBiasVector ? beta : &betaZero;
+    if (addendIsBiasVector) {
+        effectiveBeta = &betaZero;
+    } else if (addend.has_value() && effectiveBeta == nullptr) {
+        effectiveBeta = &betaOne;
+    }
 
     cublasLtMatmulPreference_t searchPreferences;
     CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&searchPreferences));
@@ -1381,8 +1419,8 @@ void CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice(Tensor A,
                                                ADesc,
                                                ltB,
                                                BDesc,
-                                               &betaZero,
-                                               D.getMemPtr(),
+                                               effectiveBeta,
+                                               ltC,
                                                CDesc,
                                                D.getMemPtr(),
                                                DDesc,
@@ -1402,6 +1440,41 @@ void CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice(Tensor A,
 
     THOR_THROW_IF_FALSE(kernelLaunchedSuccessfully);
 }
+
+void CublasMatrixMultiply::gemmWithBiasUsingHeuristicKernelChoice(Tensor A,
+                                                                  Tensor B,
+                                                                  Tensor bias,
+                                                                  Tensor D,
+                                                                  const int32_t A_rows,
+                                                                  const int32_t A_cols,
+                                                                  const int32_t B_rows,
+                                                                  const int32_t B_cols,
+                                                                  bool transposeA,
+                                                                  bool transposeB,
+                                                                  const float *alpha,
+                                                                  const MatmulDataTypes dataTypes,
+                                                                  Stream stream,
+                                                                  CublasScalarPointerMode pointerMode) {
+    const float betaOne = 1.0f;
+    gemmWithEpilogueUsingHeuristicKernelChoice(A,
+                                               B,
+                                               bias,
+                                               D,
+                                               A_rows,
+                                               A_cols,
+                                               B_rows,
+                                               B_cols,
+                                               transposeA,
+                                               transposeB,
+                                               alpha,
+                                               &betaOne,
+                                               dataTypes,
+                                               EpilogueFusion::Default,
+                                               true,
+                                               stream,
+                                               pointerMode);
+}
+
 
 vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t numChoices,
                                                                    const int32_t gpuNum,

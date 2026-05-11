@@ -1619,9 +1619,24 @@ outputs: dict[str, PhysicalTensor]
             for (const auto& stage : compiled->stages) {
                 std::string label = ThorImplementation::CompiledExecutionStage::kindToString(stage.kind);
                 if (stage.kind == ThorImplementation::CompiledExecutionStage::Kind::Matmul && stage.matmul) {
+                    auto epilogue_name = [](ThorImplementation::MatmulEpilogue epilogue) {
+                        switch (epilogue) {
+                            case ThorImplementation::MatmulEpilogue::Default:
+                                return "default";
+                            case ThorImplementation::MatmulEpilogue::Relu:
+                                return "relu";
+                            case ThorImplementation::MatmulEpilogue::Gelu:
+                                return "gelu";
+                        }
+                        return "unknown";
+                    };
                     std::ostringstream oss;
                     oss << label << "(lhsT=" << (stage.matmul->transpose_lhs ? 1 : 0) << ",rhsT=" << (stage.matmul->transpose_rhs ? 1 : 0)
-                        << ",auxT=" << (stage.matmul->transpose_aux ? 1 : 0) << ")";
+                        << ",auxT=" << (stage.matmul->transpose_aux ? 1 : 0);
+                    if (stage.matmul->epilogue != ThorImplementation::MatmulEpilogue::Default) {
+                        oss << ",epilogue=" << epilogue_name(stage.matmul->epilogue);
+                    }
+                    oss << ")";
                     label = oss.str();
                 }
                 result.push_back(std::move(label));

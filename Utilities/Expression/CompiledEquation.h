@@ -299,6 +299,7 @@ struct CompiledMatmul {
     const TensorDescriptor::DataType aux_dtype;
     const TensorDescriptor::DataType output_dtype;
     const TensorDescriptor::DataType compute_dtype;
+    const MatmulEpilogue epilogue;
 
     bool operator==(const CompiledMatmul& other) const = default;
 
@@ -315,7 +316,8 @@ struct CompiledMatmul {
                    TensorDescriptor::DataType rhs_dtype,
                    TensorDescriptor::DataType aux_dtype,
                    TensorDescriptor::DataType output_dtype,
-                   std::optional<TensorDescriptor::DataType> compute_dtype)
+                   std::optional<TensorDescriptor::DataType> compute_dtype,
+                   MatmulEpilogue epilogue = MatmulEpilogue::Default)
         : op(op),
           transpose_lhs(transpose_lhs),
           transpose_rhs(transpose_rhs),
@@ -329,7 +331,8 @@ struct CompiledMatmul {
           rhs_dtype(rhs_dtype),
           aux_dtype(aux_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : output_dtype) {}
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : output_dtype),
+          epilogue(epilogue) {}
 };
 
 }  // namespace ThorImplementation

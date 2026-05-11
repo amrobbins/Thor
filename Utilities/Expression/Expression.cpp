@@ -308,6 +308,28 @@ void parseOptionalDTypeField(const json& src, const char* key, std::optional<Dat
     dst = optionalDTypeFromJson(src.at(key));
 }
 
+const char* matmulEpilogueName(MatmulEpilogue epilogue) {
+    switch (epilogue) {
+        case MatmulEpilogue::Default:
+            return "default";
+        case MatmulEpilogue::Relu:
+            return "relu";
+        case MatmulEpilogue::Gelu:
+            return "gelu";
+    }
+    throw std::runtime_error("Unknown MatmulEpilogue value.");
+}
+
+MatmulEpilogue matmulEpilogueFromName(const std::string& name) {
+    if (name == "default")
+        return MatmulEpilogue::Default;
+    if (name == "relu")
+        return MatmulEpilogue::Relu;
+    if (name == "gelu")
+        return MatmulEpilogue::Gelu;
+    throw std::runtime_error("Unknown matmul epilogue name in serialized expression: " + name);
+}
+
 uint64_t fnv1a64(const std::string& text) {
     constexpr uint64_t kOffset = 1469598103934665603ULL;
     constexpr uint64_t kPrime = 1099511628211ULL;
@@ -341,6 +363,7 @@ json exprNodeToJson(const ExprNode& node) {
     j["transpose_lhs"] = node.transpose_lhs;
     j["transpose_rhs"] = node.transpose_rhs;
     j["transpose_aux"] = node.transpose_aux;
+    j["matmul_epilogue"] = matmulEpilogueName(node.matmul_epilogue);
     j["conv_stride_d"] = node.conv_stride_d;
     j["conv_stride_h"] = node.conv_stride_h;
     j["conv_stride_w"] = node.conv_stride_w;
@@ -411,6 +434,7 @@ ExprNode exprNodeFromJson(const json& j) {
     node.transpose_lhs = j.value("transpose_lhs", false);
     node.transpose_rhs = j.value("transpose_rhs", false);
     node.transpose_aux = j.value("transpose_aux", false);
+    node.matmul_epilogue = matmulEpilogueFromName(j.value("matmul_epilogue", std::string("default")));
     node.conv_stride_d = j.value("conv_stride_d", 1);
     node.conv_stride_h = j.value("conv_stride_h", 1);
     node.conv_stride_w = j.value("conv_stride_w", 1);
@@ -770,6 +794,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             if (n.op == ExprOp::MATMUL) {
                 out += ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0);
                 out += ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0);
+                out += ";epilogue=" + std::string(matmulEpilogueName(n.matmul_epilogue));
             } else if (n.op == ExprOp::CONV2D || n.op == ExprOp::CONV2D_BACKWARD_DATA || n.op == ExprOp::CONV2D_BACKWARD_FILTER ||
                        n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
                 if (n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
@@ -864,7 +889,8 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             };
             out = opName(n.op) + "(" + a + "," + b + "," + c + gemmScaleString("alpha", n.alpha_node, n.alpha_fp) +
                   gemmScaleString("beta", n.beta_node, n.beta_fp) + ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0) +
-                  ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0) + ";tC=" + std::to_string(n.transpose_aux ? 1 : 0) + ")";
+                  ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0) + ";tC=" + std::to_string(n.transpose_aux ? 1 : 0) +
+                  ";epilogue=" + std::string(matmulEpilogueName(n.matmul_epilogue)) + ")";
             break;
         }
 

@@ -786,6 +786,18 @@ static void appendNodeDTypeSignature(std::string& s, const ExprNode& node) {
 
 static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint32_t node_idx);
 
+static const char* matmulEpilogueSignatureName(MatmulEpilogue epilogue) {
+    switch (epilogue) {
+        case MatmulEpilogue::Default:
+            return "default";
+        case MatmulEpilogue::Relu:
+            return "relu";
+        case MatmulEpilogue::Gelu:
+            return "gelu";
+    }
+    throw std::runtime_error("Unknown MatmulEpilogue value.");
+}
+
 static std::string uintVecSignature(const std::vector<uint64_t>& v) {
     std::string s = "[";
     for (size_t i = 0; i < v.size(); ++i) {
@@ -874,14 +886,16 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
 
             if (node.op == ExprOp::MATMUL) {
                 s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",ta=" + std::to_string(node.transpose_lhs ? 1 : 0) +
-                    ",tb=" + std::to_string(node.transpose_rhs ? 1 : 0) + ")";
+                    ",tb=" + std::to_string(node.transpose_rhs ? 1 : 0) +
+                    ",epilogue=" + std::string(matmulEpilogueSignatureName(node.matmul_epilogue)) + ")";
             } else {
                 const std::string aux = fusedRegionSignatureRec(expr, node.aux);
                 s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",aux=" + aux +
                     ",ta=" + std::to_string(node.transpose_lhs ? 1 : 0) + ",tb=" + std::to_string(node.transpose_rhs ? 1 : 0) +
                     ",tc=" + std::to_string(node.transpose_aux ? 1 : 0) +
                     ",alpha=" + gemmScaleSignature(expr, node.alpha_node, node.alpha_fp) +
-                    ",beta=" + gemmScaleSignature(expr, node.beta_node, node.beta_fp) + ")";
+                    ",beta=" + gemmScaleSignature(expr, node.beta_node, node.beta_fp) +
+                    ",epilogue=" + std::string(matmulEpilogueSignatureName(node.matmul_epilogue)) + ")";
             }
         } else if (isAttentionOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
@@ -1543,7 +1557,8 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
                                        compiled_rhs_dtype,
                                        compiled_aux_dtype,
                                        node.output_dtype.value(),
-                                       node.compute_dtype);
+                                       node.compute_dtype,
+                                       node.matmul_epilogue);
 }
 
 static bool isCudnnAttentionTensorDType(DataType dtype) {

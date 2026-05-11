@@ -38,7 +38,7 @@ def test_fully_connected_constructs_defaults_and_output_shape_dtype():
     assert y.get_data_type() == x.get_data_type()
 
     fc_arch = _only_layer_architecture(n, "fully_connected")
-    assert fc_arch["activation"]["layer_type"] == "soft_plus"
+    assert fc_arch["activation"]["layer_type"] == "gelu"
 
 
 def test_fully_connected_constructs_no_activation_when_none():
