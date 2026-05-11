@@ -49,6 +49,7 @@ enum class ExprOp : uint16_t {
     ROPE,
     SOFTMAX,
     FILL,
+    RESHAPE,
     UNSQUEEZE,
     SQUEEZE,
     TRANSPOSE,
@@ -206,6 +207,7 @@ struct ExprNode {
 
     // for shape/reduction nodes only
     std::vector<uint64_t> reduction_axes;
+    std::vector<uint64_t> reshape_dims;
     std::vector<uint64_t> squeeze_axes;
     std::vector<uint64_t> unsqueeze_axes;
     std::vector<uint64_t> fill_dims;
@@ -376,6 +378,7 @@ class Expression {
     [[nodiscard]] static Expression rope(const Expression& input, RotaryPositionEmbeddingOptions options = {}) {
         return input.rotaryPositionEmbedding(std::move(options));
     }
+    [[nodiscard]] Expression reshape(const std::vector<uint64_t>& new_dims) const;
     [[nodiscard]] Expression unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const;
     [[nodiscard]] Expression squeeze(const std::vector<uint64_t>& squeeze_axes) const;
     [[nodiscard]] Expression transpose() const;

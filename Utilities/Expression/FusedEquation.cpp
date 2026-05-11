@@ -78,6 +78,78 @@ static std::vector<uint64_t> runtimeInputDims(const RuntimeInputValue& value) {
     return {};
 }
 
+static uint64_t dimsNumelForRuntimeAlias(const std::vector<uint64_t>& dims) {
+    uint64_t result = 1;
+    for (uint64_t dim : dims) {
+        if (dim == 0) {
+            throw std::runtime_error("Runtime reshape alias dimensions must be non-zero.");
+        }
+        if (result > std::numeric_limits<uint64_t>::max() / dim) {
+            throw std::runtime_error("Runtime reshape alias dimensions overflow uint64_t.");
+        }
+        result *= dim;
+    }
+    return result;
+}
+
+static void validateRuntimeAliasDims(const std::vector<uint64_t>& source_dims, const std::vector<uint64_t>& alias_dims) {
+    if (alias_dims.empty()) {
+        throw std::runtime_error("Runtime reshape alias requires non-empty dimensions.");
+    }
+    if (dimsNumelForRuntimeAlias(source_dims) != dimsNumelForRuntimeAlias(alias_dims)) {
+        throw std::runtime_error("Runtime reshape alias must preserve the number of elements.");
+    }
+}
+
+static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& aliases,
+                                       std::unordered_map<uint32_t, std::vector<uint64_t>>& value_dims) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const CompiledValueAlias& alias : aliases) {
+            if (value_dims.contains(alias.value_id)) {
+                continue;
+            }
+            auto source_it = value_dims.find(alias.source_value_id);
+            if (source_it == value_dims.end()) {
+                continue;
+            }
+            validateRuntimeAliasDims(source_it->second, alias.dimensions);
+            value_dims.emplace(alias.value_id, alias.dimensions);
+            changed = true;
+        }
+    }
+}
+
+static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& aliases,
+                                       std::unordered_map<uint32_t, RuntimeInputValue>& values,
+                                       std::unordered_map<uint32_t, uint32_t>* producer_stage_by_value_id = nullptr) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const CompiledValueAlias& alias : aliases) {
+            if (values.contains(alias.value_id)) {
+                continue;
+            }
+            auto source_it = values.find(alias.source_value_id);
+            if (source_it == values.end()) {
+                continue;
+            }
+            Tensor tensor = runtimeInputTensor(source_it->second);
+            validateRuntimeAliasDims(tensor.getDimensions(), alias.dimensions);
+            tensor.reshape(alias.dimensions);
+            values.emplace(alias.value_id, tensor);
+            if (producer_stage_by_value_id != nullptr) {
+                auto producer_it = producer_stage_by_value_id->find(alias.source_value_id);
+                if (producer_it != producer_stage_by_value_id->end()) {
+                    (*producer_stage_by_value_id)[alias.value_id] = producer_it->second;
+                }
+            }
+            changed = true;
+        }
+    }
+}
+
 static DataType runtimeInputDType(const RuntimeInputValue& value) {
     if (std::holds_alternative<Tensor>(value)) {
         return std::get<Tensor>(value).getDataType();
@@ -278,12 +350,17 @@ static std::vector<uint64_t> inferExpressionMatmulOutputDims(const ExprNode& nod
 
     std::vector<uint64_t> out_dims{a_rows, b_cols};
     if (aux_dims) {
-        if (aux_dims->size() != 2) {
-            throw std::runtime_error("GEMM addend shape inference currently only supports rank-2 tensors.");
-        }
-        const std::vector<uint64_t> expected_aux = node.transpose_aux ? std::vector<uint64_t>{out_dims[1], out_dims[0]} : out_dims;
-        if (*aux_dims != expected_aux) {
-            throw std::runtime_error("GEMM addend shape inference found incompatible addend dimensions.");
+        if (aux_dims->size() == 1) {
+            if (node.transpose_aux || aux_dims->at(0) != out_dims[1]) {
+                throw std::runtime_error("GEMM bias epilogue addend must have shape [output_columns].");
+            }
+        } else if (aux_dims->size() == 2) {
+            const std::vector<uint64_t> expected_aux = node.transpose_aux ? std::vector<uint64_t>{out_dims[1], out_dims[0]} : out_dims;
+            if (*aux_dims != expected_aux) {
+                throw std::runtime_error("GEMM addend shape inference found incompatible addend dimensions.");
+            }
+        } else {
+            throw std::runtime_error("GEMM addend shape inference currently supports rank-2 addends or rank-1 bias epilogue vectors.");
         }
     }
 
@@ -500,7 +577,8 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                     throw std::runtime_error("RoPE sequence_axis/head_dim_axis are out of range for the input rank.");
                 }
                 if (node.rope_head_dim_axis + 1 != dims.size()) {
-                    throw std::runtime_error("RoPE currently requires head_dim_axis to be the innermost dimension for coalesced pair rotation.");
+                    throw std::runtime_error(
+                        "RoPE currently requires head_dim_axis to be the innermost dimension for coalesced pair rotation.");
                 }
                 const uint64_t head_dim = dims[node.rope_head_dim_axis];
                 const uint64_t rotary_dim = node.rope_rotary_dim == 0 ? head_dim : node.rope_rotary_dim;
@@ -512,6 +590,20 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::TRANSPOSE:
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
                 break;
+            case ExprOp::RESHAPE: {
+                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
+                auto numel = [](const std::vector<uint64_t>& dims) {
+                    uint64_t result = 1;
+                    for (uint64_t d : dims)
+                        result *= d;
+                    return result;
+                };
+                if (node.reshape_dims.empty() || numel(lhs_dims) != numel(node.reshape_dims)) {
+                    throw std::runtime_error("Expression reshape must preserve the number of elements.");
+                }
+                node_dims[i] = node.reshape_dims;
+                break;
+            }
             case ExprOp::UNSQUEEZE:
                 node_dims[i] = applyNormalizedUnsqueezeDims(node_dims[node.lhs], node.unsqueeze_axes);
                 break;
@@ -551,6 +643,43 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::REDUCE_MAX_BACKWARD:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::ATTENTION: {
+                if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX) {
+                    throw std::runtime_error("Attention shape inference for GEMM optimization found a malformed ATTENTION node.");
+                }
+                const std::vector<uint64_t>& q_dims = node_dims[node.lhs];
+                const std::vector<uint64_t>& k_dims = node_dims[node.rhs];
+                const std::vector<uint64_t>& v_dims = node_dims[node.aux];
+                if (q_dims.size() != 4 || k_dims.size() != 4 || v_dims.size() != 4) {
+                    throw std::runtime_error("Attention shape inference for GEMM optimization requires rank-4 q/k/v tensors.");
+                }
+                if (q_dims[0] != k_dims[0] || q_dims[0] != v_dims[0]) {
+                    throw std::runtime_error("Attention shape inference for GEMM optimization requires matching q/k/v batch dimensions.");
+                }
+                if (k_dims[1] != v_dims[1] || q_dims[1] % k_dims[1] != 0) {
+                    throw std::runtime_error("Attention shape inference for GEMM optimization found incompatible q/k/v head counts.");
+                }
+                if (k_dims[2] != v_dims[2] || q_dims[3] != k_dims[3]) {
+                    throw std::runtime_error("Attention shape inference for GEMM optimization found incompatible q/k/v sequence/head dimensions.");
+                }
+                node_dims[i] = {q_dims[0], q_dims[1], q_dims[2], v_dims[3]};
+                break;
+            }
+            case ExprOp::ATTENTION_BACKWARD_Q:
+                node_dims[i] = node_dims[node.lhs];
+                break;
+            case ExprOp::ATTENTION_BACKWARD_K:
+                node_dims[i] = node_dims[node.rhs];
+                break;
+            case ExprOp::ATTENTION_BACKWARD_V:
+                node_dims[i] = node_dims[node.aux];
+                break;
+            case ExprOp::ATTENTION_BACKWARD_BIAS:
+                if (!node.attention_use_bias || node.alpha_node == UINT32_MAX) {
+                    throw std::runtime_error("Attention dBias shape inference for GEMM optimization requires a bias input.");
+                }
+                node_dims[i] = node_dims[node.alpha_node];
+                break;
             default:
                 throw std::runtime_error("inferExpressionNodeDimsForOptimization encountered unknown ExprOp.");
         }
@@ -575,12 +704,15 @@ struct ScaledAddendPattern {
     uint32_t node_idx = UINT32_MAX;
     double beta_scale = 1.0;
     uint32_t beta_node = UINT32_MAX;
+    bool is_bias_vector = false;
 };
 
 struct GemmLoweringPattern {
     uint32_t lhs_idx = UINT32_MAX;
     uint32_t rhs_idx = UINT32_MAX;
     uint32_t addend_idx = UINT32_MAX;
+    bool is_bias_epilogue = false;
+    std::optional<DataType> matmul_output_dtype = std::nullopt;
     bool transpose_lhs = false;
     bool transpose_rhs = false;
     double alpha_scale = 1.0;
@@ -654,6 +786,22 @@ static bool tryMatchScaledAddendPattern(const PhysicalExpression& expr,
 
     const ExprNode& node = expr.nodes[node_idx];
 
+    auto is_compatible_unscaled_addend = [&](uint32_t candidate_idx) -> bool {
+        if (candidate_idx >= node_dims.size() || node_dims[candidate_idx].empty()) {
+            return false;
+        }
+        const std::vector<uint64_t>& dims = node_dims[candidate_idx];
+        if (dims == expected_dims) {
+            out.is_bias_vector = false;
+            return true;
+        }
+        if (expected_dims.size() == 2 && dims.size() == 1 && dims[0] == expected_dims[1]) {
+            out.is_bias_vector = true;
+            return true;
+        }
+        return false;
+    };
+
     // First, prefer matching an explicitly scaled addend like beta * C or C * beta.
     // Otherwise a MUL node whose overall dims match would be incorrectly treated as
     // an unscaled addend with beta = 1.
@@ -662,7 +810,7 @@ static bool tryMatchScaledAddendPattern(const PhysicalExpression& expr,
         uint32_t scale_node = UINT32_MAX;
 
         if (tryGetLowerableScaleNode(expr, node.lhs, scale_fp, scale_node)) {
-            if (node.rhs < node_dims.size() && !node_dims[node.rhs].empty() && node_dims[node.rhs] == expected_dims) {
+            if (is_compatible_unscaled_addend(node.rhs)) {
                 out.node_idx = node.rhs;
                 out.beta_scale = scale_fp;
                 out.beta_node = scale_node;
@@ -671,7 +819,7 @@ static bool tryMatchScaledAddendPattern(const PhysicalExpression& expr,
         }
 
         if (tryGetLowerableScaleNode(expr, node.rhs, scale_fp, scale_node)) {
-            if (node.lhs < node_dims.size() && !node_dims[node.lhs].empty() && node_dims[node.lhs] == expected_dims) {
+            if (is_compatible_unscaled_addend(node.lhs)) {
                 out.node_idx = node.lhs;
                 out.beta_scale = scale_fp;
                 out.beta_node = scale_node;
@@ -680,8 +828,8 @@ static bool tryMatchScaledAddendPattern(const PhysicalExpression& expr,
         }
     }
 
-    // Fallback: plain unscaled addend C.
-    if (!node_dims[node_idx].empty() && node_dims[node_idx] == expected_dims) {
+    // Fallback: plain unscaled matrix addend C or rank-1 bias vector.
+    if (is_compatible_unscaled_addend(node_idx)) {
         out.node_idx = node_idx;
         out.beta_scale = 1.0;
         out.beta_node = UINT32_MAX;
@@ -721,10 +869,36 @@ static bool tryBuildGemmLoweringPattern(const PhysicalExpression& expr,
         if (!tryMatchScaledAddendPattern(expr, addend_candidate, node_dims, matmul_dims, addend)) {
             return false;
         }
+        if (addend.is_bias_vector) {
+            // cuBLASLt bias epilogues add the bias vector directly.  Do not lower scaled
+            // or subtracted bias-vector expressions into this pattern until an explicit
+            // pre-scaled-bias materialization policy exists.
+            if (matmul_sign != 1.0 || addend_sign != 1.0 || addend.beta_scale != 1.0 || addend.beta_node != UINT32_MAX) {
+                return false;
+            }
+            // The current cuBLASLt bias-epilogue wrapper handles the hot row-major projection
+            // case.  Leave transposed matmul+bias expressions on the generic path until their
+            // exact epilogue contract is added deliberately.
+            if (matmul.transpose_lhs || matmul.transpose_rhs) {
+                return false;
+            }
+            // Do not silently turn ``matmul(..., output_dtype=X) + bias_dtype=Y`` into a
+            // different materialized output dtype through generic ADD promotion.  Projection
+            // bias epilogues are a no-extra-kernel path only when the public add result keeps
+            // the matmul output dtype.
+            const ExprNode& matmul_node = expr.nodes[matmul.matmul_node_idx];
+            if (matmul_node.output_dtype.has_value() && node.output_dtype.has_value() &&
+                matmul_node.output_dtype.value() != node.output_dtype.value()) {
+                throw std::runtime_error(
+                    "GEMM bias epilogue requires the bias tensor dtype to match the matmul output dtype; Thor will not insert an implicit conversion for a cuBLASLt bias epilogue.");
+            }
+        }
 
         out.lhs_idx = matmul.lhs_idx;
         out.rhs_idx = matmul.rhs_idx;
         out.addend_idx = addend.node_idx;
+        out.is_bias_epilogue = addend.is_bias_vector;
+        out.matmul_output_dtype = expr.nodes[matmul.matmul_node_idx].output_dtype;
         out.transpose_lhs = matmul.transpose_lhs;
         out.transpose_rhs = matmul.transpose_rhs;
         out.alpha_scale = matmul_sign * matmul.alpha_scale;
@@ -781,6 +955,18 @@ static void optimizeExpressionGemmPatternsInPlace(PhysicalExpression& expr,
         node.transpose_lhs = pattern.transpose_lhs;
         node.transpose_rhs = pattern.transpose_rhs;
         node.transpose_aux = false;
+        if (pattern.is_bias_epilogue && pattern.matmul_output_dtype.has_value()) {
+            // A rank-1 bias epilogue is a no-extra-kernel replacement for
+            // ``matmul(..., output_dtype=X) + bias``.  Preserve the matmul's
+            // explicit materialized dtype instead of letting generic ADD dtype
+            // promotion turn the public result into the bias dtype.  Runtime
+            // stamping will then fail loudly if the provided bias tensor does
+            // not already match this dtype.
+            node.output_dtype = pattern.matmul_output_dtype.value();
+            if (!node.backward_output_dtype.has_value()) {
+                node.backward_output_dtype = pattern.matmul_output_dtype.value();
+            }
+        }
         node.reduction_axes.clear();
         node.squeeze_axes.clear();
         node.unsqueeze_axes.clear();
@@ -876,12 +1062,17 @@ static std::vector<uint64_t> resolveMatmulOutputDimsFromInputs(const CompiledMat
     std::vector<uint64_t> out_dims{a_rows, b_cols};
     if (compiled_stage.op == ExprOp::GEMM) {
         const auto& c_dims = stage_input_dims[2];
-        if (c_dims.size() != 2) {
-            throw std::runtime_error("GEMM addend currently must be rank-2.");
-        }
-        std::vector<uint64_t> expected_c = compiled_stage.transpose_aux ? std::vector<uint64_t>{out_dims[1], out_dims[0]} : out_dims;
-        if (c_dims != expected_c) {
-            throw std::runtime_error("GEMM addend tensor dimensions are incompatible with the matmul output.");
+        if (c_dims.size() == 1) {
+            if (compiled_stage.transpose_aux || c_dims[0] != out_dims[1]) {
+                throw std::runtime_error("GEMM bias epilogue addend must have shape [output_columns].");
+            }
+        } else if (c_dims.size() == 2) {
+            std::vector<uint64_t> expected_c = compiled_stage.transpose_aux ? std::vector<uint64_t>{out_dims[1], out_dims[0]} : out_dims;
+            if (c_dims != expected_c) {
+                throw std::runtime_error("GEMM addend tensor dimensions are incompatible with the matmul output.");
+            }
+        } else {
+            throw std::runtime_error("GEMM addend currently must be rank-2 or a rank-1 bias epilogue vector.");
         }
     }
 
@@ -956,7 +1147,8 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
     if (compiled_stage.use_paged_kv_cache && compiled_stage.paged_kv_max_sequence_length <= 0) {
         throw std::runtime_error("Attention paged KV max sequence length must be positive.");
     }
-    const uint64_t kv_len = compiled_stage.use_paged_kv_cache ? static_cast<uint64_t>(compiled_stage.paged_kv_max_sequence_length) : kv_len_or_block;
+    const uint64_t kv_len =
+        compiled_stage.use_paged_kv_cache ? static_cast<uint64_t>(compiled_stage.paged_kv_max_sequence_length) : kv_len_or_block;
     size_t next_optional_idx = 3;
     if (compiled_stage.use_bias) {
         if (stage_input_dims.size() <= next_optional_idx) {
@@ -973,7 +1165,8 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
             throw std::runtime_error("Attention stage with padding mask expected q_seq_len and kv_seq_len input shapes.");
         }
         const std::vector<uint64_t> expected_seq_dims{batch};
-        if (stage_input_dims.at(next_optional_idx) != expected_seq_dims || stage_input_dims.at(next_optional_idx + 1) != expected_seq_dims) {
+        if (stage_input_dims.at(next_optional_idx) != expected_seq_dims ||
+            stage_input_dims.at(next_optional_idx + 1) != expected_seq_dims) {
             throw std::runtime_error("Attention padding-mask sequence lengths must have shape [B].");
         }
         next_optional_idx += 2;
@@ -1059,14 +1252,15 @@ static std::vector<uint64_t> resolveAttentionBackwardOutputDimsFromInputs(const 
     }
     if (compiled_stage.use_ragged_offsets) {
         if (stage_input_dims.size() <= next_optional_idx + 1) {
-            throw std::runtime_error("Attention-backward stage with ragged offsets expected q_ragged_offsets and kv_ragged_offsets input shapes.");
+            throw std::runtime_error(
+                "Attention-backward stage with ragged offsets expected q_ragged_offsets and kv_ragged_offsets input shapes.");
         }
         forward_input_dims.push_back(stage_input_dims.at(next_optional_idx));
         forward_input_dims.push_back(stage_input_dims.at(next_optional_idx + 1));
         next_optional_idx += 2;
     }
-    const std::vector<uint64_t> forward_out_dims = resolveAttentionOutputDimsFromInputs(
-        makeForwardAttentionView(compiled_stage, compiled_stage.dQ_dtype), forward_input_dims);
+    const std::vector<uint64_t> forward_out_dims =
+        resolveAttentionOutputDimsFromInputs(makeForwardAttentionView(compiled_stage, compiled_stage.dQ_dtype), forward_input_dims);
 
     const auto& dO_dims = stage_input_dims.at(3);
     if (dO_dims != forward_out_dims) {
@@ -1876,7 +2070,8 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
                     throw std::runtime_error("RoPE sequence_axis/head_dim_axis are out of range for the input rank.");
                 }
                 if (node.rope_head_dim_axis + 1 != dims.size()) {
-                    throw std::runtime_error("RoPE currently requires head_dim_axis to be the innermost dimension for coalesced pair rotation.");
+                    throw std::runtime_error(
+                        "RoPE currently requires head_dim_axis to be the innermost dimension for coalesced pair rotation.");
                 }
                 const uint64_t head_dim = dims[node.rope_head_dim_axis];
                 const uint64_t rotary_dim = node.rope_rotary_dim == 0 ? head_dim : node.rope_rotary_dim;
@@ -1887,6 +2082,20 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             }
             case ExprOp::TRANSPOSE:
                 throw std::runtime_error("inferFusedStageNodeDims encountered unexpected transpose op in fused stage.");
+            case ExprOp::RESHAPE: {
+                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
+                auto numel = [](const std::vector<uint64_t>& dims) {
+                    uint64_t result = 1;
+                    for (uint64_t d : dims)
+                        result *= d;
+                    return result;
+                };
+                if (node.reshape_dims.empty() || numel(lhs_dims) != numel(node.reshape_dims)) {
+                    throw std::runtime_error("inferFusedStageNodeDims RESHAPE failed: reshape must preserve the number of elements.");
+                }
+                node_dims[i] = node.reshape_dims;
+                break;
+            }
             case ExprOp::UNSQUEEZE: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
 
@@ -2065,6 +2274,7 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::TENSOR_RUNTIME_SCALAR:
         case ExprOp::SCALAR_FP:
         case ExprOp::FILL:
+        case ExprOp::RESHAPE:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
             return 0;
@@ -2165,13 +2375,28 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
                     throw std::runtime_error("RoPE sequence_axis/head_dim_axis are out of range for the input rank.");
                 }
                 if (node.rope_head_dim_axis + 1 != dims.size()) {
-                    throw std::runtime_error("RoPE currently requires head_dim_axis to be the innermost dimension for coalesced pair rotation.");
+                    throw std::runtime_error(
+                        "RoPE currently requires head_dim_axis to be the innermost dimension for coalesced pair rotation.");
                 }
                 const uint64_t head_dim = dims[node.rope_head_dim_axis];
                 const uint64_t rotary_dim = node.rope_rotary_dim == 0 ? head_dim : node.rope_rotary_dim;
                 if (rotary_dim == 0 || (rotary_dim & 1ULL) != 0ULL || rotary_dim > head_dim) {
                     throw std::runtime_error("RoPE rotary_dim must be even, non-zero, and <= the head dimension.");
                 }
+                break;
+            }
+            case ExprOp::RESHAPE: {
+                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
+                auto numel = [](const std::vector<uint64_t>& dims) {
+                    uint64_t result = 1;
+                    for (uint64_t d : dims)
+                        result *= d;
+                    return result;
+                };
+                if (node.reshape_dims.empty() || numel(lhs_dims) != numel(node.reshape_dims)) {
+                    throw std::runtime_error("Fused-stage reshape must preserve the number of elements.");
+                }
+                node_dims[i] = node.reshape_dims;
                 break;
             }
             case ExprOp::UNSQUEEZE: {
@@ -2243,6 +2468,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::TENSOR_RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
             case ExprOp::FILL:
+            case ExprOp::RESHAPE:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
                 break;
@@ -2443,8 +2669,8 @@ static uint64_t computeAttentionBackwardStageFlops(const CompiledAttentionBackwa
         }
         next_optional_idx += 2;
     }
-    const uint64_t forward = computeAttentionStageFlops(
-        makeForwardAttentionView(attention_backward, attention_backward.dQ_dtype), forward_input_dims);
+    const uint64_t forward =
+        computeAttentionStageFlops(makeForwardAttentionView(attention_backward, attention_backward.dQ_dtype), forward_input_dims);
     // cuDNN backward internally does the reverse softmax path plus three dense-gradient products.
     return checkedMulU64(forward, 4, "computeAttentionBackwardStageFlops");
 }
@@ -2735,7 +2961,7 @@ static bool stageHasShapeOnlyOps(const CompiledExecutionStage& stage) {
         return false;
     }
     for (const ExprNode& node : stage.expr.nodes) {
-        if (node.op == ExprOp::UNSQUEEZE || node.op == ExprOp::SQUEEZE) {
+        if (node.op == ExprOp::RESHAPE || node.op == ExprOp::UNSQUEEZE || node.op == ExprOp::SQUEEZE) {
             return true;
         }
     }
@@ -2827,6 +3053,7 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
             return {};
         case ExprOp::TRANSPOSE:
             throw std::runtime_error("collectEffectiveInputDimsForNode encountered unexpected transpose op in fused stage.");
+        case ExprOp::RESHAPE:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE: {
             auto result = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
@@ -3387,6 +3614,7 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
     for (const auto& [value_id, value] : root_values) {
         value_dims.emplace(value_id, runtimeInputDims(value));
     }
+    applyAvailableValueAliases(compiled_outputs->value_aliases, value_dims);
 
     for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
         std::vector<std::vector<uint64_t>> stage_input_dims;
@@ -3491,7 +3719,10 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
         } else {
             throw std::runtime_error("Unknown execution stage kind in getOutputShapes.");
         }
+        applyAvailableValueAliases(compiled_outputs->value_aliases, value_dims);
     }
+
+    applyAvailableValueAliases(compiled_outputs->value_aliases, value_dims);
 
     std::unordered_map<std::string, std::vector<uint64_t>> final_output_shapes;
     final_output_shapes.reserve(compiled_outputs->final_outputs.size());
@@ -4567,7 +4798,12 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
 
     Tensor adaptedLhs = adaptMatmulInputDTypeIfNeeded(lhs, compiledStage->lhs_dtype, stream);
     Tensor adaptedRhs = adaptMatmulInputDTypeIfNeeded(rhs, compiledStage->rhs_dtype, stream);
-    Tensor adaptedAddend = adaptMatmulInputDTypeIfNeeded(addend, compiledStage->aux_dtype, stream);
+    const bool use_bias_epilogue = addend.getDimensions().size() == 1;
+    if (use_bias_epilogue && addend.getDataType() != compiledStage->output_dtype) {
+        throw std::runtime_error(
+            "GEMM bias epilogue requires the bias tensor dtype to match the matmul output dtype; Thor will not insert an implicit conversion for a cuBLASLt bias epilogue.");
+    }
+    Tensor adaptedAddend = use_bias_epilogue ? addend : adaptMatmulInputDTypeIfNeeded(addend, compiledStage->aux_dtype, stream);
 
     std::vector<std::vector<uint64_t>> stage_input_dims(3);
     stage_input_dims[0] = adaptedLhs.getDimensions();
@@ -4678,7 +4914,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         if (!bias.has_value()) {
             throw std::runtime_error("stampAttention requires an additive bias tensor for this compiled stage.");
         }
-        adaptedBias = adaptMatmulInputDTypeIfNeeded(bias.value(), compiledStage->compute_dtype, stream);
+        adaptedBias = bias.value();
     }
 
     std::vector<std::vector<uint64_t>> stage_input_dims{adaptedQ.getDimensions(), adaptedK.getDimensions(), adaptedV.getDimensions()};
@@ -4783,7 +5019,8 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
                 throw std::runtime_error("Attention paged KV max sequence length must be positive.");
             }
             const uint64_t max_kv = static_cast<uint64_t>(compiledStage->paged_kv_max_sequence_length);
-            const uint64_t block_size = std::string(label).find("page_table_v") != std::string::npos ? adaptedV.getDimensions().at(2) : adaptedK.getDimensions().at(2);
+            const uint64_t block_size = std::string(label).find("page_table_v") != std::string::npos ? adaptedV.getDimensions().at(2)
+                                                                                                     : adaptedK.getDimensions().at(2);
             const std::vector<uint64_t> expected{adaptedQ.getDimensions().at(0), 1, ceilDivPositive(max_kv, block_size), 1};
             if (tensor->getDimensions() != expected) {
                 throw std::runtime_error(std::string("Attention paged KV ") + label + " shape must be [B,1,ceil(Skv/block),1].");
@@ -4814,12 +5051,15 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
     // Build and validate the cuDNN descriptor during stamping so shape/layout errors fail before execution.
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, output);
     if (compiledStage->use_bias && adaptedBias.has_value()) {
-        const std::vector<uint64_t> expected_bias_dims{adaptedQ.getDimensions().at(0), adaptedQ.getDimensions().at(1), adaptedQ.getDimensions().at(2), adaptedK.getDimensions().at(2)};
+        const std::vector<uint64_t> expected_bias_dims{
+            adaptedQ.getDimensions().at(0), adaptedQ.getDimensions().at(1), adaptedQ.getDimensions().at(2), adaptedK.getDimensions().at(2)};
         if (adaptedBias->getDimensions() != expected_bias_dims) {
             throw std::runtime_error("Attention additive bias must have shape [B, Hq, Sq, Skv].");
         }
         if (adaptedBias->getDataType() != compiledStage->compute_dtype) {
-            throw std::runtime_error("Attention additive bias dtype must match attention compute dtype.");
+            throw std::runtime_error(
+                "Attention additive bias dtype must match attention compute dtype; Thor does not insert hidden bias dtype conversions for "
+                "cuDNN attention.");
         }
     }
 
@@ -4828,8 +5068,22 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         forward_state->has_valid_stats = false;
     }
 
-    return make_shared<StampedAttention>(
-        compiledStage, adaptedQ, adaptedK, adaptedV, adaptedBias, seq_len_q, seq_len_kv, q_ragged_offsets, kv_ragged_offsets, page_table_k, page_table_v, dropout_seed, dropout_offset, output, stream, std::move(forward_state));
+    return make_shared<StampedAttention>(compiledStage,
+                                         adaptedQ,
+                                         adaptedK,
+                                         adaptedV,
+                                         adaptedBias,
+                                         seq_len_q,
+                                         seq_len_kv,
+                                         q_ragged_offsets,
+                                         kv_ragged_offsets,
+                                         page_table_k,
+                                         page_table_v,
+                                         dropout_seed,
+                                         dropout_offset,
+                                         output,
+                                         stream,
+                                         std::move(forward_state));
 }
 
 std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
@@ -4860,11 +5114,12 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         if (!bias.has_value()) {
             throw std::runtime_error("stampAttentionBackward requires an additive bias tensor for this compiled stage.");
         }
-        adaptedBias = adaptMatmulInputDTypeIfNeeded(bias.value(), compiledStage->compute_dtype, stream);
+        adaptedBias = bias.value();
     }
     Tensor adaptedDO = adaptMatmulInputDTypeIfNeeded(dO, dO.getDataType(), stream);
 
-    std::vector<std::vector<uint64_t>> stage_input_dims{adaptedQ.getDimensions(), adaptedK.getDimensions(), adaptedV.getDimensions(), adaptedDO.getDimensions()};
+    std::vector<std::vector<uint64_t>> stage_input_dims{
+        adaptedQ.getDimensions(), adaptedK.getDimensions(), adaptedV.getDimensions(), adaptedDO.getDimensions()};
     std::vector<std::vector<uint64_t>> forward_input_dims{stage_input_dims[0], stage_input_dims[1], stage_input_dims[2]};
     if (compiledStage->use_bias) {
         forward_input_dims.push_back(adaptedBias->getDimensions());
@@ -4907,7 +5162,8 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         if (idx < preallocatedOutputs.size() && preallocatedOutputs[idx].has_value()) {
             Tensor out = preallocatedOutputs[idx].value();
             if (out.getPlacement() != adaptedQ.getPlacement()) {
-                throw std::runtime_error(std::string("Preallocated attention-backward ") + label + " placement does not match q placement.");
+                throw std::runtime_error(std::string("Preallocated attention-backward ") + label +
+                                         " placement does not match q placement.");
             }
             if (out.getDescriptor().getDataType() != dtype) {
                 throw std::runtime_error(std::string("Preallocated attention-backward ") + label + " dtype does not match compiled dtype.");
@@ -4924,7 +5180,8 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     Tensor dK = make_or_validate_output(1, compiledStage->dK_dtype, adaptedK.getDimensions(), "dK");
     Tensor dV = make_or_validate_output(2, compiledStage->dV_dtype, adaptedV.getDimensions(), "dV");
     Tensor oScratch(adaptedQ.getPlacement(), TensorDescriptor(adaptedDO.getDataType(), o_dims));
-    Tensor stats(adaptedQ.getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1}));
+    Tensor stats(adaptedQ.getPlacement(),
+                 TensorDescriptor(TensorDescriptor::DataType::FP32, {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1}));
     std::optional<Tensor> dBiasScratch = std::nullopt;
     if (compiledStage->use_bias) {
         dBiasScratch = make_or_validate_output(3, adaptedQ.getDataType(), adaptedBias->getDimensions(), "dBias");
@@ -4987,12 +5244,15 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
 
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, oScratch);
     if (compiledStage->use_bias && adaptedBias.has_value()) {
-        const std::vector<uint64_t> expected_bias_dims{adaptedQ.getDimensions().at(0), adaptedQ.getDimensions().at(1), adaptedQ.getDimensions().at(2), adaptedK.getDimensions().at(2)};
+        const std::vector<uint64_t> expected_bias_dims{
+            adaptedQ.getDimensions().at(0), adaptedQ.getDimensions().at(1), adaptedQ.getDimensions().at(2), adaptedK.getDimensions().at(2)};
         if (adaptedBias->getDimensions() != expected_bias_dims) {
             throw std::runtime_error("Attention-backward additive bias must have shape [B, Hq, Sq, Skv].");
         }
         if (adaptedBias->getDataType() != compiledStage->compute_dtype) {
-            throw std::runtime_error("Attention-backward additive bias dtype must match attention compute dtype.");
+            throw std::runtime_error(
+                "Attention-backward additive bias dtype must match attention compute dtype; Thor does not insert hidden bias dtype "
+                "conversions for cuDNN attention.");
         }
     }
     return make_shared<StampedAttentionBackward>(compiledStage,
@@ -5154,6 +5414,57 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
     std::unordered_map<std::string, Tensor> preallocated_final_outputs_by_name = preallocated_outputs;
 
+    std::unordered_map<uint32_t, CompiledValueAlias> alias_by_value_id;
+    alias_by_value_id.reserve(compiled_outputs->value_aliases.size());
+    for (const CompiledValueAlias& alias : compiled_outputs->value_aliases) {
+        alias_by_value_id.emplace(alias.value_id, alias);
+    }
+
+    auto ultimateAliasSourceValueId = [&](uint32_t value_id) -> std::optional<uint32_t> {
+        uint32_t current = value_id;
+        bool traversed_alias = false;
+        std::unordered_set<uint32_t> visited;
+        while (true) {
+            auto alias_it = alias_by_value_id.find(current);
+            if (alias_it == alias_by_value_id.end()) {
+                return traversed_alias ? std::optional<uint32_t>(current) : std::nullopt;
+            }
+            if (!visited.insert(current).second) {
+                throw std::runtime_error("Cycle detected while resolving reshape alias source value.");
+            }
+            current = alias_it->second.source_value_id;
+            traversed_alias = true;
+        }
+    };
+
+    std::unordered_map<uint32_t, Tensor> preallocated_outputs_by_source_value_id;
+    for (const CompiledStageOutput& final_output : compiled_outputs->final_outputs) {
+        auto preallocated_it = preallocated_final_outputs_by_name.find(final_output.name);
+        if (preallocated_it == preallocated_final_outputs_by_name.end()) {
+            continue;
+        }
+        std::optional<uint32_t> source_value_id = ultimateAliasSourceValueId(final_output.value_id);
+        if (source_value_id.has_value()) {
+            preallocated_outputs_by_source_value_id[source_value_id.value()] = preallocated_it->second;
+        }
+    }
+
+    auto preallocatedForStageOutput = [&](const CompiledStageOutput& stage_output,
+                                          const std::vector<uint64_t>& output_dims) -> std::optional<Tensor> {
+        auto named_it = preallocated_final_outputs_by_name.find(stage_output.name);
+        if (named_it != preallocated_final_outputs_by_name.end()) {
+            return named_it->second;
+        }
+        auto value_it = preallocated_outputs_by_source_value_id.find(stage_output.value_id);
+        if (value_it == preallocated_outputs_by_source_value_id.end()) {
+            return std::nullopt;
+        }
+        Tensor tensor = value_it->second;
+        validateRuntimeAliasDims(tensor.getDimensions(), output_dims);
+        tensor.reshape(output_dims);
+        return tensor;
+    };
+
     std::vector<StampedExecutionStage> stampedStages;
     stampedStages.reserve(compiled_outputs->stages.size());
 
@@ -5188,7 +5499,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         return false;
     };
 
+    applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
+
     for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
+        applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
+
         std::vector<RuntimeInputValue> stageInputs;
         stageInputs.reserve(stage.input_value_ids.size());
 
@@ -5436,11 +5751,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
-                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
-                std::optional<Tensor> preallocated = std::nullopt;
-                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
-                    preallocated = preallocated_it->second;
-                }
+                std::optional<Tensor> preallocated = preallocatedForStageOutput(stageOutput, output_dims);
                 std::shared_ptr<StampedMatmul> stampedMatmul;
                 std::optional<RuntimeInputValue> alpha_input = std::nullopt;
                 std::optional<RuntimeInputValue> beta_input = std::nullopt;
@@ -5530,11 +5841,14 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (!stage.attention) {
                     throw std::runtime_error("Attention stage missing compiled payload.");
                 }
-                const size_t expected_attention_stage_inputs = 3 + (stage.attention->use_bias ? 1 : 0) + (stage.attention->use_padding_mask ? 2 : 0) +
+                const size_t expected_attention_stage_inputs =
+                    3 + (stage.attention->use_bias ? 1 : 0) + (stage.attention->use_padding_mask ? 2 : 0) +
                     (stage.attention->use_ragged_offsets ? 2 : 0) + (stage.attention->use_paged_kv_cache ? 2 : 0) +
                     (stage.attention->dropout_probability > 0.0f ? 2 : 0);
                 if (stageInputs.size() != expected_attention_stage_inputs) {
-                    throw std::runtime_error("Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional ragged offsets, optional paged-KV page tables, and optional dropout seed/offset.");
+                    throw std::runtime_error(
+                        "Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional "
+                        "ragged offsets, optional paged-KV page tables, and optional dropout seed/offset.");
                 }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Attention stage expects exactly one output.");
@@ -5617,7 +5931,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     (stage.attention_backward && stage.attention_backward->dropout_probability > 0.0f ? 2 : 0);
                 if (stageInputs.size() != expected_attention_backward_stage_inputs) {
                     throw std::runtime_error(
-                        "Attention-backward stage input count mismatch for q/k/v/dO plus optional bias, optional q/kv sequence lengths, optional ragged offsets, and optional dropout seed/offset.");
+                        "Attention-backward stage input count mismatch for q/k/v/dO plus optional bias, optional q/kv sequence lengths, "
+                        "optional ragged offsets, and optional dropout seed/offset.");
                 }
                 Tensor qTensor = runtimeInputTensor(stageInputs[0]);
                 Tensor kTensor = runtimeInputTensor(stageInputs[1]);
@@ -5653,10 +5968,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                         throw std::runtime_error("Attention-backward stage output node index out of range while stamping.");
                     }
                     const ExprOp out_op = stage.expr.nodes[stage.outputs[i].local_node_idx].op;
-                    size_t slot = out_op == ExprOp::ATTENTION_BACKWARD_Q ? 0 :
-                                  out_op == ExprOp::ATTENTION_BACKWARD_K ? 1 :
-                                  out_op == ExprOp::ATTENTION_BACKWARD_V ? 2 :
-                                  out_op == ExprOp::ATTENTION_BACKWARD_BIAS ? 3 : 4;
+                    size_t slot = out_op == ExprOp::ATTENTION_BACKWARD_Q      ? 0
+                                  : out_op == ExprOp::ATTENTION_BACKWARD_K    ? 1
+                                  : out_op == ExprOp::ATTENTION_BACKWARD_V    ? 2
+                                  : out_op == ExprOp::ATTENTION_BACKWARD_BIAS ? 3
+                                                                              : 4;
                     if (slot >= 4) {
                         throw std::runtime_error("Attention-backward stage output op is invalid while stamping.");
                     }
@@ -5676,20 +5992,21 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                         continue;
                     }
                     if (candidate_stage.attention->canProvideForwardStateFor(*stage.attention_backward,
-                                                                               qTensor,
-                                                                               kTensor,
-                                                                               vTensor,
-                                                                               biasTensor,
-                                                                               seqLenQTensor,
-                                                                               seqLenKvTensor,
-                                                                               qRaggedOffsetsTensor,
-                                                                               kvRaggedOffsetsTensor,
-                                                                               dropoutSeedTensor,
-                                                                               dropoutOffsetTensor,
-                                                                               dOTensor)) {
+                                                                             qTensor,
+                                                                             kTensor,
+                                                                             vTensor,
+                                                                             biasTensor,
+                                                                             seqLenQTensor,
+                                                                             seqLenKvTensor,
+                                                                             qRaggedOffsetsTensor,
+                                                                             kvRaggedOffsetsTensor,
+                                                                             dropoutSeedTensor,
+                                                                             dropoutOffsetTensor,
+                                                                             dOTensor)) {
                         if (!candidate_state->stats.isInitialized()) {
                             const std::vector<uint64_t> o_dims = candidate_state->output.getDimensions();
-                            TensorDescriptor statsDescriptor(TensorDescriptor::DataType::FP32, {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1});
+                            TensorDescriptor statsDescriptor(TensorDescriptor::DataType::FP32,
+                                                             {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1});
                             candidate_state->stats = Tensor(candidate_state->output.getPlacement(), statsDescriptor);
                         }
                         candidate_state->retain_for_backward = true;
@@ -5699,20 +6016,20 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
 
                 std::shared_ptr<StampedAttentionBackward> stampedAttentionBackward = stampAttentionBackward(stage.attention_backward,
-                                                                                                             qTensor,
-                                                                                                             kTensor,
-                                                                                                             vTensor,
-                                                                                                             biasTensor,
-                                                                                                             seqLenQTensor,
-                                                                                                             seqLenKvTensor,
-                                                                                                             qRaggedOffsetsTensor,
-                                                                                                             kvRaggedOffsetsTensor,
-                                                                                                             dropoutSeedTensor,
-                                                                                                             dropoutOffsetTensor,
-                                                                                                             dOTensor,
-                                                                                                             preallocated,
-                                                                                                             stream,
-                                                                                                             savedForwardState);
+                                                                                                            qTensor,
+                                                                                                            kTensor,
+                                                                                                            vTensor,
+                                                                                                            biasTensor,
+                                                                                                            seqLenQTensor,
+                                                                                                            seqLenKvTensor,
+                                                                                                            qRaggedOffsetsTensor,
+                                                                                                            kvRaggedOffsetsTensor,
+                                                                                                            dropoutSeedTensor,
+                                                                                                            dropoutOffsetTensor,
+                                                                                                            dOTensor,
+                                                                                                            preallocated,
+                                                                                                            stream,
+                                                                                                            savedForwardState);
                 const std::vector<Tensor>& outputTensors = stampedAttentionBackward->getOutputTensors();
                 const size_t expected_attention_backward_outputs = stage.attention_backward->use_bias ? 4 : 3;
                 if (outputTensors.size() != expected_attention_backward_outputs) {
@@ -5720,10 +6037,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
                 for (size_t i = 0; i < stage.outputs.size(); ++i) {
                     const ExprOp out_op = stage.expr.nodes[stage.outputs[i].local_node_idx].op;
-                    size_t slot = out_op == ExprOp::ATTENTION_BACKWARD_Q ? 0 :
-                                  out_op == ExprOp::ATTENTION_BACKWARD_K ? 1 :
-                                  out_op == ExprOp::ATTENTION_BACKWARD_V ? 2 :
-                                  out_op == ExprOp::ATTENTION_BACKWARD_BIAS ? 3 : 4;
+                    size_t slot = out_op == ExprOp::ATTENTION_BACKWARD_Q      ? 0
+                                  : out_op == ExprOp::ATTENTION_BACKWARD_K    ? 1
+                                  : out_op == ExprOp::ATTENTION_BACKWARD_V    ? 2
+                                  : out_op == ExprOp::ATTENTION_BACKWARD_BIAS ? 3
+                                                                              : 4;
                     if (slot >= outputTensors.size()) {
                         throw std::runtime_error("Attention-backward stage output op is invalid while wiring outputs.");
                     }
@@ -5828,7 +6146,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 break;
             }
         }
+        applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
     }
+
+    applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
 
     std::unordered_map<std::string, Tensor> finalOutputsByName;
     finalOutputsByName.reserve(compiled_outputs->final_outputs.size());
@@ -6059,6 +6380,7 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
     for (const auto& [value_id, value] : root_values) {
         value_dims.emplace(value_id, runtimeInputDims(value));
     }
+    applyAvailableValueAliases(compiled_outputs->value_aliases, value_dims);
 
     for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
         std::vector<std::vector<uint64_t>> stage_input_dims;
@@ -6183,7 +6505,10 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
         } else {
             throw std::runtime_error("Unknown execution stage kind in getParameterFanOverrides.");
         }
+        applyAvailableValueAliases(compiled_outputs->value_aliases, value_dims);
     }
+
+    applyAvailableValueAliases(compiled_outputs->value_aliases, value_dims);
 
     return result;
 }

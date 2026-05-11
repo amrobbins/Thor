@@ -592,6 +592,58 @@ def test_operator_gemm_pattern_scaled_and_reordered_numerical():
     _assert_close(got, expected, dtype)
 
 
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", MATMUL_DTYPES)
+def test_operator_matmul_plus_vector_bias_lowers_to_cublaslt_bias_epilogue(dtype: thor.DataType):
+    a = ex.input("a")
+    b = ex.input("b")
+    bias = ex.input("bias")
+    eq = ex.compile(ex.matmul(a, b, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + bias, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0]], dtype=np.float32).astype(storage_dtype)
+    b_np = np.array([[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]],
+                    dtype=np.float32).astype(storage_dtype)
+    bias_np = np.array([0.25, -1.0, 2.0, 0.5], dtype=np.float32).astype(storage_dtype)
+    expected = a_np.astype(np.float32) @ b_np.astype(np.float32) + bias_np.astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 4]
+    stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+    assert len(stage_kinds) == 1
+    assert stage_kinds[0].startswith("Matmul")
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_operator_matmul_plus_vector_bias_rejects_hidden_bias_dtype_conversion():
+    dtype = thor.DataType.fp16
+    a = ex.input("a")
+    b = ex.input("b")
+    bias = ex.input("bias")
+    eq = ex.compile(ex.matmul(a, b, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + bias, device_num=0)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(np.ones((2, 3), dtype=np.float16), dtype, stream),
+        "b": _host_to_gpu(np.ones((3, 4), dtype=np.float16), dtype, stream),
+        "bias": _host_to_gpu(np.ones((4,), dtype=np.float32), thor.DataType.fp32, stream),
+    }
+
+    with pytest.raises(RuntimeError, match="bias tensor dtype to match the matmul output dtype"):
+        eq.stamp(inputs_gpu, stream)
+
+
 @pytest.mark.cuda
 def test_operator_matmul_plus_scalar_stays_valid_and_is_not_over_lowered():
     dtype = thor.DataType.fp32

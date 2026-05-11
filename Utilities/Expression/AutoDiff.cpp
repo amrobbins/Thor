@@ -266,6 +266,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::ROPE:
             case ExprOp::SOFTMAX:
             case ExprOp::TRANSPOSE:
+            case ExprOp::RESHAPE:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
             case ExprOp::REDUCE_SUM:
@@ -411,6 +412,14 @@ class BackwardGraphBuilder {
                     return false;
                 }
                 dims = inferTransposeOutputDims(lhs_dims);
+                return true;
+            }
+            case ExprOp::RESHAPE: {
+                std::vector<uint64_t> lhs_dims;
+                if (!tryGetConstantLike(node.lhs, value, lhs_dims)) {
+                    return false;
+                }
+                dims = node.reshape_dims;
                 return true;
             }
             case ExprOp::UNSQUEEZE: {
@@ -974,6 +983,22 @@ class BackwardGraphBuilder {
         return push(std::move(node));
     }
 
+    uint32_t reshape(uint32_t value, const std::vector<uint64_t>& reshape_dims) {
+        if (reshape_dims.empty()) {
+            throw std::runtime_error("AutoDiff reshape requires non-empty dimensions.");
+        }
+        const ExprNode& value_node = grad_expr.nodes.at(value);
+        if (value_node.op == ExprOp::RESHAPE) {
+            // Collapse adjacent reshapes.
+            value = value_node.lhs;
+        }
+        ExprNode node{};
+        node.op = ExprOp::RESHAPE;
+        node.lhs = value;
+        node.reshape_dims = reshape_dims;
+        return push(std::move(node));
+    }
+
     uint32_t unsqueeze(uint32_t value, const std::vector<uint64_t>& unsqueeze_axes) {
         const std::vector<uint64_t> normalized_axes = normalizeAxes(unsqueeze_axes);
         if (normalized_axes.empty()) {
@@ -1065,6 +1090,30 @@ class BackwardGraphBuilder {
     std::unordered_map<uint32_t, uint32_t> forward_to_grad_node_map;
     std::vector<std::optional<uint32_t>> node_grads;
 };
+
+std::optional<TensorDescriptor::DataType> attentionBackwardBiasOnlyDType(const BackwardGraphBuilder& builder, uint32_t node_idx) {
+    const ExprNode& node = builder.node(node_idx);
+    if (node.op == ExprOp::ATTENTION_BACKWARD_BIAS) {
+        if (!node.output_dtype.has_value()) {
+            return std::nullopt;
+        }
+        return node.output_dtype.value();
+    }
+
+    if (node.op != ExprOp::ADD) {
+        return std::nullopt;
+    }
+
+    const auto lhs_dtype = attentionBackwardBiasOnlyDType(builder, node.lhs);
+    if (!lhs_dtype.has_value()) {
+        return std::nullopt;
+    }
+    const auto rhs_dtype = attentionBackwardBiasOnlyDType(builder, node.rhs);
+    if (!rhs_dtype.has_value() || rhs_dtype.value() != lhs_dtype.value()) {
+        return std::nullopt;
+    }
+    return lhs_dtype.value();
+}
 
 std::vector<std::string> normalizeWrtNames(const PhysicalExpression& forward_expr, const std::vector<std::string>& wrt_names) {
     if (wrt_names.empty()) {
@@ -1298,12 +1347,17 @@ std::vector<uint64_t> inferMatmulOutputDims(const ExprNode& node,
 
     std::vector<uint64_t> out_dims{a_rows, b_cols};
     if (aux_dims) {
-        if (aux_dims->size() != 2) {
-            throw std::runtime_error("Autodiff shape inference for GEMM currently only supports rank-2 addends.");
-        }
-        const std::vector<uint64_t> expected_aux = node.transpose_aux ? std::vector<uint64_t>{out_dims[1], out_dims[0]} : out_dims;
-        if (*aux_dims != expected_aux) {
-            throw std::runtime_error("Autodiff shape inference found GEMM addend dimensions incompatible with the matmul output.");
+        if (aux_dims->size() == 1) {
+            if (node.transpose_aux || aux_dims->at(0) != out_dims[1]) {
+                throw std::runtime_error("Autodiff shape inference found GEMM bias epilogue addend incompatible with output columns.");
+            }
+        } else if (aux_dims->size() == 2) {
+            const std::vector<uint64_t> expected_aux = node.transpose_aux ? std::vector<uint64_t>{out_dims[1], out_dims[0]} : out_dims;
+            if (*aux_dims != expected_aux) {
+                throw std::runtime_error("Autodiff shape inference found GEMM addend dimensions incompatible with the matmul output.");
+            }
+        } else {
+            throw std::runtime_error("Autodiff shape inference for GEMM currently supports rank-2 addends or rank-1 bias epilogue vectors.");
         }
     }
 
@@ -1582,6 +1636,9 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 break;
             case ExprOp::TRANSPOSE:
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
+                break;
+            case ExprOp::RESHAPE:
+                node_dims[i] = node.reshape_dims;
                 break;
             case ExprOp::UNSQUEEZE: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
@@ -2029,6 +2086,17 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                         addContributionToChild(node.lhs, builder.unary(ExprOp::TRANSPOSE, grad), forward_node_dims.at(node.lhs));
                     } else {
                         builder.addContribution(node.lhs, builder.unary(ExprOp::TRANSPOSE, grad));
+                    }
+                }
+                break;
+            }
+
+            case ExprOp::RESHAPE: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    if (has_forward_dims) {
+                        builder.addContribution(node.lhs, builder.reshape(grad, forward_node_dims.at(node.lhs)));
+                    } else {
+                        throw std::runtime_error("AutoDiff reshape backward requires forward shape information.");
                     }
                 }
                 break;
@@ -2776,7 +2844,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         }
 
         const ExprNode& forward_input_node = forward_expr.nodes.at(first_it->second);
-        const std::optional<TensorDescriptor::DataType> grad_dtype = preferredGradValueDType(forward_input_node);
+        std::optional<TensorDescriptor::DataType> grad_dtype = preferredGradValueDType(forward_input_node);
         const std::string grad_output_name = wrt_name + "_grad";
 
         std::optional<uint32_t> total_grad;
@@ -2806,6 +2874,15 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             }
         } else if (accumulate_grad_outputs) {
             total_grad = builder.add(builder.input(grad_output_name, grad_dtype), total_grad.value());
+        } else {
+            const auto dbias_only_dtype = attentionBackwardBiasOnlyDType(builder, total_grad.value());
+            if (dbias_only_dtype.has_value()) {
+                // cuDNN SDPA backward produces dBias in the Q/input dtype, not the additive-bias tensor dtype.
+                // When the public bias_grad is composed only from attention dBias outputs, keep the terminal dtype
+                // there so same-plan duplicated/merged attention expressions do not promote back to the FP32 bias
+                // tensor dtype and force an unnecessary down-conversion for callers that want cuDNN's native dBias.
+                grad_dtype = dbias_only_dtype.value();
+            }
         }
 
         // Create a dedicated terminal output node so we can force only the final

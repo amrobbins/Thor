@@ -308,6 +308,23 @@ class CublasMatrixMultiply {
                                         Stream stream,
                                         CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
 
+    // D = alpha*(A*B) + bias, where bias has one element per output column.
+    // This uses the cuBLASLt bias epilogue instead of a separate broadcast add kernel.
+    void gemmWithBiasUsingHeuristicKernelChoice(Tensor A,
+                                                Tensor B,
+                                                Tensor bias,
+                                                Tensor D,
+                                                const int32_t A_rows,
+                                                const int32_t A_cols,
+                                                const int32_t B_rows,
+                                                const int32_t B_cols,
+                                                bool transposeA,
+                                                bool transposeB,
+                                                const float *alpha,
+                                                const MatmulDataTypes dataTypes,
+                                                Stream stream,
+                                                CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
     inline void chooseOptimalMatrixMultiplyKernel(std::string gpuType,

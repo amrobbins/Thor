@@ -1095,6 +1095,7 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
             const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
             return castScalarExpr("half(normcdff(float(" + x_h + ")))", DataType::FP16, compute_dtype);
         }
+        case ExprOp::RESHAPE:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
             return x;
@@ -1174,6 +1175,7 @@ static bool tryGetEmitterConstantValue(const PhysicalExpression& expr, uint32_t 
         case ExprOp::FILL:
             value = n.scalar_fp;
             return true;
+        case ExprOp::RESHAPE:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
             return tryGetEmitterConstantValue(expr, n.lhs, value);
@@ -1231,6 +1233,7 @@ static bool tryGetEmitterAliasSource(const PhysicalExpression& expr, uint32_t no
 
     const ExprNode& n = expr.nodes[node_idx];
     switch (n.op) {
+        case ExprOp::RESHAPE:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
             source_idx = n.lhs;
@@ -1475,7 +1478,7 @@ static void emitScalarNode(
         return emitResolvedScalarValueExpr(expr, child_idx, compute_dtype);
     };
 
-    if (n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
+    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
         emitScalarAliasNode(ss, expr, node_idx, n.lhs, indent);
         return;
     }
@@ -1658,7 +1661,7 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
         return emitResolvedScalarValueExprSuffixed(expr, child_idx, compute_dtype, suffix);
     };
 
-    if (n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
+    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
         emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.lhs, suffix, indent);
         return;
     }
@@ -1918,6 +1921,7 @@ static void emitFloatScalarNodeDefinitions(std::ostringstream& ss,
             case ExprOp::SQRT:
                 ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = sqrtf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
                 break;
+            case ExprOp::RESHAPE:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
                 ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
@@ -2210,6 +2214,7 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Normcdf(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                 break;
+            case ExprOp::RESHAPE:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = " << refWithSuffix(n.lhs, suffix)
@@ -2336,6 +2341,7 @@ static void emitFloat2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
                    << emitFloat2UnaryCall("normcdff", refWithSuffix(n.lhs, suffix)) << ";\n";
                 break;
+            case ExprOp::RESHAPE:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = " << refWithSuffix(n.lhs, suffix) << ";\n";
@@ -2554,6 +2560,7 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Normcdf(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                     break;
+                case ExprOp::RESHAPE:
                 case ExprOp::UNSQUEEZE:
                 case ExprOp::SQUEEZE:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = " << refWithSuffix(n.lhs, suffix)
@@ -2953,6 +2960,7 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Normcdf(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
                     break;
+                case ExprOp::RESHAPE:
                 case ExprOp::UNSQUEEZE:
                 case ExprOp::SQUEEZE:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";

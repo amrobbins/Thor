@@ -140,6 +140,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "softmax";
         case ExprOp::FILL:
             return "fill";
+        case ExprOp::RESHAPE:
+            return "reshape";
         case ExprOp::UNSQUEEZE:
             return "unsqueeze";
         case ExprOp::SQUEEZE:
@@ -239,6 +241,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"rotary_position_embedding", ExprOp::ROPE},
         {"softmax", ExprOp::SOFTMAX},
         {"fill", ExprOp::FILL},
+        {"reshape", ExprOp::RESHAPE},
         {"unsqueeze", ExprOp::UNSQUEEZE},
         {"squeeze", ExprOp::SQUEEZE},
         {"transpose", ExprOp::TRANSPOSE},
@@ -386,6 +389,7 @@ json exprNodeToJson(const ExprNode& node) {
     setOptionalDTypeJson(j, "backward_output_dtype", node.backward_output_dtype);
     setOptionalDTypeJson(j, "backward_compute_dtype", node.backward_compute_dtype);
     j["reduction_axes"] = node.reduction_axes;
+    j["reshape_dims"] = node.reshape_dims;
     j["squeeze_axes"] = node.squeeze_axes;
     j["unsqueeze_axes"] = node.unsqueeze_axes;
     j["fill_dims"] = node.fill_dims;
@@ -459,6 +463,7 @@ ExprNode exprNodeFromJson(const json& j) {
     parseOptionalDTypeField(j, "backward_output_dtype", node.backward_output_dtype);
     parseOptionalDTypeField(j, "backward_compute_dtype", node.backward_compute_dtype);
     node.reduction_axes = j.value("reduction_axes", std::vector<uint64_t>{});
+    node.reshape_dims = j.value("reshape_dims", std::vector<uint64_t>{});
     node.squeeze_axes = j.value("squeeze_axes", std::vector<uint64_t>{});
     node.unsqueeze_axes = j.value("unsqueeze_axes", std::vector<uint64_t>{});
     node.fill_dims = j.value("fill_dims", std::vector<uint64_t>{});
@@ -527,6 +532,8 @@ std::string opName(ExprOp op) {
             return "SOFTMAX";
         case ExprOp::FILL:
             return "FILL";
+        case ExprOp::RESHAPE:
+            return "RESHAPE";
         case ExprOp::UNSQUEEZE:
             return "UNSQ";
         case ExprOp::SQUEEZE:
@@ -698,6 +705,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
                   ";algorithm=" + std::to_string(static_cast<int>(n.softmax_algorithm)) +
                   ";mode=" + std::to_string(static_cast<int>(n.softmax_mode)) + ")";
+            break;
+        case ExprOp::RESHAPE:
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
+                  ";dims=" + formatUIntVectorCanonical(n.reshape_dims) + ")";
             break;
         case ExprOp::UNSQUEEZE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
@@ -1269,6 +1280,7 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::ROPE:
         case ExprOp::SOFTMAX:
         case ExprOp::TRANSPOSE:
+        case ExprOp::RESHAPE:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
         case ExprOp::REDUCE_SUM:
@@ -2013,6 +2025,20 @@ Expression Expression::logSoftmax(cudnnSoftmaxMode_t mode) const {
     Expression out = unaryOp(*this, ExprOp::SOFTMAX);
     out.expr->nodes[out.nodeIndex].softmax_algorithm = CUDNN_SOFTMAX_LOG;
     out.expr->nodes[out.nodeIndex].softmax_mode = mode;
+    return out;
+}
+
+Expression Expression::reshape(const std::vector<uint64_t>& new_dims) const {
+    if (!expr)
+        throw std::runtime_error("Cannot reshape an empty expression");
+    if (new_dims.empty())
+        throw std::invalid_argument("Expression::reshape requires at least one dimension.");
+    for (uint64_t d : new_dims) {
+        if (d == 0)
+            throw std::invalid_argument("Expression::reshape dimensions must be non-zero.");
+    }
+    Expression out = unaryOp(*this, ExprOp::RESHAPE);
+    out.expr->nodes[out.nodeIndex].reshape_dims = new_dims;
     return out;
 }
 
