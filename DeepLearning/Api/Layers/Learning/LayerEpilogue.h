@@ -65,6 +65,16 @@ class LayerEpilogue {
                                                               const std::string& inputName) {
         return epilogue.substituteInput(inputName, input);
     }
+
+    [[nodiscard]] static bool hasSameCanonicalForm(const ThorImplementation::Expression& lhs,
+                                                   const ThorImplementation::Expression& rhs,
+                                                   const std::string& inputName,
+                                                   const std::string& outputName,
+                                                   const std::string& layerType) {
+        ThorImplementation::ExpressionDefinition lhsDefinition = makeDefinition(lhs, inputName, outputName, layerType);
+        ThorImplementation::ExpressionDefinition rhsDefinition = makeDefinition(rhs, inputName, outputName, layerType);
+        return ThorImplementation::canonicalize(lhsDefinition.outputs) == ThorImplementation::canonicalize(rhsDefinition.outputs);
+    }
 };
 
 }  // namespace Thor

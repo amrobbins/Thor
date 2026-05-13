@@ -19,6 +19,10 @@ def _only_layer_architecture(n: thor.Network, layer_type: str):
     return layers[0]
 
 
+def _swish_epilogue():
+    return thor.activations.Swish().to_expression(thor.layers.RMSNorm.epilogue_input())
+
+
 def test_rms_norm_constructs_default_last_dim_and_output_preserves_shape_dtype():
     n = _net()
     x = _input_tensor(n, [8, 16], thor.DataType.fp16)
@@ -49,6 +53,8 @@ def test_rms_norm_constructs_explicit_trailing_shape_and_serializes_weights_only
     assert arch["epsilon"] == pytest.approx(1e-4)
     assert "weights" in arch["parameters"]
     assert "biases" not in arch["parameters"]
+    assert arch["epilogue"] is None
+    assert "fused_activation" not in arch
 
 
 def test_rms_norm_rejects_bad_normalized_shape():
@@ -106,31 +112,39 @@ def test_rms_norm_rejects_wrong_types_and_arity():
         thor.layers.RMSNorm(n, x, epsilon="1e-5")
 
 
-def test_rms_norm_accepts_fused_swish_activation_and_serializes():
+def test_rms_norm_accepts_swish_epilogue_and_serializes_expression():
     n = _net()
     x = _input_tensor(n, [8, 16], thor.DataType.bf16)
 
-    rn = thor.layers.RMSNorm(n, x, fused_activation="swish")
+    rn = thor.layers.RMSNorm(n, x, epilogue=_swish_epilogue())
 
-    assert rn.get_fused_activation() == "swish"
-    assert rn.get_parameter_data_type() == thor.DataType.bf16
+    assert rn.get_parameter_data_type() == thor.DataType.fp32
     arch = _only_layer_architecture(n, "rms_norm")
-    assert arch["fused_activation"] == "swish"
+    assert arch["epilogue"] is not None
+    assert "fused_activation" not in arch
 
 
-def test_rms_norm_accepts_silu_alias_and_rejects_unknown_fused_activation():
+def test_rms_norm_accepts_bf16_weights_for_swish_epilogue_fusion_candidate():
     n = _net()
     x = _input_tensor(n, [8, 16], thor.DataType.bf16)
 
-    rn = thor.layers.RMSNorm(n, x, fused_activation="silu")
-    assert rn.get_fused_activation() == "swish"
+    rn = thor.layers.RMSNorm(n, x, parameter_data_type=thor.DataType.bf16, epilogue=_swish_epilogue())
+    assert rn.get_parameter_data_type() == thor.DataType.bf16
 
-    n2 = thor.Network("test_net_rms_norm_bad_fused_activation")
-    x2 = _input_tensor(n2, [8, 16], thor.DataType.fp16)
-    with pytest.raises(ValueError, match="fused activation"):
-        thor.layers.RMSNorm(n2, x2, fused_activation="relu")
+    n2 = thor.Network("test_net_rms_norm_bf16_without_swish")
+    x2 = _input_tensor(n2, [8, 16], thor.DataType.bf16)
+    with pytest.raises((RuntimeError, ValueError), match="Swish epilogue"):
+        thor.layers.RMSNorm(n2, x2, parameter_data_type=thor.DataType.bf16)
 
-    n3 = thor.Network("test_net_rms_norm_fused_fp16")
+    n3 = thor.Network("test_net_rms_norm_bf16_weights_bad_input")
     x3 = _input_tensor(n3, [8, 16], thor.DataType.fp16)
-    with pytest.raises((RuntimeError, ValueError), match="bf16"):
-        thor.layers.RMSNorm(n3, x3, fused_activation="swish")
+    with pytest.raises((RuntimeError, ValueError), match="bf16 feature inputs"):
+        thor.layers.RMSNorm(n3, x3, parameter_data_type=thor.DataType.bf16, epilogue=_swish_epilogue())
+
+
+def test_rms_norm_rejects_bad_epilogue_type():
+    n = _net()
+    x = _input_tensor(n, [8, 16], thor.DataType.fp16)
+
+    with pytest.raises(TypeError, match="epilogue"):
+        thor.layers.RMSNorm(n, x, epilogue="swish")

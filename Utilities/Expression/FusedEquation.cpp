@@ -500,6 +500,10 @@ static std::vector<uint64_t> inferExpressionConvolutionBackwardFilterOutputDims(
     return out_dims;
 }
 
+static std::vector<uint64_t> inferRmsNormOutputDims(const ExprNode& node,
+                                                    const std::vector<uint64_t>& input_dims,
+                                                    const std::vector<uint64_t>& scale_dims);
+
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims) {
     if (input_dims.size() != 2) {
         throw std::runtime_error("Transpose shape inference currently only supports rank-2 tensors.");
@@ -595,6 +599,9 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 }
                 break;
             }
+            case ExprOp::RMSNORM:
+                node_dims[i] = inferRmsNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                break;
             case ExprOp::TRANSPOSE:
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
                 break;
@@ -2171,6 +2178,27 @@ static void collectReachableLocalNodes(const PhysicalExpression& expr, uint32_t 
 //     return out_dims;
 // }
 
+static std::vector<uint64_t> inferRmsNormOutputDims(const ExprNode& node,
+                                                    const std::vector<uint64_t>& input_dims,
+                                                    const std::vector<uint64_t>& scale_dims) {
+    if (input_dims.size() != 2) {
+        throw std::runtime_error("RMSNorm expression stage currently expects a rank-2 [outer, normalized_features] input.");
+    }
+    if (scale_dims.size() != 1) {
+        throw std::runtime_error("RMSNorm expression stage expects a rank-1 scale tensor.");
+    }
+    if (node.rms_norm_normalized_feature_count == 0) {
+        throw std::runtime_error("RMSNorm expression stage has zero normalized feature count.");
+    }
+    if (input_dims[1] != node.rms_norm_normalized_feature_count) {
+        throw std::runtime_error("RMSNorm expression normalized feature count does not match the input tail dimension.");
+    }
+    if (scale_dims[0] != node.rms_norm_normalized_feature_count) {
+        throw std::runtime_error("RMSNorm expression scale dimension does not match the normalized feature count.");
+    }
+    return input_dims;
+}
+
 static std::string dimsToString(const std::vector<uint64_t>& dims) {
     std::ostringstream oss;
     oss << "[";
@@ -2605,6 +2633,9 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
                 }
                 break;
             }
+            case ExprOp::RMSNORM:
+                node_dims[i] = inferRmsNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                break;
             case ExprOp::RESHAPE: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
                 auto numel = [](const std::vector<uint64_t>& dims) {
@@ -2754,6 +2785,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::CONV3D:
             case ExprOp::CONV3D_BACKWARD_DATA:
             case ExprOp::CONV3D_BACKWARD_FILTER:
+            case ExprOp::RMSNORM:
             case ExprOp::REDUCE_MIN_BACKWARD:
             case ExprOp::REDUCE_MAX_BACKWARD:
                 throw std::runtime_error("Unexpected staged op inside fused kernel while computing FLOPs.");
@@ -2974,6 +3006,20 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
                 throw std::runtime_error("Softmax stage missing input dims while computing FLOPs.");
             return numelFromDims(stage_input_dims[0]) * 5;
 
+        case CompiledExecutionStage::Kind::RmsNorm: {
+            if (!stage.rms_norm) {
+                throw std::runtime_error("RMSNorm stage missing payload while computing FLOPs.");
+            }
+            if (stage_input_dims.empty()) {
+                throw std::runtime_error("RMSNorm stage missing input dims while computing FLOPs.");
+            }
+            const uint64_t base_flops = checkedMulU64(numelFromDims(stage_input_dims[0]), 6, "computeRmsNormStageFlops");
+            if (stage.rms_norm->fused_activation == CudnnRmsNormFusedActivation::SWISH) {
+                return checkedAddU64(base_flops, checkedMulU64(numelFromDims(stage_input_dims[0]), 5, "computeRmsNormStageFlops"), "computeRmsNormStageFlops");
+            }
+            return base_flops;
+        }
+
         case CompiledExecutionStage::Kind::Matmul:
             if (!stage.matmul)
                 throw std::runtime_error("Matmul stage missing payload while computing FLOPs.");
@@ -3049,6 +3095,16 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 throw std::runtime_error("resolveOutputDimsForStageOutput softmax stage expected one input shape.");
             }
             return stage_input_dims[0];
+        }
+
+        case CompiledExecutionStage::Kind::RmsNorm: {
+            if (!stage.rms_norm) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput RMSNorm stage missing payload.");
+            }
+            if (stage_input_dims.size() != 2) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput RMSNorm stage expected input and scale shapes.");
+            }
+            return inferRmsNormOutputDims(stage.expr.nodes.at(stage.outputs.at(output_idx).local_node_idx), stage_input_dims[0], stage_input_dims[1]);
         }
 
         case CompiledExecutionStage::Kind::ReduceMinMaxBackward: {
@@ -3891,6 +3947,14 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("Softmax stage expected exactly one input and one output.");
             }
             value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
+        } else if (stage.kind == CompiledExecutionStage::Kind::RmsNorm) {
+            if (!stage.rms_norm) {
+                throw std::runtime_error("Missing compiled RMSNorm stage.");
+            }
+            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
+                throw std::runtime_error("RMSNorm stage expected exactly two inputs and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = inferRmsNormOutputDims(stage.expr.nodes.at(stage.outputs[0].local_node_idx), stage_input_dims[0], stage_input_dims[1]);
         } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");
@@ -4842,6 +4906,43 @@ std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_pt
 
     std::shared_ptr<BuiltSoftmax> built = StampedEquation::buildSoftmax(compiledStage, adaptedInput, output, stream.getGpuNum());
     return make_shared<StampedSoftmax>(compiledStage, std::move(built), adaptedInput, output, stream);
+}
+
+std::shared_ptr<StampedRmsNorm> FusedEquation::stampRmsNorm(const std::shared_ptr<CompiledRmsNorm>& compiledStage,
+                                                               Tensor& input,
+                                                               Tensor& scale,
+                                                               const std::optional<Tensor>& preallocatedOutput,
+                                                               const Stream& stream) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampRmsNorm requires non-null compiled stage.");
+    }
+
+    Tensor adaptedInput = adaptMatmulInputDTypeIfNeeded(input, compiledStage->input_dtype, stream);
+    Tensor adaptedScale = adaptMatmulInputDTypeIfNeeded(scale, compiledStage->scale_dtype, stream);
+    ExprNode rmsNormNode{};
+    rmsNormNode.op = ExprOp::RMSNORM;
+    rmsNormNode.rms_norm_normalized_feature_count = compiledStage->normalized_feature_count;
+    const std::vector<uint64_t> output_dims =
+        inferRmsNormOutputDims(rmsNormNode, adaptedInput.getDimensions(), adaptedScale.getDimensions());
+
+    Tensor output;
+    if (preallocatedOutput.has_value()) {
+        output = preallocatedOutput.value();
+        if (output.getPlacement() != adaptedInput.getPlacement()) {
+            throw std::runtime_error("Preallocated RMSNorm output tensor placement does not match input placement.");
+        }
+        if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
+            throw std::runtime_error("Preallocated RMSNorm output tensor dtype does not match compiled output dtype.");
+        }
+        if (output.getDimensions() != output_dims) {
+            throw std::runtime_error("Preallocated RMSNorm output tensor dimensions are incompatible with the RMSNorm output shape.");
+        }
+    } else {
+        TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dims);
+        output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
+    }
+
+    return std::make_shared<StampedRmsNorm>(compiledStage, adaptedInput, adaptedScale, output, stream);
 }
 
 std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::shared_ptr<CompiledConvolution>& compiledStage,
@@ -6063,6 +6164,32 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedSoftmax, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
+            case CompiledExecutionStage::Kind::RmsNorm: {
+                if (!stage.rms_norm) {
+                    throw std::runtime_error("RMSNorm stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 2) {
+                    throw std::runtime_error("RMSNorm stage expects exactly two inputs.");
+                }
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("RMSNorm stage expects exactly one output.");
+                }
+
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                Tensor scaleTensor = runtimeInputTensor(stageInputs[1]);
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                std::optional<Tensor> preallocated = preallocatedForStageOutput(stageOutput, output_dims);
+
+                std::shared_ptr<StampedRmsNorm> stampedRmsNorm =
+                    stampRmsNorm(stage.rms_norm, inputTensor, scaleTensor, preallocated, stream);
+                Tensor outputTensor = stampedRmsNorm->getOutputTensor();
+
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedRmsNorm, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
             case CompiledExecutionStage::Kind::Matmul: {
                 if (!stage.matmul) {
                     throw std::runtime_error("Matmul/gemm stage missing compiled payload.");
@@ -6803,6 +6930,14 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                 throw std::runtime_error("Softmax stage expected exactly one input and one output.");
             }
             value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
+        } else if (stage.kind == CompiledExecutionStage::Kind::RmsNorm) {
+            if (!stage.rms_norm) {
+                throw std::runtime_error("Missing compiled RMSNorm stage.");
+            }
+            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
+                throw std::runtime_error("RMSNorm stage expected exactly two inputs and one output.");
+            }
+            value_dims[stage.outputs[0].value_id] = inferRmsNormOutputDims(stage.expr.nodes.at(stage.outputs[0].local_node_idx), stage_input_dims[0], stage_input_dims[1]);
         } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");

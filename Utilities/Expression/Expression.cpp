@@ -198,6 +198,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "reduce_norm1";
         case ExprOp::REDUCE_NORM2:
             return "reduce_norm2";
+        case ExprOp::RMSNORM:
+            return "rmsnorm";
         case ExprOp::ATTENTION:
             return "attention";
         case ExprOp::ATTENTION_BACKWARD_Q:
@@ -270,6 +272,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"reduce_avg", ExprOp::REDUCE_AVG},
         {"reduce_norm1", ExprOp::REDUCE_NORM1},
         {"reduce_norm2", ExprOp::REDUCE_NORM2},
+        {"rmsnorm", ExprOp::RMSNORM},
         {"attention", ExprOp::ATTENTION},
         {"attention_backward_q", ExprOp::ATTENTION_BACKWARD_Q},
         {"attention_backward_k", ExprOp::ATTENTION_BACKWARD_K},
@@ -430,6 +433,9 @@ json exprNodeToJson(const ExprNode& node) {
     j["rope_scaling_kind"] = static_cast<int>(node.rope_scaling_kind);
     j["rope_scaling_factor"] = node.rope_scaling_factor;
     j["rope_original_max_position_embeddings"] = node.rope_original_max_position_embeddings;
+    j["rms_norm_normalized_feature_count"] = node.rms_norm_normalized_feature_count;
+    j["rms_norm_epsilon"] = node.rms_norm_epsilon;
+    j["rms_norm_fused_activation"] = toString(node.rms_norm_fused_activation);
     setOptionalDTypeJson(j, "input_tensor_dtype", node.input_tensor_dtype);
     setOptionalDTypeJson(j, "output_dtype", node.output_dtype);
     setOptionalDTypeJson(j, "compute_dtype", node.compute_dtype);
@@ -507,6 +513,11 @@ ExprNode exprNodeFromJson(const json& j) {
     node.rope_scaling_kind = static_cast<RotaryScalingKind>(j.value("rope_scaling_kind", static_cast<int>(RotaryScalingKind::None)));
     node.rope_scaling_factor = j.value("rope_scaling_factor", 1.0);
     node.rope_original_max_position_embeddings = j.value("rope_original_max_position_embeddings", uint64_t{0});
+    node.rms_norm_normalized_feature_count = j.value("rms_norm_normalized_feature_count", uint64_t{0});
+    node.rms_norm_epsilon = j.value("rms_norm_epsilon", 1.0e-5);
+    node.rms_norm_fused_activation = j.contains("rms_norm_fused_activation")
+                                         ? cudnnRmsNormFusedActivationFromString(j.at("rms_norm_fused_activation").get<std::string>())
+                                         : CudnnRmsNormFusedActivation::NONE;
     parseOptionalDTypeField(j, "input_tensor_dtype", node.input_tensor_dtype);
     parseOptionalDTypeField(j, "output_dtype", node.output_dtype);
     parseOptionalDTypeField(j, "compute_dtype", node.compute_dtype);
@@ -648,6 +659,8 @@ std::string opName(ExprOp op) {
             return "RNORM1";
         case ExprOp::REDUCE_NORM2:
             return "RNORM2";
+        case ExprOp::RMSNORM:
+            return "RMSNORM";
         case ExprOp::ATTENTION:
             return "ATTENTION";
         case ExprOp::ATTENTION_BACKWARD_Q:
@@ -804,6 +817,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::MAX_GRAD_LEFT:
         case ExprOp::MAX_GRAD_RIGHT:
         case ExprOp::MATMUL:
+        case ExprOp::RMSNORM:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -825,6 +839,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 if (n.matmul_epilogue_aux != UINT32_MAX) {
                     out += ";epilogueAux=" + canonicalizeNode(expr, n.matmul_epilogue_aux, memo, memoReady);
                 }
+            } else if (n.op == ExprOp::RMSNORM) {
+                out += ";hidden=" + std::to_string(n.rms_norm_normalized_feature_count);
+                out += ";epsilon=" + formatFloatCanonical(n.rms_norm_epsilon);
+                out += ";fusedActivation=" + std::string(toString(n.rms_norm_fused_activation));
             } else if (n.op == ExprOp::CONV2D || n.op == ExprOp::CONV2D_BACKWARD_DATA || n.op == ExprOp::CONV2D_BACKWARD_FILTER ||
                        n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
                 if (n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
@@ -965,6 +983,9 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
             break;
         case PhysicalExecutionStage::Kind::Softmax:
             ss << "softmax";
+            break;
+        case PhysicalExecutionStage::Kind::RmsNorm:
+            ss << "rmsnorm";
             break;
         case PhysicalExecutionStage::Kind::Matmul:
             ss << "matmul";
@@ -1379,6 +1400,7 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::MAX_GRAD_LEFT:
         case ExprOp::MAX_GRAD_RIGHT:
         case ExprOp::MATMUL:
+        case ExprOp::RMSNORM:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -2176,6 +2198,35 @@ Expression Expression::matmul(const Expression& lhs,
         node.output_dtype = output_dtype.value();
     }
     return out;
+}
+
+Expression Expression::rmsNorm(const Expression& input,
+                               const Expression& scale,
+                               uint64_t normalized_feature_count,
+                               double epsilon,
+                               std::optional<DataType> compute_dtype,
+                               std::optional<DataType> output_dtype) {
+    if (normalized_feature_count == 0) {
+        throw std::invalid_argument("Expression::rmsNorm normalized_feature_count must be non-zero.");
+    }
+    if (!(epsilon > 0.0)) {
+        throw std::invalid_argument("Expression::rmsNorm epsilon must be > 0.");
+    }
+
+    Expression out = binaryOp(input, scale, ExprOp::RMSNORM);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.rms_norm_normalized_feature_count = normalized_feature_count;
+    node.rms_norm_epsilon = epsilon;
+    node.rms_norm_fused_activation = CudnnRmsNormFusedActivation::NONE;
+    node.compute_dtype = compute_dtype.value_or(DataType::FP32);
+    if (output_dtype.has_value()) {
+        node.output_dtype = output_dtype.value();
+    }
+    return out;
+}
+
+Expression Expression::swish() const {
+    return *this * this->sigmoid();
 }
 
 static uint32_t cloneSubtreeIntoMergedExpression(const Expression& src_expr,

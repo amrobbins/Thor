@@ -497,6 +497,7 @@ static bool isConvolutionBackwardOp(ExprOp op) {
 static bool isConvolutionOp(ExprOp op) { return isConvolutionForwardOp(op) || isConvolutionBackwardOp(op); }
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
 static bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
+static bool isRmsNormOp(ExprOp op) { return op == ExprOp::RMSNORM; }
 static bool isAttentionOp(ExprOp op) { return op == ExprOp::ATTENTION; }
 static bool isAttentionBackwardOp(ExprOp op) {
     return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V ||
@@ -509,7 +510,7 @@ static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
-    return isCudnnReduceOp(op) || isSoftmaxOp(op) || isMatmulOp(op) || isAttentionOp(op) || isAttentionBackwardOp(op) ||
+    return isCudnnReduceOp(op) || isSoftmaxOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) || isAttentionBackwardOp(op) ||
            isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isTransposeOp(op);
 }
 
@@ -738,6 +739,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "RNORM1";
         case ExprOp::REDUCE_NORM2:
             return "RNORM2";
+        case ExprOp::RMSNORM:
+            return "RMSNORM";
         case ExprOp::MATMUL:
             return "MATMUL";
         case ExprOp::GEMM:
@@ -894,6 +897,12 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs +
                 ",algorithm=" + std::to_string(static_cast<int>(node.softmax_algorithm)) +
                 ",mode=" + std::to_string(static_cast<int>(node.softmax_mode)) + ")";
+        } else if (isRmsNormOp(node.op)) {
+            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",scale=" + rhs +
+                ",hidden=" + std::to_string(node.rms_norm_normalized_feature_count) +
+                ",epsilon=" + std::to_string(scalarBits(node.rms_norm_epsilon)) +
+                ",fused=" + std::string(toString(node.rms_norm_fused_activation)) + ")";
         } else if (isMatmulOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
 
@@ -1432,6 +1441,70 @@ shared_ptr<CompiledSoftmax> EquationCompiler::compileSoftmax(const PhysicalExpre
 
     const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
     return make_shared<CompiledSoftmax>(node.softmax_algorithm, node.softmax_mode, supported_input_dtype, node.output_dtype.value());
+}
+
+shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 2) {
+        throw std::runtime_error("RMSNorm stage must have exactly two inputs: feature input and scale.");
+    }
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("RMSNorm stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isRmsNormOp(node.op)) {
+        throw std::runtime_error("RMSNorm stage output node is not RMSNORM.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("RMSNorm node is missing input or scale.");
+    }
+
+    const ExprNode& input_node = expr.nodes[node.lhs];
+    const ExprNode& scale_node = expr.nodes[node.rhs];
+    if (input_node.op != ExprOp::INPUT || scale_node.op != ExprOp::INPUT) {
+        throw std::runtime_error("RMSNorm stage inputs must be local INPUT nodes.");
+    }
+    if (!input_node.input_tensor_dtype.has_value() || !scale_node.input_tensor_dtype.has_value()) {
+        throw std::runtime_error("RMSNorm stage input nodes are missing resolved input_tensor_dtype.");
+    }
+    if (!node.output_dtype.has_value() || !node.compute_dtype.has_value()) {
+        throw std::runtime_error("RMSNorm node is missing resolved dtype metadata.");
+    }
+    if (node.rms_norm_normalized_feature_count == 0) {
+        throw std::runtime_error("RMSNorm node has zero normalized feature count.");
+    }
+    if (!(node.rms_norm_epsilon > 0.0)) {
+        throw std::runtime_error("RMSNorm node epsilon must be > 0.");
+    }
+
+    const DataType input_dtype = input_node.input_tensor_dtype.value();
+    const DataType scale_dtype = scale_node.input_tensor_dtype.value();
+    const DataType output_dtype = node.output_dtype.value();
+    const DataType compute_dtype = toSupportedComputeDType(node.op, node.compute_dtype.value());
+
+    auto compiled = make_shared<CompiledRmsNorm>();
+    compiled->normalized_feature_count = node.rms_norm_normalized_feature_count;
+    compiled->epsilon = node.rms_norm_epsilon;
+    compiled->input_dtype = input_dtype;
+    compiled->scale_dtype = scale_dtype;
+    compiled->output_dtype = output_dtype;
+    compiled->compute_dtype = compute_dtype;
+    compiled->fused_activation = node.rms_norm_fused_activation;
+    compiled->debug_name = node.rms_norm_fused_activation == CudnnRmsNormFusedActivation::SWISH ? "thor_expr_rms_norm_swish" : "thor_expr_rms_norm";
+
+    CudnnRmsNormDescriptor descriptor;
+    descriptor.outerSize = 1;
+    descriptor.normalizedFeatureCount = compiled->normalized_feature_count;
+    descriptor.inputDataType = input_dtype;
+    descriptor.parameterDataType = scale_dtype;
+    descriptor.outputDataType = output_dtype;
+    descriptor.computeDataType = compute_dtype;
+    descriptor.epsilon = static_cast<float>(compiled->epsilon);
+    descriptor.training = false;
+    descriptor.fusedActivation = compiled->fused_activation;
+    descriptor.debugName = compiled->debug_name;
+    descriptor.validateForward();
+    return compiled;
 }
 
 shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs) {
@@ -2455,6 +2528,95 @@ static PhysicalExecutionStage buildSoftmaxStage(const PhysicalExpression& expr,
 
     return PhysicalExecutionStage{
         .kind = PhysicalExecutionStage::Kind::Softmax,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = std::move(stage_outputs),
+    };
+}
+
+static PhysicalExecutionStage buildRmsNormStage(const PhysicalExpression& expr,
+                                                uint32_t node_idx,
+                                                uint32_t output_value_id,
+                                                const std::string& output_name,
+                                                const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isRmsNormOp(node.op)) {
+        throw std::runtime_error("buildRmsNormStage called on non-RMSNorm node.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("RMSNorm node missing input or scale.");
+    }
+
+    PhysicalExpression stage_expr;
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(2);
+    auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
+
+    auto add_local_input = [&](uint32_t parent_idx, uint32_t local_slot) {
+        const ExprNode& parent = expr.nodes[parent_idx];
+        uint32_t value_id = UINT32_MAX;
+        std::optional<DataType> actual_input_dtype = std::nullopt;
+        std::optional<DataType> output_dtype = std::nullopt;
+        std::optional<DataType> compute_dtype = std::nullopt;
+        std::optional<DataType> backward_output_dtype = std::nullopt;
+        std::optional<DataType> backward_compute_dtype = std::nullopt;
+
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            value_id = out_it->second;
+            actual_input_dtype = parent.output_dtype;
+            output_dtype = parent.output_dtype;
+            compute_dtype = parent.compute_dtype;
+            backward_output_dtype = parent.backward_output_dtype;
+            backward_compute_dtype = parent.backward_compute_dtype;
+        } else if (parent.op == ExprOp::INPUT) {
+            value_id = parent.input_slot;
+            actual_input_dtype = parent.input_tensor_dtype;
+            output_dtype = parent.output_dtype;
+            compute_dtype = parent.compute_dtype;
+            backward_output_dtype = parent.backward_output_dtype;
+            backward_compute_dtype = parent.backward_compute_dtype;
+        } else {
+            throw std::runtime_error("Missing value id for RMSNorm input.");
+        }
+
+        if (!actual_input_dtype.has_value() || !output_dtype.has_value()) {
+            throw std::runtime_error("RMSNorm input parent is missing resolved dtype metadata.");
+        }
+
+        input_value_ids.push_back(value_id);
+        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot), local_slot, NamedInput::Kind::Tensor});
+
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = actual_input_dtype.value();
+        input_node.output_dtype = output_dtype.value();
+        input_node.compute_dtype = compute_dtype.value_or(defaultComputeDType(actual_input_dtype.value(), output_dtype.value()));
+        input_node.backward_output_dtype = backward_output_dtype.value_or(output_dtype.value());
+        input_node.backward_compute_dtype = backward_compute_dtype.value_or(input_node.compute_dtype.value());
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+
+    add_local_input(node.lhs, 0);
+    add_local_input(node.rhs, 1);
+
+    ExprNode rms_norm = node;
+    rms_norm.lhs = 0;
+    rms_norm.rhs = 1;
+    rms_norm.aux = UINT32_MAX;
+    stage_expr.nodes.push_back(std::move(rms_norm));
+    stage_expr.output_node = 2;
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{
+        .name = output_name,
+        .local_node_idx = 2,
+        .value_id = output_value_id,
+    });
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::RmsNorm,
         .expr = std::move(stage_expr),
         .input_value_ids = std::move(input_value_ids),
         .outputs = std::move(stage_outputs),
@@ -3781,6 +3943,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 planned.stages.push_back(buildReduceMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isSoftmaxOp(root.op)) {
                 planned.stages.push_back(buildSoftmaxStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isRmsNormOp(root.op)) {
+                planned.stages.push_back(buildRmsNormStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isMatmulOp(root.op)) {
                 std::vector<PendingMatmulBgradOutput> bgrad_outputs = takePendingMatmulBgradOutputs(root_idx);
                 planned.stages.push_back(buildMatmulStage(expr, root_idx, stage_out_id, "", node_output_value_id, bgrad_outputs));
@@ -4059,6 +4223,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isSoftmaxOp(root.op)) {
                 planned.stages.push_back(
                     buildSoftmaxStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isRmsNormOp(root.op)) {
+                planned.stages.push_back(
+                    buildRmsNormStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isMatmulOp(root.op)) {
                 std::vector<PendingMatmulBgradOutput> bgrad_outputs = takePendingMatmulBgradOutputs(named_output.node_idx);
                 planned.stages.push_back(
@@ -4209,6 +4376,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::Softmax: {
                 std::shared_ptr<CompiledSoftmax> softmax = compileSoftmax(stage.expr);
                 compiled->stages.emplace_back(softmax, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::RmsNorm: {
+                std::shared_ptr<CompiledRmsNorm> rms_norm = compileRmsNorm(stage.expr);
+                compiled->stages.emplace_back(rms_norm, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::Matmul: {

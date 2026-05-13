@@ -18,6 +18,7 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 
 namespace ThorImplementation {
 struct PhysicalExecutionStage;
@@ -78,6 +79,7 @@ enum class ExprOp : uint16_t {
     REDUCE_AVG,
     REDUCE_NORM1,
     REDUCE_NORM2,
+    RMSNORM,
     ATTENTION,
     ATTENTION_BACKWARD_Q,
     ATTENTION_BACKWARD_K,
@@ -210,6 +212,10 @@ struct ExprNode {
     RotaryScalingKind rope_scaling_kind = RotaryScalingKind::None;
     double rope_scaling_factor = 1.0;
     uint64_t rope_original_max_position_embeddings = 0;
+
+    uint64_t rms_norm_normalized_feature_count = 0;
+    double rms_norm_epsilon = 1.0e-5;
+    CudnnRmsNormFusedActivation rms_norm_fused_activation = CudnnRmsNormFusedActivation::NONE;
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     std::optional<TensorDescriptor::DataType> input_tensor_dtype = std::nullopt;
@@ -438,6 +444,21 @@ class Expression {
                                          bool transpose_addend = false,
                                          std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
                                          std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
+
+    [[nodiscard]] static Expression rmsNorm(const Expression& input,
+                                            const Expression& scale,
+                                            uint64_t normalized_feature_count,
+                                            double epsilon = 1.0e-5,
+                                            std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                                            std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
+    [[nodiscard]] Expression rmsNorm(const Expression& scale,
+                                      uint64_t normalized_feature_count,
+                                      double epsilon = 1.0e-5,
+                                      std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                                      std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt) const {
+        return rmsNorm(*this, scale, normalized_feature_count, epsilon, compute_dtype, output_dtype);
+    }
+
     [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
                                                               const Expression& k,
                                                               const Expression& v,
@@ -674,8 +695,6 @@ inline Expression Expression::gelu() const {
     // Exact GELU: x * Phi(x), where Phi is the standard normal CDF.
     return *this * this->normcdf();
 }
-
-inline Expression Expression::swish() const { return *this * this->sigmoid(); }
 
 std::string formatFloatCanonical(double x);
 bool isCommutative(ExprOp op);
