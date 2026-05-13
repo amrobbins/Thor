@@ -104,3 +104,33 @@ def test_rms_norm_rejects_wrong_types_and_arity():
 
     with pytest.raises(TypeError):
         thor.layers.RMSNorm(n, x, epsilon="1e-5")
+
+
+def test_rms_norm_accepts_fused_swish_activation_and_serializes():
+    n = _net()
+    x = _input_tensor(n, [8, 16], thor.DataType.bf16)
+
+    rn = thor.layers.RMSNorm(n, x, fused_activation="swish")
+
+    assert rn.get_fused_activation() == "swish"
+    assert rn.get_parameter_data_type() == thor.DataType.bf16
+    arch = _only_layer_architecture(n, "rms_norm")
+    assert arch["fused_activation"] == "swish"
+
+
+def test_rms_norm_accepts_silu_alias_and_rejects_unknown_fused_activation():
+    n = _net()
+    x = _input_tensor(n, [8, 16], thor.DataType.bf16)
+
+    rn = thor.layers.RMSNorm(n, x, fused_activation="silu")
+    assert rn.get_fused_activation() == "swish"
+
+    n2 = thor.Network("test_net_rms_norm_bad_fused_activation")
+    x2 = _input_tensor(n2, [8, 16], thor.DataType.fp16)
+    with pytest.raises(ValueError, match="fused activation"):
+        thor.layers.RMSNorm(n2, x2, fused_activation="relu")
+
+    n3 = thor.Network("test_net_rms_norm_fused_fp16")
+    x3 = _input_tensor(n3, [8, 16], thor.DataType.fp16)
+    with pytest.raises((RuntimeError, ValueError), match="bf16"):
+        thor.layers.RMSNorm(n3, x3, fused_activation="swish")
