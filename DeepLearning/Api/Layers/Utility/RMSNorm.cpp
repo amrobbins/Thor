@@ -62,8 +62,10 @@ RMSNorm RMSNorm::Builder::build() {
     }
     if (!_epsilon.has_value())
         _epsilon = 1.0e-5;
-    if (!_parameterDataType.has_value())
-        _parameterDataType = Tensor::DataType::FP32;
+    if (!_parameterDataType.has_value()) {
+        _parameterDataType = _fusedActivation == ThorImplementation::CudnnRmsNormFusedActivation::SWISH ? Tensor::DataType::BF16
+                                                                                                       : Tensor::DataType::FP32;
+    }
     if (_weightsInitializer == nullptr)
         _weightsInitializer = UniformRandom::Builder().minValue(1.0f).maxValue(1.0f).build();
 
@@ -74,6 +76,7 @@ RMSNorm RMSNorm::Builder::build() {
     layer.normalizedShape = _normalizedShape;
     layer.epsilon = _epsilon.value();
     layer.parameterDataType = _parameterDataType.value();
+    layer.fusedActivation = _fusedActivation;
 
     const uint64_t hidden = RMSNorm::checkedFeatureCount(layer.normalizedShape, "normalizedShape");
 
@@ -107,10 +110,17 @@ void RMSNorm::Builder::verifyConfig() const {
     if (!_epsilon.has_value() || !(_epsilon.value() > 0.0)) {
         throw invalid_argument("RMSNorm epsilon must be > 0.");
     }
-    if (_parameterDataType.value() != Tensor::DataType::FP32) {
+    const Tensor::DataType inputDataType = _featureInputs.front().getDataType();
+    if (_fusedActivation == ThorImplementation::CudnnRmsNormFusedActivation::SWISH) {
+        if (inputDataType != Tensor::DataType::BF16) {
+            throw invalid_argument("RMSNorm fused SWISH currently requires bf16 feature inputs for cuDNN Frontend RMSNorm + SiLU fusion.");
+        }
+        if (_parameterDataType.value() != Tensor::DataType::BF16) {
+            throw invalid_argument("RMSNorm fused SWISH currently requires bf16 weights for cuDNN Frontend RMSNorm + SiLU fusion.");
+        }
+    } else if (_parameterDataType.value() != Tensor::DataType::FP32) {
         throw invalid_argument("RMSNorm currently requires fp32 weights for cuDNN Frontend RMSNorm.");
     }
-    const Tensor::DataType inputDataType = _featureInputs.front().getDataType();
     if (!RMSNorm::isRMSNormInputDataType(inputDataType)) {
         throw invalid_argument("RMSNorm feature input dtype must be fp16, bf16, or fp32.");
     }
@@ -145,7 +155,7 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
         physicalParameters.push_back(parameter->stamp());
     }
 
-    return make_shared<ThorImplementation::RMSNorm>(placement, inferenceOnly, normalizedShape, epsilon, parameterDataType, physicalParameters, getId());
+    return make_shared<ThorImplementation::RMSNorm>(placement, inferenceOnly, normalizedShape, epsilon, parameterDataType, fusedActivation, physicalParameters, getId());
 }
 
 json RMSNorm::architectureJson() const {
@@ -157,6 +167,7 @@ json RMSNorm::architectureJson() const {
     j["normalized_shape"] = normalizedShape;
     j["epsilon"] = epsilon;
     j["parameter_data_type"] = parameterDataType;
+    j["fused_activation"] = ThorImplementation::toString(fusedActivation);
 
     json inputs = json::array();
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
@@ -191,6 +202,9 @@ void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const
     layer.normalizedShape = j.at("normalized_shape").get<vector<uint64_t>>();
     layer.epsilon = j.at("epsilon").get<double>();
     layer.parameterDataType = j.at("parameter_data_type").get<Tensor::DataType>();
+    layer.fusedActivation = j.contains("fused_activation")
+                                ? ThorImplementation::cudnnRmsNormFusedActivationFromString(j.at("fused_activation").get<string>())
+                                : ThorImplementation::CudnnRmsNormFusedActivation::NONE;
 
     for (const json& inputJson : j.at("inputs")) {
         const uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();

@@ -31,6 +31,7 @@ class RMSNorm : public TrainableLayer {
     const std::vector<uint64_t>& getNormalizedShape() const { return normalizedShape; }
     double getEpsilon() const { return epsilon; }
     Tensor::DataType getParameterDataType() const { return parameterDataType; }
+    ThorImplementation::CudnnRmsNormFusedActivation getFusedActivation() const { return fusedActivation; }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                              Stream stream,
@@ -54,6 +55,7 @@ class RMSNorm : public TrainableLayer {
     std::vector<uint64_t> normalizedShape;
     double epsilon = 1.0e-5;
     Tensor::DataType parameterDataType = Tensor::DataType::FP32;
+    ThorImplementation::CudnnRmsNormFusedActivation fusedActivation = ThorImplementation::CudnnRmsNormFusedActivation::NONE;
 
     friend class Network;
     friend class Builder;
@@ -114,6 +116,14 @@ class RMSNorm::Builder {
         return *this;
     }
 
+    virtual RMSNorm::Builder& fusedActivation(ThorImplementation::CudnnRmsNormFusedActivation activation) {
+        THOR_THROW_IF_FALSE(this->_fusedActivation == ThorImplementation::CudnnRmsNormFusedActivation::NONE);
+        this->_fusedActivation = activation;
+        return *this;
+    }
+
+    virtual RMSNorm::Builder& fusedSwish() { return fusedActivation(ThorImplementation::CudnnRmsNormFusedActivation::SWISH); }
+
    private:
     void verifyConfig() const;
 
@@ -124,6 +134,7 @@ class RMSNorm::Builder {
     std::optional<Tensor::DataType> _parameterDataType;
     std::shared_ptr<Initializer> _weightsInitializer = nullptr;
     std::shared_ptr<Optimizer> _weightsOptimizer = nullptr;
+    ThorImplementation::CudnnRmsNormFusedActivation _fusedActivation = ThorImplementation::CudnnRmsNormFusedActivation::NONE;
 };
 
 }  // namespace Thor
