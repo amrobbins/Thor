@@ -31,7 +31,7 @@ struct ParameterFanOverride {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -42,6 +42,8 @@ struct CompiledExecutionStage {
                 return "ArgMinMax";
             case Kind::Softmax:
                 return "Softmax";
+            case Kind::RmsNorm:
+                return "RmsNorm";
             case Kind::Matmul:
                 return "Matmul";
             case Kind::Attention:
@@ -66,6 +68,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledReduction> reduction = nullptr;
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
+    const std::shared_ptr<CompiledRmsNorm> rms_norm = nullptr;
     const std::shared_ptr<CompiledMatmul> matmul = nullptr;
     const std::shared_ptr<CompiledAttention> attention = nullptr;
     const std::shared_ptr<CompiledAttentionBackward> attention_backward = nullptr;
@@ -106,6 +109,12 @@ struct CompiledExecutionStage {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing softmax stage.");
                 }
                 return softmax->output_dtype;
+
+            case Kind::RmsNorm:
+                if (!rms_norm) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing RMSNorm stage.");
+                }
+                return rms_norm->output_dtype;
 
             case Kind::Matmul:
                 if (!matmul) {
@@ -196,6 +205,17 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::Softmax),
           softmax(softmax),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledRmsNorm>& rms_norm,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::RmsNorm),
+          rms_norm(rms_norm),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
@@ -459,6 +479,12 @@ class FusedEquation {
                                                                const std::optional<Tensor>& preallocatedOutput,
                                                                const Stream& stream,
                                                                const std::vector<uint64_t>& requested_output_shape) const;
+
+    [[nodiscard]] std::shared_ptr<StampedRmsNorm> stampRmsNorm(const std::shared_ptr<CompiledRmsNorm>& compiledStage,
+                                                               Tensor& input,
+                                                               Tensor& scale,
+                                                               const std::optional<Tensor>& preallocatedOutput,
+                                                               const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(
         const std::shared_ptr<CompiledMatmul>& compiledStage,

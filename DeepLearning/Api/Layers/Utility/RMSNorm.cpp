@@ -1,13 +1,163 @@
 #include "DeepLearning/Api/Layers/Utility/RMSNorm.h"
 
+#include "DeepLearning/Api/Layers/Activations/Swish.h"
+#include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/Expression/FusedEquation.h"
+
+#include <cstddef>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 using namespace std;
 using json = nlohmann::json;
 
 namespace Thor {
+
+namespace {
+
+uint64_t checkedProductForRmsNorm(const std::vector<uint64_t>& dims, const std::string& what) {
+    uint64_t product = 1;
+    for (uint64_t dim : dims) {
+        if (dim == 0) {
+            throw std::runtime_error("RMSNorm " + what + " dimensions must be non-zero.");
+        }
+        if (product > std::numeric_limits<uint64_t>::max() / dim) {
+            throw std::runtime_error("RMSNorm " + what + " product overflows uint64_t.");
+        }
+        product *= dim;
+    }
+    return product;
+}
+
+bool isSwishEpilogueExpression(const ThorImplementation::Expression& epilogue) {
+    Swish swish;
+    ThorImplementation::Expression reference = swish.toExpression(RMSNorm::epilogueInput());
+    return LayerEpilogue::hasSameCanonicalForm(epilogue, reference, RMSNorm::epilogueInputName(), RMSNorm::epilogueOutputName(), "RMSNorm");
+}
+
+ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation::TensorPlacement placement,
+                                                             std::vector<uint64_t> normalizedShape,
+                                                             uint64_t hidden,
+                                                             double epsilon,
+                                                             Tensor::DataType parameterDataType,
+                                                             std::optional<ThorImplementation::Expression> epilogue,
+                                                             bool inferenceOnly) {
+    using ThorImplementation::DynamicExpression;
+    using ThorImplementation::DynamicExpressionBuild;
+    using ThorImplementation::Expression;
+    using ThorImplementation::FusedEquation;
+    using ThorImplementation::Tensor;
+    using ThorImplementation::TensorDescriptor;
+
+    const bool epilogueIsSwish = epilogue.has_value() && isSwishEpilogueExpression(epilogue.value());
+
+    return DynamicExpression(
+        {"feature_input", "weights"},
+        {"feature_output"},
+        [placement,
+         normalizedShape = std::move(normalizedShape),
+         hidden,
+         epsilon,
+         parameterDataType,
+         epilogue = std::move(epilogue),
+         epilogueIsSwish,
+         inferenceOnly](
+            const DynamicExpression::TensorMap& inputs,
+            const DynamicExpression::TensorMap& outputs,
+            Stream& stream) -> DynamicExpressionBuild {
+            (void)stream;
+
+            Tensor featureInputTensor = inputs.at("feature_input");
+            const Tensor& weightsTensor = inputs.at("weights");
+            const std::vector<uint64_t> originalInputDims = featureInputTensor.getDimensions();
+            const TensorDescriptor::DataType inputDataType = featureInputTensor.getDataType();
+
+            if (featureInputTensor.getPlacement() != placement) {
+                throw std::runtime_error("RMSNorm feature input tensor placement does not match the layer placement.");
+            }
+            if (weightsTensor.getPlacement() != placement) {
+                throw std::runtime_error("RMSNorm weights tensor placement does not match the layer placement.");
+            }
+            if (weightsTensor.getDataType() != parameterDataType) {
+                throw std::runtime_error("RMSNorm weights tensor dtype does not match parameterDataType.");
+            }
+            if (weightsTensor.getDimensions().size() != 1 || weightsTensor.getDimensions()[0] != hidden) {
+                throw std::runtime_error("RMSNorm weights tensor must have shape [normalized_feature_count].");
+            }
+            if (originalInputDims.size() < normalizedShape.size()) {
+                throw std::runtime_error("RMSNorm normalizedShape rank cannot exceed feature input rank.");
+            }
+            const size_t normalizedOffset = originalInputDims.size() - normalizedShape.size();
+            for (size_t i = 0; i < normalizedShape.size(); ++i) {
+                if (originalInputDims[normalizedOffset + i] != normalizedShape[i]) {
+                    throw std::runtime_error("RMSNorm normalizedShape must match trailing feature input dimensions.");
+                }
+            }
+
+            const uint64_t outer = checkedProductForRmsNorm(
+                std::vector<uint64_t>(originalInputDims.begin(), originalInputDims.begin() + static_cast<std::ptrdiff_t>(normalizedOffset)),
+                "outer");
+            featureInputTensor.reshape({outer, hidden});
+
+            if (outputs.contains("feature_output")) {
+                const Tensor& featureOutputTensor = outputs.at("feature_output");
+                if (featureOutputTensor.getPlacement() != placement) {
+                    throw std::runtime_error("RMSNorm feature output tensor placement does not match the layer placement.");
+                }
+                if (featureOutputTensor.getDataType() != inputDataType) {
+                    throw std::runtime_error("RMSNorm feature output tensor dtype must match the feature input dtype.");
+                }
+                if (featureOutputTensor.getDimensions() != originalInputDims) {
+                    throw std::runtime_error("RMSNorm feature output tensor dimensions must match the feature input dimensions.");
+                }
+            }
+
+            Expression fin = Expression::input("feature_input", inputDataType, inputDataType);
+            Expression weights = Expression::input("weights", parameterDataType, parameterDataType);
+            Expression fout = Expression::rmsNorm(fin, weights, hidden, epsilon, TensorDescriptor::DataType::FP32, inputDataType);
+            const bool useCudnnSwishFusion = epilogueIsSwish && parameterDataType == TensorDescriptor::DataType::BF16 &&
+                                             inputDataType == TensorDescriptor::DataType::BF16;
+            if (useCudnnSwishFusion) {
+                if (!inferenceOnly) {
+                    throw std::runtime_error(
+                        "RMSNorm Swish epilogue can use cuDNN Frontend RMSNorm + SiLU only for inference; "
+                        "training should use fp32 RMSNorm weights so the Swish epilogue can run as a separate expression.");
+                }
+                ThorImplementation::PhysicalExpression physical = fout.expression();
+                if (physical.output_node >= physical.nodes.size() || physical.nodes[physical.output_node].op != ThorImplementation::ExprOp::RMSNORM) {
+                    throw std::runtime_error("RMSNorm internal fusion rewrite expected an RMSNORM output node.");
+                }
+                physical.nodes[physical.output_node].rms_norm_fused_activation =
+                    ThorImplementation::CudnnRmsNormFusedActivation::SWISH;
+                auto fusedPhysical = std::make_shared<ThorImplementation::PhysicalExpression>(std::move(physical));
+                fout = Expression::fromPhysicalNode(fusedPhysical, fusedPhysical->output_node);
+            } else if (epilogue.has_value()) {
+                fout = RMSNorm::applyEpilogue(fout, epilogue.value());
+            }
+            if (featureInputTensor.getDimensions() != originalInputDims) {
+                fout = fout.reshape(originalInputDims);
+            }
+            fout = fout.withOutputDType(inputDataType);
+
+            auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
+
+            DynamicExpression::TensorMap stampInputs = inputs;
+            stampInputs["feature_input"] = featureInputTensor;
+
+            return DynamicExpressionBuild{
+                std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+                stampInputs,
+                {},
+                outputs,
+                {},
+            };
+        });
+}
+
+}  // namespace
 
 bool RMSNorm::isRMSNormInputDataType(Tensor::DataType dataType) {
     switch (dataType) {
@@ -58,26 +208,26 @@ RMSNorm RMSNorm::Builder::build() {
     }
     if (_normalizedShape.empty()) {
         const vector<uint64_t> dims = _featureInputs.front().getDimensions();
+        if (dims.empty()) {
+            throw invalid_argument("RMSNorm feature input must have at least one feature dimension.");
+        }
         _normalizedShape = {dims.back()};
     }
     if (!_epsilon.has_value())
         _epsilon = 1.0e-5;
     if (!_parameterDataType.has_value()) {
-        _parameterDataType = _fusedActivation == ThorImplementation::CudnnRmsNormFusedActivation::SWISH ? Tensor::DataType::BF16
-                                                                                                       : Tensor::DataType::FP32;
+        _parameterDataType = Tensor::DataType::FP32;
     }
     if (_weightsInitializer == nullptr)
         _weightsInitializer = UniformRandom::Builder().minValue(1.0f).maxValue(1.0f).build();
 
     verifyConfig();
 
-    RMSNorm layer;
+    RMSNorm layer(_epilogue);
     layer.featureInputs = _featureInputs;
     layer.normalizedShape = _normalizedShape;
     layer.epsilon = _epsilon.value();
     layer.parameterDataType = _parameterDataType.value();
-    layer.fusedActivation = _fusedActivation;
-
     const uint64_t hidden = RMSNorm::checkedFeatureCount(layer.normalizedShape, "normalizedShape");
 
     ParameterSpecification::Builder weightsBuilder;
@@ -111,15 +261,22 @@ void RMSNorm::Builder::verifyConfig() const {
         throw invalid_argument("RMSNorm epsilon must be > 0.");
     }
     const Tensor::DataType inputDataType = _featureInputs.front().getDataType();
-    if (_fusedActivation == ThorImplementation::CudnnRmsNormFusedActivation::SWISH) {
-        if (inputDataType != Tensor::DataType::BF16) {
-            throw invalid_argument("RMSNorm fused SWISH currently requires bf16 feature inputs for cuDNN Frontend RMSNorm + SiLU fusion.");
+    const bool swishEpilogue = _epilogue.has_value() && isSwishEpilogueExpression(_epilogue.value());
+    if (_epilogue.has_value()) {
+        RMSNorm::validateEpilogueExpression(_epilogue.value());
+    }
+    if (_parameterDataType.value() == Tensor::DataType::BF16) {
+        if (!swishEpilogue) {
+            throw invalid_argument(
+                "RMSNorm bf16 weights are only supported for the cuDNN Frontend RMSNorm + Swish epilogue inference fusion; "
+                "use fp32 weights for standard RMSNorm or non-Swish epilogues.");
         }
-        if (_parameterDataType.value() != Tensor::DataType::BF16) {
-            throw invalid_argument("RMSNorm fused SWISH currently requires bf16 weights for cuDNN Frontend RMSNorm + SiLU fusion.");
+        if (inputDataType != Tensor::DataType::BF16) {
+            throw invalid_argument(
+                "RMSNorm Swish epilogue fusion with bf16 weights requires bf16 feature inputs; use fp32 weights for generic epilogue execution.");
         }
     } else if (_parameterDataType.value() != Tensor::DataType::FP32) {
-        throw invalid_argument("RMSNorm currently requires fp32 weights for cuDNN Frontend RMSNorm.");
+        throw invalid_argument("RMSNorm currently requires fp32 weights, except bf16 weights for the Swish epilogue inference fusion.");
     }
     if (!RMSNorm::isRMSNormInputDataType(inputDataType)) {
         throw invalid_argument("RMSNorm feature input dtype must be fp16, bf16, or fp32.");
@@ -155,7 +312,16 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
         physicalParameters.push_back(parameter->stamp());
     }
 
-    return make_shared<ThorImplementation::RMSNorm>(placement, inferenceOnly, normalizedShape, epsilon, parameterDataType, fusedActivation, physicalParameters, getId());
+    const uint64_t hidden = RMSNorm::checkedFeatureCount(normalizedShape, "normalizedShape");
+    shared_ptr<ThorImplementation::CustomLayer> physicalRmsNorm = make_shared<ThorImplementation::CustomLayer>(
+        buildRmsNormExpression(placement, normalizedShape, hidden, epsilon, parameterDataType, epilogue, inferenceOnly),
+        placement,
+        physicalParameters,
+        inferenceOnly,
+        getId(),
+        false);
+    physicalRmsNorm->setLayerName(getLayerType());
+    return physicalRmsNorm;
 }
 
 json RMSNorm::architectureJson() const {
@@ -167,7 +333,13 @@ json RMSNorm::architectureJson() const {
     j["normalized_shape"] = normalizedShape;
     j["epsilon"] = epsilon;
     j["parameter_data_type"] = parameterDataType;
-    j["fused_activation"] = ThorImplementation::toString(fusedActivation);
+    if (epilogue.has_value()) {
+        if (!serializableEpilogue.has_value())
+            serializableEpilogue = makeEpilogueDefinition(epilogue.value());
+        j["epilogue"] = serializableEpilogue.value().architectureJson();
+    } else {
+        j["epilogue"] = nullptr;
+    }
 
     json inputs = json::array();
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
@@ -198,13 +370,22 @@ void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const
     if (j.at("layer_type").get<string>() != "rms_norm")
         throw runtime_error("Layer type mismatch in RMSNorm::deserialize: " + j.at("layer_type").get<string>());
 
-    RMSNorm layer;
+    std::optional<ThorImplementation::Expression> epilogue = std::nullopt;
+    if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
+        ThorImplementation::ExpressionDefinition epilogueDefinition =
+            ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
+        epilogue = epilogueExpressionFromDefinition(epilogueDefinition);
+    } else if (j.contains("fused_activation") &&
+               ThorImplementation::cudnnRmsNormFusedActivationFromString(j.at("fused_activation").get<string>()) ==
+                   ThorImplementation::CudnnRmsNormFusedActivation::SWISH) {
+        Swish swish;
+        epilogue = swish.toExpression(RMSNorm::epilogueInput());
+    }
+
+    RMSNorm layer(epilogue);
     layer.normalizedShape = j.at("normalized_shape").get<vector<uint64_t>>();
     layer.epsilon = j.at("epsilon").get<double>();
     layer.parameterDataType = j.at("parameter_data_type").get<Tensor::DataType>();
-    layer.fusedActivation = j.contains("fused_activation")
-                                ? ThorImplementation::cudnnRmsNormFusedActivationFromString(j.at("fused_activation").get<string>())
-                                : ThorImplementation::CudnnRmsNormFusedActivation::NONE;
 
     for (const json& inputJson : j.at("inputs")) {
         const uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();

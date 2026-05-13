@@ -2,16 +2,20 @@
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
+#include "DeepLearning/Api/Layers/Activations/Activation.h"
+#include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
-#include "DeepLearning/Implementation/Layers/NeuralNetwork/RMSNorm.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Thor {
@@ -21,6 +25,7 @@ class RMSNorm : public TrainableLayer {
     class Builder;
 
     RMSNorm() = default;
+    explicit RMSNorm(std::optional<ThorImplementation::Expression> epilogue) : epilogue(std::move(epilogue)) {}
     ~RMSNorm() override = default;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<RMSNorm>(*this); }
@@ -31,7 +36,37 @@ class RMSNorm : public TrainableLayer {
     const std::vector<uint64_t>& getNormalizedShape() const { return normalizedShape; }
     double getEpsilon() const { return epsilon; }
     Tensor::DataType getParameterDataType() const { return parameterDataType; }
-    ThorImplementation::CudnnRmsNormFusedActivation getFusedActivation() const { return fusedActivation; }
+    static const char* epilogueInputName() { return "__rms_norm_epilogue_input"; }
+    static const char* epilogueOutputName() { return "__rms_norm_epilogue_output"; }
+
+    [[nodiscard]] static ThorImplementation::Expression epilogueInput(
+        std::optional<ThorImplementation::TensorDescriptor::DataType> computeDType = std::nullopt,
+        std::optional<ThorImplementation::TensorDescriptor::DataType> outputDType = std::nullopt) {
+        return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
+    }
+
+    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(
+        const ThorImplementation::Expression& expression) {
+        return LayerEpilogue::makeDefinition(expression, epilogueInputName(), epilogueOutputName(), "RMSNorm");
+    }
+
+    static void validateEpilogueExpression(const ThorImplementation::Expression& expression) {
+        LayerEpilogue::validateExpression(expression, epilogueInputName(), epilogueOutputName(), "RMSNorm");
+    }
+
+    static void validateEpilogueDefinition(const ThorImplementation::ExpressionDefinition& definition) {
+        LayerEpilogue::validateDefinition(definition, epilogueInputName(), epilogueOutputName(), "RMSNorm");
+    }
+
+    [[nodiscard]] static ThorImplementation::Expression epilogueExpressionFromDefinition(
+        const ThorImplementation::ExpressionDefinition& definition) {
+        return LayerEpilogue::expressionFromDefinition(definition, epilogueInputName(), epilogueOutputName(), "RMSNorm");
+    }
+
+    [[nodiscard]] static ThorImplementation::Expression applyEpilogue(const ThorImplementation::Expression& input,
+                                                                      const ThorImplementation::Expression& epilogue) {
+        return LayerEpilogue::apply(input, epilogue, epilogueInputName());
+    }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                              Stream stream,
@@ -55,7 +90,8 @@ class RMSNorm : public TrainableLayer {
     std::vector<uint64_t> normalizedShape;
     double epsilon = 1.0e-5;
     Tensor::DataType parameterDataType = Tensor::DataType::FP32;
-    ThorImplementation::CudnnRmsNormFusedActivation fusedActivation = ThorImplementation::CudnnRmsNormFusedActivation::NONE;
+    std::optional<ThorImplementation::Expression> epilogue;
+    mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
 
     friend class Network;
     friend class Builder;
@@ -116,13 +152,23 @@ class RMSNorm::Builder {
         return *this;
     }
 
-    virtual RMSNorm::Builder& fusedActivation(ThorImplementation::CudnnRmsNormFusedActivation activation) {
-        THOR_THROW_IF_FALSE(this->_fusedActivation == ThorImplementation::CudnnRmsNormFusedActivation::NONE);
-        this->_fusedActivation = activation;
+    virtual RMSNorm::Builder& epilogue(const ThorImplementation::Expression& expression) {
+        THOR_THROW_IF_FALSE(!this->_epilogue.has_value());
+        RMSNorm::validateEpilogueExpression(expression);
+        this->_epilogue = expression;
         return *this;
     }
 
-    virtual RMSNorm::Builder& fusedSwish() { return fusedActivation(ThorImplementation::CudnnRmsNormFusedActivation::SWISH); }
+    virtual RMSNorm::Builder& epilogue(const Activation& activation) {
+        return epilogue(activation.toExpression(RMSNorm::epilogueInput()));
+    }
+
+    virtual RMSNorm::Builder& epilogue(const std::shared_ptr<Activation>& activation) {
+        if (activation == nullptr) {
+            throw std::invalid_argument("RMSNorm epilogue activation must be non-null.");
+        }
+        return epilogue(*activation);
+    }
 
    private:
     void verifyConfig() const;
@@ -134,7 +180,7 @@ class RMSNorm::Builder {
     std::optional<Tensor::DataType> _parameterDataType;
     std::shared_ptr<Initializer> _weightsInitializer = nullptr;
     std::shared_ptr<Optimizer> _weightsOptimizer = nullptr;
-    ThorImplementation::CudnnRmsNormFusedActivation _fusedActivation = ThorImplementation::CudnnRmsNormFusedActivation::NONE;
+    std::optional<ThorImplementation::Expression> _epilogue;
 };
 
 }  // namespace Thor

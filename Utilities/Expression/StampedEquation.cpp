@@ -48,6 +48,48 @@ static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
                                             const std::optional<Tensor>& workspace,
                                             const char* op_name);
 
+
+CudnnRmsNormDescriptor CompiledRmsNorm::descriptorFor(const Tensor& inputTensor, const Tensor& scaleTensor, const Tensor& outputTensor) const {
+    const std::vector<uint64_t> inputDims = inputTensor.getDimensions();
+    const std::vector<uint64_t> scaleDims = scaleTensor.getDimensions();
+    const std::vector<uint64_t> outputDims = outputTensor.getDimensions();
+    if (inputDims.size() != 2 || outputDims.size() != 2) {
+        throw std::runtime_error("Thor RMSNorm expression stage requires rank-2 logical [outer, hidden] input/output tensors.");
+    }
+    if (scaleDims.size() != 1) {
+        throw std::runtime_error("Thor RMSNorm expression stage requires a rank-1 [hidden] scale tensor.");
+    }
+    if (inputDims != outputDims) {
+        throw std::runtime_error("Thor RMSNorm expression stage input/output dimensions must match.");
+    }
+    if (inputDims[1] != normalized_feature_count || scaleDims[0] != normalized_feature_count) {
+        throw std::runtime_error("Thor RMSNorm expression stage hidden dimension does not match the compiled descriptor.");
+    }
+    if (inputTensor.getDataType() != input_dtype) {
+        throw std::runtime_error("Thor RMSNorm expression stage input dtype does not match compiled dtype.");
+    }
+    if (scaleTensor.getDataType() != scale_dtype) {
+        throw std::runtime_error("Thor RMSNorm expression stage scale dtype does not match compiled dtype.");
+    }
+    if (outputTensor.getDataType() != output_dtype) {
+        throw std::runtime_error("Thor RMSNorm expression stage output dtype does not match compiled dtype.");
+    }
+
+    CudnnRmsNormDescriptor descriptor;
+    descriptor.outerSize = inputDims[0];
+    descriptor.normalizedFeatureCount = normalized_feature_count;
+    descriptor.inputDataType = input_dtype;
+    descriptor.parameterDataType = scale_dtype;
+    descriptor.outputDataType = output_dtype;
+    descriptor.computeDataType = compute_dtype;
+    descriptor.epsilon = static_cast<float>(epsilon);
+    descriptor.training = false;
+    descriptor.fusedActivation = fused_activation;
+    descriptor.debugName = debug_name;
+    descriptor.validateForward();
+    return descriptor;
+}
+
 CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
                                                           const Tensor& kTensor,
                                                           const Tensor& vTensor,
@@ -801,6 +843,29 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
     }
 
     throw std::runtime_error("StampedConvolutionBackward received non-frontend convolution payload unexpectedly.");
+}
+
+
+StampedRmsNorm::StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
+                               const Tensor& input,
+                               const Tensor& scale,
+                               const Tensor& output,
+                               const Stream& stream)
+    : compiled_rms_norm(std::move(compiled)), input(input), scale(scale), output(output), stream(stream) {
+    if (!compiled_rms_norm) {
+        throw std::runtime_error("StampedRmsNorm requires a compiled RMSNorm payload.");
+    }
+}
+
+void StampedRmsNorm::run() { runOn(stream); }
+
+void StampedRmsNorm::runOn(Stream& run_stream) const {
+    const CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(input, scale, output);
+    CudnnRmsNormForwardArgs args;
+    args.x = input;
+    args.scale = scale;
+    args.y = output;
+    CudnnRmsNorm::instance().forward(descriptor, args, run_stream);
 }
 
 StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,

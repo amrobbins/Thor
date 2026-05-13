@@ -45,7 +45,9 @@ static bool isAttentionBackwardOp(ExprOp op) {
            op == ExprOp::ATTENTION_BACKWARD_BIAS;
 }
 
-static bool isReductionComputeOp(ExprOp op) { return isCudnnReduceOp(op) || op == ExprOp::ATTENTION || isAttentionBackwardOp(op) || op == ExprOp::ROPE; }
+static bool isReductionComputeOp(ExprOp op) {
+    return isCudnnReduceOp(op) || op == ExprOp::RMSNORM || op == ExprOp::ATTENTION || isAttentionBackwardOp(op) || op == ExprOp::ROPE;
+}
 static bool isConvolutionOp(ExprOp op) {
     return op == ExprOp::CONV2D || op == ExprOp::CONV3D || op == ExprOp::CONV2D_BACKWARD_DATA ||
            op == ExprOp::CONV2D_BACKWARD_FILTER || op == ExprOp::CONV3D_BACKWARD_DATA || op == ExprOp::CONV3D_BACKWARD_FILTER;
@@ -263,6 +265,14 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
 
     if (node.op == ExprOp::SCALAR_FP || node.op == ExprOp::FILL) {
         return node.output_dtype.has_value() ? node.output_dtype.value() : DataType::FP32;
+    }
+
+    if (node.op == ExprOp::RMSNORM) {
+        if (node.lhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("RMSNorm node has input index out of range in resolveNodeOutputDType.");
+        }
+        const DataType input_dtype = resolved_output_dtypes[node.lhs];
+        return node.output_dtype.has_value() ? node.output_dtype.value() : input_dtype;
     }
 
     if (isCudnnReduceOp(node.op)) {

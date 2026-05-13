@@ -13,6 +13,7 @@
 #include "DeepLearning/Api/Layers/Utility/RMSNorm.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "Utilities/Expression/Expression.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -34,12 +35,27 @@ vector<uint64_t> normalizedShapeFromPython(const nb::object& obj, const Tensor& 
     return nb::cast<vector<uint64_t>>(obj);
 }
 
-ThorImplementation::CudnnRmsNormFusedActivation fusedActivationFromPython(const string& value) {
-    try {
-        return ThorImplementation::cudnnRmsNormFusedActivationFromString(value);
-    } catch (const invalid_argument& error) {
-        throw nb::value_error(error.what());
+std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj) {
+    if (obj.is_none()) {
+        return std::nullopt;
     }
+    return nb::cast<DataType>(obj);
+}
+
+ThorImplementation::Expression makePythonEpilogueInput(const nb::object& outputDTypeObj, const nb::object& computeDTypeObj) {
+    std::optional<DataType> outputDType = optionalDataTypeFromPython(outputDTypeObj);
+    std::optional<DataType> computeDType = optionalDataTypeFromPython(computeDTypeObj);
+    return RMSNorm::epilogueInput(computeDType, outputDType);
+}
+
+void applyPythonEpilogue(RMSNorm::Builder& builder, const nb::object& epilogue) {
+    if (epilogue.is_none()) {
+        return;
+    }
+    if (!nb::isinstance<ThorImplementation::Expression>(epilogue)) {
+        throw nb::type_error("epilogue must be a thor.physical.Expression instance or None");
+    }
+    builder.epilogue(nb::cast<ThorImplementation::Expression>(epilogue));
 }
 
 }  // namespace
@@ -56,22 +72,20 @@ void bind_rms_norm(nb::module_& m) {
            nb::object normalized_shape,
            double epsilon,
            nb::object parameter_data_type,
-           string fused_activation,
            shared_ptr<Initializer> weights_initializer,
-           shared_ptr<Optimizer> weights_optimizer) {
+           shared_ptr<Optimizer> weights_optimizer,
+           nb::object epilogue) {
             if (!(epsilon > 0.0)) {
                 throw nb::value_error("RMSNorm instance: epsilon must be > 0.");
             }
 
             vector<uint64_t> shape = normalizedShapeFromPython(normalized_shape, feature_input);
-            ThorImplementation::CudnnRmsNormFusedActivation activation = fusedActivationFromPython(fused_activation);
 
             RMSNorm::Builder builder;
             builder.network(network).featureInput(feature_input).normalizedShape(shape).epsilon(epsilon);
             if (!parameter_data_type.is_none())
                 builder.parameterDataType(nb::cast<DataType>(parameter_data_type));
-            if (activation != ThorImplementation::CudnnRmsNormFusedActivation::NONE)
-                builder.fusedActivation(activation);
+            applyPythonEpilogue(builder, epilogue);
             if (weights_initializer != nullptr)
                 builder.weightsInitializer(weights_initializer);
             builder.weightsOptimizer(weights_optimizer);
@@ -83,9 +97,18 @@ void bind_rms_norm(nb::module_& m) {
         "normalized_shape"_a.none() = nb::none(),
         "epsilon"_a = 1.0e-5,
         "parameter_data_type"_a.none() = nb::none(),
-        "fused_activation"_a = "none",
         "weights_initializer"_a.none() = nb::none(),
-        "weights_optimizer"_a.none() = nb::none());
+        "weights_optimizer"_a.none() = nb::none(),
+        "epilogue"_a.none() = nb::none());
+
+    rms_norm.def_static(
+        "epilogue_input",
+        &makePythonEpilogueInput,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+            Return the single tensor input expression expected by an RMSNorm epilogue.
+            )nbdoc");
 
     rms_norm.def(
         "get_feature_output",
@@ -98,7 +121,6 @@ void bind_rms_norm(nb::module_& m) {
     rms_norm.def("get_normalized_shape", [](RMSNorm& self) { return self.getNormalizedShape(); });
     rms_norm.def("get_epsilon", [](RMSNorm& self) { return self.getEpsilon(); });
     rms_norm.def("get_parameter_data_type", [](RMSNorm& self) { return self.getParameterDataType(); });
-    rms_norm.def("get_fused_activation", [](RMSNorm& self) { return string(ThorImplementation::toString(self.getFusedActivation())); });
 
     rms_norm.attr("__doc__") = R"nbdoc(
         Root Mean Square Layer Normalization over a contiguous trailing normalized shape.
@@ -114,8 +136,10 @@ void bind_rms_norm(nb::module_& m) {
         epsilon : float, default 1e-5
             Positive numerical-stability epsilon.
         parameter_data_type : thor.DataType or None, default None
-            Data type for scale weights. None chooses fp32 for standard RMSNorm and bf16 for fused RMSNorm + SiLU.
-        fused_activation : {"none", "swish", "silu"}, default "none"
-            Optional cuDNN Frontend RMSNorm + SiLU/Swish inference fusion. The fused path is inference-only.
+            Data type for scale weights. None chooses fp32.
+        epilogue : thor.physical.Expression or None, default None
+            Optional expression applied after RMSNorm. Build it from ``RMSNorm.epilogue_input()``.
+            A Swish/SiLU epilogue can use the cuDNN Frontend RMSNorm + SiLU inference fusion when the
+            feature input, output, and scale weights are bf16.
         )nbdoc";
 }

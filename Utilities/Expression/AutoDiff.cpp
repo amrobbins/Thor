@@ -198,6 +198,7 @@ static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
         case ExprOp::REDUCE_MIN:
         case ExprOp::REDUCE_MAX:
         case ExprOp::SOFTMAX:
+        case ExprOp::RMSNORM:
         case ExprOp::ATTENTION:
         case ExprOp::ATTENTION_BACKWARD_Q:
         case ExprOp::ATTENTION_BACKWARD_K:
@@ -293,6 +294,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                 reaches[i] = reaches.at(node.lhs);
                 break;
             case ExprOp::MATMUL:
+            case ExprOp::RMSNORM:
             case ExprOp::CONV2D:
             case ExprOp::CONV2D_BACKWARD_DATA:
             case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -1807,6 +1809,16 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::GEMM:
                 node_dims[i] = inferMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs], &node_dims[node.aux]);
                 break;
+            case ExprOp::RMSNORM: {
+                const std::vector<uint64_t>& input_dims = node_dims[node.lhs];
+                const std::vector<uint64_t>& scale_dims = node_dims[node.rhs];
+                if (input_dims.size() != 2 || scale_dims.size() != 1 || input_dims[1] != node.rms_norm_normalized_feature_count ||
+                    scale_dims[0] != node.rms_norm_normalized_feature_count) {
+                    throw std::runtime_error("inferForwardNodeDims RMSNorm expects [outer, hidden] input and [hidden] scale tensors.");
+                }
+                node_dims[i] = input_dims;
+                break;
+            }
             case ExprOp::ATTENTION:
                 node_dims[i] = inferAttentionOutputDims(node_dims[node.lhs], node_dims[node.rhs], node_dims[node.aux]);
                 break;
@@ -2456,6 +2468,56 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                         const uint32_t sum_grad_times_out = builder.reduction(ExprOp::REDUCE_SUM, builder.mul(grad, out), axes, {});
                         addContributionToChild(node.lhs, builder.mul(out, builder.sub(grad, sum_grad_times_out)), node_dims);
                     }
+                }
+                break;
+            }
+
+            case ExprOp::RMSNORM: {
+                if (!has_forward_dims) {
+                    throw std::runtime_error("Autodiff RMSNorm backward requires forward shape information.");
+                }
+                const std::vector<uint64_t>& x_dims = forward_node_dims.at(node.lhs);
+                const std::vector<uint64_t>& scale_dims = forward_node_dims.at(node.rhs);
+                if (x_dims.size() != 2 || scale_dims.size() != 1 || x_dims[1] != node.rms_norm_normalized_feature_count ||
+                    scale_dims[0] != node.rms_norm_normalized_feature_count) {
+                    throw std::runtime_error("Autodiff RMSNorm backward expects [outer, hidden] input and [hidden] scale tensors.");
+                }
+
+                uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                const uint32_t x = builder.cloneForward(node.lhs);
+                const uint32_t scale = builder.cloneForward(node.rhs);
+
+                const uint32_t x_squared = builder.mul(x, x);
+                const uint32_t mean_x_squared =
+                    builder.reduction(ExprOp::REDUCE_AVG, x_squared, {1}, {}, node.compute_dtype, node.compute_dtype);
+                const uint32_t inv_rms = builder.div(
+                    builder.scalar(1.0),
+                    builder.unary(ExprOp::SQRT, builder.add(mean_x_squared, builder.scalar(node.rms_norm_epsilon))));
+
+                if (node.rms_norm_fused_activation == CudnnRmsNormFusedActivation::SWISH) {
+                    const uint32_t z = builder.mul(builder.mul(x, scale), inv_rms);
+                    const uint32_t sigmoid = builder.div(builder.scalar(1.0),
+                                                         builder.add(builder.scalar(1.0), builder.exp(builder.neg(z))));
+                    const uint32_t one_minus_sigmoid = builder.sub(builder.scalar(1.0), sigmoid);
+                    const uint32_t swish_grad = builder.mul(sigmoid, builder.add(builder.scalar(1.0), builder.mul(z, one_minus_sigmoid)));
+                    grad_like_output = builder.mul(grad_like_output, swish_grad);
+                }
+
+                const uint32_t scaled_grad = builder.mul(grad_like_output, scale);
+
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t mean_scaled_grad_x =
+                        builder.reduction(ExprOp::REDUCE_AVG, builder.mul(scaled_grad, x), {1}, {}, node.compute_dtype, node.compute_dtype);
+                    const uint32_t inv_rms_squared = builder.mul(inv_rms, inv_rms);
+                    const uint32_t inv_rms_cubed = builder.mul(inv_rms_squared, inv_rms);
+                    const uint32_t first = builder.mul(scaled_grad, inv_rms);
+                    const uint32_t second = builder.mul(x, builder.mul(inv_rms_cubed, mean_scaled_grad_x));
+                    addContributionToChild(node.lhs, builder.sub(first, second), x_dims);
+                }
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    const uint32_t dscale = builder.reduction(ExprOp::REDUCE_SUM, builder.mul(grad_like_output, builder.mul(x, inv_rms)),
+                                                              {0}, {0}, node.compute_dtype, preferredGradValueDType(forward_expr.nodes.at(node.rhs)));
+                    addContributionToChild(node.rhs, dscale, scale_dims);
                 }
                 break;
             }

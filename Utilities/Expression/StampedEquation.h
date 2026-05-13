@@ -17,6 +17,7 @@
 #include "Utilities/Cache/LruCache.h"
 #include "Utilities/Expression/CompiledEquation.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 
 namespace cudnn_frontend {
 namespace graph {
@@ -203,6 +204,20 @@ struct BuiltMatmul {
 
     BuiltMatmul(const BuiltMatmul&) = delete;
     BuiltMatmul& operator=(const BuiltMatmul&) = delete;
+};
+
+
+struct CompiledRmsNorm {
+    uint64_t normalized_feature_count = 0;
+    double epsilon = 1.0e-5;
+    TensorDescriptor::DataType input_dtype = TensorDescriptor::DataType::FP16;
+    TensorDescriptor::DataType scale_dtype = TensorDescriptor::DataType::FP32;
+    TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP16;
+    TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
+    CudnnRmsNormFusedActivation fused_activation = CudnnRmsNormFusedActivation::NONE;
+    std::string debug_name = "thor_expr_rms_norm";
+
+    [[nodiscard]] CudnnRmsNormDescriptor descriptorFor(const Tensor& input, const Tensor& scale, const Tensor& output) const;
 };
 
 struct CompiledAttention {
@@ -437,6 +452,26 @@ class StampedSoftmax {
     const float beta_0 = 0.0f;
     const void* alpha = &alpha_1;
     const void* beta = &beta_0;
+};
+
+
+class StampedRmsNorm {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+    Tensor getOutputTensor() const { return output; }
+
+    StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled, const Tensor& input, const Tensor& scale, const Tensor& output, const Stream& stream);
+
+   private:
+    const std::shared_ptr<CompiledRmsNorm> compiled_rms_norm;
+    const Tensor input;
+    const Tensor scale;
+    Tensor output;
+    Stream stream;
 };
 
 class StampedMatmul {
@@ -702,7 +737,7 @@ class StampedReduceMinMaxBackward {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     const Kind kind;
 
     const std::vector<uint32_t> dependency_stage_indices;
@@ -713,6 +748,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedReduction> reduction = nullptr;
     const std::shared_ptr<StampedArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<StampedSoftmax> softmax = nullptr;
+    const std::shared_ptr<StampedRmsNorm> rms_norm = nullptr;
     const std::shared_ptr<StampedMatmul> matmul = nullptr;
     const std::shared_ptr<StampedAttention> attention = nullptr;
     const std::shared_ptr<StampedAttentionBackward> attention_backward = nullptr;
@@ -755,6 +791,16 @@ struct StampedExecutionStage {
           gpu_num(softmax->gpuNum()),
           flop_count(flop_count),
           softmax(softmax) {}
+
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedRmsNorm>& rms_norm,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::RmsNorm),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(rms_norm->gpuNum()),
+          flop_count(flop_count),
+          rms_norm(rms_norm) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedMatmul>& matmul,
                                    std::vector<uint32_t> dependency_stage_indices = {},
@@ -830,6 +876,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::Softmax) {
             THOR_THROW_IF_FALSE(softmax != nullptr);
             softmax->runOn(run_stream);
+        } else if (kind == Kind::RmsNorm) {
+            THOR_THROW_IF_FALSE(rms_norm != nullptr);
+            rms_norm->runOn(run_stream);
         } else if (kind == Kind::Matmul) {
             THOR_THROW_IF_FALSE(matmul != nullptr);
             if (runtime_scalars.empty())

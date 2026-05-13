@@ -23,7 +23,7 @@
 namespace ThorImplementation {
 
 struct PhysicalExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
 
     Kind kind;
     PhysicalExpression expr;
@@ -54,6 +54,7 @@ class EquationCompiler {
     static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledArgMinMax> compileArgMinMax(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledSoftmax> compileSoftmax(const PhysicalExpression& expr);
+    static std::shared_ptr<CompiledRmsNorm> compileRmsNorm(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledMatmul> compileMatmul(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs = {});
     static std::shared_ptr<CompiledAttention> compileAttention(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledAttentionBackward> compileAttentionBackward(const PhysicalExpression& expr);

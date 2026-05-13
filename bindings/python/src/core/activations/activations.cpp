@@ -2,6 +2,7 @@
 #include <nanobind/stl/shared_ptr.h>
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
+#include "Utilities/Expression/Expression.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -26,6 +27,11 @@ void bind_activations(nb::module_ &activations) {
 
     auto activation = nb::class_<Activation>(activations, "Activation");
     activation.attr("__module__") = "thor.activations";
+    activation.def(
+        "to_expression",
+        [](const Activation& self, const ThorImplementation::Expression& input) { return self.toExpression(input); },
+        "input"_a,
+        R"nbdoc(Return an expression equivalent to applying this activation to the supplied expression.)nbdoc");
 
     bind_elu(activations);
     bind_exponential(activations);
