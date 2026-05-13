@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -156,6 +157,25 @@ static void validateBatchNormIoTensors(const Tensor& input, const Tensor& output
     }
 }
 
+static void validateRunningAverageFactor(double exponentialRunningAverageFactor) {
+    if (exponentialRunningAverageFactor <= 0.0 || exponentialRunningAverageFactor > 1.0) {
+        throw std::runtime_error("BatchNormalization exponential running average factor must be in the interval (0, 1].");
+    }
+}
+
+static double computeEffectiveRunningAverageFactor(uint64_t itemsObserved, double exponentialRunningAverageFactor) {
+    validateRunningAverageFactor(exponentialRunningAverageFactor);
+
+    // cuDNN's exponentialAverageFactor is the new-batch weight in:
+    //   running = running * (1 - factor) + batch_stat * factor
+    // Use the exact cumulative moving-average factor while it is larger than the configured EMA floor, then keep the configured
+    // factor once EMA would adapt faster than 1/N. This gives unbiased early running statistics without changing the steady-state EMA.
+    if (itemsObserved == 0) {
+        return 1.0;
+    }
+    return std::max(1.0 / static_cast<double>(itemsObserved), exponentialRunningAverageFactor);
+}
+
 }  // namespace
 
 const float BatchNormalization::ALPHA_NO_SCALE = 1.0f;
@@ -287,10 +307,7 @@ void BatchNormalization::compileImpl() {
         }
     }
 
-    THOR_THROW_IF_FALSE(exponentialRunningAverageFactor > 0.0);
-    THOR_THROW_IF_FALSE(exponentialRunningAverageFactor <= 1.0);
-    itemsObserved = 0;
-    currentExponentialRunningAverageFactor.assign(featureInputs.size(), 0.0);
+    validateRunningAverageFactor(exponentialRunningAverageFactor);
 }
 
 void BatchNormalization::cleanup() {
@@ -316,12 +333,12 @@ void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
     THOR_THROW_IF_FALSE(outputTensor.has_value());
     validateBatchNormIoTensors(inputTensor.value(), outputTensor.value());
 
-    if (itemsObserved != UINT64_MAX)
-        itemsObserved += 1;
-    if (currentExponentialRunningAverageFactor[connectionNumber] != exponentialRunningAverageFactor) {
-        currentExponentialRunningAverageFactor[connectionNumber] = 1.0 / itemsObserved;
-        if (currentExponentialRunningAverageFactor[connectionNumber] < exponentialRunningAverageFactor)
-            currentExponentialRunningAverageFactor[connectionNumber] = exponentialRunningAverageFactor;
+    double effectiveRunningAverageFactor = exponentialRunningAverageFactor;
+    if (!isInferenceOnly()) {
+        if (itemsObserved != UINT64_MAX) {
+            itemsObserved += 1;
+        }
+        effectiveRunningAverageFactor = computeEffectiveRunningAverageFactor(itemsObserved, exponentialRunningAverageFactor);
     }
 
     const ScopedCudnnTensorDescriptor xDesc = makePackedNchwTensorDescriptor(inputTensor.value());
@@ -330,7 +347,6 @@ void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
 
     ScopedGpu scopedGpu(stream.getGpuNum());
     if (!isInferenceOnly()) {
-        const double momentum = currentExponentialRunningAverageFactor[connectionNumber];
         CUDNN_CHECK(cudnnBatchNormalizationForwardTraining(stream.getCudnnHandle(),
                                                            CUDNN_BATCHNORM_SPATIAL,
                                                            &ALPHA_NO_SCALE,
@@ -342,7 +358,7 @@ void BatchNormalization::computeFeatureOut(uint32_t connectionNumber) {
                                                            bnDesc.get(),
                                                            weights.getMemPtr(),
                                                            biases.getMemPtr(),
-                                                           momentum,
+                                                           effectiveRunningAverageFactor,
                                                            resultRunningMean.getMemPtr(),
                                                            resultRunningVariance.getMemPtr(),
                                                            epsilon,
