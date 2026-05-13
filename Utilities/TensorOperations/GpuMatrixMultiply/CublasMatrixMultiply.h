@@ -88,6 +88,11 @@ class CublasMatrixMultiply {
         Gelu,
     };
 
+    enum class BackwardEpilogueFusion {
+        DRelu,
+        DGelu,
+    };
+
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
     // accumulate=true computes C += A * B. accumulate=false computes C = A * B.
@@ -353,6 +358,99 @@ class CublasMatrixMultiply {
                                                 const MatmulDataTypes dataTypes,
                                                 Stream stream,
                                                 CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+
+    // D = dActivation(alpha*(A*B) + optional addend, epilogueAux).
+    // epilogueAux is the cuBLASLt auxiliary input: a ReLU bit-mask for DRelu or
+    // the GELU input matrix for DGelu. If biasGradient is present, cuBLASLt also
+    // writes the bias-gradient vector through CUBLASLT_MATMUL_DESC_BIAS_POINTER.
+    void gemmWithBackwardEpilogueUsingHeuristicKernelChoice(Tensor A,
+                                                            Tensor B,
+                                                            std::optional<Tensor> addend,
+                                                            Tensor epilogueAux,
+                                                            Tensor D,
+                                                            std::optional<Tensor> biasGradient,
+                                                            const int32_t A_rows,
+                                                            const int32_t A_cols,
+                                                            const int32_t B_rows,
+                                                            const int32_t B_cols,
+                                                            bool transposeA,
+                                                            bool transposeB,
+                                                            const float *alpha,
+                                                            const float *beta,
+                                                            const MatmulDataTypes dataTypes,
+                                                            BackwardEpilogueFusion epilogue,
+                                                            Stream stream,
+                                                            CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+
+    void gemmWithDReluUsingHeuristicKernelChoice(Tensor A,
+                                                 Tensor B,
+                                                 std::optional<Tensor> addend,
+                                                 Tensor reluAux,
+                                                 Tensor D,
+                                                 const int32_t A_rows,
+                                                 const int32_t A_cols,
+                                                 const int32_t B_rows,
+                                                 const int32_t B_cols,
+                                                 bool transposeA,
+                                                 bool transposeB,
+                                                 const float *alpha,
+                                                 const float *beta,
+                                                 const MatmulDataTypes dataTypes,
+                                                 Stream stream,
+                                                 CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+
+    void gemmWithDGeluUsingHeuristicKernelChoice(Tensor A,
+                                                 Tensor B,
+                                                 std::optional<Tensor> addend,
+                                                 Tensor geluAux,
+                                                 Tensor D,
+                                                 const int32_t A_rows,
+                                                 const int32_t A_cols,
+                                                 const int32_t B_rows,
+                                                 const int32_t B_cols,
+                                                 bool transposeA,
+                                                 bool transposeB,
+                                                 const float *alpha,
+                                                 const float *beta,
+                                                 const MatmulDataTypes dataTypes,
+                                                 Stream stream,
+                                                 CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+
+    void gemmWithDReluBgradUsingHeuristicKernelChoice(Tensor A,
+                                                      Tensor B,
+                                                      std::optional<Tensor> addend,
+                                                      Tensor reluAux,
+                                                      Tensor D,
+                                                      Tensor biasGradient,
+                                                      const int32_t A_rows,
+                                                      const int32_t A_cols,
+                                                      const int32_t B_rows,
+                                                      const int32_t B_cols,
+                                                      bool transposeA,
+                                                      bool transposeB,
+                                                      const float *alpha,
+                                                      const float *beta,
+                                                      const MatmulDataTypes dataTypes,
+                                                      Stream stream,
+                                                      CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+
+    void gemmWithDGeluBgradUsingHeuristicKernelChoice(Tensor A,
+                                                      Tensor B,
+                                                      std::optional<Tensor> addend,
+                                                      Tensor geluAux,
+                                                      Tensor D,
+                                                      Tensor biasGradient,
+                                                      const int32_t A_rows,
+                                                      const int32_t A_cols,
+                                                      const int32_t B_rows,
+                                                      const int32_t B_cols,
+                                                      bool transposeA,
+                                                      bool transposeB,
+                                                      const float *alpha,
+                                                      const float *beta,
+                                                      const MatmulDataTypes dataTypes,
+                                                      Stream stream,
+                                                      CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
 
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation

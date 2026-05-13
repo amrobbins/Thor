@@ -111,7 +111,13 @@ struct CompiledExecutionStage {
                 if (!matmul) {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing matmul/gemm stage.");
                 }
-                return matmul->output_dtype;
+                if (output_idx == 0) {
+                    return matmul->output_dtype;
+                }
+                if (matmul->bgrad_output_dtype.has_value()) {
+                    return matmul->bgrad_output_dtype.value();
+                }
+                throw std::runtime_error("Matmul stage secondary output requested but no bias-gradient output dtype is available.");
 
             case Kind::Attention:
                 if (!attention) {
@@ -463,7 +469,9 @@ class FusedEquation {
         const std::optional<RuntimeInputValue>& alpha_input = std::nullopt,
         const std::optional<RuntimeInputValue>& beta_input = std::nullopt,
         const std::optional<std::string>& alpha_runtime_name = std::nullopt,
-        const std::optional<std::string>& beta_runtime_name = std::nullopt) const;
+        const std::optional<std::string>& beta_runtime_name = std::nullopt,
+        const std::optional<Tensor>& epilogue_aux = std::nullopt,
+        const std::optional<Tensor>& preallocatedBgradOutput = std::nullopt) const;
 
     [[nodiscard]] std::shared_ptr<StampedAttention> stampAttention(
         const std::shared_ptr<CompiledAttention>& compiledStage,
@@ -523,7 +531,9 @@ class FusedEquation {
         const std::optional<RuntimeInputValue>& alpha_input = std::nullopt,
         const std::optional<RuntimeInputValue>& beta_input = std::nullopt,
         const std::optional<std::string>& alpha_runtime_name = std::nullopt,
-        const std::optional<std::string>& beta_runtime_name = std::nullopt) const;
+        const std::optional<std::string>& beta_runtime_name = std::nullopt,
+        const std::optional<Tensor>& epilogue_aux = std::nullopt,
+        const std::optional<Tensor>& preallocatedBgradOutput = std::nullopt) const;
 
     [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
         const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,

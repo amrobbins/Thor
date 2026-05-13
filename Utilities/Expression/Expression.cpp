@@ -330,6 +330,28 @@ MatmulEpilogue matmulEpilogueFromName(const std::string& name) {
     throw std::runtime_error("Unknown matmul epilogue name in serialized expression: " + name);
 }
 
+const char* matmulBackwardEpilogueName(MatmulBackwardEpilogue epilogue) {
+    switch (epilogue) {
+        case MatmulBackwardEpilogue::Default:
+            return "default";
+        case MatmulBackwardEpilogue::DRelu:
+            return "drelu";
+        case MatmulBackwardEpilogue::DGelu:
+            return "dgelu";
+    }
+    throw std::runtime_error("Unknown MatmulBackwardEpilogue value.");
+}
+
+MatmulBackwardEpilogue matmulBackwardEpilogueFromName(const std::string& name) {
+    if (name == "default")
+        return MatmulBackwardEpilogue::Default;
+    if (name == "drelu")
+        return MatmulBackwardEpilogue::DRelu;
+    if (name == "dgelu")
+        return MatmulBackwardEpilogue::DGelu;
+    throw std::runtime_error("Unknown matmul backward epilogue name in serialized expression: " + name);
+}
+
 uint64_t fnv1a64(const std::string& text) {
     constexpr uint64_t kOffset = 1469598103934665603ULL;
     constexpr uint64_t kPrime = 1099511628211ULL;
@@ -364,6 +386,8 @@ json exprNodeToJson(const ExprNode& node) {
     j["transpose_rhs"] = node.transpose_rhs;
     j["transpose_aux"] = node.transpose_aux;
     j["matmul_epilogue"] = matmulEpilogueName(node.matmul_epilogue);
+    j["matmul_backward_epilogue"] = matmulBackwardEpilogueName(node.matmul_backward_epilogue);
+    j["matmul_epilogue_aux"] = node.matmul_epilogue_aux;
     j["conv_stride_d"] = node.conv_stride_d;
     j["conv_stride_h"] = node.conv_stride_h;
     j["conv_stride_w"] = node.conv_stride_w;
@@ -435,6 +459,8 @@ ExprNode exprNodeFromJson(const json& j) {
     node.transpose_rhs = j.value("transpose_rhs", false);
     node.transpose_aux = j.value("transpose_aux", false);
     node.matmul_epilogue = matmulEpilogueFromName(j.value("matmul_epilogue", std::string("default")));
+    node.matmul_backward_epilogue = matmulBackwardEpilogueFromName(j.value("matmul_backward_epilogue", std::string("default")));
+    node.matmul_epilogue_aux = j.value("matmul_epilogue_aux", UINT32_MAX);
     node.conv_stride_d = j.value("conv_stride_d", 1);
     node.conv_stride_h = j.value("conv_stride_h", 1);
     node.conv_stride_w = j.value("conv_stride_w", 1);
@@ -795,6 +821,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 out += ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0);
                 out += ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0);
                 out += ";epilogue=" + std::string(matmulEpilogueName(n.matmul_epilogue));
+                out += ";backwardEpilogue=" + std::string(matmulBackwardEpilogueName(n.matmul_backward_epilogue));
+                if (n.matmul_epilogue_aux != UINT32_MAX) {
+                    out += ";epilogueAux=" + canonicalizeNode(expr, n.matmul_epilogue_aux, memo, memoReady);
+                }
             } else if (n.op == ExprOp::CONV2D || n.op == ExprOp::CONV2D_BACKWARD_DATA || n.op == ExprOp::CONV2D_BACKWARD_FILTER ||
                        n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
                 if (n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
@@ -890,7 +920,12 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             out = opName(n.op) + "(" + a + "," + b + "," + c + gemmScaleString("alpha", n.alpha_node, n.alpha_fp) +
                   gemmScaleString("beta", n.beta_node, n.beta_fp) + ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0) +
                   ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0) + ";tC=" + std::to_string(n.transpose_aux ? 1 : 0) +
-                  ";epilogue=" + std::string(matmulEpilogueName(n.matmul_epilogue)) + ")";
+                  ";epilogue=" + std::string(matmulEpilogueName(n.matmul_epilogue)) +
+                  ";backwardEpilogue=" + std::string(matmulBackwardEpilogueName(n.matmul_backward_epilogue));
+            if (n.matmul_epilogue_aux != UINT32_MAX) {
+                out += ";epilogueAux=" + canonicalizeNode(expr, n.matmul_epilogue_aux, memo, memoReady);
+            }
+            out += ")";
             break;
         }
 
@@ -1101,6 +1136,12 @@ void ExpressionDefinition::validate() const {
         }
         if ((node.op == ExprOp::GEMM) && node.beta_node != UINT32_MAX && node.beta_node >= node_index_u32) {
             throw std::runtime_error("ExpressionDefinition GEMM beta_node must reference an earlier node.");
+        }
+        if ((node.op == ExprOp::MATMUL || node.op == ExprOp::GEMM) && node.matmul_backward_epilogue != MatmulBackwardEpilogue::Default) {
+            validateNodeIndex(node.matmul_epilogue_aux, "matmul backward epilogue aux");
+            if (node.matmul_epilogue_aux >= node_index_u32) {
+                throw std::runtime_error("ExpressionDefinition matmul backward epilogue aux must reference an earlier node.");
+            }
         }
         if ((node.op == ExprOp::ATTENTION) && node.attention_use_bias) {
             validateNodeIndex(node.alpha_node, "attention bias");
@@ -1393,6 +1434,9 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
         newNode.lhs = cloneSubtree(src, srcNode.lhs, dst, oldToNew);
         newNode.rhs = cloneSubtree(src, srcNode.rhs, dst, oldToNew);
         newNode.aux = UINT32_MAX;
+        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
+            newNode.matmul_epilogue_aux = cloneSubtree(src, srcNode.matmul_epilogue_aux, dst, oldToNew);
+        }
     } else if (Expression::isTernaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX || srcNode.aux == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing child for ternary op");
@@ -1404,6 +1448,9 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
         }
         if (srcNode.beta_node != UINT32_MAX) {
             newNode.beta_node = cloneSubtree(src, srcNode.beta_node, dst, oldToNew);
+        }
+        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
+            newNode.matmul_epilogue_aux = cloneSubtree(src, srcNode.matmul_epilogue_aux, dst, oldToNew);
         }
         if (srcNode.attention_use_padding_mask) {
             if (srcNode.attention_seq_len_q_node == UINT32_MAX || srcNode.attention_seq_len_kv_node == UINT32_MAX) {
@@ -1498,6 +1545,10 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
         newNode.lhs = cloneSubtreeWithMergedInputs(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName);
         newNode.rhs = cloneSubtreeWithMergedInputs(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName);
         newNode.aux = UINT32_MAX;
+        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
+            newNode.matmul_epilogue_aux =
+                cloneSubtreeWithMergedInputs(src, srcNode.matmul_epilogue_aux, dst, oldToNew, dstInputSlotsByName);
+        }
     } else if (Expression::isTernaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX || srcNode.aux == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing child for ternary op while merging outputs.");
@@ -1509,6 +1560,10 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
         }
         if (srcNode.beta_node != UINT32_MAX) {
             newNode.beta_node = cloneSubtreeWithMergedInputs(src, srcNode.beta_node, dst, oldToNew, dstInputSlotsByName);
+        }
+        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
+            newNode.matmul_epilogue_aux =
+                cloneSubtreeWithMergedInputs(src, srcNode.matmul_epilogue_aux, dst, oldToNew, dstInputSlotsByName);
         }
         if (srcNode.attention_use_padding_mask) {
             if (srcNode.attention_seq_len_q_node == UINT32_MAX || srcNode.attention_seq_len_kv_node == UINT32_MAX) {
@@ -1606,6 +1661,10 @@ uint32_t cloneSubtreeWithInputSubstitution(const PhysicalExpression& src,
         newNode.lhs = cloneSubtreeWithInputSubstitution(src, srcNode.lhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
         newNode.rhs = cloneSubtreeWithInputSubstitution(src, srcNode.rhs, substituteInputName, substituteNodeIndex, dst, oldToNew);
         newNode.aux = UINT32_MAX;
+        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
+            newNode.matmul_epilogue_aux = cloneSubtreeWithInputSubstitution(
+                src, srcNode.matmul_epilogue_aux, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        }
     } else if (Expression::isTernaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX || srcNode.aux == UINT32_MAX) {
             throw std::runtime_error("Malformed expression: missing child for ternary op while substituting input.");
@@ -1620,6 +1679,10 @@ uint32_t cloneSubtreeWithInputSubstitution(const PhysicalExpression& src,
         if (srcNode.beta_node != UINT32_MAX) {
             newNode.beta_node =
                 cloneSubtreeWithInputSubstitution(src, srcNode.beta_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        }
+        if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
+            newNode.matmul_epilogue_aux = cloneSubtreeWithInputSubstitution(
+                src, srcNode.matmul_epilogue_aux, substituteInputName, substituteNodeIndex, dst, oldToNew);
         }
         if (srcNode.attention_use_padding_mask) {
             if (srcNode.attention_seq_len_q_node == UINT32_MAX || srcNode.attention_seq_len_kv_node == UINT32_MAX) {

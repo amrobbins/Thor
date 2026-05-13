@@ -52,6 +52,16 @@ static bool isConvolutionOp(ExprOp op) {
 }
 static bool isCudnnSingleInputStageOp(ExprOp op) { return isCudnnReduceOp(op) || isCudnnSoftmaxOp(op); }
 
+static bool isSupportedCudnnReductionOutputDType(DataType dtype) {
+    switch (dtype) {
+        case DataType::FP16:
+        case DataType::FP32:
+            return true;
+        default:
+            return false;
+    }
+}
+
 DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
     if (!isSupportedFusionFloatingType(requested_compute_dtype)) {
         throw std::runtime_error("Unsupported dtype in toSupportedComputeDType.");
@@ -258,6 +268,14 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
     if (isCudnnReduceOp(node.op)) {
         if (node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX)
             return DataType::UINT32;
+
+        // cuDNN reductions compute in the promoted reduction compute dtype.  Some low-precision
+        // public gradient dtypes still need a final fused conversion stage because cuDNN ReduceTensor
+        // does not accept every Thor floating output dtype.  Preserve the single-stage reduction path
+        // only for materialized output dtypes that cuDNN supports directly, e.g. FP16 bias gradients.
+        if (node.output_dtype.has_value() && isSupportedCudnnReductionOutputDType(node.output_dtype.value())) {
+            return node.output_dtype.value();
+        }
         return DataType::FP32;
     }
 

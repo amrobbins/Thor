@@ -755,7 +755,9 @@ static bool canFuseMatmulActivationEpilogue(const PhysicalExpression& expr,
         return false;
     }
     const ExprNode& node = expr.nodes[node_idx];
-    if (!isMatmulOp(node.op) || node.matmul_epilogue != MatmulEpilogue::Default || node_dims[node_idx].size() != 2) {
+    if (!isMatmulOp(node.op) || node.matmul_epilogue != MatmulEpilogue::Default ||
+        node.matmul_backward_epilogue != MatmulBackwardEpilogue::Default || node.matmul_epilogue_aux != UINT32_MAX ||
+        node_dims[node_idx].size() != 2) {
         return false;
     }
 
@@ -799,11 +801,17 @@ static bool sameSubexpressionForMatmulEpilogue(const PhysicalExpression& expr,
             return a.scalar_fp == b.scalar_fp;
         case ExprOp::MATMUL:
             return a.transpose_lhs == b.transpose_lhs && a.transpose_rhs == b.transpose_rhs && a.matmul_epilogue == b.matmul_epilogue &&
+                   a.matmul_backward_epilogue == b.matmul_backward_epilogue &&
+                   (a.matmul_epilogue_aux == b.matmul_epilogue_aux ||
+                    sameSubexpressionForMatmulEpilogue(expr, a.matmul_epilogue_aux, b.matmul_epilogue_aux, depth + 1)) &&
                    sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
                    sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1);
         case ExprOp::GEMM:
             return a.transpose_lhs == b.transpose_lhs && a.transpose_rhs == b.transpose_rhs && a.transpose_aux == b.transpose_aux &&
                    a.alpha_fp == b.alpha_fp && a.beta_fp == b.beta_fp && a.matmul_epilogue == b.matmul_epilogue &&
+                   a.matmul_backward_epilogue == b.matmul_backward_epilogue &&
+                   (a.matmul_epilogue_aux == b.matmul_epilogue_aux ||
+                    sameSubexpressionForMatmulEpilogue(expr, a.matmul_epilogue_aux, b.matmul_epilogue_aux, depth + 1)) &&
                    sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
                    sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1) &&
                    sameSubexpressionForMatmulEpilogue(expr, a.aux, b.aux, depth + 1) &&
@@ -1285,6 +1293,14 @@ static std::vector<uint64_t> resolveMatmulOutputDimsFromInputs(const CompiledMat
 
     validate_scalar_input_dims(compiled_stage.alpha_input_slot, "alpha");
     validate_scalar_input_dims(compiled_stage.beta_input_slot, "beta");
+    if (compiled_stage.backward_epilogue != MatmulBackwardEpilogue::Default) {
+        if (compiled_stage.epilogue_aux_input_slot == UINT32_MAX || compiled_stage.epilogue_aux_input_slot >= stage_input_dims.size()) {
+            throw std::runtime_error("Matmul/gemm backward epilogue aux input slot is out of range.");
+        }
+        if (stage_input_dims[compiled_stage.epilogue_aux_input_slot] != out_dims) {
+            throw std::runtime_error("Matmul/gemm backward epilogue aux dimensions must match the matrix output dimensions.");
+        }
+    }
     return out_dims;
 }
 
@@ -1793,9 +1809,9 @@ static bool accumulatesIntoGradOutputs(const std::optional<BackwardEquationConfi
     return backward_config.has_value() && backward_config->accumulate_grad_outputs;
 }
 
-static std::unordered_set<std::string> backwardAccumulationOutputNames(const std::optional<BackwardEquationConfig>& backward_config) {
+static std::unordered_set<std::string> backwardGradOutputNames(const std::optional<BackwardEquationConfig>& backward_config) {
     std::unordered_set<std::string> names;
-    if (!accumulatesIntoGradOutputs(backward_config)) {
+    if (!backward_config.has_value()) {
         return names;
     }
 
@@ -1804,6 +1820,13 @@ static std::unordered_set<std::string> backwardAccumulationOutputNames(const std
         names.insert(wrt_name + "_grad");
     }
     return names;
+}
+
+static std::unordered_set<std::string> backwardAccumulationOutputNames(const std::optional<BackwardEquationConfig>& backward_config) {
+    if (!accumulatesIntoGradOutputs(backward_config)) {
+        return {};
+    }
+    return backwardGradOutputNames(backward_config);
 }
 
 static size_t externalRootInputCount(const std::vector<NamedInput>& root_inputs,
@@ -1976,12 +1999,14 @@ static void validateBackwardAccumulationOutputs(const std::optional<BackwardEqua
 
 static std::unordered_map<std::string, std::vector<uint64_t>> mergeRequestedOutputShapesWithProvidedOutputs(
     const std::unordered_map<std::string, Tensor>& provided_outputs,
-    const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes) {
+    const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes,
+    const std::optional<BackwardEquationConfig>& backward_config = std::nullopt) {
     std::unordered_map<std::string, std::vector<uint64_t>> effective = requested_output_shapes;
+    const std::unordered_set<std::string> backward_grad_output_names = backwardGradOutputNames(backward_config);
 
     for (const auto& [name, output] : provided_outputs) {
         auto requested_it = effective.find(name);
-        if (requested_it != effective.end() && !requested_it->second.empty()) {
+        if (requested_it != effective.end() && !requested_it->second.empty() && !backward_grad_output_names.contains(name)) {
             verifyRequestedOutputLayout(output.getDimensions(), requested_it->second);
         }
         effective[name] = output.getDimensions();
@@ -2923,11 +2948,10 @@ static uint64_t computeReduceMinMaxBackwardStageFlops(const CompiledReduceMinMax
     }
 
     // Reduce-min/max backward compares every original input element with the retained extremum and then
-    // conditionally routes the upstream gradient. The compile-backward graph may also include a tiny helper
-    // stage to materialize/broadcast the upstream reduced gradient; do not double count that helper here.
-    const uint64_t input_flops = checkedMulU64(numelFromDims(stage_input_dims[0]), 2, "computeReduceMinMaxBackwardStageFlops");
-    const uint64_t upstream_numel = numelFromDims(stage_input_dims[1]);
-    return input_flops > upstream_numel ? input_flops - upstream_numel : input_flops;
+    // conditionally routes the upstream gradient. Count those two per-input-element operations directly;
+    // upstream-gradient shaping is no longer represented as a separate helper stage in the optimized
+    // backward graph.
+    return checkedMulU64(numelFromDims(stage_input_dims[0]), 2, "computeReduceMinMaxBackwardStageFlops");
 }
 
 static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std::vector<std::vector<uint64_t>>& stage_input_dims) {
@@ -3039,7 +3063,17 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
             if (!stage.matmul) {
                 throw std::runtime_error("resolveOutputDimsForStageOutput matmul stage missing payload.");
             }
-            return resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+            const std::vector<uint64_t> matrix_dims = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+            if (output_idx == 0) {
+                return matrix_dims;
+            }
+            if (stage.matmul->bgrad_output_dtype.has_value()) {
+                if (matrix_dims.size() != 2) {
+                    throw std::runtime_error("Matmul bias-gradient output requires a rank-2 matrix output.");
+                }
+                return std::vector<uint64_t>{matrix_dims[1]};
+            }
+            throw std::runtime_error("Matmul stage requested secondary output but has no bias-gradient epilogue.");
         }
 
         case CompiledExecutionStage::Kind::Attention: {
@@ -3871,10 +3905,20 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
             if (!stage.matmul) {
                 throw std::runtime_error("Missing compiled matmul stage.");
             }
-            if (stage.outputs.size() != 1) {
-                throw std::runtime_error("Matmul/gemm stage expected exactly one output.");
+            if (stage.outputs.empty() || stage.outputs.size() > 2) {
+                throw std::runtime_error("Matmul/gemm stage expected one matrix output and at most one bias-gradient output.");
             }
-            value_dims[stage.outputs[0].value_id] = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+            const std::vector<uint64_t> matrix_dims = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+            value_dims[stage.outputs[0].value_id] = matrix_dims;
+            if (stage.outputs.size() > 1) {
+                if (!stage.matmul->bgrad_output_dtype.has_value()) {
+                    throw std::runtime_error("Matmul/gemm stage has a secondary output but no compiled bias-gradient output dtype.");
+                }
+                if (matrix_dims.size() != 2) {
+                    throw std::runtime_error("Matmul/gemm bias-gradient output requires a rank-2 matrix output.");
+                }
+                value_dims[stage.outputs[1].value_id] = std::vector<uint64_t>{matrix_dims[1]};
+            }
         } else if (stage.kind == CompiledExecutionStage::Kind::Attention) {
             if (!stage.attention) {
                 throw std::runtime_error("Missing compiled attention stage.");
@@ -4897,7 +4941,9 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                           const std::optional<RuntimeInputValue>& alpha_input,
                                                           const std::optional<RuntimeInputValue>& beta_input,
                                                           const std::optional<std::string>& alpha_runtime_name,
-                                                          const std::optional<std::string>& beta_runtime_name) const {
+                                                          const std::optional<std::string>& beta_runtime_name,
+                                                          const std::optional<Tensor>& epilogue_aux,
+                                                          const std::optional<Tensor>& preallocatedBgradOutput) const {
     if (!compiledStage) {
         throw std::runtime_error("stampMatmul requires non-null compiled stage.");
     }
@@ -4927,6 +4973,15 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
 
     assign_scale_dims(compiledStage->alpha_input_slot, alpha_input, "alpha");
     assign_scale_dims(compiledStage->beta_input_slot, beta_input, "beta");
+    if (compiledStage->epilogue_aux_input_slot != UINT32_MAX) {
+        if (!epilogue_aux.has_value()) {
+            throw std::runtime_error("Matmul stage missing backward epilogue aux tensor.");
+        }
+        if (stage_input_dims.size() <= compiledStage->epilogue_aux_input_slot) {
+            stage_input_dims.resize(compiledStage->epilogue_aux_input_slot + 1);
+        }
+        stage_input_dims[compiledStage->epilogue_aux_input_slot] = epilogue_aux->getDimensions();
+    }
 
     const std::vector<uint64_t> output_dims = resolveMatmulOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
@@ -4947,8 +5002,36 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         output = Tensor(adaptedLhs.getPlacement(), outputDescriptor);
     }
 
-    std::shared_ptr<BuiltMatmul> built =
-        StampedEquation::buildMatmul(compiledStage, adaptedLhs, adaptedRhs, std::nullopt, output, adaptedLhs.getPlacement().getDeviceNum());
+    std::optional<Tensor> bgrad_output = std::nullopt;
+    if (compiledStage->bgrad_output_dtype.has_value()) {
+        if (output_dims.size() != 2) {
+            throw std::runtime_error("Matmul bias-gradient epilogue requires a rank-2 output matrix.");
+        }
+        const std::vector<uint64_t> bgrad_dims{output_dims[1]};
+        if (preallocatedBgradOutput.has_value()) {
+            bgrad_output = preallocatedBgradOutput.value();
+            if (bgrad_output->getPlacement() != adaptedLhs.getPlacement()) {
+                throw std::runtime_error("Preallocated matmul bias-gradient output tensor placement does not match the input placement.");
+            }
+            if (bgrad_output->getDescriptor().getDataType() != compiledStage->bgrad_output_dtype.value()) {
+                throw std::runtime_error("Preallocated matmul bias-gradient output tensor dtype does not match the compiled dtype.");
+            }
+            if (bgrad_output->getDimensions() != bgrad_dims) {
+                throw std::runtime_error("Preallocated matmul bias-gradient output tensor dimensions are incompatible with the output shape.");
+            }
+        } else {
+            bgrad_output = Tensor(adaptedLhs.getPlacement(), TensorDescriptor(compiledStage->bgrad_output_dtype.value(), bgrad_dims));
+        }
+    }
+
+    std::shared_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(compiledStage,
+                                                                      adaptedLhs,
+                                                                      adaptedRhs,
+                                                                      std::nullopt,
+                                                                      output,
+                                                                      adaptedLhs.getPlacement().getDeviceNum(),
+                                                                      epilogue_aux,
+                                                                      bgrad_output);
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
@@ -4971,7 +5054,9 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       std::nullopt,
                                       std::nullopt,
                                       std::nullopt,
-                                      std::nullopt);
+                                      std::nullopt,
+                                      epilogue_aux,
+                                      bgrad_output);
 }
 
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
@@ -4983,7 +5068,9 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                           const std::optional<RuntimeInputValue>& alpha_input,
                                                           const std::optional<RuntimeInputValue>& beta_input,
                                                           const std::optional<std::string>& alpha_runtime_name,
-                                                          const std::optional<std::string>& beta_runtime_name) const {
+                                                          const std::optional<std::string>& beta_runtime_name,
+                                                          const std::optional<Tensor>& epilogue_aux,
+                                                          const std::optional<Tensor>& preallocatedBgradOutput) const {
     if (!compiledStage) {
         throw std::runtime_error("stampMatmul requires non-null compiled stage.");
     }
@@ -5020,6 +5107,15 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
 
     assign_scale_dims(compiledStage->alpha_input_slot, alpha_input, "alpha");
     assign_scale_dims(compiledStage->beta_input_slot, beta_input, "beta");
+    if (compiledStage->epilogue_aux_input_slot != UINT32_MAX) {
+        if (!epilogue_aux.has_value()) {
+            throw std::runtime_error("Matmul stage missing backward epilogue aux tensor.");
+        }
+        if (stage_input_dims.size() <= compiledStage->epilogue_aux_input_slot) {
+            stage_input_dims.resize(compiledStage->epilogue_aux_input_slot + 1);
+        }
+        stage_input_dims[compiledStage->epilogue_aux_input_slot] = epilogue_aux->getDimensions();
+    }
 
     const std::vector<uint64_t> output_dims = resolveMatmulOutputDimsFromInputs(*compiledStage, stage_input_dims);
 
@@ -5040,8 +5136,36 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         output = Tensor(adaptedLhs.getPlacement(), outputDescriptor);
     }
 
-    std::shared_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(
-        compiledStage, adaptedLhs, adaptedRhs, std::optional<Tensor>(adaptedAddend), output, adaptedLhs.getPlacement().getDeviceNum());
+    std::optional<Tensor> bgrad_output = std::nullopt;
+    if (compiledStage->bgrad_output_dtype.has_value()) {
+        if (output_dims.size() != 2) {
+            throw std::runtime_error("GEMM bias-gradient epilogue requires a rank-2 output matrix.");
+        }
+        const std::vector<uint64_t> bgrad_dims{output_dims[1]};
+        if (preallocatedBgradOutput.has_value()) {
+            bgrad_output = preallocatedBgradOutput.value();
+            if (bgrad_output->getPlacement() != adaptedLhs.getPlacement()) {
+                throw std::runtime_error("Preallocated GEMM bias-gradient output tensor placement does not match the input placement.");
+            }
+            if (bgrad_output->getDescriptor().getDataType() != compiledStage->bgrad_output_dtype.value()) {
+                throw std::runtime_error("Preallocated GEMM bias-gradient output tensor dtype does not match the compiled dtype.");
+            }
+            if (bgrad_output->getDimensions() != bgrad_dims) {
+                throw std::runtime_error("Preallocated GEMM bias-gradient output tensor dimensions are incompatible with the output shape.");
+            }
+        } else {
+            bgrad_output = Tensor(adaptedLhs.getPlacement(), TensorDescriptor(compiledStage->bgrad_output_dtype.value(), bgrad_dims));
+        }
+    }
+
+    std::shared_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(compiledStage,
+                                                                      adaptedLhs,
+                                                                      adaptedRhs,
+                                                                      std::optional<Tensor>(adaptedAddend),
+                                                                      output,
+                                                                      adaptedLhs.getPlacement().getDeviceNum(),
+                                                                      epilogue_aux,
+                                                                      bgrad_output);
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
@@ -5078,7 +5202,9 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       alpha_device_scratch,
                                       beta_device_scratch,
                                       alpha_host_scratch,
-                                      beta_host_scratch);
+                                      beta_host_scratch,
+                                      epilogue_aux,
+                                      bgrad_output);
 }
 
 std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::shared_ptr<CompiledAttention>& compiledStage,
@@ -5588,7 +5714,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
     static const std::unordered_map<std::string, float> empty_scalar_inputs;
 
     const std::unordered_map<std::string, std::vector<uint64_t>> requestedOutputShapesWithOutputs =
-        mergeRequestedOutputShapesWithProvidedOutputs(preallocated_outputs, requestedOutputShapes);
+        mergeRequestedOutputShapesWithProvidedOutputs(preallocated_outputs, requestedOutputShapes, backward_config);
 
     std::unordered_map<uint32_t, RuntimeInputValue> compile_root_values =
         accumulatesIntoGradOutputs(backward_config)
@@ -5941,17 +6067,25 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (!stage.matmul) {
                     throw std::runtime_error("Matmul/gemm stage missing compiled payload.");
                 }
-                if (stage.outputs.size() != 1) {
-                    throw std::runtime_error("Matmul/gemm stage expects exactly one output.");
+                if (stage.outputs.empty() || stage.outputs.size() > 2) {
+                    throw std::runtime_error("Matmul/gemm stage expects one matrix output and at most one bias-gradient output.");
                 }
-                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                const CompiledStageOutput& matrixStageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
-                std::optional<Tensor> preallocated = preallocatedForStageOutput(stageOutput, output_dims);
+                std::optional<Tensor> preallocated = preallocatedForStageOutput(matrixStageOutput, output_dims);
+                std::optional<Tensor> preallocated_bgrad = std::nullopt;
+                std::vector<uint64_t> bgrad_output_dims;
+                if (stage.outputs.size() > 1) {
+                    bgrad_output_dims = resolveOutputDimsForStageOutput(stage, 1, stageInputs);
+                    preallocated_bgrad = preallocatedForStageOutput(stage.outputs[1], bgrad_output_dims);
+                }
+
                 std::shared_ptr<StampedMatmul> stampedMatmul;
                 std::optional<RuntimeInputValue> alpha_input = std::nullopt;
                 std::optional<RuntimeInputValue> beta_input = std::nullopt;
                 std::optional<std::string> alpha_runtime_name = std::nullopt;
                 std::optional<std::string> beta_runtime_name = std::nullopt;
+                std::optional<Tensor> epilogue_aux = std::nullopt;
 
                 auto runtimeScalarNameForStageLocalSlot = [&](uint32_t local_slot) -> std::optional<std::string> {
                     if (local_slot == UINT32_MAX) {
@@ -5990,6 +6124,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     beta_runtime_name = runtimeScalarNameForStageLocalSlot(stage.matmul->beta_input_slot);
                 }
 
+                if (stage.matmul->epilogue_aux_input_slot != UINT32_MAX) {
+                    if (stage.matmul->epilogue_aux_input_slot >= stageInputs.size()) {
+                        throw std::runtime_error("Matmul stage backward epilogue aux input slot is out of range.");
+                    }
+                    epilogue_aux = runtimeInputTensor(stageInputs[stage.matmul->epilogue_aux_input_slot]);
+                }
+
                 if (stage.matmul->op == ExprOp::MATMUL) {
                     if (stageInputs.size() < 2) {
                         throw std::runtime_error("Matmul stage expects at least two inputs.");
@@ -6004,7 +6145,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                 alpha_input,
                                                 beta_input,
                                                 alpha_runtime_name,
-                                                beta_runtime_name);
+                                                beta_runtime_name,
+                                                epilogue_aux,
+                                                preallocated_bgrad);
                 } else {
                     if (stageInputs.size() < 3) {
                         throw std::runtime_error("GEMM stage expects at least three inputs.");
@@ -6021,14 +6164,29 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                 alpha_input,
                                                 beta_input,
                                                 alpha_runtime_name,
-                                                beta_runtime_name);
+                                                beta_runtime_name,
+                                                epilogue_aux,
+                                                preallocated_bgrad);
                 }
                 Tensor outputTensor = stampedMatmul->getOutputTensor();
                 if (outputTensor.getDimensions() != output_dims) {
                     throw std::runtime_error("Stamped matmul/gemm output tensor dimensions are incompatible with the staged output shape.");
                 }
-                values[stageOutput.value_id] = outputTensor;
-                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                values[matrixStageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[matrixStageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+
+                if (stage.outputs.size() > 1) {
+                    std::optional<Tensor> bgradTensor = stampedMatmul->getBiasGradientTensor();
+                    if (!bgradTensor.has_value()) {
+                        throw std::runtime_error("Matmul stage expected a fused bias-gradient output but none was stamped.");
+                    }
+                    if (bgradTensor->getDimensions() != bgrad_output_dims) {
+                        throw std::runtime_error("Stamped matmul/gemm bias-gradient tensor dimensions are incompatible with the staged output shape.");
+                    }
+                    values[stage.outputs[1].value_id] = bgradTensor.value();
+                    producer_stage_by_value_id[stage.outputs[1].value_id] = static_cast<uint32_t>(stampedStages.size());
+                }
+
                 stampedStages.emplace_back(stampedMatmul, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
@@ -6657,10 +6815,20 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             if (!stage.matmul) {
                 throw std::runtime_error("Missing compiled matmul stage.");
             }
-            if (stage.outputs.size() != 1) {
-                throw std::runtime_error("Matmul/gemm stage expected exactly one output.");
+            if (stage.outputs.empty() || stage.outputs.size() > 2) {
+                throw std::runtime_error("Matmul/gemm stage expected one matrix output and at most one bias-gradient output.");
             }
-            value_dims[stage.outputs[0].value_id] = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+            const std::vector<uint64_t> matrix_dims = resolveMatmulOutputDimsFromInputs(*stage.matmul, stage_input_dims);
+            value_dims[stage.outputs[0].value_id] = matrix_dims;
+            if (stage.outputs.size() > 1) {
+                if (!stage.matmul->bgrad_output_dtype.has_value()) {
+                    throw std::runtime_error("Matmul/gemm stage has a secondary output but no compiled bias-gradient output dtype.");
+                }
+                if (matrix_dims.size() != 2) {
+                    throw std::runtime_error("Matmul/gemm bias-gradient output requires a rank-2 matrix output.");
+                }
+                value_dims[stage.outputs[1].value_id] = std::vector<uint64_t>{matrix_dims[1]};
+            }
         } else if (stage.kind == CompiledExecutionStage::Kind::Attention) {
             if (!stage.attention) {
                 throw std::runtime_error("Missing compiled attention stage.");

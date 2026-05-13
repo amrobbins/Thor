@@ -189,12 +189,24 @@ static bool isAttentionBackwardOp(ExprOp op) {
 
 static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
     switch (op) {
+        case ExprOp::MATMUL:
+        case ExprOp::GEMM:
+        case ExprOp::REDUCE_SUM:
+        case ExprOp::REDUCE_AVG:
+        case ExprOp::REDUCE_NORM1:
+        case ExprOp::REDUCE_NORM2:
+        case ExprOp::REDUCE_MIN:
+        case ExprOp::REDUCE_MAX:
+        case ExprOp::SOFTMAX:
+        case ExprOp::ATTENTION:
         case ExprOp::ATTENTION_BACKWARD_Q:
         case ExprOp::ATTENTION_BACKWARD_K:
         case ExprOp::ATTENTION_BACKWARD_V:
         case ExprOp::ATTENTION_BACKWARD_BIAS:
+        case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
+        case ExprOp::CONV3D:
         case ExprOp::CONV3D_BACKWARD_DATA:
         case ExprOp::CONV3D_BACKWARD_FILTER:
         case ExprOp::REDUCE_MIN_BACKWARD:
@@ -694,7 +706,9 @@ class BackwardGraphBuilder {
                   bool transpose_rhs = false,
                   bool transpose_addend = false,
                   std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
-                  std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
+                  std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                  uint32_t alpha_node = UINT32_MAX,
+                  uint32_t beta_node = UINT32_MAX) {
         ExprNode node{};
         node.op = ExprOp::GEMM;
         node.lhs = lhs;
@@ -702,6 +716,8 @@ class BackwardGraphBuilder {
         node.aux = addend;
         node.alpha_fp = alpha;
         node.beta_fp = beta;
+        node.alpha_node = alpha_node;
+        node.beta_node = beta_node;
         node.transpose_lhs = transpose_lhs;
         node.transpose_rhs = transpose_rhs;
         node.transpose_aux = transpose_addend;
@@ -712,6 +728,107 @@ class BackwardGraphBuilder {
             node.compute_dtype = compute_dtype.value();
         }
         return push(std::move(node));
+    }
+
+
+    uint32_t cloneForwardMatmulPreamble(const ExprNode& forward_node) {
+        if (forward_node.op == ExprOp::MATMUL) {
+            uint32_t result = matmul(cloneForward(forward_node.lhs),
+                                     cloneForward(forward_node.rhs),
+                                     forward_node.transpose_lhs,
+                                     forward_node.transpose_rhs,
+                                     forward_node.output_dtype,
+                                     forward_node.compute_dtype);
+            ExprNode& result_node = grad_expr.nodes.at(result);
+            result_node.alpha_fp = forward_node.alpha_fp;
+            result_node.beta_fp = forward_node.beta_fp;
+            if (forward_node.alpha_node != UINT32_MAX) {
+                result_node.alpha_node = cloneForward(forward_node.alpha_node);
+            }
+            if (forward_node.beta_node != UINT32_MAX) {
+                result_node.beta_node = cloneForward(forward_node.beta_node);
+            }
+            return result;
+        }
+        if (forward_node.op == ExprOp::GEMM) {
+            return gemm(cloneForward(forward_node.lhs),
+                        cloneForward(forward_node.rhs),
+                        cloneForward(forward_node.aux),
+                        forward_node.alpha_fp,
+                        forward_node.beta_fp,
+                        forward_node.transpose_lhs,
+                        forward_node.transpose_rhs,
+                        forward_node.transpose_aux,
+                        forward_node.output_dtype,
+                        forward_node.compute_dtype,
+                        forward_node.alpha_node != UINT32_MAX ? cloneForward(forward_node.alpha_node) : UINT32_MAX,
+                        forward_node.beta_node != UINT32_MAX ? cloneForward(forward_node.beta_node) : UINT32_MAX);
+        }
+        throw std::runtime_error("cloneForwardMatmulPreamble requires a MATMUL or GEMM node.");
+    }
+
+    uint32_t duplicateMatmulWithBackwardEpilogue(uint32_t matmul_idx, uint32_t epilogue_aux, MatmulBackwardEpilogue epilogue) {
+        if (matmul_idx >= grad_expr.nodes.size()) {
+            return UINT32_MAX;
+        }
+        const ExprNode& source = grad_expr.nodes.at(matmul_idx);
+        if (!(source.op == ExprOp::MATMUL || source.op == ExprOp::GEMM) || source.matmul_epilogue != MatmulEpilogue::Default ||
+            source.matmul_backward_epilogue != MatmulBackwardEpilogue::Default) {
+            return UINT32_MAX;
+        }
+        ExprNode fused = source;
+        if (fused.transpose_lhs) {
+            fused.lhs = unary(ExprOp::TRANSPOSE, fused.lhs);
+            fused.transpose_lhs = false;
+        }
+        if (fused.transpose_rhs) {
+            fused.rhs = unary(ExprOp::TRANSPOSE, fused.rhs);
+            fused.transpose_rhs = false;
+        }
+        if (fused.transpose_aux) {
+            fused.aux = unary(ExprOp::TRANSPOSE, fused.aux);
+            fused.transpose_aux = false;
+        }
+        fused.matmul_backward_epilogue = epilogue;
+        fused.matmul_epilogue_aux = epilogue_aux;
+        return push(std::move(fused));
+    }
+
+    uint32_t applyForwardMatmulEpilogueBackward(const ExprNode& forward_node, uint32_t grad_like_output) {
+        if (forward_node.matmul_epilogue == MatmulEpilogue::Default) {
+            return grad_like_output;
+        }
+
+        const uint32_t preactivation = cloneForwardMatmulPreamble(forward_node);
+        if (forward_node.matmul_epilogue == MatmulEpilogue::Relu) {
+            const uint32_t fused = duplicateMatmulWithBackwardEpilogue(grad_like_output, preactivation, MatmulBackwardEpilogue::DRelu);
+            if (fused != UINT32_MAX) {
+                return fused;
+            }
+            return mul(grad_like_output, binary(ExprOp::MAX_GRAD_LEFT, preactivation, scalar(0.0)));
+        }
+
+        if (forward_node.matmul_epilogue == MatmulEpilogue::Gelu) {
+            // Only use cuBLASLt DGELU when the forward path was explicitly lowered to cuBLASLt's GELU
+            // approximation.  Generic x * normcdf(x) graphs that were not eligible for the forward epilogue
+            // continue to use the exact expression derivative through the normal autodiff rules.
+            const uint32_t fused = duplicateMatmulWithBackwardEpilogue(grad_like_output, preactivation, MatmulBackwardEpilogue::DGelu);
+            if (fused != UINT32_MAX) {
+                return fused;
+            }
+            const uint32_t x2 = mul(preactivation, preactivation);
+            const uint32_t x3 = mul(x2, preactivation);
+            const uint32_t sqrt_two_over_pi = scalar(0.7978845608028654);
+            const uint32_t tanh_arg = mul(sqrt_two_over_pi, add(preactivation, mul(scalar(0.044715), x3)));
+            const uint32_t tanh_value = unary(ExprOp::TANH, tanh_arg);
+            const uint32_t sech2 = sub(scalar(1.0), mul(tanh_value, tanh_value));
+            const uint32_t dt_dx = mul(sqrt_two_over_pi, add(scalar(1.0), mul(scalar(3.0 * 0.044715), x2)));
+            const uint32_t term0 = mul(scalar(0.5), add(scalar(1.0), tanh_value));
+            const uint32_t term1 = mul(mul(scalar(0.5), preactivation), mul(sech2, dt_dx));
+            return mul(grad_like_output, add(term0, term1));
+        }
+
+        throw std::runtime_error("Unsupported matmul epilogue in autodiff.");
     }
 
     uint32_t conv2dBackwardData(uint32_t filter,
@@ -918,13 +1035,17 @@ class BackwardGraphBuilder {
                        uint32_t lhs,
                        const std::vector<uint64_t>& reduction_axes,
                        const std::vector<uint64_t>& squeeze_axes,
-                       std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
+                       std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt,
+                       std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt) {
         ExprNode node{};
         node.op = op;
         node.lhs = lhs;
         node.reduction_axes = reduction_axes;
         node.squeeze_axes = squeeze_axes;
         node.compute_dtype = compute_dtype;
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
+        }
         return push(std::move(node));
     }
 
@@ -1727,7 +1848,8 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
 uint32_t sumToShape(BackwardGraphBuilder& builder,
                     uint32_t contrib,
                     const std::vector<uint64_t>& contrib_dims,
-                    const std::vector<uint64_t>& target_dims) {
+                    const std::vector<uint64_t>& target_dims,
+                    std::optional<TensorDescriptor::DataType> target_dtype = std::nullopt) {
     if (contrib_dims == target_dims) {
         return contrib;
     }
@@ -1829,7 +1951,7 @@ uint32_t sumToShape(BackwardGraphBuilder& builder,
             }
             reduction_scale *= static_cast<double>(contrib_dims[axis]);
         }
-        return builder.fill(contrib_constant * reduction_scale, target_dims);
+        return builder.fill(contrib_constant * reduction_scale, target_dims, target_dtype);
     }
 
     bool has_numeric_reduction = false;
@@ -1847,7 +1969,7 @@ uint32_t sumToShape(BackwardGraphBuilder& builder,
         return builder.squeeze(contrib, squeeze_axes);
     }
 
-    return builder.reduction(ExprOp::REDUCE_SUM, contrib, reduction_axes, squeeze_axes);
+    return builder.reduction(ExprOp::REDUCE_SUM, contrib, reduction_axes, squeeze_axes, std::nullopt, target_dtype);
 }
 
 uint64_t reductionElementCount(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& reduction_axes) {
@@ -1941,7 +2063,11 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         if (has_forward_dims) {
             const std::vector<uint64_t>& child_dims = forward_node_dims.at(child_idx);
             if (!child_dims.empty()) {
-                adjusted_contrib = sumToShape(builder, contrib, contrib_dims, child_dims);
+                adjusted_contrib = sumToShape(builder,
+                                              contrib,
+                                              contrib_dims,
+                                              child_dims,
+                                              preferredGradValueDType(forward_expr.nodes.at(child_idx)));
             }
         }
         builder.addContribution(child_idx, adjusted_contrib);
@@ -1965,7 +2091,27 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
     auto shapeGradLikeNodeOutput =
         [&](uint32_t grad_value, uint32_t forward_node_idx, const std::vector<uint64_t>& forward_node_output_dims) -> uint32_t {
-        return broadcastGradToDims(grad_value, forward_node_output_dims, preferredGradValueDType(forward_expr.nodes.at(forward_node_idx)));
+        if (!has_forward_dims || forward_node_output_dims.empty()) {
+            return grad_value;
+        }
+
+        double constant_value = 0.0;
+        std::vector<uint64_t> constant_dims;
+        if (!builder.tryGetConstantLike(grad_value, constant_value, constant_dims)) {
+            // Tensor-valued upstream gradients are already shaped like the forward node output.  Do not
+            // wrap them in fill(0)+grad just to force materialization: doing so creates synthetic fused
+            // stages around matmul backward inputs and prevents later planner rewrites from recognizing
+            // cuBLASLt backward-epilogue and bgrad patterns.
+            return grad_value;
+        }
+
+        if (constant_dims == forward_node_output_dims) {
+            return grad_value;
+        }
+
+        return builder.fill(constant_value,
+                            forward_node_output_dims,
+                            preferredGradValueDType(forward_expr.nodes.at(forward_node_idx)));
     };
 
     auto shapeAttentionOutputGrad =
@@ -2511,7 +2657,8 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             }
 
             case ExprOp::MATMUL: {
-                const uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                grad_like_output = builder.applyForwardMatmulEpilogueBackward(node, grad_like_output);
                 const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : std::vector<uint64_t>{};
                 const std::vector<uint64_t> rhs_dims = has_forward_dims ? forward_node_dims.at(node.rhs) : std::vector<uint64_t>{};
                 const auto lhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
@@ -2622,13 +2769,23 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             }
 
             case ExprOp::GEMM: {
-                const uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                grad_like_output = builder.applyForwardMatmulEpilogueBackward(node, grad_like_output);
                 const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : std::vector<uint64_t>{};
                 const std::vector<uint64_t> rhs_dims = has_forward_dims ? forward_node_dims.at(node.rhs) : std::vector<uint64_t>{};
                 const std::vector<uint64_t> aux_dims = has_forward_dims ? forward_node_dims.at(node.aux) : std::vector<uint64_t>{};
                 const auto lhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
                 const auto rhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.rhs));
-                const auto aux_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.aux));
+                auto aux_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.aux));
+                if (!aux_grad_dtype.has_value()) {
+                    // A GEMM rank-1/full-rank addend is constrained to the GEMM output dtype by the
+                    // cuBLASLt epilogue path.  Plain input nodes do not have their runtime dtype resolved
+                    // while the backward graph is being built, so use the forward GEMM's public output
+                    // dtype as the requested materialized dtype for dAux.  Without this, an FP16 bias
+                    // gradient reduction resolves to the reduction default FP32 output and callers that
+                    // request the FP16 public grad need a trailing conversion wrapper.
+                    aux_grad_dtype = preferredGradValueDType(node);
+                }
 
                 if (node_reaches_requested_inputs.at(node.lhs)) {
                     const uint32_t rhs = builder.cloneForward(node.rhs);
@@ -2703,7 +2860,18 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     }
                     uint32_t aux_grad = grad_like_output;
                     aux_grad = builder.buildScaledByGemmFactor(node.beta_node, node.beta_fp, aux_grad);
-                    aux_grad = broadcastGradToDims(aux_grad, aux_dims, aux_grad_dtype);
+
+                    if (has_forward_dims && !aux_dims.empty()) {
+                        // GEMM supports both full-rank addends and rank-1 bias vectors.  The gradient flowing into
+                        // the addend is initially shaped like the GEMM output.  For a bias-vector addend this must be
+                        // reduced across the broadcasted batch axis before it is written to the optimizer's [out]
+                        // gradient buffer; broadcasting a [out] zero tensor up to [batch, out] would leave the terminal
+                        // gradient with the wrong logical shape and fail preallocated-output validation.
+                        aux_grad = sumToShape(builder, aux_grad, node_dims, aux_dims, aux_grad_dtype);
+                    } else {
+                        aux_grad = broadcastGradToDims(aux_grad, aux_dims, aux_grad_dtype);
+                    }
+
                     addContributionToChild(node.aux, aux_grad, aux_dims);
                 }
                 break;

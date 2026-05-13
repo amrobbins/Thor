@@ -97,6 +97,12 @@ enum class MatmulEpilogue : uint8_t {
     Gelu = 2,
 };
 
+enum class MatmulBackwardEpilogue : uint8_t {
+    Default = 0,
+    DRelu = 1,
+    DGelu = 2,
+};
+
 struct RotaryPositionEmbeddingOptions {
     uint32_t sequence_axis = 2;
     uint32_t head_dim_axis = 3;
@@ -158,6 +164,8 @@ struct ExprNode {
     bool transpose_rhs = false;
     bool transpose_aux = false;
     MatmulEpilogue matmul_epilogue = MatmulEpilogue::Default;
+    MatmulBackwardEpilogue matmul_backward_epilogue = MatmulBackwardEpilogue::Default;
+    uint32_t matmul_epilogue_aux = UINT32_MAX;
     int32_t conv_stride_d = 1;
     int32_t conv_stride_h = 1;
     int32_t conv_stride_w = 1;
