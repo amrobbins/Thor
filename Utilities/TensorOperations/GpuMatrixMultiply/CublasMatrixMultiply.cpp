@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <optional>
+#include <sstream>
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
@@ -1643,15 +1645,32 @@ void CublasMatrixMultiply::gemmWithBackwardEpilogueUsingHeuristicKernelChoice(Te
         effectiveBeta = &betaOne;
     }
 
+    constexpr uint64_t BACKWARD_EPILOGUE_WORKSPACE_ABSOLUTE_CAP_BYTES = 1ull * 1024ull * 1024ull * 1024ull;
+    constexpr uint64_t BACKWARD_EPILOGUE_WORKSPACE_TOTAL_MEM_DIVISOR = 20ull;  // At most 5% of device memory.
+    constexpr uint64_t BACKWARD_EPILOGUE_WORKSPACE_FREE_MEM_DIVISOR = 4ull;    // Leave at least 75% of currently-free memory alone.
+
+    const uint64_t totalMemBytes = static_cast<uint64_t>(MachineEvaluator::instance().getTotalGlobalMemBytes(stream.getGpuNum()));
+    const uint64_t freeMemBytes = static_cast<uint64_t>(MachineEvaluator::instance().getFreeMemBytes(stream.getGpuNum()));
+    uint64_t maxWorkspaceBytes = BACKWARD_EPILOGUE_WORKSPACE_ABSOLUTE_CAP_BYTES;
+    if (totalMemBytes > 0) {
+        maxWorkspaceBytes = std::min(maxWorkspaceBytes, totalMemBytes / BACKWARD_EPILOGUE_WORKSPACE_TOTAL_MEM_DIVISOR);
+    }
+    if (freeMemBytes > 0) {
+        maxWorkspaceBytes = std::min(maxWorkspaceBytes, freeMemBytes / BACKWARD_EPILOGUE_WORKSPACE_FREE_MEM_DIVISOR);
+    }
+
     cublasStatus_t lastHeuristicStatus = CUBLAS_STATUS_SUCCESS;
-    auto tryLaunchBackwardEpilogue = [&](void *workspacePtr, uint64_t workspaceSizeBytes) -> bool {
+    cublasStatus_t lastMatmulStatus = CUBLAS_STATUS_SUCCESS;
+    uint64_t largestRejectedWorkspaceBytes = 0;
+    uint64_t selectedWorkspaceBytes = 0;
+    Tensor backwardEpilogueWorkspace;
+
+    auto tryLaunchBackwardEpilogue = [&](uint64_t workspaceLimitBytes) -> bool {
         cublasLtMatmulPreference_t searchPreferences;
         CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&searchPreferences));
         CHECK_CUBLAS(cublasLtMatmulPreferenceInit(searchPreferences));
-        if (workspaceSizeBytes > 0) {
-            CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
-                searchPreferences, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSizeBytes, sizeof(workspaceSizeBytes)));
-        }
+        CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+            searchPreferences, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceLimitBytes, sizeof(workspaceLimitBytes)));
 
         int returnedAlgoCount = 0;
         std::vector<cublasLtMatmulHeuristicResult_t> results(64);
@@ -1672,51 +1691,66 @@ void CublasMatrixMultiply::gemmWithBackwardEpilogueUsingHeuristicKernelChoice(Te
         results.resize(returnedAlgoCount);
 
         for (int i = 0; i < returnedAlgoCount; ++i) {
-            if (!(results[i].wavesCount > 0.0f)) {
+            if (results[i].state != CUBLAS_STATUS_SUCCESS || !(results[i].wavesCount > 0.0f)) {
                 continue;
             }
+
             const uint64_t algoWorkspaceSize = static_cast<uint64_t>(results[i].workspaceSize);
-            if (algoWorkspaceSize > workspaceSizeBytes) {
+            if (algoWorkspaceSize > workspaceLimitBytes) {
+                largestRejectedWorkspaceBytes = std::max(largestRejectedWorkspaceBytes, algoWorkspaceSize);
                 continue;
             }
-            cublasStatus_t status = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
-                                                   operationDesc,
-                                                   alpha,
-                                                   ltA,
-                                                   ADesc,
-                                                   ltB,
-                                                   BDesc,
-                                                   effectiveBeta,
-                                                   ltC,
-                                                   CDesc,
-                                                   D.getMemPtr(),
-                                                   DDesc,
-                                                   &(results[i].algo),
-                                                   workspacePtr,
-                                                   algoWorkspaceSize,
-                                                   stream);
-            if (status == CUBLAS_STATUS_SUCCESS) {
+
+            void *workspacePtr = nullptr;
+            if (algoWorkspaceSize > 0) {
+                TensorPlacement workspacePlacement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
+                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {algoWorkspaceSize});
+                backwardEpilogueWorkspace = Tensor(workspacePlacement, workspaceDescriptor);
+                workspacePtr = backwardEpilogueWorkspace.getMemPtr();
+            }
+
+            lastMatmulStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                             operationDesc,
+                                             alpha,
+                                             ltA,
+                                             ADesc,
+                                             ltB,
+                                             BDesc,
+                                             effectiveBeta,
+                                             ltC,
+                                             CDesc,
+                                             D.getMemPtr(),
+                                             DDesc,
+                                             &(results[i].algo),
+                                             workspacePtr,
+                                             algoWorkspaceSize,
+                                             stream);
+            if (lastMatmulStatus == CUBLAS_STATUS_SUCCESS) {
+                selectedWorkspaceBytes = algoWorkspaceSize;
                 return true;
             }
         }
         return false;
     };
 
-    bool kernelLaunchedSuccessfully = tryLaunchBackwardEpilogue(nullptr, 0);
-    Tensor backwardEpilogueWorkspace;
-    if (!kernelLaunchedSuccessfully && biasGradient.has_value()) {
-        // NVIDIA documents the cuBLASLt heuristic preference default as zero workspace.  The backward
-        // activation+bias-gradient epilogues can have no zero-workspace algorithms on current GPUs, so
-        // retry with the same 32 MiB workspace budget NVIDIA recommends for Hopper/Blackwell handles.
-        constexpr uint64_t BACKWARD_EPILOGUE_WORKSPACE_BYTES = 32ull * 1024ull * 1024ull;
-        TensorPlacement workspacePlacement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
-        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {BACKWARD_EPILOGUE_WORKSPACE_BYTES});
-        backwardEpilogueWorkspace = Tensor(workspacePlacement, workspaceDescriptor);
-        kernelLaunchedSuccessfully = tryLaunchBackwardEpilogue(backwardEpilogueWorkspace.getMemPtr(), BACKWARD_EPILOGUE_WORKSPACE_BYTES);
+    // Use the real production policy first: give cuBLASLt enough bounded workspace headroom to choose a fast
+    // backward-epilogue kernel, then allocate only the exact scratch size reported by the selected algorithm.
+    bool kernelLaunchedSuccessfully = tryLaunchBackwardEpilogue(maxWorkspaceBytes);
+    if (!kernelLaunchedSuccessfully && maxWorkspaceBytes != 0) {
+        // A zero-workspace fallback is still useful for low-memory situations or driver/library combinations whose
+        // heuristic search behaves differently when workspace is allowed.
+        kernelLaunchedSuccessfully = tryLaunchBackwardEpilogue(0);
     }
 
-    if (lastHeuristicStatus != CUBLAS_STATUS_SUCCESS && !kernelLaunchedSuccessfully) {
-        CHECK_CUBLAS(lastHeuristicStatus);
+    if (!kernelLaunchedSuccessfully) {
+        std::ostringstream message;
+        message << "Unable to find a cuBLASLt backward epilogue GEMM algorithm. workspace_cap_bytes=" << maxWorkspaceBytes
+                << ", selected_workspace_bytes=" << selectedWorkspaceBytes
+                << ", largest_rejected_workspace_bytes=" << largestRejectedWorkspaceBytes
+                << ", total_mem_bytes=" << totalMemBytes << ", free_mem_bytes=" << freeMemBytes
+                << ", heuristic_status=" << static_cast<int>(lastHeuristicStatus)
+                << ", last_matmul_status=" << static_cast<int>(lastMatmulStatus) << '.';
+        throw std::runtime_error(message.str());
     }
     CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
     CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
