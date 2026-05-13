@@ -20,6 +20,8 @@ void bind_convolution_3d(nb::module_ &m);
 void bind_custom_layer(nb::module_ &m);
 void bind_flatten(nb::module_ &m);
 void bind_fully_connected(nb::module_ &m);
+void bind_layer_norm(nb::module_ &m);
+void bind_rms_norm(nb::module_ &m);
 void bind_network_input(nb::module_ &m);
 void bind_network_output(nb::module_ &m);
 void bind_pooling(nb::module_ &layers);
@@ -45,6 +47,8 @@ void bind_layers(nb::module_ &layers) {
     bind_custom_layer(layers);
     bind_flatten(layers);
     bind_fully_connected(layers);
+    bind_layer_norm(layers);
+    bind_rms_norm(layers);
     bind_network_input(layers);
     bind_network_output(layers);
     bind_pooling(layers);
