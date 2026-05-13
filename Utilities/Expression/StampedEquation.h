@@ -138,6 +138,8 @@ struct MatmulCacheKey {
     const bool transpose_c;
     const bool bias_epilogue;
     const MatmulEpilogue epilogue;
+    const MatmulBackwardEpilogue backward_epilogue;
+    const bool bgrad_epilogue;
     const TensorDescriptor::DataType a_dtype;
     const TensorDescriptor::DataType b_dtype;
     const TensorDescriptor::DataType c_dtype;
@@ -161,6 +163,8 @@ struct MatmulCacheKey {
                    bool transpose_c,
                    bool bias_epilogue,
                    MatmulEpilogue epilogue,
+                   MatmulBackwardEpilogue backward_epilogue,
+                   bool bgrad_epilogue,
                    TensorDescriptor::DataType a_dtype,
                    TensorDescriptor::DataType b_dtype,
                    TensorDescriptor::DataType c_dtype,
@@ -181,6 +185,8 @@ struct MatmulCacheKey {
           transpose_c(transpose_c),
           bias_epilogue(bias_epilogue),
           epilogue(epilogue),
+          backward_epilogue(backward_epilogue),
+          bgrad_epilogue(bgrad_epilogue),
           a_dtype(a_dtype),
           b_dtype(b_dtype),
           c_dtype(c_dtype),
@@ -322,7 +328,9 @@ class StampedEquation {
                                                     const Tensor& rhs,
                                                     const std::optional<Tensor>& addend,
                                                     const Tensor& output,
-                                                    int device_num);
+                                                    int device_num,
+                                                    const std::optional<Tensor>& epilogue_aux = std::nullopt,
+                                                    const std::optional<Tensor>& bgrad_output = std::nullopt);
 
     static std::shared_ptr<BuiltConvolution> buildConvolution(const std::shared_ptr<CompiledConvolution>& compiled_convolution,
                                                               const Tensor& input,
@@ -440,6 +448,7 @@ class StampedMatmul {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    std::optional<Tensor> getBiasGradientTensor() const { return bgrad_output; }
 
     StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                   std::shared_ptr<BuiltMatmul> built,
@@ -456,7 +465,9 @@ class StampedMatmul {
                   std::optional<Tensor> alpha_device_scratch,
                   std::optional<Tensor> beta_device_scratch,
                   std::optional<Tensor> alpha_host_scratch,
-                  std::optional<Tensor> beta_host_scratch);
+                  std::optional<Tensor> beta_host_scratch,
+                  std::optional<Tensor> epilogue_aux = std::nullopt,
+                  std::optional<Tensor> bgrad_output = std::nullopt);
 
     [[nodiscard]] std::optional<std::string> alphaRuntimeName() const { return alpha_runtime_name; }
     [[nodiscard]] std::optional<std::string> betaRuntimeName() const { return beta_runtime_name; }
@@ -468,6 +479,8 @@ class StampedMatmul {
     const Tensor rhs;
     const std::optional<Tensor> addend;
     Tensor output;
+    const std::optional<Tensor> epilogue_aux;
+    const std::optional<Tensor> bgrad_output;
     Stream stream;
     const std::optional<Tensor> workspace;
     const std::optional<RuntimeInputValue> alpha_input;
@@ -967,6 +980,8 @@ struct hash<ThorImplementation::MatmulCacheKey> {
         hashCombine(h, hash<bool>{}(k.transpose_c));
         hashCombine(h, hash<bool>{}(k.bias_epilogue));
         hashCombine(h, hash<int>{}(static_cast<int>(k.epilogue)));
+        hashCombine(h, hash<int>{}(static_cast<int>(k.backward_epilogue)));
+        hashCombine(h, hash<bool>{}(k.bgrad_epilogue));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.a_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.b_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.c_dtype));

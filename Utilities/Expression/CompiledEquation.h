@@ -300,6 +300,10 @@ struct CompiledMatmul {
     const TensorDescriptor::DataType output_dtype;
     const TensorDescriptor::DataType compute_dtype;
     const MatmulEpilogue epilogue;
+    const MatmulBackwardEpilogue backward_epilogue;
+    const uint32_t epilogue_aux_input_slot;
+    const std::optional<TensorDescriptor::DataType> epilogue_aux_dtype;
+    const std::optional<TensorDescriptor::DataType> bgrad_output_dtype;
 
     bool operator==(const CompiledMatmul& other) const = default;
 
@@ -317,7 +321,11 @@ struct CompiledMatmul {
                    TensorDescriptor::DataType aux_dtype,
                    TensorDescriptor::DataType output_dtype,
                    std::optional<TensorDescriptor::DataType> compute_dtype,
-                   MatmulEpilogue epilogue = MatmulEpilogue::Default)
+                   MatmulEpilogue epilogue = MatmulEpilogue::Default,
+                   MatmulBackwardEpilogue backward_epilogue = MatmulBackwardEpilogue::Default,
+                   uint32_t epilogue_aux_input_slot = UINT32_MAX,
+                   std::optional<TensorDescriptor::DataType> epilogue_aux_dtype = std::nullopt,
+                   std::optional<TensorDescriptor::DataType> bgrad_output_dtype = std::nullopt)
         : op(op),
           transpose_lhs(transpose_lhs),
           transpose_rhs(transpose_rhs),
@@ -332,7 +340,11 @@ struct CompiledMatmul {
           aux_dtype(aux_dtype),
           output_dtype(output_dtype),
           compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : output_dtype),
-          epilogue(epilogue) {}
+          epilogue(epilogue),
+          backward_epilogue(backward_epilogue),
+          epilogue_aux_input_slot(epilogue_aux_input_slot),
+          epilogue_aux_dtype(epilogue_aux_dtype),
+          bgrad_output_dtype(bgrad_output_dtype) {}
 };
 
 }  // namespace ThorImplementation

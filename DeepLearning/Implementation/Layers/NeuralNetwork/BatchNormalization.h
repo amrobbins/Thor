@@ -9,8 +9,6 @@
 
 namespace ThorImplementation {
 
-struct BatchNormalizationFrontendGraph;
-
 /**
  * Parameter epsilon is used in the batch normalization formula and must be >= 0.00001.
  * Parameter exponentialRunningAverageFactor is used to determine how long to remember past results and how much weight to give the newest
@@ -21,8 +19,8 @@ struct BatchNormalizationFrontendGraph;
  *
  * Batch Normalization supports 2d or 4d input tensor.
  *
- * Unlike CustomLayer-based layers, batch-normalization backward stays on the cuDNN fused path, so the error-output gradient and parameter
- * gradients are produced together by the cuDNN Frontend batchnorm backward graph.
+ * Unlike CustomLayer-based layers, batch-normalization backward stays on the cuDNN batchnorm path, so the error-output gradient and parameter
+ * gradients are produced together by cuDNN.
  */
 class BatchNormalization : public TrainableLayer {
    public:
@@ -95,17 +93,8 @@ class BatchNormalization : public TrainableLayer {
     std::vector<double> currentExponentialRunningAverageFactor;
     double epsilon;
 
-    std::vector<std::shared_ptr<BatchNormalizationFrontendGraph>> frontendTrainingGraphs;
-    std::shared_ptr<BatchNormalizationFrontendGraph> frontendInferenceGraph;
-    std::vector<std::shared_ptr<BatchNormalizationFrontendGraph>> frontendBackwardGraphs;
-
     std::vector<Tensor> resultSaveMean;
     std::vector<Tensor> resultSaveInvVariance;
-    std::vector<Tensor> nextRunningMean;
-    std::vector<Tensor> nextRunningVariance;
-    std::optional<Tensor> runningInvVariance = std::nullopt;
-    std::vector<Tensor> weightsGradientScratch;
-    std::vector<Tensor> biasesGradientScratch;
 
     // Since weights gradients and error gradient is a fused operation, then when back prop is pruned
     // we still need some valid chunk of memory to write values in, which we ignore.

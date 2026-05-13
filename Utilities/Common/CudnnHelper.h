@@ -21,6 +21,8 @@ class CudnnHelper {
                 return CUDNN_DATA_FLOAT;
             case ThorImplementation::TensorDescriptor::DataType::FP16:
                 return CUDNN_DATA_HALF;
+            case ThorImplementation::TensorDescriptor::DataType::BF16:
+                return CUDNN_DATA_BFLOAT16;
             case ThorImplementation::TensorDescriptor::DataType::INT8:
                 return CUDNN_DATA_INT8;
             case ThorImplementation::TensorDescriptor::DataType::INT32:

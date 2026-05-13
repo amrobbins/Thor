@@ -19,7 +19,7 @@ TEST(AttentionApi, BuildsDenseMultiHeadSelfAttentionInterface) {
                                                    .attentionScale(1.0 / 8.0)
                                                    .build();
 
-    EXPECT_EQ(attention.getLayerType(), "Attention");
+    EXPECT_EQ(attention.getLayerType(), "ScaledDotProductAttention");
     EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"query", "key", "value"}));
     EXPECT_EQ(attention.getOutputNames(), (std::vector<std::string>{"output"}));
     EXPECT_EQ(attention.getOutput("output").getDataType(), DataType::FP16);

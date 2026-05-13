@@ -54,7 +54,7 @@ class EquationCompiler {
     static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledArgMinMax> compileArgMinMax(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledSoftmax> compileSoftmax(const PhysicalExpression& expr);
-    static std::shared_ptr<CompiledMatmul> compileMatmul(const PhysicalExpression& expr);
+    static std::shared_ptr<CompiledMatmul> compileMatmul(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs = {});
     static std::shared_ptr<CompiledAttention> compileAttention(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledAttentionBackward> compileAttentionBackward(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledConvolution> compileConvolution(const PhysicalExpression& expr);

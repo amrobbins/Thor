@@ -798,6 +798,19 @@ static const char* matmulEpilogueSignatureName(MatmulEpilogue epilogue) {
     throw std::runtime_error("Unknown MatmulEpilogue value.");
 }
 
+
+static const char* matmulBackwardEpilogueSignatureName(MatmulBackwardEpilogue epilogue) {
+    switch (epilogue) {
+        case MatmulBackwardEpilogue::Default:
+            return "default";
+        case MatmulBackwardEpilogue::DRelu:
+            return "drelu";
+        case MatmulBackwardEpilogue::DGelu:
+            return "dgelu";
+    }
+    throw std::runtime_error("Unknown MatmulBackwardEpilogue value.");
+}
+
 static std::string uintVecSignature(const std::vector<uint64_t>& v) {
     std::string s = "[";
     for (size_t i = 0; i < v.size(); ++i) {
@@ -887,7 +900,12 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             if (node.op == ExprOp::MATMUL) {
                 s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",ta=" + std::to_string(node.transpose_lhs ? 1 : 0) +
                     ",tb=" + std::to_string(node.transpose_rhs ? 1 : 0) +
-                    ",epilogue=" + std::string(matmulEpilogueSignatureName(node.matmul_epilogue)) + ")";
+                    ",epilogue=" + std::string(matmulEpilogueSignatureName(node.matmul_epilogue)) +
+                    ",backward_epilogue=" + std::string(matmulBackwardEpilogueSignatureName(node.matmul_backward_epilogue));
+                if (node.matmul_epilogue_aux != UINT32_MAX) {
+                    s += ",epilogue_aux=" + fusedRegionSignatureRec(expr, node.matmul_epilogue_aux);
+                }
+                s += ")";
             } else {
                 const std::string aux = fusedRegionSignatureRec(expr, node.aux);
                 s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",aux=" + aux +
@@ -895,7 +913,12 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                     ",tc=" + std::to_string(node.transpose_aux ? 1 : 0) +
                     ",alpha=" + gemmScaleSignature(expr, node.alpha_node, node.alpha_fp) +
                     ",beta=" + gemmScaleSignature(expr, node.beta_node, node.beta_fp) +
-                    ",epilogue=" + std::string(matmulEpilogueSignatureName(node.matmul_epilogue)) + ")";
+                    ",epilogue=" + std::string(matmulEpilogueSignatureName(node.matmul_epilogue)) +
+                    ",backward_epilogue=" + std::string(matmulBackwardEpilogueSignatureName(node.matmul_backward_epilogue));
+                if (node.matmul_epilogue_aux != UINT32_MAX) {
+                    s += ",epilogue_aux=" + fusedRegionSignatureRec(expr, node.matmul_epilogue_aux);
+                }
+                s += ")";
             }
         } else if (isAttentionOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
@@ -1411,7 +1434,7 @@ shared_ptr<CompiledSoftmax> EquationCompiler::compileSoftmax(const PhysicalExpre
     return make_shared<CompiledSoftmax>(node.softmax_algorithm, node.softmax_mode, supported_input_dtype, node.output_dtype.value());
 }
 
-shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpression& expr) {
+shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs) {
     if (expr.output_node >= expr.nodes.size()) {
         throw std::runtime_error("Matmul stage output_node is out of range.");
     }
@@ -1471,6 +1494,43 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
     const ExprNode* aux_input = nullptr;
     if (node.op == ExprOp::GEMM) {
         aux_input = &validate_local_input(node.aux, "aux");
+    }
+
+    uint32_t epilogue_aux_input_slot = UINT32_MAX;
+    std::optional<DataType> epilogue_aux_dtype = std::nullopt;
+    if (node.matmul_backward_epilogue != MatmulBackwardEpilogue::Default) {
+        if (node.matmul_epilogue_aux == UINT32_MAX) {
+            throw std::runtime_error("Matmul backward epilogue requires an aux input node.");
+        }
+        const ExprNode& epilogue_aux_input = validate_local_input(node.matmul_epilogue_aux, "backward epilogue aux");
+        epilogue_aux_input_slot = epilogue_aux_input.input_slot;
+        epilogue_aux_dtype = epilogue_aux_input.input_tensor_dtype.value();
+    }
+
+    std::optional<DataType> bgrad_output_dtype = std::nullopt;
+    for (const CompiledStageOutput& output : outputs) {
+        if (output.local_node_idx == UINT32_MAX || output.local_node_idx == expr.output_node) {
+            continue;
+        }
+        if (output.local_node_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Matmul stage output local node index is out of range.");
+        }
+        const ExprNode& output_node = expr.nodes.at(output.local_node_idx);
+        if (output_node.op != ExprOp::REDUCE_SUM || output_node.lhs != expr.output_node || output_node.reduction_axes.size() != 1 ||
+            output_node.reduction_axes[0] != 0 || output_node.squeeze_axes.size() != 1 || output_node.squeeze_axes[0] != 0) {
+            throw std::runtime_error("Matmul stage secondary output must be a reduce_sum(axis=0) bias-gradient output.");
+        }
+        if (!output_node.output_dtype.has_value()) {
+            throw std::runtime_error("Matmul stage bias-gradient output missing resolved output_dtype.");
+        }
+        if (bgrad_output_dtype.has_value() && bgrad_output_dtype.value() != output_node.output_dtype.value()) {
+            throw std::runtime_error("Matmul stage has incompatible bias-gradient output dtypes.");
+        }
+        bgrad_output_dtype = output_node.output_dtype.value();
+    }
+
+    if (bgrad_output_dtype.has_value() && node.matmul_backward_epilogue == MatmulBackwardEpilogue::Default) {
+        throw std::runtime_error("Matmul stage bias-gradient output requires a backward epilogue matmul plan.");
     }
 
     if (!node.output_dtype.has_value()) {
@@ -1558,7 +1618,11 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
                                        compiled_aux_dtype,
                                        node.output_dtype.value(),
                                        node.compute_dtype,
-                                       node.matmul_epilogue);
+                                       node.matmul_epilogue,
+                                       node.matmul_backward_epilogue,
+                                       epilogue_aux_input_slot,
+                                       epilogue_aux_dtype,
+                                       bgrad_output_dtype);
 }
 
 static bool isCudnnAttentionTensorDType(DataType dtype) {
@@ -2468,11 +2532,18 @@ static PhysicalExecutionStage buildInputTransposedMaterializationStage(const Phy
     };
 }
 
+struct PendingMatmulBgradOutput {
+    uint32_t reduce_node_idx = UINT32_MAX;
+    uint32_t value_id = UINT32_MAX;
+    std::string name;
+};
+
 static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
                                                uint32_t node_idx,
                                                uint32_t output_value_id,
                                                const std::string& output_name,
-                                               const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+                                               const std::unordered_map<uint32_t, uint32_t>& node_output_value_id,
+                                               const std::vector<PendingMatmulBgradOutput>& bgrad_outputs = {}) {
     const ExprNode& node = expr.nodes[node_idx];
     if (!isMatmulOp(node.op)) {
         throw std::runtime_error("buildMatmulStage called on non-matmul node.");
@@ -2483,7 +2554,7 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
 
     PhysicalExpression stage_expr;
     std::vector<uint32_t> input_value_ids;
-    input_value_ids.reserve(node.op == ExprOp::MATMUL ? 4u : 5u);
+    input_value_ids.reserve((node.op == ExprOp::MATMUL ? 4u : 5u) + (node.matmul_epilogue_aux != UINT32_MAX ? 1u : 0u));
 
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
@@ -2571,8 +2642,12 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
 
     bool absorbed_lhs_transpose = false;
     bool absorbed_rhs_transpose = false;
-    const uint32_t effective_lhs_parent = peelExplicitTransposeChain(expr, node.lhs, absorbed_lhs_transpose);
-    const uint32_t effective_rhs_parent = peelExplicitTransposeChain(expr, node.rhs, absorbed_rhs_transpose);
+    uint32_t effective_lhs_parent = node.lhs;
+    uint32_t effective_rhs_parent = node.rhs;
+    if (node.matmul_backward_epilogue == MatmulBackwardEpilogue::Default) {
+        effective_lhs_parent = peelExplicitTransposeChain(expr, node.lhs, absorbed_lhs_transpose);
+        effective_rhs_parent = peelExplicitTransposeChain(expr, node.rhs, absorbed_rhs_transpose);
+    }
 
     bind_parent_to_local_tensor_input(effective_lhs_parent, static_cast<uint32_t>(stage_expr.inputs.size()));
     const uint32_t lhs_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
@@ -2595,12 +2670,19 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
         beta_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
     }
 
+    uint32_t epilogue_aux_local = UINT32_MAX;
+    if (node.matmul_epilogue_aux != UINT32_MAX) {
+        bind_parent_to_local_tensor_input(node.matmul_epilogue_aux, static_cast<uint32_t>(stage_expr.inputs.size()));
+        epilogue_aux_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+    }
+
     ExprNode route = node;
     route.lhs = lhs_local;
     route.rhs = rhs_local;
     route.aux = aux_local;
     route.alpha_node = alpha_local;
     route.beta_node = beta_local;
+    route.matmul_epilogue_aux = epilogue_aux_local;
     route.transpose_lhs = node.transpose_lhs ^ absorbed_lhs_transpose;
     route.transpose_rhs = node.transpose_rhs ^ absorbed_rhs_transpose;
     stage_expr.nodes.push_back(std::move(route));
@@ -2612,6 +2694,24 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
         .local_node_idx = stage_expr.output_node,
         .value_id = output_value_id,
     });
+
+    for (const PendingMatmulBgradOutput& bgrad : bgrad_outputs) {
+        if (bgrad.reduce_node_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Matmul bias-gradient output node index is out of range.");
+        }
+        ExprNode local_bgrad = expr.nodes.at(bgrad.reduce_node_idx);
+        if (local_bgrad.op != ExprOp::REDUCE_SUM || local_bgrad.lhs != node_idx || local_bgrad.reduction_axes.size() != 1 ||
+            local_bgrad.reduction_axes[0] != 0 || local_bgrad.squeeze_axes.size() != 1 || local_bgrad.squeeze_axes[0] != 0) {
+            throw std::runtime_error("Matmul bias-gradient output must be reduce_sum(matmul_output, axis=0).");
+        }
+        local_bgrad.lhs = stage_expr.output_node;
+        stage_expr.nodes.push_back(std::move(local_bgrad));
+        stage_outputs.push_back(CompiledStageOutput{
+            .name = bgrad.name,
+            .local_node_idx = static_cast<uint32_t>(stage_expr.nodes.size() - 1),
+            .value_id = bgrad.value_id,
+        });
+    }
 
     return PhysicalExecutionStage{
         .kind = PhysicalExecutionStage::Kind::Matmul,
@@ -3343,6 +3443,26 @@ static bool reshapeAliasPreservesDType(const PhysicalExpression& expr, uint32_t 
     return reshape_node.output_dtype.value() == source_node.output_dtype.value();
 }
 
+
+static bool isMatmulBiasGradientReduction(const PhysicalExpression& expr, uint32_t node_idx, uint32_t& matmul_idx) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+    const ExprNode& node = expr.nodes.at(node_idx);
+    if (node.op != ExprOp::REDUCE_SUM || node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
+        return false;
+    }
+    if (node.reduction_axes.size() != 1 || node.reduction_axes[0] != 0 || node.squeeze_axes.size() != 1 || node.squeeze_axes[0] != 0) {
+        return false;
+    }
+    const ExprNode& source = expr.nodes.at(node.lhs);
+    if (!isMatmulOp(source.op) || source.matmul_backward_epilogue == MatmulBackwardEpilogue::Default) {
+        return false;
+    }
+    matmul_idx = node.lhs;
+    return true;
+}
+
 static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     if (!outputs.expr) {
         throw std::runtime_error("Cannot split null PhysicalOutputs expression.");
@@ -3379,6 +3499,41 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
     PlannedExecution planned;
     uint32_t next_value_id = expr.numInputs();
+
+    std::unordered_map<uint32_t, std::vector<PendingMatmulBgradOutput>> pending_matmul_bgrad_outputs;
+    for (const NamedOutput& output : outputs.outputs) {
+        uint32_t matmul_idx = UINT32_MAX;
+        if (isMatmulBiasGradientReduction(expr, output.node_idx, matmul_idx)) {
+            pending_matmul_bgrad_outputs[matmul_idx].push_back(PendingMatmulBgradOutput{
+                .reduce_node_idx = output.node_idx,
+                .value_id = UINT32_MAX,
+                .name = output.name,
+            });
+        }
+    }
+
+    auto takePendingMatmulBgradOutputs = [&](uint32_t matmul_idx) -> std::vector<PendingMatmulBgradOutput> {
+        std::vector<PendingMatmulBgradOutput> result;
+        auto pending_it = pending_matmul_bgrad_outputs.find(matmul_idx);
+        if (pending_it == pending_matmul_bgrad_outputs.end()) {
+            return result;
+        }
+        std::unordered_set<uint32_t> seen_reduce_nodes;
+        for (PendingMatmulBgradOutput& output : pending_it->second) {
+            if (!seen_reduce_nodes.insert(output.reduce_node_idx).second) {
+                continue;
+            }
+            auto existing_it = node_output_value_id.find(output.reduce_node_idx);
+            if (existing_it != node_output_value_id.end()) {
+                output.value_id = existing_it->second;
+            } else {
+                output.value_id = next_value_id++;
+                node_output_value_id[output.reduce_node_idx] = output.value_id;
+            }
+            result.push_back(output);
+        }
+        return result;
+    };
 
     std::function<void(size_t)> materializeTerminalGroup;
     std::function<void(uint32_t)> emitForDependency;
@@ -3564,7 +3719,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
             uint32_t lhs_dependency_idx = root.lhs;
             uint32_t rhs_dependency_idx = root.rhs;
-            if (isMatmulOp(root.op)) {
+            if (isMatmulOp(root.op) && root.matmul_backward_epilogue == MatmulBackwardEpilogue::Default) {
                 bool ignored = false;
                 lhs_dependency_idx = peelExplicitTransposeChain(expr, root.lhs, ignored);
                 rhs_dependency_idx = peelExplicitTransposeChain(expr, root.rhs, ignored);
@@ -3616,6 +3771,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 ensureScaleDependencyEmitted(root.alpha_node, "alpha");
                 ensureScaleDependencyEmitted(root.beta_node, "beta");
             }
+            if (isMatmulOp(root.op) && root.matmul_epilogue_aux != UINT32_MAX) {
+                ensureBoundaryParentEmitted(root.matmul_epilogue_aux, "backward epilogue aux", false);
+            }
 
             uint32_t stage_out_id = next_value_id++;
             node_output_value_id[root_idx] = stage_out_id;
@@ -3624,7 +3782,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isSoftmaxOp(root.op)) {
                 planned.stages.push_back(buildSoftmaxStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isMatmulOp(root.op)) {
-                planned.stages.push_back(buildMatmulStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+                std::vector<PendingMatmulBgradOutput> bgrad_outputs = takePendingMatmulBgradOutputs(root_idx);
+                planned.stages.push_back(buildMatmulStage(expr, root_idx, stage_out_id, "", node_output_value_id, bgrad_outputs));
             } else if (isAttentionOp(root.op)) {
                 planned.stages.push_back(buildAttentionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isAttentionBackwardOp(root.op)) {
@@ -3745,6 +3904,31 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     for (const NamedOutput& named_output : outputs.outputs) {
         const ExprNode& root = expr.nodes[named_output.node_idx];
 
+        auto existing_value_it = node_output_value_id.find(named_output.node_idx);
+        if (existing_value_it != node_output_value_id.end()) {
+            planned.final_outputs.push_back(CompiledStageOutput{
+                .name = named_output.name,
+                .local_node_idx = UINT32_MAX,
+                .value_id = existing_value_it->second,
+            });
+            continue;
+        }
+
+        uint32_t bgrad_matmul_idx = UINT32_MAX;
+        if (isMatmulBiasGradientReduction(expr, named_output.node_idx, bgrad_matmul_idx)) {
+            emitForDependency(bgrad_matmul_idx);
+            auto bgrad_value_it = node_output_value_id.find(named_output.node_idx);
+            if (bgrad_value_it == node_output_value_id.end()) {
+                throw std::runtime_error("Matmul bias-gradient reduction was not exposed as a matmul stage output.");
+            }
+            planned.final_outputs.push_back(CompiledStageOutput{
+                .name = named_output.name,
+                .local_node_idx = UINT32_MAX,
+                .value_id = bgrad_value_it->second,
+            });
+            continue;
+        }
+
         if (isContiguousReshapeAliasOp(root.op) && reshapeAliasPreservesDType(expr, named_output.node_idx)) {
             const uint32_t alias_value_id = emitContiguousReshapeAlias(named_output.node_idx, std::nullopt);
             planned.final_outputs.push_back(CompiledStageOutput{
@@ -3811,7 +3995,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
             uint32_t lhs_dependency_idx = root.lhs;
             uint32_t rhs_dependency_idx = root.rhs;
-            if (isMatmulOp(root.op)) {
+            if (isMatmulOp(root.op) && root.matmul_backward_epilogue == MatmulBackwardEpilogue::Default) {
                 bool ignored = false;
                 lhs_dependency_idx = peelExplicitTransposeChain(expr, root.lhs, ignored);
                 rhs_dependency_idx = peelExplicitTransposeChain(expr, root.rhs, ignored);
@@ -3863,6 +4047,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 ensureScaleDependencyEmitted(root.alpha_node, "alpha");
                 ensureScaleDependencyEmitted(root.beta_node, "beta");
             }
+            if (isMatmulOp(root.op) && root.matmul_epilogue_aux != UINT32_MAX) {
+                ensureBoundaryParentEmitted(root.matmul_epilogue_aux, "backward epilogue aux", false);
+            }
 
             uint32_t stage_out_id = next_value_id++;
             node_output_value_id[named_output.node_idx] = stage_out_id;
@@ -3873,8 +4060,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 planned.stages.push_back(
                     buildSoftmaxStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isMatmulOp(root.op)) {
+                std::vector<PendingMatmulBgradOutput> bgrad_outputs = takePendingMatmulBgradOutputs(named_output.node_idx);
                 planned.stages.push_back(
-                    buildMatmulStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+                    buildMatmulStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id, bgrad_outputs));
             } else if (isAttentionOp(root.op)) {
                 planned.stages.push_back(
                     buildAttentionStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -4024,7 +4212,7 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
                 break;
             }
             case PhysicalExecutionStage::Kind::Matmul: {
-                std::shared_ptr<CompiledMatmul> matmul = compileMatmul(stage.expr);
+                std::shared_ptr<CompiledMatmul> matmul = compileMatmul(stage.expr, stage.outputs);
                 compiled->stages.emplace_back(matmul, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }

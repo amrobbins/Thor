@@ -818,13 +818,17 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                              std::optional<Tensor> alpha_device_scratch,
                              std::optional<Tensor> beta_device_scratch,
                              std::optional<Tensor> alpha_host_scratch,
-                             std::optional<Tensor> beta_host_scratch)
+                             std::optional<Tensor> beta_host_scratch,
+                             std::optional<Tensor> epilogue_aux,
+                             std::optional<Tensor> bgrad_output)
     : compiled_matmul(std::move(compiled)),
       built_matmul(std::move(built)),
       lhs(lhs),
       rhs(rhs),
       addend(addend),
       output(output),
+      epilogue_aux(epilogue_aux),
+      bgrad_output(bgrad_output),
       stream(stream),
       workspace(workspace),
       alpha_input(alpha_input),
@@ -840,6 +844,15 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
     }
     if (!built_matmul) {
         throw std::runtime_error("StampedMatmul requires non-null built matmul payload.");
+    }
+    if (compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default && !epilogue_aux.has_value()) {
+        throw std::runtime_error("StampedMatmul backward cuBLASLt epilogue requires epilogue_aux.");
+    }
+    if (compiled_matmul->bgrad_output_dtype.has_value() && !bgrad_output.has_value()) {
+        throw std::runtime_error("StampedMatmul backward cuBLASLt bgrad epilogue requires bgrad_output.");
+    }
+    if (bgrad_output.has_value() && !compiled_matmul->bgrad_output_dtype.has_value()) {
+        throw std::runtime_error("StampedMatmul received bgrad_output but the compiled matmul does not declare a bgrad output.");
     }
     if (built_matmul->workspace_bytes != 0) {
         if (!workspace.has_value()) {
@@ -1043,6 +1056,7 @@ static ResolvedMatmulScales resolveMatmulRuntimeScales(const std::optional<Runti
 }
 
 static CublasMatrixMultiply::EpilogueFusion toCublasEpilogueFusion(MatmulEpilogue epilogue);
+static CublasMatrixMultiply::BackwardEpilogueFusion toCublasBackwardEpilogueFusion(MatmulBackwardEpilogue epilogue);
 
 void StampedMatmul::run() { runOn(stream); }
 
@@ -1066,6 +1080,39 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                               output.getDescriptor().getDataType(),
                                                               output.getDescriptor().getDataType(),
                                                               compiled_matmul->compute_dtype};
+        if (compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default) {
+            if (compiled_matmul->epilogue != MatmulEpilogue::Default) {
+                throw std::runtime_error("Stamped MATMUL cannot combine forward and backward cuBLASLt epilogues in one stage.");
+            }
+            if (!epilogue_aux.has_value()) {
+                throw std::runtime_error("Stamped MATMUL backward epilogue requires epilogue_aux.");
+            }
+            if (compiled_matmul->transpose_lhs || compiled_matmul->transpose_rhs) {
+                throw std::runtime_error("cuBLASLt MATMUL backward epilogue fusion currently supports only non-transposed row-major stages.");
+            }
+            const float alphaOne = 1.0f;
+            const float betaZero = 0.0f;
+            CublasMatrixMultiply::instance().gemmWithBackwardEpilogueUsingHeuristicKernelChoice(
+                lhs,
+                rhs,
+                std::nullopt,
+                epilogue_aux.value(),
+                output,
+                bgrad_output,
+                a_rows,
+                a_cols,
+                b_rows,
+                b_cols,
+                compiled_matmul->transpose_lhs,
+                compiled_matmul->transpose_rhs,
+                &alphaOne,
+                &betaZero,
+                dataTypes,
+                toCublasBackwardEpilogueFusion(compiled_matmul->backward_epilogue),
+                run_stream);
+            return;
+        }
+
         if (compiled_matmul->epilogue == MatmulEpilogue::Default) {
             CublasMatrixMultiply::instance().multiply(lhs,
                                                       rhs,
@@ -1134,7 +1181,43 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                           use_bias_epilogue ? output.getDescriptor().getDataType() : addend.value().getDescriptor().getDataType(),
                                                           output.getDescriptor().getDataType(),
                                                           compiled_matmul->compute_dtype};
-    const bool use_cublaslt_epilogue_wrapper = use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default;
+    const bool use_backward_epilogue = compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default;
+    if (use_backward_epilogue) {
+        if (compiled_matmul->epilogue != MatmulEpilogue::Default) {
+            throw std::runtime_error("Stamped GEMM cannot combine forward and backward cuBLASLt epilogues in one stage.");
+        }
+        if (use_bias_epilogue) {
+            throw std::runtime_error("Stamped GEMM backward epilogue requires a rank-2 addend or no addend; rank-1 bias addends are forward epilogues.");
+        }
+        if (compiled_matmul->transpose_aux) {
+            throw std::runtime_error("GEMM cuBLASLt backward epilogue fusion does not support transpose_aux.");
+        }
+        if (compiled_matmul->transpose_lhs || compiled_matmul->transpose_rhs) {
+            throw std::runtime_error("GEMM cuBLASLt backward epilogue fusion currently supports only non-transposed row-major stages.");
+        }
+        CublasMatrixMultiply::instance().gemmWithBackwardEpilogueUsingHeuristicKernelChoice(
+            lhs,
+            rhs,
+            addend,
+            epilogue_aux.value(),
+            output,
+            bgrad_output,
+            a_rows,
+            a_cols,
+            b_rows,
+            b_cols,
+            compiled_matmul->transpose_lhs,
+            compiled_matmul->transpose_rhs,
+            resolved_scales.alpha.ptr,
+            resolved_scales.beta.ptr,
+            dataTypes,
+            toCublasBackwardEpilogueFusion(compiled_matmul->backward_epilogue),
+            run_stream,
+            resolved_scales.pointer_mode);
+        return;
+    }
+
+    const bool use_cublaslt_epilogue_wrapper = use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default || use_backward_epilogue;
     if (use_cublaslt_epilogue_wrapper) {
         if (compiled_matmul->transpose_aux) {
             throw std::runtime_error("GEMM cuBLASLt epilogue fusion does not support transpose_aux.");
@@ -1704,6 +1787,18 @@ static CublasMatrixMultiply::EpilogueFusion toCublasEpilogueFusion(MatmulEpilogu
     throw std::runtime_error("Unknown MatmulEpilogue value.");
 }
 
+static CublasMatrixMultiply::BackwardEpilogueFusion toCublasBackwardEpilogueFusion(MatmulBackwardEpilogue epilogue) {
+    switch (epilogue) {
+        case MatmulBackwardEpilogue::DRelu:
+            return CublasMatrixMultiply::BackwardEpilogueFusion::DRelu;
+        case MatmulBackwardEpilogue::DGelu:
+            return CublasMatrixMultiply::BackwardEpilogueFusion::DGelu;
+        case MatmulBackwardEpilogue::Default:
+            break;
+    }
+    throw std::runtime_error("Default or unknown MatmulBackwardEpilogue cannot be lowered to a cuBLASLt backward epilogue.");
+}
+
 static int32_t leadingDimensionForStoredMatrix(const Tensor& matrix) {
     const std::vector<uint64_t> dims = matrix.getDimensions();
     if (dims.size() != 2) {
@@ -1717,12 +1812,26 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                           const Tensor& rhs,
                                                           const std::optional<Tensor>& addend,
                                                           const Tensor& output,
-                                                          int device_num) {
+                                                          int device_num,
+                                                          const std::optional<Tensor>& epilogue_aux,
+                                                          const std::optional<Tensor>& bgrad_output) {
     if (!compiled_matmul) {
         throw std::runtime_error("buildMatmul requires non-null compiled payload.");
     }
     if (lhs.getDimensions().size() != 2 || rhs.getDimensions().size() != 2 || output.getDimensions().size() != 2) {
         throw std::runtime_error("buildMatmul currently only supports rank-2 tensors.");
+    }
+    if (compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default && !epilogue_aux.has_value()) {
+        throw std::runtime_error("buildMatmul backward cuBLASLt epilogue requires epilogue_aux.");
+    }
+    if (compiled_matmul->bgrad_output_dtype.has_value() && !bgrad_output.has_value()) {
+        throw std::runtime_error("buildMatmul backward cuBLASLt bgrad epilogue requires bgrad_output.");
+    }
+    if (bgrad_output.has_value() && !compiled_matmul->bgrad_output_dtype.has_value()) {
+        throw std::runtime_error("buildMatmul received bgrad_output but the compiled matmul does not declare one.");
+    }
+    if (compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default && compiled_matmul->epilogue != MatmulEpilogue::Default) {
+        throw std::runtime_error("buildMatmul cannot combine forward and backward cuBLASLt epilogues in one stage.");
     }
     bool use_bias_epilogue = false;
     if (compiled_matmul->op == ExprOp::GEMM) {
@@ -1760,9 +1869,23 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     if (use_bias_epilogue && addend.value().getDescriptor().getDataType() != output.getDescriptor().getDataType()) {
         throw std::runtime_error("GEMM bias epilogue requires the bias dtype to match the output dtype.");
     }
-    if ((compiled_matmul->epilogue != MatmulEpilogue::Default || use_bias_epilogue) &&
+    const bool use_backward_epilogue = compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default;
+    if ((compiled_matmul->epilogue != MatmulEpilogue::Default || use_bias_epilogue || use_backward_epilogue) &&
         (compiled_matmul->transpose_lhs || compiled_matmul->transpose_rhs || compiled_matmul->transpose_aux)) {
         throw std::runtime_error("cuBLASLt GEMM epilogue fusion currently supports only non-transposed row-major matmul/gemm stages.");
+    }
+    if (use_backward_epilogue && epilogue_aux.has_value() &&
+        compiled_matmul->epilogue_aux_dtype.has_value() &&
+        epilogue_aux.value().getDescriptor().getDataType() != compiled_matmul->epilogue_aux_dtype.value()) {
+        throw std::runtime_error("buildMatmul epilogue_aux dtype does not match the compiled matmul dtype plan.");
+    }
+    if (bgrad_output.has_value()) {
+        if (bgrad_output.value().getDimensions().size() != 1 || bgrad_output.value().getDimensions()[0] != output.getDimensions()[1]) {
+            throw std::runtime_error("buildMatmul bgrad_output must be a rank-1 tensor with one element per output column.");
+        }
+        if (bgrad_output.value().getDescriptor().getDataType() != compiled_matmul->bgrad_output_dtype.value()) {
+            throw std::runtime_error("buildMatmul bgrad_output dtype does not match the compiled matmul dtype plan.");
+        }
     }
     if (dataTypes.A != compiled_matmul->lhs_dtype || dataTypes.B != compiled_matmul->rhs_dtype ||
         dataTypes.C != (compiled_matmul->op == ExprOp::GEMM ? compiled_matmul->aux_dtype : compiled_matmul->output_dtype) ||
@@ -1784,6 +1907,8 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                        compiled_matmul->transpose_aux,
                        use_bias_epilogue,
                        compiled_matmul->epilogue,
+                       compiled_matmul->backward_epilogue,
+                       bgrad_output.has_value(),
                        dataTypes.A,
                        dataTypes.B,
                        dataTypes.C,
@@ -1799,7 +1924,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     auto built = std::make_shared<BuiltMatmul>(key);
     bool kernelWillRunOnGpu = false;
 
-    const bool use_cublaslt_epilogue_wrapper = use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default;
+    const bool use_cublaslt_epilogue_wrapper = use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default || use_backward_epilogue;
 
     if (compiled_matmul->op == ExprOp::MATMUL && !use_cublaslt_epilogue_wrapper) {
         CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(device_num,

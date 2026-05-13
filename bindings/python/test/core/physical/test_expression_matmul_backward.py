@@ -150,6 +150,11 @@ def test_matmul_backward_all_transpose_combinations_numerical(
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
+    stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert len(stage_kinds) == 2
+    assert all(kind.startswith("Matmul") for kind in stage_kinds)
+    assert "FusedKernel" not in stage_kinds
+
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
 
@@ -367,6 +372,51 @@ def test_gemm_backward_beta_zero_aux_grad_is_zero(dtype: thor.DataType):
 
 
 @pytest.mark.cuda
+@pytest.mark.parametrize("dtype", BACKWARD_DTYPES)
+def test_gemm_vector_bias_backward_reduces_to_bias_shape_numerical(dtype: thor.DataType):
+    a = ex.input("a")
+    b = ex.input("b")
+    bias = ex.input("bias")
+    upstream_name = "__grad_output"
+
+    fwd_eq = ex.compile(ex.matmul(a, b, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + bias, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["bias"], error_input_name=upstream_name)
+    assert bwd_eq.output_names() == ["bias_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    a_np = np.array([[1.0, -2.0, 0.5], [3.0, 1.5, -1.0], [-0.25, 2.0, 1.25]], dtype=np.float32).astype(storage_dtype)
+    b_np = np.array(
+        [[2.0, -1.0, 0.0, 1.0], [0.5, 3.0, -2.0, 0.25], [-1.5, 2.0, 4.0, -0.5]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+    bias_np = np.array([0.25, -1.0, 2.0, 0.5], dtype=np.float32).astype(storage_dtype)
+    grad_np = np.array([[0.5, -1.0, 0.25, 1.5], [-0.75, 0.125, 2.0, -0.5], [1.25, 0.75, -1.5, 0.25]],
+                       dtype=np.float32).astype(storage_dtype)
+
+    expected_bias_grad = grad_np.astype(np.float32).sum(axis=0)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    # A rank-1 GEMM bias addend must reduce the upstream [batch, out] gradient back
+    # to [out], not broadcast a [out] zero tensor up to [batch, out]. This guards the
+    # preallocated-output shape failure seen in the FC optimizer tests.
+    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["Reduction"]
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got_bias_grad = _copy_to_host(stamped.output("bias_grad"), dtype, stream)
+    assert list(stamped.output("bias_grad").dimensions) == [4]
+    _assert_close(got_bias_grad, _cast_reference_to_storage_dtype(expected_bias_grad, dtype), dtype)
+
+
+@pytest.mark.cuda
 def test_gemm_backward_rejects_transpose_c():
     a = ex.input("a")
     b = ex.input("b")
@@ -524,3 +574,99 @@ def test_gemm_backward_arbitrary_scalar_expression_wrt_all_inputs_numerical(dtyp
     _assert_close(got_c_grad, _cast_reference_to_storage_dtype(expected_c_grad, dtype), dtype)
     _assert_close(got_alpha_src_grad, _cast_reference_to_storage_dtype(expected_alpha_src_grad, dtype), dtype)
     _assert_close(got_beta_src_grad, _cast_reference_to_storage_dtype(expected_beta_src_grad, dtype), dtype)
+
+
+def _cublaslt_gelu_approx_derivative_np(x: np.ndarray) -> np.ndarray:
+    x = x.astype(np.float32)
+    c = np.sqrt(np.float32(2.0 / np.pi)).astype(np.float32)
+    t = c * (x + np.float32(0.044715) * x * x * x)
+    tanh_t = np.tanh(t)
+    sech2_t = np.float32(1.0) - tanh_t * tanh_t
+    dt_dx = c * (np.float32(1.0) + np.float32(3.0 * 0.044715) * x * x)
+    return np.float32(0.5) * (np.float32(1.0) + tanh_t) + np.float32(0.5) * x * sech2_t * dt_dx
+
+
+@pytest.mark.cuda
+def test_fused_gelu_matmul_bias_backward_exposes_bias_grad_from_same_matmul_stage_numerical():
+    dtype = thor.DataType.fp32
+    upstream_name = "__grad_output"
+
+    x = ex.input("x")
+    w1 = ex.input("w1")
+    b1 = ex.input("b1")
+    w2 = ex.input("w2")
+
+    pre = ex.matmul(x, w1) + b1
+    hidden = pre * ex.normcdf(pre)
+    out = ex.matmul(hidden, w2)
+
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["b1"], error_input_name=upstream_name)
+    assert bwd_eq.output_names() == ["b1_grad"]
+
+    x_np = (np.arange(12, dtype=np.float32).reshape(4, 3) - 5.0) / 8.0
+    w1_np = (np.arange(48, dtype=np.float32).reshape(3, 16) - 23.0) / 16.0
+    b1_np = np.linspace(-0.35, 0.4, 16, dtype=np.float32)
+    w2_np = (np.arange(80, dtype=np.float32).reshape(16, 5) - 39.0) / 19.0
+    grad_np = (np.arange(20, dtype=np.float32).reshape(4, 5) - 9.0) / 11.0
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "w1": _host_to_gpu(w1_np, dtype, stream),
+        "b1": _host_to_gpu(b1_np, dtype, stream),
+        "w2": _host_to_gpu(w2_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert any(
+        kind.startswith("Matmul") and "backward_epilogue=dgelu" in kind and "bgrad=1" in kind
+        for kind in stage_kinds
+    )
+    assert "Reduction" not in stage_kinds
+
+    pre_np = x_np @ w1_np + b1_np
+    d_hidden = grad_np @ w2_np.T
+    expected_b1_grad = np.sum(d_hidden * _cublaslt_gelu_approx_derivative_np(pre_np), axis=0)
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got_b1_grad = _copy_to_host(stamped.output("b1_grad"), dtype, stream)
+    _assert_close(got_b1_grad, expected_b1_grad.astype(np.float32), dtype)
+
+
+@pytest.mark.cuda
+def test_dgelu_backward_epilogue_requires_forward_gelu_cublaslt_epilogue_eligibility():
+    dtype = thor.DataType.fp32
+    upstream_name = "__grad_output"
+
+    a = ex.input("a")
+    b = ex.input("b")
+    w2 = ex.input("w2")
+
+    # The transposed projection is intentionally outside the currently allowed forward cuBLASLt GELU epilogue path.
+    # Backward must therefore keep the exact expression derivative and must not silently substitute cuBLASLt DGELU.
+    pre = ex.matmul(a, b, transpose_a=True)
+    hidden = pre * ex.normcdf(pre)
+    out = ex.matmul(hidden, w2)
+
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["a"], error_input_name=upstream_name)
+
+    a_np = (np.arange(12, dtype=np.float32).reshape(3, 4) - 5.0) / 7.0
+    b_np = (np.arange(48, dtype=np.float32).reshape(3, 16) - 21.0) / 17.0
+    w2_np = (np.arange(80, dtype=np.float32).reshape(16, 5) - 37.0) / 23.0
+    grad_np = (np.arange(20, dtype=np.float32).reshape(4, 5) - 8.0) / 13.0
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "a": _host_to_gpu(a_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+        "w2": _host_to_gpu(w2_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert not any("backward_epilogue=dgelu" in kind for kind in stage_kinds)

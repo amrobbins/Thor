@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <cuda_bf16.h>
@@ -3366,4 +3367,190 @@ TEST(CublasMatrixMultiply, HeuristicGemmRejectsFp8LayoutsThatNeedTemporaryTransp
     expectFp8HeuristicGemmRejectsTemporaryTransposeLayout(gpuNum, false, false);  // NN needs B materialization.
     expectFp8HeuristicGemmRejectsTemporaryTransposeLayout(gpuNum, true, false);   // TN needs A and B materialization.
     expectFp8HeuristicGemmRejectsTemporaryTransposeLayout(gpuNum, true, true);    // TT needs A materialization.
+}
+
+static float geluApproxDerivativeForCublasLt(float x) {
+    constexpr float sqrt_2_over_pi = 0.7978845608028654f;
+    constexpr float cubic_coeff = 0.044715f;
+    const float x2 = x * x;
+    const float u = sqrt_2_over_pi * (x + cubic_coeff * x * x2);
+    const float t = std::tanh(u);
+    const float sech2 = 1.0f - t * t;
+    const float du_dx = sqrt_2_over_pi * (1.0f + 3.0f * cubic_coeff * x2);
+    return 0.5f * (1.0f + t) + 0.5f * x * sech2 * du_dx;
+}
+
+static void fillBackwardEpilogueInputs(float *a, float *b, float *aux, int m, int k, int n) {
+    for (int row = 0; row < m; ++row) {
+        for (int col = 0; col < k; ++col) {
+            a[row * k + col] = static_cast<float>(((row * 7 + col * 3) % 17) - 8) / 7.0f;
+        }
+    }
+    for (int row = 0; row < k; ++row) {
+        for (int col = 0; col < n; ++col) {
+            b[row * n + col] = static_cast<float>(((row * 5 + col * 11) % 19) - 9) / 8.0f;
+        }
+    }
+    for (int row = 0; row < m; ++row) {
+        for (int col = 0; col < n; ++col) {
+            aux[row * n + col] = static_cast<float>(((row * 13 + col * 2) % 23) - 11) / 5.0f;
+        }
+    }
+}
+
+static void computeDGeluBackwardReference(const float *a, const float *b, const float *aux, float *out, float *bgrad, int m, int k, int n) {
+    for (int col = 0; col < n; ++col) {
+        bgrad[col] = 0.0f;
+    }
+    for (int row = 0; row < m; ++row) {
+        for (int col = 0; col < n; ++col) {
+            float mm = 0.0f;
+            for (int kk = 0; kk < k; ++kk) {
+                mm += a[row * k + kk] * b[kk * n + col];
+            }
+            const float dz = mm * geluApproxDerivativeForCublasLt(aux[row * n + col]);
+            out[row * n + col] = dz;
+            bgrad[col] += dz;
+        }
+    }
+}
+
+TEST(CublasMatrixMultiply, GemmWithDGeluBackwardEpilogueMatchesCpuFP32) {
+    ScopedGpu scopedGpu(0);
+    Stream stream(0);
+
+    constexpr int m = 8;
+    constexpr int k = 16;
+    constexpr int n = 16;  // cuBLASLt DGELU aux leading dimension must be divisible by 8.
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor aDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(k)});
+    TensorDescriptor bDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(k), static_cast<uint64_t>(n)});
+    TensorDescriptor dDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(n)});
+
+    Tensor A(cpuPlacement, aDesc);
+    Tensor B(cpuPlacement, bDesc);
+    Tensor Aux(cpuPlacement, dDesc);
+    Tensor D(cpuPlacement, dDesc);
+    Tensor Expected(cpuPlacement, dDesc);
+    Tensor A_d(gpuPlacement, aDesc);
+    Tensor B_d(gpuPlacement, bDesc);
+    Tensor Aux_d(gpuPlacement, dDesc);
+    Tensor D_d(gpuPlacement, dDesc);
+
+    fillBackwardEpilogueInputs(A.getMemPtr<float>(), B.getMemPtr<float>(), Aux.getMemPtr<float>(), m, k, n);
+    std::vector<float> unusedBgrad(n);
+    computeDGeluBackwardReference(
+        A.getMemPtr<float>(), B.getMemPtr<float>(), Aux.getMemPtr<float>(), Expected.getMemPtr<float>(), unusedBgrad.data(), m, k, n);
+
+    A_d.copyFromAsync(A, stream);
+    B_d.copyFromAsync(B, stream);
+    Aux_d.copyFromAsync(Aux, stream);
+    stream.synchronize();
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    CublasMatrixMultiply::instance().gemmWithDGeluUsingHeuristicKernelChoice(
+        A_d,
+        B_d,
+        std::nullopt,
+        Aux_d,
+        D_d,
+        m,
+        k,
+        k,
+        n,
+        false,
+        false,
+        &alpha,
+        &beta,
+        CublasMatrixMultiply::MatmulDataTypes::same(TensorDescriptor::DataType::FP32),
+        stream);
+
+    D.copyFromAsync(D_d, stream);
+    stream.synchronize();
+
+    for (int i = 0; i < m * n; ++i) {
+        ASSERT_NEAR(D.getMemPtr<float>()[i], Expected.getMemPtr<float>()[i], 2.0e-3f);
+    }
+}
+
+TEST(CublasMatrixMultiply, GemmWithDGeluBgradBackwardEpilogueMatchesCpuFP32) {
+    ScopedGpu scopedGpu(0);
+    Stream stream(0);
+
+    constexpr int m = 8;
+    constexpr int k = 16;
+    constexpr int n = 16;  // cuBLASLt DGELU aux leading dimension must be divisible by 8.
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor aDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(k)});
+    TensorDescriptor bDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(k), static_cast<uint64_t>(n)});
+    TensorDescriptor dDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(n)});
+    TensorDescriptor biasDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(n)});
+
+    Tensor A(cpuPlacement, aDesc);
+    Tensor B(cpuPlacement, bDesc);
+    Tensor Aux(cpuPlacement, dDesc);
+    Tensor D(cpuPlacement, dDesc);
+    Tensor BiasGrad(cpuPlacement, biasDesc);
+    Tensor Expected(cpuPlacement, dDesc);
+    Tensor ExpectedBiasGrad(cpuPlacement, biasDesc);
+    Tensor A_d(gpuPlacement, aDesc);
+    Tensor B_d(gpuPlacement, bDesc);
+    Tensor Aux_d(gpuPlacement, dDesc);
+    Tensor D_d(gpuPlacement, dDesc);
+    Tensor BiasGrad_d(gpuPlacement, biasDesc);
+
+    fillBackwardEpilogueInputs(A.getMemPtr<float>(), B.getMemPtr<float>(), Aux.getMemPtr<float>(), m, k, n);
+    for (int i = 0; i < n; ++i) {
+        BiasGrad.getMemPtr<float>()[i] = 99.0f;
+    }
+    computeDGeluBackwardReference(A.getMemPtr<float>(),
+                                  B.getMemPtr<float>(),
+                                  Aux.getMemPtr<float>(),
+                                  Expected.getMemPtr<float>(),
+                                  ExpectedBiasGrad.getMemPtr<float>(),
+                                  m,
+                                  k,
+                                  n);
+
+    A_d.copyFromAsync(A, stream);
+    B_d.copyFromAsync(B, stream);
+    Aux_d.copyFromAsync(Aux, stream);
+    BiasGrad_d.copyFromAsync(BiasGrad, stream);
+    stream.synchronize();
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    CublasMatrixMultiply::instance().gemmWithDGeluBgradUsingHeuristicKernelChoice(
+        A_d,
+        B_d,
+        std::nullopt,
+        Aux_d,
+        D_d,
+        BiasGrad_d,
+        m,
+        k,
+        k,
+        n,
+        false,
+        false,
+        &alpha,
+        &beta,
+        CublasMatrixMultiply::MatmulDataTypes::same(TensorDescriptor::DataType::FP32),
+        stream);
+
+    D.copyFromAsync(D_d, stream);
+    BiasGrad.copyFromAsync(BiasGrad_d, stream);
+    stream.synchronize();
+
+    for (int i = 0; i < m * n; ++i) {
+        ASSERT_NEAR(D.getMemPtr<float>()[i], Expected.getMemPtr<float>()[i], 2.0e-3f);
+    }
+    for (int i = 0; i < n; ++i) {
+        ASSERT_NEAR(BiasGrad.getMemPtr<float>()[i], ExpectedBiasGrad.getMemPtr<float>()[i], 2.0e-3f * static_cast<float>(m));
+    }
 }

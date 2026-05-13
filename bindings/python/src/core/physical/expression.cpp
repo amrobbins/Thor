@@ -1630,11 +1630,28 @@ outputs: dict[str, PhysicalTensor]
                         }
                         return "unknown";
                     };
+                    auto backward_epilogue_name = [](ThorImplementation::MatmulBackwardEpilogue epilogue) {
+                        switch (epilogue) {
+                            case ThorImplementation::MatmulBackwardEpilogue::Default:
+                                return "default";
+                            case ThorImplementation::MatmulBackwardEpilogue::DRelu:
+                                return "drelu";
+                            case ThorImplementation::MatmulBackwardEpilogue::DGelu:
+                                return "dgelu";
+                        }
+                        return "unknown";
+                    };
                     std::ostringstream oss;
                     oss << label << "(lhsT=" << (stage.matmul->transpose_lhs ? 1 : 0) << ",rhsT=" << (stage.matmul->transpose_rhs ? 1 : 0)
                         << ",auxT=" << (stage.matmul->transpose_aux ? 1 : 0);
                     if (stage.matmul->epilogue != ThorImplementation::MatmulEpilogue::Default) {
                         oss << ",epilogue=" << epilogue_name(stage.matmul->epilogue);
+                    }
+                    if (stage.matmul->backward_epilogue != ThorImplementation::MatmulBackwardEpilogue::Default) {
+                        oss << ",backward_epilogue=" << backward_epilogue_name(stage.matmul->backward_epilogue);
+                    }
+                    if (stage.matmul->bgrad_output_dtype.has_value()) {
+                        oss << ",bgrad=1";
                     }
                     oss << ")";
                     label = oss.str();
