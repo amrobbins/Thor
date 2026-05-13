@@ -966,6 +966,83 @@ TEST(BatchNormalization, DirectForwardTrainingSpatialRunningAverageWarmupAndClam
     EXPECT_GT(fabs(actualRunningVariancePass5[0] - wrongRefPass5.runningVarianceAfter[0]), 1e-3f);
 }
 
+TEST(BatchNormalization, DirectForwardTrainingPreservesObservedCountAcrossCompileForWarmup) {
+    const uint64_t batchSize = 2;
+    const uint64_t numChannels = 1;
+    const uint64_t height = 1;
+    const uint64_t width = 2;
+    const DataType dataType = DataType::FP32;
+    const uint64_t itemsObservedBeforeCompile = 3;
+    const double exponentialRunningAverageFactor = 0.25;
+
+    const vector<float> inputValues = {7.0f, 13.0f, 7.0f, 13.0f};  // mean = 10, var = 9
+    const vector<float> weightValues = {1.0f};
+    const vector<float> biasValues = {0.0f};
+    const vector<float> runningMeanBefore = {0.5f};
+    const vector<float> runningVarianceBefore = {2.0f};
+
+    TensorDescriptor featureInDescriptor(dataType, {batchSize, numChannels, height, width});
+    Tensor featureIn_h(cpuPlacement, featureInDescriptor);
+    writeCpuTensor(featureIn_h, inputValues);
+
+    NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
+    BatchNormalization bn(gpuPlacement, false, itemsObservedBeforeCompile, exponentialRunningAverageFactor);
+    NetworkOutput no(cpuPlacement);
+
+    bn.setOptimizer("weights", make_shared<Adam>(4100, 0.001f, 0.9f, 0.999f, 1e-7f));
+    bn.setOptimizer("biases", make_shared<Adam>(4101, 0.001f, 0.9f, 0.999f, 1e-7f));
+
+    ni.connectToNextLayer(&bn);
+    bn.connectToNextLayer(&no);
+    compileAndInitialize(ni, bn, no);
+
+    EXPECT_EQ(bn.getNumItemsObserved(), itemsObservedBeforeCompile);
+
+    Stream stream = bn.getStreams()[0];
+    setParameterTensor(bn.getParameter("weights"), weightValues, stream);
+    setParameterTensor(bn.getParameter("biases"), biasValues, stream);
+    setParameterTensor(bn.getParameter("running_mean"), runningMeanBefore, stream);
+    setParameterTensor(bn.getParameter("running_variance"), runningVarianceBefore, stream);
+
+    ni.forward(featureIn_h, false, batchSize);
+    no.getOutputReadyEvent().synchronize();
+
+    EXPECT_EQ(bn.getNumItemsObserved(), itemsObservedBeforeCompile + 1);
+
+    const vector<float> actualRunningMean = readCpuTensor(copyTensorToCpu(bn.getParameter("running_mean")->getStorage().value(), stream));
+    const vector<float> actualRunningVariance =
+        readCpuTensor(copyTensorToCpu(bn.getParameter("running_variance")->getStorage().value(), stream));
+
+    // The resumed fourth observation is exactly the transition point for factor 0.25.
+    const BatchNormForwardReference expected = batchNormForwardTrainingReference(inputValues,
+                                                                                 weightValues,
+                                                                                 biasValues,
+                                                                                 runningMeanBefore,
+                                                                                 runningVarianceBefore,
+                                                                                 batchSize,
+                                                                                 numChannels,
+                                                                                 height,
+                                                                                 width,
+                                                                                 0.25,
+                                                                                 bn.getEpsilon());
+    expectAllClose(actualRunningMean, expected.runningMeanAfter, 2e-4f, 2e-4f, "runningMean resumed pass");
+    expectAllClose(actualRunningVariance, expected.runningVarianceAfter, 2e-4f, 2e-4f, "runningVariance resumed pass");
+
+    const BatchNormForwardReference wrongIfCompileResetCount = batchNormForwardTrainingReference(inputValues,
+                                                                                                  weightValues,
+                                                                                                  biasValues,
+                                                                                                  runningMeanBefore,
+                                                                                                  runningVarianceBefore,
+                                                                                                  batchSize,
+                                                                                                  numChannels,
+                                                                                                  height,
+                                                                                                  width,
+                                                                                                  1.0,
+                                                                                                  bn.getEpsilon());
+    EXPECT_GT(fabs(actualRunningMean[0] - wrongIfCompileResetCount.runningMeanAfter[0]), 1e-3f);
+    EXPECT_GT(fabs(actualRunningVariance[0] - wrongIfCompileResetCount.runningVarianceAfter[0]), 1e-3f);
+}
+
 vector<float> sgdUpdatedWeightsReference(const vector<float>& initialWeights,
                                          const vector<float>& rawGradient,
                                          uint64_t batchSize,

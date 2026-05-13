@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 // FIXME: More work to do on this, compare to old get it exact.
 
@@ -11,8 +12,9 @@ namespace ThorImplementation {
 
 /**
  * Parameter epsilon is used in the batch normalization formula and must be >= 0.00001.
- * Parameter exponentialRunningAverageFactor is used to determine how long to remember past results and how much weight to give the newest
- * result, via equation: runningMean = runningMean*(1-exponentialRunningAverageFactor) + newMean*exponentialRunningAverageFactor
+ * Parameter exponentialRunningAverageFactor is the steady-state floor for the running-stat update factor. Training begins with an exact
+ * cumulative moving average using factor 1 / numItemsObserved, then switches to the configured EMA factor once that factor is larger.
+ * cuDNN applies the selected factor via: runningMean = runningMean*(1-factor) + newMean*factor.
  *
  * This layer will serialize processing of each input by synchronizing all streams with stream[0] when multiple connections are present, for
  * compatibility with cuDNN.
@@ -36,6 +38,8 @@ class BatchNormalization : public TrainableLayer {
 
     double getExponentialRunningAverageFactor() const { return exponentialRunningAverageFactor; }
     void setExponentialRunningAverageFactor(double exponentialRunningAverageFactor) {
+        THOR_THROW_IF_FALSE(exponentialRunningAverageFactor > 0.0);
+        THOR_THROW_IF_FALSE(exponentialRunningAverageFactor <= 1.0);
         this->exponentialRunningAverageFactor = exponentialRunningAverageFactor;
     }
 
@@ -44,7 +48,8 @@ class BatchNormalization : public TrainableLayer {
 
     std::string getLayerType() override { return "BatchNormalization"; }
 
-    uint64_t getNumItemsObserved() { return itemsObserved; }
+    uint64_t getNumItemsObserved() const { return itemsObserved; }
+    void setNumItemsObserved(uint64_t numItemsObserved) { itemsObserved = numItemsObserved; }
 
     std::optional<Tensor> createFeatureOutputTensor() override;
     std::optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) override;
@@ -90,7 +95,6 @@ class BatchNormalization : public TrainableLayer {
 
     double exponentialRunningAverageFactor;
     uint64_t itemsObserved = 0;
-    std::vector<double> currentExponentialRunningAverageFactor;
     double epsilon;
 
     std::vector<Tensor> resultSaveMean;
