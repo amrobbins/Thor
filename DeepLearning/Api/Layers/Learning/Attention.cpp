@@ -187,10 +187,10 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                 v = v + Expression::input("value_bias", weightsDType, weightsDType);
             }
 
-            q = q.reshape({batch, sequenceLength, numHeads, headDim}).withOutputDType(outputDType);
-            k = k.reshape({batch, sequenceLength, numKeyValueHeads, headDim}).withOutputDType(outputDType);
-            v = v.reshape({batch, sequenceLength, numKeyValueHeads, valueDim}).withOutputDType(outputDType);
-
+            // The projection matmuls produce dense [B*S, H*D] storage, which is physically [B,S,H,D].
+            // The cuDNN attention wrapper, however, takes semantic dimensions in [B,H,S,D] order and uses
+            // AttentionTensorLayout::BSHD strides to describe the physical storage.  Preserve the dense BSHD
+            // storage while presenting semantic BHSD dimensions to the attention stage.
             if (useRope) {
                 ThorImplementation::RotaryPositionEmbeddingOptions opts = ropeOptions;
                 opts.sequence_axis = 1;
@@ -201,9 +201,21 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                 if (!opts.output_dtype.has_value()) {
                     opts.output_dtype = outputDType;
                 }
-                q = q.rotaryPositionEmbedding(opts);
-                k = k.rotaryPositionEmbedding(opts);
+
+                // RoPE is a pointwise expression op, so apply it while the tensor is logically [B,S,H,D].
+                // After RoPE materialization/fusion, reinterpret that same dense BSHD storage as semantic
+                // [B,H,S,D] for cuDNN SDPA by pairing the reshape below with AttentionTensorLayout::BSHD.
+                q = q.reshape({batch, sequenceLength, numHeads, headDim}).withOutputDType(outputDType).rotaryPositionEmbedding(opts);
+                k = k.reshape({batch, sequenceLength, numKeyValueHeads, headDim})
+                        .withOutputDType(outputDType)
+                        .rotaryPositionEmbedding(opts);
+                q = q.reshape({batch, numHeads, sequenceLength, headDim}).withOutputDType(outputDType);
+                k = k.reshape({batch, numKeyValueHeads, sequenceLength, headDim}).withOutputDType(outputDType);
+            } else {
+                q = q.reshape({batch, numHeads, sequenceLength, headDim}).withOutputDType(outputDType);
+                k = k.reshape({batch, numKeyValueHeads, sequenceLength, headDim}).withOutputDType(outputDType);
             }
+            v = v.reshape({batch, numKeyValueHeads, sequenceLength, valueDim}).withOutputDType(outputDType);
 
             AttentionOptions options;
             options.q_layout = AttentionTensorLayout::BSHD;

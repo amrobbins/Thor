@@ -548,8 +548,34 @@ std::optional<Tensor> CustomLayer::inferFeatureOutputTensor(uint32_t application
     PreparedDynamicExpression prepared =
         layerDefinitionExpression.prepare(buildForwardInputs(applicationIndex), discoveredOutputs, computeStream(applicationIndex));
     validatePreparedExpressionInputs(prepared);
+
+    const std::string& outputName = outputNames[outputPortIndex];
+
+    // Output construction during graph connection should discover only metadata.
+    // Stamping a throwaway execution plan here is too early for CustomLayer expressions that
+    // intentionally rebind inputs to logical views before a specialized stage, such as
+    // RMSNorm flattening [outer..., hidden] to [outer, hidden] and then reshaping the
+    // public output back to the original feature shape.  The real forward stamp below still
+    // receives caller-owned output tensors and therefore preserves the fused CustomLayer path.
+    if (prepared.tensorScalarInputs().empty() && prepared.preallocatedOutputs().empty() &&
+        prepared.requestedOutputShapes().empty()) {
+        const auto outputShapes = prepared.equation().getOutputShapes(prepared.stampInputs());
+        const auto outputDataTypes = prepared.equation().getOutputDataTypes(prepared.stampInputs());
+
+        const auto shapeIt = outputShapes.find(outputName);
+        if (shapeIt == outputShapes.end()) {
+            throw runtime_error("CustomLayer expression did not infer output shape for port '" + outputName + "'.");
+        }
+        const auto dtypeIt = outputDataTypes.find(outputName);
+        if (dtypeIt == outputDataTypes.end()) {
+            throw runtime_error("CustomLayer expression did not infer output dtype for port '" + outputName + "'.");
+        }
+
+        return Tensor(placement, TensorDescriptor(dtypeIt->second, shapeIt->second));
+    }
+
     StampedExecutionPlan stamped = prepared.stamp();
-    return stamped.output(outputNames[outputPortIndex]);
+    return stamped.output(outputName);
 }
 
 void CustomLayer::compileImpl() {

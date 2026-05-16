@@ -411,6 +411,8 @@ class FusedEquation {
     std::vector<uint64_t> getOutputShape(const std::unordered_map<std::string, Tensor>& inputs) const;
     std::unordered_map<std::string, std::vector<uint64_t>> getOutputShapes(const Tensor& input) const;
     std::unordered_map<std::string, std::vector<uint64_t>> getOutputShapes(const std::unordered_map<std::string, Tensor>& inputs) const;
+    std::unordered_map<std::string, TensorDescriptor::DataType> getOutputDataTypes(
+        const std::unordered_map<std::string, Tensor>& inputs) const;
 
     static bool resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions);
 

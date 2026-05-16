@@ -3,7 +3,11 @@
 
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/TarFile/TarWriter.h"
+
+#include <map>
+#include <string>
 
 namespace Thor {
 
@@ -25,6 +29,9 @@ class PlacedNetwork {
     }
 
     void save(const std::string& directory, bool overwrite, bool saveOptimizerState);
+
+    std::map<std::string, ThorImplementation::Tensor> infer(std::map<std::string, ThorImplementation::Tensor> batchInputs,
+                                                            uint64_t stampIndex = 0);
 
     uint64_t getNumStamps() { return stampedNetworks.size(); }
     ThorImplementation::StampedNetwork& getStampedNetwork(uint64_t i) {
