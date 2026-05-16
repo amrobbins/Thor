@@ -1,12 +1,12 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include <optional>
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h"
-#include <optional>
 
 namespace Thor {
 
@@ -23,8 +23,6 @@ class BatchNormalization : public TrainableLayer {
     virtual std::optional<double> getEpsilon() { return epsilon; }
 
     std::string getLayerType() const override { return "BatchNormalization"; }
-
-    virtual bool isMultiLayer() const { return false; }
 
     nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                              Stream stream,
