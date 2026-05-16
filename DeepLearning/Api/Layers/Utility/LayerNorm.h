@@ -26,7 +26,6 @@ class LayerNorm : public TrainableLayer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<LayerNorm>(*this); }
 
     std::string getLayerType() const override { return "LayerNorm"; }
-    bool isMultiLayer() const { return false; }
 
     const std::vector<uint64_t>& getNormalizedShape() const { return normalizedShape; }
     double getEpsilon() const { return epsilon; }
