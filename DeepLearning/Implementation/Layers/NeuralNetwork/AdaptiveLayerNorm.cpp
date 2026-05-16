@@ -22,6 +22,14 @@ bool isAdaptiveLayerNormIoDataType(TensorDescriptor::DataType dtype) {
     }
 }
 
+void validateCudnnFrontendContract(uint64_t normalizedFeatureCount, TensorDescriptor::DataType inputDataType) {
+    if (inputDataType == TensorDescriptor::DataType::FP32 && normalizedFeatureCount % 32 != 0) {
+        throw runtime_error(
+            "AdaptiveLayerNorm cuDNN Frontend primary engines require fp32 normalized feature count to be a multiple of 32; got " +
+            to_string(normalizedFeatureCount) + ".");
+    }
+}
+
 string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 void validateEpsilon(double epsilon) {
@@ -99,17 +107,50 @@ void AdaptiveLayerNorm::validateConfiguredInput(const Tensor& input) const {
             throw runtime_error("AdaptiveLayerNorm input trailing dimensions do not match normalizedShape.");
         }
     }
+    validateCudnnFrontendContract(normalizedFeatureCount, input.getDataType());
 }
 
-uint64_t AdaptiveLayerNorm::computeOuterSize(const Tensor& input) const {
+uint64_t AdaptiveLayerNorm::computeBatchSize(const Tensor& input) const {
     validateConfiguredInput(input);
-    const uint64_t total = input.getTotalNumElements();
-    THOR_THROW_IF_FALSE(total % normalizedFeatureCount == 0);
-    const uint64_t outer = total / normalizedFeatureCount;
-    if (outer == 0) {
-        throw runtime_error("AdaptiveLayerNorm outer sample count must be non-zero.");
+    const vector<uint64_t> dims = input.getDimensions();
+    THOR_THROW_IF_FALSE(!dims.empty());
+    if (dims[0] == 0) {
+        throw runtime_error("AdaptiveLayerNorm batch size must be non-zero.");
     }
-    return outer;
+    return dims[0];
+}
+
+uint64_t AdaptiveLayerNorm::computeLeadingFeatureCount(const Tensor& input) const {
+    validateConfiguredInput(input);
+    const vector<uint64_t> dims = input.getDimensions();
+    const size_t normalizedOffset = dims.size() - normalizedShape.size();
+    uint64_t count = 1;
+    for (size_t i = 1; i < normalizedOffset; ++i) {
+        if (dims[i] == 0) {
+            throw runtime_error("AdaptiveLayerNorm leading feature dimensions must be non-zero.");
+        }
+        if (count > numeric_limits<uint64_t>::max() / dims[i]) {
+            throw runtime_error("AdaptiveLayerNorm leading feature count overflows uint64_t.");
+        }
+        count *= dims[i];
+    }
+    return count;
+}
+
+void AdaptiveLayerNorm::validateScaleBiasInput(const Tensor& tensor, const Tensor& data, const char* name) const {
+    const vector<uint64_t> dataDims = data.getDimensions();
+    const vector<uint64_t> dims = tensor.getDimensions();
+    if (dims.size() != normalizedShape.size() + 1) {
+        throw runtime_error(string("AdaptiveLayerNorm ") + name + " input must have physical dimensions [batch] + normalizedShape.");
+    }
+    if (dims[0] != dataDims[0]) {
+        throw runtime_error(string("AdaptiveLayerNorm ") + name + " batch dimension must match the data input batch dimension.");
+    }
+    for (size_t i = 0; i < normalizedShape.size(); ++i) {
+        if (dims[i + 1] != normalizedShape[i]) {
+            throw runtime_error(string("AdaptiveLayerNorm ") + name + " trailing dimensions must match normalizedShape.");
+        }
+    }
 }
 
 void AdaptiveLayerNorm::validateAllConnectedInputs() const {
@@ -126,9 +167,8 @@ void AdaptiveLayerNorm::validateAllConnectedInputs() const {
     const Tensor& scale = adaptiveFeatureInputs[SCALE].value();
     const Tensor& bias = adaptiveFeatureInputs[BIAS].value();
     validateConfiguredInput(data);
-    if (scale.getDimensions() != data.getDimensions() || bias.getDimensions() != data.getDimensions()) {
-        throw runtime_error("AdaptiveLayerNorm scale and bias inputs must have the same dimensions as the data input.");
-    }
+    validateScaleBiasInput(scale, data, "scale");
+    validateScaleBiasInput(bias, data, "bias");
     if (scale.getDataType() != scaleBiasDataType || bias.getDataType() != scaleBiasDataType) {
         throw runtime_error("AdaptiveLayerNorm scale and bias inputs must be fp32 tensors.");
     }
@@ -232,10 +272,12 @@ void AdaptiveLayerNorm::compileImpl() {
     THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor() == adaptiveFeatureInputs[DATA].value().getDescriptor());
     THOR_THROW_IF_FALSE(featureOutput.value().getPlacement() == adaptiveFeatureInputs[DATA].value().getPlacement());
 
-    outerSize = computeOuterSize(adaptiveFeatureInputs[DATA].value());
+    batchSize = computeBatchSize(adaptiveFeatureInputs[DATA].value());
+    leadingFeatureCount = computeLeadingFeatureCount(adaptiveFeatureInputs[DATA].value());
+    const uint64_t statsElementCount = batchSize * leadingFeatureCount;
 
-    saveMean = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {outerSize}));
-    saveInvVariance = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {outerSize}));
+    saveMean = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {statsElementCount}));
+    saveInvVariance = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {statsElementCount}));
 
     for (auto& scratch : scratchErrorOutputs)
         scratch.reset();
@@ -301,7 +343,8 @@ void AdaptiveLayerNorm::forward(optional<Tensor> featureInput, bool validationPa
     }
 
     CudnnAdaptiveLayerNormDescriptor descriptor;
-    descriptor.outerSize = computeOuterSize(adaptiveFeatureInputs[DATA].value());
+    descriptor.batchSize = computeBatchSize(adaptiveFeatureInputs[DATA].value());
+    descriptor.leadingFeatureCount = computeLeadingFeatureCount(adaptiveFeatureInputs[DATA].value());
     descriptor.normalizedFeatureCount = normalizedFeatureCount;
     descriptor.inputDataType = adaptiveFeatureInputs[DATA].value().getDataType();
     descriptor.outputDataType = featureOutput.value().getDataType();
@@ -350,7 +393,8 @@ void AdaptiveLayerNorm::backward(optional<Tensor> errorInput, uint32_t batchSize
     }
 
     CudnnAdaptiveLayerNormDescriptor descriptor;
-    descriptor.outerSize = computeOuterSize(adaptiveFeatureInputs[DATA].value());
+    descriptor.batchSize = computeBatchSize(adaptiveFeatureInputs[DATA].value());
+    descriptor.leadingFeatureCount = computeLeadingFeatureCount(adaptiveFeatureInputs[DATA].value());
     descriptor.normalizedFeatureCount = normalizedFeatureCount;
     descriptor.inputDataType = adaptiveFeatureInputs[DATA].value().getDataType();
     descriptor.outputDataType = errorInput.value().getDataType();

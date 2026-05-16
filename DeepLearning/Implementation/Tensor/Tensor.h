@@ -148,6 +148,13 @@ class Tensor : private ReferenceCounted {
     void fillZero(Stream dataStream);
 
     void reshape(std::vector<uint64_t> dimensions);
+    [[nodiscard]] Tensor aliasView(std::vector<uint64_t> dimensions,
+                                   std::vector<uint64_t> strides_elements,
+                                   uint64_t element_offset = 0) const;
+    [[nodiscard]] bool hasCustomStrides() const { return !customStridesElements.empty(); }
+    [[nodiscard]] bool isDenseContiguous() const;
+    [[nodiscard]] uint64_t getStorageElementOffset() const { return storageElementOffset; }
+    [[nodiscard]] std::vector<uint64_t> getStridesElements() const;
     void resize(std::vector<uint64_t> dimensions);
     // void concatenateFrom(std::vector<Tensor> sources);
     // void splitInto(std::vector<Tensor> destinations);
@@ -793,6 +800,9 @@ class Tensor : private ReferenceCounted {
 
     TensorPlacement placement;
     void *mem = nullptr;
+    uint64_t storageElementOffset = 0;
+    uint64_t storageNumElements = 0;
+    std::vector<uint64_t> customStridesElements;
 
     uint64_t instanceId;
 

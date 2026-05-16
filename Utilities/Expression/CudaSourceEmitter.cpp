@@ -573,7 +573,9 @@ static const CompiledStageOutput& requireSingleTransposedMaterializedOutput(cons
 }
 
 static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
-    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return node.op == ExprOp::ROPE; });
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
+        return node.op == ExprOp::ROPE || node.op == ExprOp::STRIDED_VIEW_BACKWARD;
+    });
 }
 
 static std::optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpression& expr,
@@ -1096,6 +1098,7 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
             return castScalarExpr("half(normcdff(float(" + x_h + ")))", DataType::FP16, compute_dtype);
         }
         case ExprOp::RESHAPE:
+        case ExprOp::STRIDED_VIEW:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
             return x;
@@ -1176,6 +1179,7 @@ static bool tryGetEmitterConstantValue(const PhysicalExpression& expr, uint32_t 
             value = n.scalar_fp;
             return true;
         case ExprOp::RESHAPE:
+        case ExprOp::STRIDED_VIEW:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
             return tryGetEmitterConstantValue(expr, n.lhs, value);
@@ -1234,6 +1238,7 @@ static bool tryGetEmitterAliasSource(const PhysicalExpression& expr, uint32_t no
     const ExprNode& n = expr.nodes[node_idx];
     switch (n.op) {
         case ExprOp::RESHAPE:
+        case ExprOp::STRIDED_VIEW:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
             source_idx = n.lhs;
@@ -1341,6 +1346,380 @@ static void emitScalarAliasNode(
        << emitResolvedScalarValueExpr(expr, source_node_idx, emitted_dtype) << ";\n";
 }
 
+
+struct StridedViewBackwardPartitionSlice {
+    uint32_t node_idx = UINT32_MAX;
+    uint32_t grad_source_idx = UINT32_MAX;
+    uint64_t start = 0;
+    uint64_t end = 0;
+    uint64_t width = 0;
+    uint64_t row_width = 0;
+    uint64_t outer = 0;
+};
+
+static bool tryClassifyRowPartitionedStridedViewBackward(const PhysicalExpression& expr,
+                                                          uint32_t node_idx,
+                                                          StridedViewBackwardPartitionSlice& slice) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+    const ExprNode& n = expr.nodes[node_idx];
+    if (n.op != ExprOp::STRIDED_VIEW_BACKWARD || n.fill_dims.size() != 2 || n.view_dims.size() < 2 ||
+        n.view_dims.size() != n.view_strides.size()) {
+        return false;
+    }
+    if (n.fill_dims[0] == 0 || n.fill_dims[1] == 0) {
+        return false;
+    }
+
+    uint32_t grad_source_idx = n.lhs;
+    uint32_t alias_source_idx = UINT32_MAX;
+    while (tryGetEmitterAliasSource(expr, grad_source_idx, alias_source_idx)) {
+        grad_source_idx = alias_source_idx;
+        alias_source_idx = UINT32_MAX;
+    }
+    if (grad_source_idx >= expr.nodes.size() || expr.nodes[grad_source_idx].op != ExprOp::INPUT) {
+        return false;
+    }
+
+    const std::vector<uint64_t>& dims = n.view_dims;
+    const std::vector<uint64_t>& strides = n.view_strides;
+    for (uint64_t dim : dims) {
+        if (dim == 0) {
+            return false;
+        }
+    }
+    for (uint64_t stride : strides) {
+        if (stride == 0) {
+            return false;
+        }
+    }
+
+    for (size_t collapsed_last_axis = 0; collapsed_last_axis + 1 < dims.size(); ++collapsed_last_axis) {
+        bool ok = true;
+
+        uint64_t dense_suffix_width = 1;
+        for (size_t axis = dims.size(); axis-- > collapsed_last_axis + 1;) {
+            if (strides[axis] != dense_suffix_width) {
+                ok = false;
+                break;
+            }
+            dense_suffix_width *= dims[axis];
+        }
+        if (!ok) {
+            continue;
+        }
+
+        uint64_t expected_prefix_stride = strides[collapsed_last_axis];
+        for (size_t axis = collapsed_last_axis; axis-- > 0;) {
+            expected_prefix_stride *= dims[axis + 1];
+            if (strides[axis] != expected_prefix_stride) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) {
+            continue;
+        }
+
+        uint64_t outer = 1;
+        for (size_t axis = 0; axis <= collapsed_last_axis; ++axis) {
+            outer *= dims[axis];
+        }
+        const uint64_t row_width = strides[collapsed_last_axis];
+        if (outer != n.fill_dims[0] || row_width != n.fill_dims[1]) {
+            continue;
+        }
+        if (n.view_element_offset > row_width || dense_suffix_width > row_width - n.view_element_offset) {
+            continue;
+        }
+
+        slice.node_idx = node_idx;
+        slice.grad_source_idx = grad_source_idx;
+        slice.start = n.view_element_offset;
+        slice.end = n.view_element_offset + dense_suffix_width;
+        slice.width = dense_suffix_width;
+        slice.row_width = row_width;
+        slice.outer = outer;
+        return true;
+    }
+
+    return false;
+}
+
+static bool collectStridedViewBackwardPartitionTree(const PhysicalExpression& expr,
+                                                    uint32_t node_idx,
+                                                    std::vector<uint32_t>& leaves,
+                                                    std::unordered_set<uint32_t>& tree_nodes) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+    const ExprNode& n = expr.nodes[node_idx];
+    if (n.op == ExprOp::ADD) {
+        tree_nodes.insert(node_idx);
+        return collectStridedViewBackwardPartitionTree(expr, n.lhs, leaves, tree_nodes) &&
+               collectStridedViewBackwardPartitionTree(expr, n.rhs, leaves, tree_nodes);
+    }
+    if (n.op == ExprOp::STRIDED_VIEW_BACKWARD) {
+        StridedViewBackwardPartitionSlice slice;
+        if (!tryClassifyRowPartitionedStridedViewBackward(expr, node_idx, slice)) {
+            return false;
+        }
+        tree_nodes.insert(node_idx);
+        leaves.push_back(node_idx);
+        return true;
+    }
+    return false;
+}
+
+static bool buildStridedViewBackwardPartitionPlan(const PhysicalExpression& expr,
+                                                  uint32_t root_idx,
+                                                  std::vector<StridedViewBackwardPartitionSlice>& slices,
+                                                  std::unordered_set<uint32_t>* tree_nodes = nullptr) {
+    std::vector<uint32_t> leaves;
+    std::unordered_set<uint32_t> local_tree_nodes;
+    if (!collectStridedViewBackwardPartitionTree(expr, root_idx, leaves, local_tree_nodes) || leaves.size() < 2) {
+        return false;
+    }
+
+    slices.clear();
+    slices.reserve(leaves.size());
+    for (uint32_t leaf_idx : leaves) {
+        StridedViewBackwardPartitionSlice slice;
+        if (!tryClassifyRowPartitionedStridedViewBackward(expr, leaf_idx, slice)) {
+            return false;
+        }
+        slices.push_back(slice);
+    }
+
+    const uint64_t row_width = slices.front().row_width;
+    const uint64_t outer = slices.front().outer;
+    for (const auto& slice : slices) {
+        if (slice.row_width != row_width || slice.outer != outer || slice.start >= slice.end) {
+            return false;
+        }
+    }
+
+    std::sort(slices.begin(), slices.end(), [](const auto& a, const auto& b) { return a.start < b.start; });
+    uint64_t covered_until = 0;
+    for (const auto& slice : slices) {
+        if (slice.start < covered_until) {
+            return false;
+        }
+        covered_until = slice.end;
+    }
+
+    if (tree_nodes != nullptr) {
+        *tree_nodes = std::move(local_tree_nodes);
+    }
+    return true;
+}
+
+[[maybe_unused]] static bool tryEmitScalarStridedViewBackwardPartitionNode(std::ostringstream& ss,
+                                                          const PhysicalExpression& expr,
+                                                          uint32_t node_idx,
+                                                          const std::string& indent) {
+    std::vector<StridedViewBackwardPartitionSlice> slices;
+    if (!buildStridedViewBackwardPartitionPlan(expr, node_idx, slices)) {
+        return false;
+    }
+
+    const ExprNode& out_node = expr.nodes.at(node_idx);
+    const DataType emitted_dtype = emittedScalarNodeValueDType(out_node);
+    const std::string output_type = scalarStorageType(emitted_dtype);
+    const std::string zero = castScalarExpr("0.0f", DataType::FP32, emitted_dtype);
+    const uint64_t row_width = slices.front().row_width;
+
+    ss << indent << output_type << " t" << node_idx << ";\n";
+    ss << indent << "{\n";
+    ss << indent << "  const unsigned long long svb_row_" << node_idx << " = static_cast<unsigned long long>(idx) / "
+       << row_width << "ULL;\n";
+    ss << indent << "  const unsigned long long svb_col_" << node_idx << " = static_cast<unsigned long long>(idx) - svb_row_"
+       << node_idx << " * " << row_width << "ULL;\n";
+
+    uint64_t covered_until = 0;
+    for (size_t i = 0; i < slices.size(); ++i) {
+        const auto& slice = slices[i];
+        const ExprNode& grad_source = expr.nodes.at(slice.grad_source_idx);
+        const DataType input_dtype = requireNodeInputTensorDType(grad_source);
+        const std::string load_idx = "(svb_row_" + std::to_string(node_idx) + " * " + std::to_string(slice.width) +
+                                     "ULL + (svb_col_" + std::to_string(node_idx) + " - " + std::to_string(slice.start) + "ULL))";
+        const std::string load_expr = "in" + std::to_string(grad_source.input_slot) + "[" + load_idx + "]";
+        const std::string cast_load = castScalarExpr(load_expr, input_dtype, emitted_dtype);
+
+        const bool full_tail = (slice.start == covered_until && slice.end == row_width);
+        if (i == 0) {
+            if (slice.start == 0 && full_tail) {
+                ss << indent << "  t" << node_idx << " = " << cast_load << ";\n";
+            } else if (slice.start == 0) {
+                ss << indent << "  if (svb_col_" << node_idx << " < " << slice.end << "ULL) {\n";
+                ss << indent << "    t" << node_idx << " = " << cast_load << ";\n";
+            } else {
+                ss << indent << "  if (svb_col_" << node_idx << " >= " << slice.start << "ULL && svb_col_" << node_idx << " < "
+                   << slice.end << "ULL) {\n";
+                ss << indent << "    t" << node_idx << " = " << cast_load << ";\n";
+            }
+        } else if (full_tail) {
+            ss << indent << "  } else {\n";
+            ss << indent << "    t" << node_idx << " = " << cast_load << ";\n";
+        } else {
+            ss << indent << "  } else if (svb_col_" << node_idx << " >= " << slice.start << "ULL && svb_col_" << node_idx << " < "
+               << slice.end << "ULL) {\n";
+            ss << indent << "    t" << node_idx << " = " << cast_load << ";\n";
+        }
+        covered_until = slice.end;
+    }
+
+    if (covered_until < row_width) {
+        ss << indent << "  } else {\n";
+        ss << indent << "    t" << node_idx << " = " << zero << ";\n";
+    }
+    if (!(slices.size() == 1 && slices.front().start == 0 && slices.front().end == row_width)) {
+        ss << indent << "  }\n";
+    }
+    ss << indent << "}\n";
+    return true;
+}
+
+static std::unordered_set<uint32_t> collectIndexAwareInputNodesToSkipForFlatOutput(const PhysicalExpression& expr,
+                                                                                     const std::vector<CompiledStageOutput>& outputs) {
+    std::unordered_set<uint32_t> reachable;
+    for (const CompiledStageOutput& output : outputs) {
+        if (output.local_node_idx >= expr.nodes.size()) {
+            throw runtime_error("Fused output local_node_idx out of range while collecting index-aware input skips.");
+        }
+        collectRequiredNodes(expr, output.local_node_idx, reachable);
+    }
+
+    std::unordered_set<uint32_t> index_aware_input_sources;
+    std::unordered_map<uint32_t, uint32_t> ordinary_input_uses;
+
+    auto resolve_emitter_alias_source = [&](uint32_t node_idx) {
+        uint32_t source_idx = node_idx;
+        uint32_t alias_source_idx = UINT32_MAX;
+        while (tryGetEmitterAliasSource(expr, source_idx, alias_source_idx)) {
+            source_idx = alias_source_idx;
+            alias_source_idx = UINT32_MAX;
+        }
+        return source_idx;
+    };
+
+    auto note_child_input_use = [&](uint32_t parent_idx, uint32_t child_idx, bool index_aware_load) {
+        if (child_idx >= expr.nodes.size() || !reachable.contains(parent_idx) || !reachable.contains(child_idx)) {
+            return;
+        }
+
+        const uint32_t source_idx = resolve_emitter_alias_source(child_idx);
+        if (source_idx >= expr.nodes.size() || expr.nodes[source_idx].op != ExprOp::INPUT) {
+            return;
+        }
+
+        if (index_aware_load) {
+            index_aware_input_sources.insert(source_idx);
+        } else {
+            ++ordinary_input_uses[source_idx];
+        }
+    };
+
+    for (uint32_t node_idx : reachable) {
+        const ExprNode& node = expr.nodes.at(node_idx);
+        if (Expression::isLeafOp(node.op)) {
+            continue;
+        }
+
+        // STRIDED_VIEW_BACKWARD is an index-aware consumer: it derives a
+        // source-gradient input index from the output coordinate, rather than
+        // using the fused output's flat idx directly.
+        note_child_input_use(node_idx, node.lhs, node.op == ExprOp::STRIDED_VIEW_BACKWARD);
+        if (Expression::isBinaryOp(node.op)) {
+            note_child_input_use(node_idx, node.rhs, false);
+        }
+    }
+
+    std::unordered_set<uint32_t> skip;
+    for (uint32_t source_idx : index_aware_input_sources) {
+        if (!ordinary_input_uses.contains(source_idx)) {
+            // The index-aware node emits the only valid load for this input.
+            // Emitting the ordinary scalar INPUT definition would read at the
+            // packed output idx, which is wrong for narrower dQ/dK/dV tensors
+            // and can be out of bounds after the first packed row.
+            skip.insert(source_idx);
+        }
+    }
+
+    return skip;
+}
+
+static void emitScalarStridedViewBackwardNode(std::ostringstream& ss,
+                                              const PhysicalExpression& expr,
+                                              uint32_t node_idx,
+                                              const std::string& indent) {
+    const ExprNode& n = expr.nodes.at(node_idx);
+    if (n.lhs >= expr.nodes.size()) {
+        throw runtime_error("strided_view_backward node has invalid lhs.");
+    }
+
+    uint32_t grad_source_idx = n.lhs;
+    uint32_t alias_source_idx = UINT32_MAX;
+    while (tryGetEmitterAliasSource(expr, grad_source_idx, alias_source_idx)) {
+        grad_source_idx = alias_source_idx;
+        alias_source_idx = UINT32_MAX;
+    }
+
+    const ExprNode& grad_source = expr.nodes.at(grad_source_idx);
+    if (grad_source.op != ExprOp::INPUT) {
+        throw runtime_error(
+            "strided_view_backward fused emission currently requires the view-gradient input to be a materialized stage input.");
+    }
+    if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size()) {
+        throw runtime_error("strided_view_backward requires view dimensions and strides with the same non-zero rank.");
+    }
+    if (n.fill_dims.empty()) {
+        throw runtime_error("strided_view_backward requires non-empty source dimensions.");
+    }
+
+    const DataType emitted_dtype = emittedScalarNodeValueDType(n);
+    const DataType input_dtype = requireNodeInputTensorDType(grad_source);
+    const std::string output_type = scalarStorageType(emitted_dtype);
+    const std::string input_ref = "in" + std::to_string(grad_source.input_slot);
+
+    ss << indent << "bool view_bw_in_view_" << node_idx << " = true;\n";
+    ss << indent << "unsigned long long view_bw_residual_" << node_idx << " = static_cast<unsigned long long>(idx);\n";
+    if (n.view_element_offset != 0) {
+        ss << indent << "if (view_bw_residual_" << node_idx << " < " << n.view_element_offset << "ULL) {\n";
+        ss << indent << "  view_bw_in_view_" << node_idx << " = false;\n";
+        ss << indent << "} else {\n";
+        ss << indent << "  view_bw_residual_" << node_idx << " -= " << n.view_element_offset << "ULL;\n";
+        ss << indent << "}\n";
+    }
+    ss << indent << "unsigned long long view_bw_linear_" << node_idx << " = 0ULL;\n";
+    for (size_t axis = 0; axis < n.view_dims.size(); ++axis) {
+        const uint64_t dim = n.view_dims.at(axis);
+        const uint64_t stride = n.view_strides.at(axis);
+        if (dim == 0 || stride == 0) {
+            throw runtime_error("strided_view_backward dimensions and strides must be non-zero.");
+        }
+        ss << indent << "if (view_bw_in_view_" << node_idx << ") {\n";
+        ss << indent << "  const unsigned long long coord_" << node_idx << "_" << axis << " = view_bw_residual_" << node_idx
+           << " / " << stride << "ULL;\n";
+        ss << indent << "  if (coord_" << node_idx << "_" << axis << " >= " << dim << "ULL) {\n";
+        ss << indent << "    view_bw_in_view_" << node_idx << " = false;\n";
+        ss << indent << "  } else {\n";
+        ss << indent << "    view_bw_residual_" << node_idx << " -= coord_" << node_idx << "_" << axis << " * " << stride
+           << "ULL;\n";
+        ss << indent << "    view_bw_linear_" << node_idx << " = view_bw_linear_" << node_idx << " * " << dim << "ULL + coord_"
+           << node_idx << "_" << axis << ";\n";
+        ss << indent << "  }\n";
+        ss << indent << "}\n";
+    }
+    ss << indent << "if (view_bw_residual_" << node_idx << " != 0ULL) view_bw_in_view_" << node_idx << " = false;\n";
+    const std::string load_expr = input_ref + "[view_bw_linear_" + std::to_string(node_idx) + "]";
+    const std::string cast_load = castScalarExpr(load_expr, input_dtype, emitted_dtype);
+    const std::string zero = castScalarExpr("0.0f", DataType::FP32, emitted_dtype);
+    ss << indent << "const " << output_type << " t" << node_idx << " = view_bw_in_view_" << node_idx << " ? " << cast_load
+       << " : " << zero << ";\n";
+}
+
 static void emitScalarNode(
     std::ostringstream& ss, const PhysicalExpression& expr, uint32_t node_idx, bool broadcast_support, const std::string& indent) {
     const ExprNode& n = expr.nodes[node_idx];
@@ -1357,6 +1736,10 @@ static void emitScalarNode(
     }
 
     switch (n.op) {
+        case ExprOp::STRIDED_VIEW_BACKWARD:
+            emitScalarStridedViewBackwardNode(ss, expr, node_idx, indent);
+            return;
+
         case ExprOp::INPUT: {
             const std::string idx_expr = broadcast_support ? ("in" + std::to_string(n.input_slot) + "_offset") : "idx";
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
@@ -1478,7 +1861,7 @@ static void emitScalarNode(
         return emitResolvedScalarValueExpr(expr, child_idx, compute_dtype);
     };
 
-    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
+    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::STRIDED_VIEW || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
         emitScalarAliasNode(ss, expr, node_idx, n.lhs, indent);
         return;
     }
@@ -1486,6 +1869,10 @@ static void emitScalarNode(
     if (Expression::isBinaryOp(n.op)) {
         switch (n.op) {
             case ExprOp::ADD:
+                // Keep STRIDED_VIEW_BACKWARD sums on the generic per-slice path.
+                // This remains one fused kernel, but avoids the packed-gradient
+                // partition fast path whose branch-chain emitter can accidentally
+                // couple packed output indexing to narrower dQ/dK/dV inputs.
                 if (isEmitterConstantZero(expr, n.lhs)) {
                     emitScalarAliasNode(ss, expr, node_idx, n.rhs, indent);
                     return;
@@ -1594,6 +1981,9 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
     }
 
     switch (n.op) {
+        case ExprOp::STRIDED_VIEW_BACKWARD:
+            throw runtime_error("strided_view_backward is index-aware and is only supported by the scalar flat fused emitter.");
+
         case ExprOp::INPUT: {
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
             std::string input_expr;
@@ -1661,7 +2051,7 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
         return emitResolvedScalarValueExprSuffixed(expr, child_idx, compute_dtype, suffix);
     };
 
-    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
+    if (n.op == ExprOp::RESHAPE || n.op == ExprOp::STRIDED_VIEW || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
         emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.lhs, suffix, indent);
         return;
     }
@@ -3522,8 +3912,9 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
     ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";";
     ss << "  if (idx >= numel) return;";
 
+    const std::unordered_set<uint32_t> index_aware_skip_nodes = collectIndexAwareInputNodesToSkipForFlatOutput(stage.expr, stage.outputs);
     for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-        if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+        if (index_aware_skip_nodes.contains(node_idx) || !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
             continue;
         }
         emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, "  ");

@@ -828,9 +828,10 @@ void CudnnAttentionDescriptor::validateForward() const {
         if (!usesCausalDiagonal || diagonalRightBound != 0)
             throwInvalidAttention("ALiBi requires causal diagonal masking with diagonalRightBound == 0");
     }
-    if (maskKind == AttentionMaskKind::CausalBottomRight && (useBias || useAlibiMask || dropout.probability > 0.0f))
+    if ((maskKind == AttentionMaskKind::CausalBottomRight || maskKind == AttentionMaskKind::SlidingWindowBottomRight) &&
+        (useBias || useAlibiMask || dropout.probability > 0.0f))
         throwInvalidAttention(
-            "causal bottom-right attention currently requires additive bias, ALiBi, and dropout to be disabled in the cuDNN primary SDPA path");
+            "bottom-right/decode attention currently requires additive bias, ALiBi, and dropout to be disabled in the cuDNN primary SDPA path");
     if (usePagedKvCache) {
         if (pagedKv.maxSequenceLengthKv <= 0)
             throwInvalidAttention("paged KV attention requires pagedKv.maxSequenceLengthKv > 0");

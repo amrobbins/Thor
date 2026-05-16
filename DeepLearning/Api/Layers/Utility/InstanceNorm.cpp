@@ -20,6 +20,14 @@ bool InstanceNorm::isInstanceNormInputDataType(Tensor::DataType dataType) {
     }
 }
 
+namespace {
+
+bool isReducedPrecisionInstanceNormInputDataType(Tensor::DataType dataType) {
+    return dataType == Tensor::DataType::FP16 || dataType == Tensor::DataType::BF16;
+}
+
+}  // namespace
+
 uint64_t InstanceNorm::checkedChannelCount(uint64_t channelCount) {
     if (channelCount == 0) {
         throw invalid_argument("InstanceNorm channel count must be non-zero.");
@@ -48,6 +56,14 @@ void InstanceNorm::validateInputShape(const vector<uint64_t>& inputDims) {
             throw invalid_argument("InstanceNorm spatial element count overflows uint64_t.");
         }
         spatial *= inputDims[i];
+    }
+}
+
+void InstanceNorm::validateCudnnFrontendContract(uint64_t channelCount, Tensor::DataType inputDataType) {
+    if (isReducedPrecisionInstanceNormInputDataType(inputDataType) && channelCount % 8 != 0) {
+        throw invalid_argument(
+            "InstanceNorm cuDNN Frontend primary engines require fp16/bf16 channel count to be a multiple of 8; got " +
+            to_string(channelCount) + ".");
     }
 }
 
@@ -116,6 +132,7 @@ void InstanceNorm::Builder::verifyConfig() const {
     }
     const vector<uint64_t> inputDims = _featureInputs.front().getDimensions();
     InstanceNorm::validateInputShape(inputDims);
+    InstanceNorm::validateCudnnFrontendContract(inputDims.front(), inputDataType);
     for (uint32_t i = 0; i < _featureInputs.size(); ++i) {
         if (!_featureInputs[i].isInitialized()) {
             throw invalid_argument("InstanceNorm feature input is not initialized.");

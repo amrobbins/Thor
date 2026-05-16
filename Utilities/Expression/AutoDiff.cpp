@@ -280,6 +280,8 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::SOFTMAX:
             case ExprOp::TRANSPOSE:
             case ExprOp::RESHAPE:
+            case ExprOp::STRIDED_VIEW:
+            case ExprOp::STRIDED_VIEW_BACKWARD:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
             case ExprOp::REDUCE_SUM:
@@ -394,6 +396,55 @@ class BackwardGraphBuilder {
         return grad_expr.nodes.at(node_idx);
     }
 
+    std::optional<std::vector<uint64_t>> tryInferKnownGradientDims(uint32_t node_idx) const {
+        if (node_idx >= grad_expr.nodes.size()) {
+            throw std::runtime_error("BackwardGraphBuilder gradient-dim inference node index out of range.");
+        }
+
+        const ExprNode& n = grad_expr.nodes.at(node_idx);
+        switch (n.op) {
+            case ExprOp::SCALAR_FP:
+                return std::vector<uint64_t>{};
+            case ExprOp::FILL:
+                return n.fill_dims;
+            case ExprOp::RESHAPE:
+                return n.reshape_dims;
+            case ExprOp::STRIDED_VIEW:
+                return n.view_dims;
+            case ExprOp::STRIDED_VIEW_BACKWARD:
+                return n.fill_dims;
+            case ExprOp::NEG:
+                return tryInferKnownGradientDims(n.lhs);
+            case ExprOp::ADD:
+            case ExprOp::SUB: {
+                const auto lhs_dims = tryInferKnownGradientDims(n.lhs);
+                const auto rhs_dims = tryInferKnownGradientDims(n.rhs);
+                if (!lhs_dims.has_value() || !rhs_dims.has_value()) {
+                    return std::nullopt;
+                }
+                if (lhs_dims->empty()) {
+                    return rhs_dims.value();
+                }
+                if (rhs_dims->empty()) {
+                    return lhs_dims.value();
+                }
+                if (lhs_dims.value() == rhs_dims.value()) {
+                    return lhs_dims.value();
+                }
+
+                std::vector<uint64_t> out_dims;
+                try {
+                    resolveBroadcastedDims({lhs_dims.value(), rhs_dims.value()}, out_dims);
+                } catch (const std::runtime_error&) {
+                    return std::nullopt;
+                }
+                return out_dims;
+            }
+            default:
+                return std::nullopt;
+        }
+    }
+
     bool tryGetScalarConstant(uint32_t node_idx, double& value) const {
         if (node_idx >= grad_expr.nodes.size()) {
             throw std::runtime_error("BackwardGraphBuilder constant query node index out of range.");
@@ -434,6 +485,25 @@ class BackwardGraphBuilder {
                     return false;
                 }
                 dims = node.reshape_dims;
+                return true;
+            }
+            case ExprOp::STRIDED_VIEW: {
+                std::vector<uint64_t> lhs_dims;
+                if (!tryGetConstantLike(node.lhs, value, lhs_dims)) {
+                    return false;
+                }
+                dims = node.view_dims;
+                return true;
+            }
+            case ExprOp::STRIDED_VIEW_BACKWARD: {
+                std::vector<uint64_t> lhs_dims;
+                if (!tryGetConstantLike(node.lhs, value, lhs_dims)) {
+                    return false;
+                }
+                if (value != 0.0) {
+                    return false;
+                }
+                dims = node.fill_dims;
                 return true;
             }
             case ExprOp::UNSQUEEZE: {
@@ -1122,6 +1192,45 @@ class BackwardGraphBuilder {
         return push(std::move(node));
     }
 
+    uint32_t stridedViewBackward(uint32_t grad_view,
+                                 const std::vector<uint64_t>& source_dims,
+                                 const std::vector<uint64_t>& view_dims,
+                                 const std::vector<uint64_t>& view_strides,
+                                 uint64_t view_element_offset,
+                                 std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt,
+                                 std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt) {
+        if (source_dims.empty()) {
+            throw std::runtime_error("AutoDiff strided-view backward requires non-empty source dimensions.");
+        }
+        if (view_dims.empty() || view_dims.size() != view_strides.size()) {
+            throw std::runtime_error("AutoDiff strided-view backward requires view dimensions and strides with the same non-zero rank.");
+        }
+        // The generated scatter kernel inverts a canonical, non-overlapping row-major-like strided view.
+        // Packed-QKV slices satisfy this: [B,S,H,D] strides [S*total,total,D,1].
+        uint64_t dense_tail = 1;
+        for (int64_t axis = static_cast<int64_t>(view_dims.size()) - 1; axis >= 0; --axis) {
+            if (view_dims[axis] == 0 || view_strides[axis] < dense_tail) {
+                throw std::runtime_error(
+                    "AutoDiff strided-view backward requires canonical non-overlapping row-major-like strides.");
+            }
+            dense_tail *= view_dims[axis];
+        }
+        ExprNode node{};
+        node.op = ExprOp::STRIDED_VIEW_BACKWARD;
+        node.lhs = grad_view;
+        node.fill_dims = source_dims;
+        node.view_dims = view_dims;
+        node.view_strides = view_strides;
+        node.view_element_offset = view_element_offset;
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
+        }
+        if (compute_dtype.has_value()) {
+            node.compute_dtype = compute_dtype.value();
+        }
+        return push(std::move(node));
+    }
+
     uint32_t unsqueeze(uint32_t value, const std::vector<uint64_t>& unsqueeze_axes) {
         const std::vector<uint64_t> normalized_axes = normalizeAxes(unsqueeze_axes);
         if (normalized_axes.empty()) {
@@ -1763,6 +1872,9 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::RESHAPE:
                 node_dims[i] = node.reshape_dims;
                 break;
+            case ExprOp::STRIDED_VIEW:
+                node_dims[i] = node.view_dims;
+                break;
             case ExprOp::UNSQUEEZE: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
                 const std::vector<uint64_t>& axes = node.unsqueeze_axes;
@@ -2007,6 +2119,78 @@ uint64_t reductionElementCount(const std::vector<uint64_t>& input_dims, const st
 }
 
 }  // namespace
+
+
+static std::optional<std::vector<uint64_t>> inferPackedDenseSourceDimsForStridedViewBackward(const ExprNode& node) {
+    const std::vector<uint64_t>& dims = node.view_dims;
+    const std::vector<uint64_t>& strides = node.view_strides;
+    if (dims.size() < 2 || dims.size() != strides.size()) {
+        return std::nullopt;
+    }
+    for (uint64_t dim : dims) {
+        if (dim == 0) {
+            return std::nullopt;
+        }
+    }
+    for (uint64_t stride : strides) {
+        if (stride == 0) {
+            return std::nullopt;
+        }
+    }
+
+    // Packed-QKV views are commonly expressed as a higher-rank logical view over a
+    // dense 2-D parent [outer, inner], where some prefix axes collapse into
+    // `outer`, and the remaining suffix axes address a dense slice within each
+    // row of width `inner`.  Example for BSHD Q view into [B*S, QKV]:
+    //   dims    = [B, S, H, D]
+    //   strides = [S*QKV, QKV, D, 1]
+    //   offset  = q_start
+    // which infers source dims [B*S, QKV].
+    for (size_t collapsed_last_axis = 0; collapsed_last_axis + 1 < dims.size(); ++collapsed_last_axis) {
+        bool ok = true;
+
+        uint64_t expected_suffix_stride = 1;
+        for (size_t axis = dims.size(); axis-- > collapsed_last_axis + 1;) {
+            if (strides[axis] != expected_suffix_stride) {
+                ok = false;
+                break;
+            }
+            expected_suffix_stride *= dims[axis];
+        }
+        if (!ok) {
+            continue;
+        }
+
+        uint64_t expected_prefix_stride = strides[collapsed_last_axis];
+        for (size_t axis = collapsed_last_axis; axis-- > 0;) {
+            expected_prefix_stride *= dims[axis + 1];
+            if (strides[axis] != expected_prefix_stride) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) {
+            continue;
+        }
+
+        const uint64_t inner_width = strides[collapsed_last_axis];
+        uint64_t suffix_span = 1;
+        for (size_t axis = collapsed_last_axis + 1; axis < dims.size(); ++axis) {
+            suffix_span += (dims[axis] - 1) * strides[axis];
+        }
+        if (node.view_element_offset >= inner_width || node.view_element_offset + suffix_span > inner_width) {
+            continue;
+        }
+
+        uint64_t outer = 1;
+        for (size_t axis = 0; axis <= collapsed_last_axis; ++axis) {
+            outer *= dims[axis];
+        }
+        return std::vector<uint64_t>{outer, inner_width};
+    }
+
+    return std::nullopt;
+}
 
 static std::string dbgDims(const std::vector<uint64_t>& dims) {
     std::ostringstream oss;
@@ -2259,6 +2443,29 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 }
                 break;
             }
+
+            case ExprOp::STRIDED_VIEW:
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    std::vector<uint64_t> source_dims;
+                    if (has_forward_dims) {
+                        source_dims = forward_node_dims.at(node.lhs);
+                    } else {
+                        const auto inferred_source_dims = inferPackedDenseSourceDimsForStridedViewBackward(node);
+                        if (!inferred_source_dims.has_value()) {
+                            throw std::runtime_error("AutoDiff strided_view backward requires forward shape information.");
+                        }
+                        source_dims = inferred_source_dims.value();
+                    }
+                    builder.addContribution(node.lhs,
+                                            builder.stridedViewBackward(grad,
+                                                                        source_dims,
+                                                                        node.view_dims,
+                                                                        node.view_strides,
+                                                                        node.view_element_offset,
+                                                                        preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
+                                                                        preferredGradValueDType(forward_expr.nodes.at(node.lhs))));
+                }
+                break;
 
             case ExprOp::UNSQUEEZE: {
                 if (has_forward_dims) {
@@ -3132,6 +3339,10 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             uint32_t zero_like;
             if (has_forward_dims) {
                 zero_like = builder.fill(0.0, forward_node_dims.at(first_it->second), grad_dtype);
+            } else if (const auto inferred_grad_dims = builder.tryInferKnownGradientDims(total_grad.value()); inferred_grad_dims.has_value()) {
+                // Avoid cloning the primal input just to manufacture a zero tensor when the
+                // backward graph already carries its terminal shape, as strided-view backward does.
+                zero_like = builder.fill(0.0, inferred_grad_dims.value(), grad_dtype);
             } else {
                 const uint32_t input_clone = builder.cloneForward(first_it->second);
                 zero_like = builder.mul(input_clone, builder.scalar(0.0));

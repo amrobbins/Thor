@@ -63,7 +63,9 @@ class AdaptiveLayerNorm : public Layer {
     static uint64_t checkedNormalizedFeatureCount(const std::vector<uint64_t>& normalizedShape);
     static uint32_t decodeInputConnectionType(int connectionType);
     void validateConfiguredInput(const Tensor& input) const;
-    uint64_t computeOuterSize(const Tensor& input) const;
+    uint64_t computeBatchSize(const Tensor& input) const;
+    uint64_t computeLeadingFeatureCount(const Tensor& input) const;
+    void validateScaleBiasInput(const Tensor& tensor, const Tensor& data, const char* name) const;
     void validateAllConnectedInputs() const;
     bool anyErrorOutput() const;
     Stream& computeStream();
@@ -75,7 +77,8 @@ class AdaptiveLayerNorm : public Layer {
     int64_t stampedId = -1;
     std::vector<uint64_t> normalizedShape;
     uint64_t normalizedFeatureCount = 0;
-    uint64_t outerSize = 0;
+    uint64_t batchSize = 0;
+    uint64_t leadingFeatureCount = 0;
     double epsilon = 1.0e-5;
     TensorDescriptor::DataType scaleBiasDataType = TensorDescriptor::DataType::FP32;
 

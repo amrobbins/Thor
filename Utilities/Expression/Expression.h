@@ -51,6 +51,8 @@ enum class ExprOp : uint16_t {
     SOFTMAX,
     FILL,
     RESHAPE,
+    STRIDED_VIEW,
+    STRIDED_VIEW_BACKWARD,
     UNSQUEEZE,
     SQUEEZE,
     TRANSPOSE,
@@ -229,6 +231,9 @@ struct ExprNode {
     // for shape/reduction nodes only
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> reshape_dims;
+    std::vector<uint64_t> view_dims;
+    std::vector<uint64_t> view_strides;
+    uint64_t view_element_offset = 0;
     std::vector<uint64_t> squeeze_axes;
     std::vector<uint64_t> unsqueeze_axes;
     std::vector<uint64_t> fill_dims;
@@ -400,6 +405,14 @@ class Expression {
         return input.rotaryPositionEmbedding(std::move(options));
     }
     [[nodiscard]] Expression reshape(const std::vector<uint64_t>& new_dims) const;
+    [[nodiscard]] Expression stridedView(const std::vector<uint64_t>& dims,
+                                         const std::vector<uint64_t>& strides_elements,
+                                         uint64_t element_offset = 0) const;
+    [[nodiscard]] Expression aliasView(const std::vector<uint64_t>& dims,
+                                       const std::vector<uint64_t>& strides_elements,
+                                       uint64_t element_offset = 0) const {
+        return stridedView(dims, strides_elements, element_offset);
+    }
     [[nodiscard]] Expression unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const;
     [[nodiscard]] Expression squeeze(const std::vector<uint64_t>& squeeze_axes) const;
     [[nodiscard]] Expression transpose() const;

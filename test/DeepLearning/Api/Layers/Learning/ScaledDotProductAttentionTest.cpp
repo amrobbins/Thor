@@ -95,3 +95,16 @@ TEST(AttentionApi, RejectsBottomRightMaskWithAdditiveBias) {
                      .build(),
                  std::invalid_argument);
 }
+
+TEST(AttentionApi, SdpaRejectsBottomRightMaskWithAlibi) {
+    Api::Network network("attention_api_rejects_bottom_right_mask_with_alibi_sdpa");
+    Api::NetworkInput q = Api::NetworkInput::Builder().network(network).name("q").dimensions({2, 8, 32}).dataType(DataType::FP16).build();
+
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .selfInput(q.getFeatureOutput().value())
+                     .maskKind(Impl::AttentionMaskKind::CausalBottomRight)
+                     .useAlibiMask()
+                     .build(),
+                 std::invalid_argument);
+}

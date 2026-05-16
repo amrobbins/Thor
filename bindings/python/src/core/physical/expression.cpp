@@ -270,6 +270,25 @@ For contiguous tensors this is planned as a value alias rather than a materializ
 fused kernel when no dtype conversion is requested.
 )nbdoc");
 
+    expr.def(
+        "strided_view",
+        [](const Expression& self,
+           const std::vector<uint64_t>& dims,
+           const std::vector<uint64_t>& strides,
+           uint64_t element_offset) { return self.stridedView(dims, strides, element_offset); },
+        "shape"_a,
+        "strides"_a,
+        "element_offset"_a = 0,
+        R"nbdoc(
+Return a zero-materialization storage alias with explicit element strides.
+
+The alias shares the source allocation, starts at element_offset elements from the
+source tensor's visible base pointer, and indexes the requested shape using the
+provided element strides. This is intended for layout/descriptor adapters such as
+packed-QKV attention views; generic fused kernels should materialize or lower a
+layout-aware kernel before consuming non-dense views.
+)nbdoc");
+
     expr.def_static(
         "constant_scalar",
         [](double value) { return Expression::constantScalar(value); },

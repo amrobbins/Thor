@@ -26,11 +26,11 @@ TEST(UtilityApiLayers, InstanceNormDerivesChannelCountFromFirstFeatureDimension)
 
 TEST(UtilityApiLayers, InstanceNormAcceptsOneDimensionalSpatialInput) {
     Network network("instance_norm_1d_spatial");
-    Tensor input(Tensor::DataType::BF16, {4, 32});
+    Tensor input(Tensor::DataType::BF16, {8, 32});
 
     InstanceNorm layer = InstanceNorm::Builder().network(network).featureInput(input).epsilon(1.0e-4).build();
 
-    EXPECT_EQ(layer.getChannelCount(), 4u);
+    EXPECT_EQ(layer.getChannelCount(), 8u);
     EXPECT_DOUBLE_EQ(layer.getEpsilon(), 1.0e-4);
     EXPECT_EQ(layer.getFeatureOutput().value().getDimensions(), input.getDimensions());
 }
@@ -40,6 +40,15 @@ TEST(UtilityApiLayers, InstanceNormRejectsBadInputShape) {
     Tensor rankOne(Tensor::DataType::FP16, {8});
     EXPECT_THROW(InstanceNorm::Builder().network(network).featureInput(rankOne).build(), std::invalid_argument);
 
+}
+
+TEST(UtilityApiLayers, InstanceNormRejectsReducedPrecisionChannelCountsUnsupportedByCudnnPrimaryEngines) {
+    Network network("instance_norm_bad_cudnn_contract");
+    Tensor fp16BadChannels(Tensor::DataType::FP16, {4, 32});
+    EXPECT_THROW(InstanceNorm::Builder().network(network).featureInput(fp16BadChannels).build(), std::invalid_argument);
+
+    Tensor bf16BadChannels(Tensor::DataType::BF16, {4, 32});
+    EXPECT_THROW(InstanceNorm::Builder().network(network).featureInput(bf16BadChannels).build(), std::invalid_argument);
 }
 
 TEST(UtilityApiLayers, InstanceNormRejectsUnsupportedDtypes) {

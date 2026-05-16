@@ -20,6 +20,14 @@ bool AdaptiveLayerNorm::isAdaptiveLayerNormInputDataType(Tensor::DataType dataTy
     }
 }
 
+void AdaptiveLayerNorm::validateCudnnFrontendContract(uint64_t normalizedFeatureCount, Tensor::DataType inputDataType) {
+    if (inputDataType == Tensor::DataType::FP32 && normalizedFeatureCount % 32 != 0) {
+        throw invalid_argument(
+            "AdaptiveLayerNorm cuDNN Frontend primary engines require fp32 normalized feature count to be a multiple of 32; got " +
+            to_string(normalizedFeatureCount) + ".");
+    }
+}
+
 uint64_t AdaptiveLayerNorm::checkedFeatureCount(const vector<uint64_t>& shape, const string& what) {
     if (shape.empty()) {
         throw invalid_argument("AdaptiveLayerNorm " + what + " must contain at least one dimension.");
@@ -114,7 +122,7 @@ void AdaptiveLayerNorm::Builder::verifyConfig() const {
     if (!_featureInput.has_value() || !_scaleInput.has_value() || !_biasInput.has_value()) {
         throw invalid_argument("AdaptiveLayerNorm::Builder requires featureInput(), scaleInput(), and biasInput().");
     }
-    checkedFeatureCount(_normalizedShape, "normalizedShape");
+    const uint64_t normalizedFeatureCount = checkedFeatureCount(_normalizedShape, "normalizedShape");
     if (!_epsilon.has_value() || !(_epsilon.value() > 0.0)) {
         throw invalid_argument("AdaptiveLayerNorm epsilon must be > 0.");
     }
@@ -133,8 +141,9 @@ void AdaptiveLayerNorm::Builder::verifyConfig() const {
     }
     const vector<uint64_t> inputDims = featureInput.getDimensions();
     AdaptiveLayerNorm::validateNormalizedShapeForInput(inputDims, _normalizedShape);
-    if (scaleInput.getDimensions() != inputDims || biasInput.getDimensions() != inputDims) {
-        throw invalid_argument("AdaptiveLayerNorm scale_input and bias_input dimensions must match feature_input dimensions.");
+    AdaptiveLayerNorm::validateCudnnFrontendContract(normalizedFeatureCount, featureInput.getDataType());
+    if (scaleInput.getDimensions() != _normalizedShape || biasInput.getDimensions() != _normalizedShape) {
+        throw invalid_argument("AdaptiveLayerNorm scale_input and bias_input dimensions must match normalizedShape.");
     }
 
     set<uint64_t> originalIds = {featureInput.getOriginalId(), scaleInput.getOriginalId(), biasInput.getOriginalId()};

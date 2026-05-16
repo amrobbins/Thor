@@ -25,6 +25,18 @@ bool isInstanceNormIoDataType(TensorDescriptor::DataType dtype) {
     }
 }
 
+bool isReducedPrecisionInstanceNormIoDataType(TensorDescriptor::DataType dtype) {
+    return dtype == TensorDescriptor::DataType::FP16 || dtype == TensorDescriptor::DataType::BF16;
+}
+
+void validateCudnnFrontendContract(uint64_t channelCount, TensorDescriptor::DataType inputDataType) {
+    if (isReducedPrecisionInstanceNormIoDataType(inputDataType) && channelCount % 8 != 0) {
+        throw runtime_error(
+            "InstanceNorm cuDNN Frontend primary engines require fp16/bf16 channel count to be a multiple of 8; got " +
+            to_string(channelCount) + ".");
+    }
+}
+
 string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 class InstanceNormParameter final : public PhysicalParameter {
@@ -119,6 +131,7 @@ void InstanceNorm::validateConfiguredInput(const Tensor& input) const {
     if (dims[1] != channelCount) {
         throw runtime_error("InstanceNorm input channel dimension does not match configured channel count.");
     }
+    validateCudnnFrontendContract(channelCount, input.getDataType());
     (void)computeSpatialElementCount(input);
 }
 

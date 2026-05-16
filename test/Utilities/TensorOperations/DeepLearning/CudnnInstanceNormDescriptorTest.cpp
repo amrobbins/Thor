@@ -48,6 +48,20 @@ TEST(CudnnInstanceNormDescriptor, RejectsEmptyShapeComponents) {
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 }
 
+TEST(CudnnInstanceNormDescriptor, RejectsReducedPrecisionChannelCountsUnsupportedByPrimaryEngines) {
+    CudnnInstanceNormDescriptor descriptor = makeDescriptor();
+    descriptor.channelCount = 4;
+    descriptor.inputDataType = TensorDescriptor::DataType::FP16;
+    descriptor.outputDataType = TensorDescriptor::DataType::FP16;
+    EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
+
+    descriptor = makeDescriptor();
+    descriptor.channelCount = 4;
+    descriptor.inputDataType = TensorDescriptor::DataType::BF16;
+    descriptor.outputDataType = TensorDescriptor::DataType::BF16;
+    EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
+}
+
 TEST(CudnnInstanceNormDescriptor, RejectsUnsupportedIoDtype) {
     CudnnInstanceNormDescriptor descriptor = makeDescriptor();
     descriptor.inputDataType = TensorDescriptor::DataType::FP8_E4M3;

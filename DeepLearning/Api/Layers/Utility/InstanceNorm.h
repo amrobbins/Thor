@@ -50,6 +50,7 @@ class InstanceNorm : public TrainableLayer {
     static uint64_t checkedChannelCount(uint64_t channelCount);
     static uint64_t channelCountFromInputDims(const std::vector<uint64_t>& inputDims);
     static void validateInputShape(const std::vector<uint64_t>& inputDims);
+    static void validateCudnnFrontendContract(uint64_t channelCount, Tensor::DataType inputDataType);
 
     uint64_t channelCount = 0;
     double epsilon = 1.0e-5;

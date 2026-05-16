@@ -10,8 +10,8 @@ using json = nlohmann::json;
 TEST(UtilityApiLayers, AdaptiveLayerNormConstructsDefaultLastDimAndOutputPreservesShapeDtype) {
     Network network("adaptive_layer_norm_default_shape");
     Tensor input(Tensor::DataType::FP16, {8, 16});
-    Tensor scale(Tensor::DataType::FP32, {8, 16});
-    Tensor bias(Tensor::DataType::FP32, {8, 16});
+    Tensor scale(Tensor::DataType::FP32, {16});
+    Tensor bias(Tensor::DataType::FP32, {16});
 
     AdaptiveLayerNorm layer = AdaptiveLayerNorm::Builder().network(network).featureInput(input).scaleInput(scale).biasInput(bias).build();
 
@@ -29,8 +29,8 @@ TEST(UtilityApiLayers, AdaptiveLayerNormConstructsDefaultLastDimAndOutputPreserv
 TEST(UtilityApiLayers, AdaptiveLayerNormAcceptsExplicitTrailingNormalizedShape) {
     Network network("adaptive_layer_norm_explicit_shape");
     Tensor input(Tensor::DataType::BF16, {2, 3, 4});
-    Tensor scale(Tensor::DataType::FP32, {2, 3, 4});
-    Tensor bias(Tensor::DataType::FP32, {2, 3, 4});
+    Tensor scale(Tensor::DataType::FP32, {3, 4});
+    Tensor bias(Tensor::DataType::FP32, {3, 4});
 
     AdaptiveLayerNorm layer = AdaptiveLayerNorm::Builder()
                                   .network(network)
@@ -49,8 +49,8 @@ TEST(UtilityApiLayers, AdaptiveLayerNormAcceptsExplicitTrailingNormalizedShape) 
 TEST(UtilityApiLayers, AdaptiveLayerNormRejectsBadNormalizedShape) {
     Network network("adaptive_layer_norm_bad_shape");
     Tensor input(Tensor::DataType::FP16, {2, 3, 4});
-    Tensor scale(Tensor::DataType::FP32, {2, 3, 4});
-    Tensor bias(Tensor::DataType::FP32, {2, 3, 4});
+    Tensor scale(Tensor::DataType::FP32, {4});
+    Tensor bias(Tensor::DataType::FP32, {4});
 
     EXPECT_THROW(AdaptiveLayerNorm::Builder().network(network).featureInput(input).scaleInput(scale).biasInput(bias).normalizedShape({4, 3}).build(),
                  std::invalid_argument);
@@ -58,19 +58,29 @@ TEST(UtilityApiLayers, AdaptiveLayerNormRejectsBadNormalizedShape) {
                  std::invalid_argument);
 }
 
+TEST(UtilityApiLayers, AdaptiveLayerNormRejectsFp32NormalizedFeatureCountsUnsupportedByCudnnPrimaryEngines) {
+    Network network("adaptive_layer_norm_bad_cudnn_contract");
+    Tensor input(Tensor::DataType::FP32, {3, 16});
+    Tensor scale(Tensor::DataType::FP32, {16});
+    Tensor bias(Tensor::DataType::FP32, {16});
+
+    EXPECT_THROW(AdaptiveLayerNorm::Builder().network(network).featureInput(input).scaleInput(scale).biasInput(bias).build(),
+                 std::invalid_argument);
+}
+
 TEST(UtilityApiLayers, AdaptiveLayerNormRejectsUnsupportedDtypesOrShapes) {
     Network network("adaptive_layer_norm_bad_dtype");
     Tensor intInput(Tensor::DataType::INT32, {2, 4});
-    Tensor scale(Tensor::DataType::FP32, {2, 4});
-    Tensor bias(Tensor::DataType::FP32, {2, 4});
+    Tensor scale(Tensor::DataType::FP32, {4});
+    Tensor bias(Tensor::DataType::FP32, {4});
     EXPECT_THROW(AdaptiveLayerNorm::Builder().network(network).featureInput(intInput).scaleInput(scale).biasInput(bias).build(), std::invalid_argument);
 
     Tensor fpInput(Tensor::DataType::FP16, {2, 4});
-    Tensor halfScale(Tensor::DataType::FP16, {2, 4});
+    Tensor halfScale(Tensor::DataType::FP16, {4});
     EXPECT_THROW(AdaptiveLayerNorm::Builder().network(network).featureInput(fpInput).scaleInput(halfScale).biasInput(bias).build(),
                  std::invalid_argument);
 
-    Tensor wrongShapeBias(Tensor::DataType::FP32, {4});
+    Tensor wrongShapeBias(Tensor::DataType::FP32, {2, 4});
     EXPECT_THROW(AdaptiveLayerNorm::Builder().network(network).featureInput(fpInput).scaleInput(scale).biasInput(wrongShapeBias).build(),
                  std::invalid_argument);
 }
@@ -78,8 +88,8 @@ TEST(UtilityApiLayers, AdaptiveLayerNormRejectsUnsupportedDtypesOrShapes) {
 TEST(UtilityApiLayers, AdaptiveLayerNormArchitectureJsonContainsSideInputs) {
     Network network("adaptive_layer_norm_architecture");
     Tensor input(Tensor::DataType::FP32, {8, 32});
-    Tensor scale(Tensor::DataType::FP32, {8, 32});
-    Tensor bias(Tensor::DataType::FP32, {8, 32});
+    Tensor scale(Tensor::DataType::FP32, {32});
+    Tensor bias(Tensor::DataType::FP32, {32});
 
     AdaptiveLayerNorm layer = AdaptiveLayerNorm::Builder().network(network).featureInput(input).scaleInput(scale).biasInput(bias).normalizedShape({32}).build();
     json arch = layer.architectureJson();

@@ -78,6 +78,10 @@ static std::vector<uint64_t> runtimeInputDims(const RuntimeInputValue& value) {
     return {};
 }
 
+static bool runtimeInputIsNonDenseTensorView(const RuntimeInputValue& value) {
+    return std::holds_alternative<Tensor>(value) && !std::get<Tensor>(value).isDenseContiguous();
+}
+
 static uint64_t dimsNumelForRuntimeAlias(const std::vector<uint64_t>& dims) {
     uint64_t result = 1;
     for (uint64_t dim : dims) {
@@ -101,6 +105,24 @@ static void validateRuntimeAliasDims(const std::vector<uint64_t>& source_dims, c
     }
 }
 
+static void validateRuntimeStorageAliasDims(const std::vector<uint64_t>& source_dims, const CompiledValueAlias& alias) {
+    if (alias.dimensions.empty()) {
+        throw std::runtime_error("Runtime storage alias requires non-empty dimensions.");
+    }
+    if (alias.strides.empty()) {
+        validateRuntimeAliasDims(source_dims, alias.dimensions);
+        return;
+    }
+    if (alias.strides.size() != alias.dimensions.size()) {
+        throw std::runtime_error("Runtime strided alias dimensions and strides must have the same rank.");
+    }
+    for (uint64_t dim : alias.dimensions) {
+        if (dim == 0) {
+            throw std::runtime_error("Runtime strided alias dimensions must be non-zero.");
+        }
+    }
+}
+
 static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& aliases,
                                        std::unordered_map<uint32_t, std::vector<uint64_t>>& value_dims) {
     bool changed = true;
@@ -114,7 +136,7 @@ static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& al
             if (source_it == value_dims.end()) {
                 continue;
             }
-            validateRuntimeAliasDims(source_it->second, alias.dimensions);
+            validateRuntimeStorageAliasDims(source_it->second, alias);
             value_dims.emplace(alias.value_id, alias.dimensions);
             changed = true;
         }
@@ -155,8 +177,12 @@ static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& al
                 continue;
             }
             Tensor tensor = runtimeInputTensor(source_it->second);
-            validateRuntimeAliasDims(tensor.getDimensions(), alias.dimensions);
-            tensor.reshape(alias.dimensions);
+            validateRuntimeStorageAliasDims(tensor.getDimensions(), alias);
+            if (alias.strides.empty()) {
+                tensor.reshape(alias.dimensions);
+            } else {
+                tensor = tensor.aliasView(alias.dimensions, alias.strides, alias.element_offset);
+            }
             values.emplace(alias.value_id, tensor);
             if (producer_stage_by_value_id != nullptr) {
                 auto producer_it = producer_stage_by_value_id->find(alias.source_value_id);
@@ -530,6 +556,45 @@ static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t
     return std::vector<uint64_t>{input_dims[1], input_dims[0]};
 }
 
+struct AttentionTensorLogicalDims {
+    uint64_t batch = 0;
+    uint64_t heads = 0;
+    uint64_t sequence_length = 0;
+    uint64_t head_dim = 0;
+};
+
+static AttentionTensorLogicalDims logicalAttentionDims(const std::vector<uint64_t>& dims,
+                                                       AttentionTensorLayout layout,
+                                                       const char* tensor_name) {
+    if (dims.size() != 4) {
+        throw std::runtime_error(std::string("Attention stage requires rank-4 tensor '") + tensor_name + "'.");
+    }
+
+    switch (layout) {
+        case AttentionTensorLayout::BHSD:
+            return {dims.at(0), dims.at(1), dims.at(2), dims.at(3)};
+        case AttentionTensorLayout::BSHD:
+            return {dims.at(0), dims.at(2), dims.at(1), dims.at(3)};
+        default:
+            throw std::runtime_error(std::string("Unsupported attention layout for tensor '") + tensor_name + "'.");
+    }
+}
+
+static std::vector<uint64_t> thorAttentionDims(AttentionTensorLayout layout,
+                                               uint64_t batch,
+                                               uint64_t heads,
+                                               uint64_t sequence_length,
+                                               uint64_t head_dim) {
+    switch (layout) {
+        case AttentionTensorLayout::BHSD:
+            return {batch, heads, sequence_length, head_dim};
+        case AttentionTensorLayout::BSHD:
+            return {batch, sequence_length, heads, head_dim};
+        default:
+            throw std::runtime_error("Unsupported attention output layout.");
+    }
+}
+
 static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization(
     const PhysicalExpression& expr, const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
     std::vector<std::vector<uint64_t>> node_dims(expr.nodes.size());
@@ -638,6 +703,19 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 node_dims[i] = node.reshape_dims;
                 break;
             }
+            case ExprOp::STRIDED_VIEW:
+                if (node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
+                    throw std::runtime_error("Expression strided_view requires dimensions and strides with the same non-zero rank.");
+                }
+                node_dims[i] = node.view_dims;
+                break;
+            case ExprOp::STRIDED_VIEW_BACKWARD:
+                if (node.fill_dims.empty() || node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
+                    throw std::runtime_error(
+                        "Expression strided_view_backward requires source dimensions and matching view dimensions/strides.");
+                }
+                node_dims[i] = node.fill_dims;
+                break;
             case ExprOp::UNSQUEEZE:
                 node_dims[i] = applyNormalizedUnsqueezeDims(node_dims[node.lhs], node.unsqueeze_axes);
                 break;
@@ -681,22 +759,19 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX) {
                     throw std::runtime_error("Attention shape inference for GEMM optimization found a malformed ATTENTION node.");
                 }
-                const std::vector<uint64_t>& q_dims = node_dims[node.lhs];
-                const std::vector<uint64_t>& k_dims = node_dims[node.rhs];
-                const std::vector<uint64_t>& v_dims = node_dims[node.aux];
-                if (q_dims.size() != 4 || k_dims.size() != 4 || v_dims.size() != 4) {
-                    throw std::runtime_error("Attention shape inference for GEMM optimization requires rank-4 q/k/v tensors.");
-                }
-                if (q_dims[0] != k_dims[0] || q_dims[0] != v_dims[0]) {
+                const AttentionTensorLogicalDims q_dims = logicalAttentionDims(node_dims[node.lhs], node.attention_q_layout, "q");
+                const AttentionTensorLogicalDims k_dims = logicalAttentionDims(node_dims[node.rhs], node.attention_k_layout, "k");
+                const AttentionTensorLogicalDims v_dims = logicalAttentionDims(node_dims[node.aux], node.attention_v_layout, "v");
+                if (q_dims.batch != k_dims.batch || q_dims.batch != v_dims.batch) {
                     throw std::runtime_error("Attention shape inference for GEMM optimization requires matching q/k/v batch dimensions.");
                 }
-                if (k_dims[1] != v_dims[1] || q_dims[1] % k_dims[1] != 0) {
+                if (k_dims.heads != v_dims.heads || q_dims.heads % k_dims.heads != 0) {
                     throw std::runtime_error("Attention shape inference for GEMM optimization found incompatible q/k/v head counts.");
                 }
-                if (k_dims[2] != v_dims[2] || q_dims[3] != k_dims[3]) {
+                if (k_dims.sequence_length != v_dims.sequence_length || q_dims.head_dim != k_dims.head_dim) {
                     throw std::runtime_error("Attention shape inference for GEMM optimization found incompatible q/k/v sequence/head dimensions.");
                 }
-                node_dims[i] = {q_dims[0], q_dims[1], q_dims[2], v_dims[3]};
+                node_dims[i] = thorAttentionDims(node.attention_o_layout, q_dims.batch, q_dims.heads, q_dims.sequence_length, v_dims.head_dim);
                 break;
             }
             case ExprOp::ATTENTION_BACKWARD_Q:
@@ -1343,25 +1418,22 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
         throw std::runtime_error("Attention stage expected q/k/v input shapes.");
     }
 
-    const auto& q_dims = stage_input_dims.at(0);
-    const auto& k_dims = stage_input_dims.at(1);
-    const auto& v_dims = stage_input_dims.at(2);
-    if (q_dims.size() != 4 || k_dims.size() != 4 || v_dims.size() != 4) {
-        throw std::runtime_error("Attention stage requires rank-4 q/k/v tensors in logical [B,H,S,D] order.");
-    }
+    const AttentionTensorLogicalDims q_dims = logicalAttentionDims(stage_input_dims.at(0), compiled_stage.q_layout, "q");
+    const AttentionTensorLogicalDims k_dims = logicalAttentionDims(stage_input_dims.at(1), compiled_stage.k_layout, "k");
+    const AttentionTensorLogicalDims v_dims = logicalAttentionDims(stage_input_dims.at(2), compiled_stage.v_layout, "v");
 
-    const uint64_t batch = q_dims.at(0);
-    const uint64_t query_heads = q_dims.at(1);
-    const uint64_t query_len = q_dims.at(2);
-    const uint64_t qk_dim = q_dims.at(3);
-    const uint64_t kv_batch_or_blocks = k_dims.at(0);
-    const uint64_t kv_heads = k_dims.at(1);
-    const uint64_t kv_len_or_block = k_dims.at(2);
-    const uint64_t k_dim = k_dims.at(3);
-    const uint64_t v_batch_or_blocks = v_dims.at(0);
-    const uint64_t v_heads = v_dims.at(1);
-    const uint64_t v_len_or_block = v_dims.at(2);
-    const uint64_t v_dim = v_dims.at(3);
+    const uint64_t batch = q_dims.batch;
+    const uint64_t query_heads = q_dims.heads;
+    const uint64_t query_len = q_dims.sequence_length;
+    const uint64_t qk_dim = q_dims.head_dim;
+    const uint64_t kv_batch_or_blocks = k_dims.batch;
+    const uint64_t kv_heads = k_dims.heads;
+    const uint64_t kv_len_or_block = k_dims.sequence_length;
+    const uint64_t k_dim = k_dims.head_dim;
+    const uint64_t v_batch_or_blocks = v_dims.batch;
+    const uint64_t v_heads = v_dims.heads;
+    const uint64_t v_len_or_block = v_dims.sequence_length;
+    const uint64_t v_dim = v_dims.head_dim;
 
     if (!compiled_stage.use_paged_kv_cache && (batch != kv_batch_or_blocks || batch != v_batch_or_blocks)) {
         throw std::runtime_error("Attention q/k/v batch dimensions must match.");
@@ -1439,8 +1511,9 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
         next_optional_idx += 2;
     }
 
-    return std::vector<uint64_t>{batch, query_heads, query_len, v_dim};
+    return thorAttentionDims(compiled_stage.o_layout, batch, query_heads, query_len, v_dim);
 }
+
 
 static CompiledAttention makeForwardAttentionView(const CompiledAttentionBackward& backward,
                                                   TensorDescriptor::DataType output_dtype,
@@ -2375,6 +2448,19 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
                 node_dims[i] = node.reshape_dims;
                 break;
             }
+            case ExprOp::STRIDED_VIEW:
+                if (node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
+                    throw std::runtime_error("Expression strided_view requires dimensions and strides with the same non-zero rank.");
+                }
+                node_dims[i] = node.view_dims;
+                break;
+            case ExprOp::STRIDED_VIEW_BACKWARD:
+                if (node.fill_dims.empty() || node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
+                    throw std::runtime_error(
+                        "Expression strided_view_backward requires source dimensions and matching view dimensions/strides.");
+                }
+                node_dims[i] = node.fill_dims;
+                break;
             case ExprOp::UNSQUEEZE: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
 
@@ -2554,6 +2640,8 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::SCALAR_FP:
         case ExprOp::FILL:
         case ExprOp::RESHAPE:
+        case ExprOp::STRIDED_VIEW:
+        case ExprOp::STRIDED_VIEW_BACKWARD:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
             return 0;
@@ -2681,6 +2769,19 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
                 node_dims[i] = node.reshape_dims;
                 break;
             }
+            case ExprOp::STRIDED_VIEW:
+                if (node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
+                    throw std::runtime_error("Expression strided_view requires dimensions and strides with the same non-zero rank.");
+                }
+                node_dims[i] = node.view_dims;
+                break;
+            case ExprOp::STRIDED_VIEW_BACKWARD:
+                if (node.fill_dims.empty() || node.view_dims.empty() || node.view_strides.size() != node.view_dims.size()) {
+                    throw std::runtime_error(
+                        "Expression strided_view_backward requires source dimensions and matching view dimensions/strides.");
+                }
+                node_dims[i] = node.fill_dims;
+                break;
             case ExprOp::UNSQUEEZE: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
                 node_dims[i] = applyNormalizedUnsqueezeDims(lhs_dims, node.unsqueeze_axes);
@@ -2751,6 +2852,8 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::SCALAR_FP:
             case ExprOp::FILL:
             case ExprOp::RESHAPE:
+            case ExprOp::STRIDED_VIEW:
+            case ExprOp::STRIDED_VIEW_BACKWARD:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
                 break;
@@ -3277,7 +3380,7 @@ static bool stageHasShapeOnlyOps(const CompiledExecutionStage& stage) {
         return false;
     }
     for (const ExprNode& node : stage.expr.nodes) {
-        if (node.op == ExprOp::RESHAPE || node.op == ExprOp::UNSQUEEZE || node.op == ExprOp::SQUEEZE) {
+        if (node.op == ExprOp::RESHAPE || node.op == ExprOp::STRIDED_VIEW || node.op == ExprOp::UNSQUEEZE || node.op == ExprOp::SQUEEZE) {
             return true;
         }
     }
@@ -3369,7 +3472,23 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
             return {};
         case ExprOp::TRANSPOSE:
             throw std::runtime_error("collectEffectiveInputDimsForNode encountered unexpected transpose op in fused stage.");
+        case ExprOp::STRIDED_VIEW_BACKWARD: {
+            auto result = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
+            // strided_view_backward is an index-aware gather from the view-gradient input
+            // into the source-gradient output domain. The input tensor's physical rank
+            // (for packed-QKV this is typically [B,S,H,D]) is not broadcast against the
+            // output tensor rank (typically [B*S,QKV]). Treat the referenced input as
+            // effectively consumed in the output domain so broadcast planning keeps this
+            // as a flat fused kernel instead of trying to build invalid rank-4 -> rank-2
+            // broadcast strides.
+            for (auto& [slot, dims_set] : result) {
+                dims_set.clear();
+                dims_set.insert(node_dims[node_idx]);
+            }
+            return result;
+        }
         case ExprOp::RESHAPE:
+        case ExprOp::STRIDED_VIEW:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE: {
             auto result = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
@@ -5443,6 +5562,9 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         stage_input_dims.push_back(dropout_offset->getDimensions());
     }
     const std::vector<uint64_t> output_dims = resolveAttentionOutputDimsFromInputs(*compiledStage, stage_input_dims);
+    const AttentionTensorLogicalDims qLogical = logicalAttentionDims(adaptedQ.getDimensions(), compiledStage->q_layout, "q");
+    const AttentionTensorLogicalDims kLogical = logicalAttentionDims(adaptedK.getDimensions(), compiledStage->k_layout, "k");
+    const AttentionTensorLogicalDims vLogical = logicalAttentionDims(adaptedV.getDimensions(), compiledStage->v_layout, "v");
 
     Tensor output;
     if (preallocatedOutput.has_value()) {
@@ -5472,7 +5594,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
                 throw std::runtime_error(std::string("Attention padding-mask ") + label + " dtype must be INT32.");
             }
-            if (tensor->getDimensions() != std::vector<uint64_t>{adaptedQ.getDimensions().at(0)}) {
+            if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch}) {
                 throw std::runtime_error(std::string("Attention padding-mask ") + label + " shape must be [B].");
             }
         };
@@ -5490,7 +5612,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
                 throw std::runtime_error(std::string("Attention ragged ") + label + " dtype must be INT32.");
             }
-            if (tensor->getDimensions() != std::vector<uint64_t>{adaptedQ.getDimensions().at(0) + 1}) {
+            if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch + 1}) {
                 throw std::runtime_error(std::string("Attention ragged ") + label + " shape must be [B + 1].");
             }
         };
@@ -5512,9 +5634,9 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
                 throw std::runtime_error("Attention paged KV max sequence length must be positive.");
             }
             const uint64_t max_kv = static_cast<uint64_t>(compiledStage->paged_kv_max_sequence_length);
-            const uint64_t block_size = std::string(label).find("page_table_v") != std::string::npos ? adaptedV.getDimensions().at(2)
-                                                                                                     : adaptedK.getDimensions().at(2);
-            const std::vector<uint64_t> expected{adaptedQ.getDimensions().at(0), 1, ceilDivPositive(max_kv, block_size), 1};
+            const uint64_t block_size = std::string(label).find("page_table_v") != std::string::npos ? vLogical.sequence_length
+                                                                                                     : kLogical.sequence_length;
+            const std::vector<uint64_t> expected{qLogical.batch, 1, ceilDivPositive(max_kv, block_size), 1};
             if (tensor->getDimensions() != expected) {
                 throw std::runtime_error(std::string("Attention paged KV ") + label + " shape must be [B,1,ceil(Skv/block),1].");
             }
@@ -5544,8 +5666,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
     // Build and validate the cuDNN descriptor during stamping so shape/layout errors fail before execution.
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, output);
     if (compiledStage->use_bias && adaptedBias.has_value()) {
-        const std::vector<uint64_t> expected_bias_dims{
-            adaptedQ.getDimensions().at(0), adaptedQ.getDimensions().at(1), adaptedQ.getDimensions().at(2), adaptedK.getDimensions().at(2)};
+        const std::vector<uint64_t> expected_bias_dims{qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length};
         if (adaptedBias->getDimensions() != expected_bias_dims) {
             throw std::runtime_error("Attention additive bias must have shape [B, Hq, Sq, Skv].");
         }
@@ -5647,6 +5768,8 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     }
     const std::vector<uint64_t> o_dims = resolveAttentionOutputDimsFromInputs(
         makeForwardAttentionView(*compiledStage, adaptedDO.getDataType(), ".stats_forward"), forward_input_dims);
+    const AttentionTensorLogicalDims qLogical = logicalAttentionDims(adaptedQ.getDimensions(), compiledStage->q_layout, "q");
+    const AttentionTensorLogicalDims kLogical = logicalAttentionDims(adaptedK.getDimensions(), compiledStage->k_layout, "k");
     if (adaptedDO.getDimensions() != o_dims) {
         throw std::runtime_error("Attention-backward dO dimensions do not match the corresponding forward attention output shape.");
     }
@@ -5674,7 +5797,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     Tensor dV = make_or_validate_output(2, compiledStage->dV_dtype, adaptedV.getDimensions(), "dV");
     Tensor oScratch(adaptedQ.getPlacement(), TensorDescriptor(adaptedDO.getDataType(), o_dims));
     Tensor stats(adaptedQ.getPlacement(),
-                 TensorDescriptor(TensorDescriptor::DataType::FP32, {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1}));
+                 TensorDescriptor(TensorDescriptor::DataType::FP32, {qLogical.batch, qLogical.heads, qLogical.sequence_length, 1}));
     std::optional<Tensor> dBiasScratch = std::nullopt;
     if (compiledStage->use_bias) {
         dBiasScratch = make_or_validate_output(3, adaptedQ.getDataType(), adaptedBias->getDimensions(), "dBias");
@@ -5691,7 +5814,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
                 throw std::runtime_error(std::string("Attention-backward padding-mask ") + label + " dtype must be INT32.");
             }
-            if (tensor->getDimensions() != std::vector<uint64_t>{adaptedQ.getDimensions().at(0)}) {
+            if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch}) {
                 throw std::runtime_error(std::string("Attention-backward padding-mask ") + label + " shape must be [B].");
             }
         };
@@ -5709,7 +5832,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
                 throw std::runtime_error(std::string("Attention-backward ragged ") + label + " dtype must be INT32.");
             }
-            if (tensor->getDimensions() != std::vector<uint64_t>{adaptedQ.getDimensions().at(0) + 1}) {
+            if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch + 1}) {
                 throw std::runtime_error(std::string("Attention-backward ragged ") + label + " shape must be [B + 1].");
             }
         };
@@ -5737,8 +5860,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
 
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, oScratch);
     if (compiledStage->use_bias && adaptedBias.has_value()) {
-        const std::vector<uint64_t> expected_bias_dims{
-            adaptedQ.getDimensions().at(0), adaptedQ.getDimensions().at(1), adaptedQ.getDimensions().at(2), adaptedK.getDimensions().at(2)};
+        const std::vector<uint64_t> expected_bias_dims{qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length};
         if (adaptedBias->getDimensions() != expected_bias_dims) {
             throw std::runtime_error("Attention-backward additive bias must have shape [B, Hq, Sq, Skv].");
         }
@@ -5938,7 +6060,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         }
         std::optional<uint32_t> source_value_id = ultimateAliasSourceValueId(final_output.value_id);
         if (source_value_id.has_value()) {
-            preallocated_outputs_by_source_value_id[source_value_id.value()] = preallocated_it->second;
+            auto alias_meta_it = alias_by_value_id.find(final_output.value_id);
+            if (alias_meta_it == alias_by_value_id.end() || alias_meta_it->second.strides.empty()) {
+                preallocated_outputs_by_source_value_id[source_value_id.value()] = preallocated_it->second;
+            }
         }
     }
 
@@ -6032,6 +6157,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             case CompiledExecutionStage::Kind::FusedKernel: {
                 if (stage.outputs.empty()) {
                     throw std::runtime_error("Fused stage requires at least one output.");
+                }
+                for (const RuntimeInputValue& input : stageInputs) {
+                    if (runtimeInputIsNonDenseTensorView(input)) {
+                        throw std::runtime_error(
+                            "Fused kernels cannot consume non-dense strided tensor views yet; materialize the view or route it to a "
+                            "layout-aware stage such as attention.");
+                    }
                 }
 
                 std::vector<std::vector<uint64_t>> expected_output_dims(stage.outputs.size());

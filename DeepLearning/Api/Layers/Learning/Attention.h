@@ -51,7 +51,13 @@ class Attention : public CustomLayer {
               Tensor::DataType weightsDataType,
               Tensor::DataType computeDataType,
               Tensor::DataType outputDataType)
-        : CustomLayer(std::move(expression), {"feature_input"}, {"feature_output"}, inputInterfaces, outputInterfaces, std::move(parameters), false),
+        : CustomLayer(std::move(expression),
+                      {"feature_input"},
+                      {"feature_output"},
+                      inputInterfaces,
+                      outputInterfaces,
+                      std::move(parameters),
+                      false),
           numHeads(numHeads),
           numKeyValueHeads(numKeyValueHeads),
           headDim(headDim),
@@ -70,6 +76,12 @@ class Attention : public CustomLayer {
           outputDataType(outputDataType) {}
 
     ~Attention() override = default;
+
+    // Compile-time experiment switch for benchmarking packed QKV projection against the legacy split-Q/K/V path.
+    // Keep USE_PACKED_QKV_PROJECTION_WITH_ROPE disabled until RoPE can consume non-dense packed Q/K views directly
+    // or a dedicated layout-aware RoPE materialization path is added.
+    static constexpr bool USE_PACKED_QKV_PROJECTION = true;
+    static constexpr bool USE_PACKED_QKV_PROJECTION_WITH_ROPE = false;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Attention>(*this); }
     std::string getLayerType() const override { return "Attention"; }

@@ -31,12 +31,95 @@ constexpr int64_t CUDNN_FRONTEND_CONV_Y_UID = 7'100'003;
 
 static int64_t checkedDim(const std::vector<uint64_t>& dims, size_t idx, const char* tensor_name) {
     if (idx >= dims.size()) {
-        throw std::runtime_error(std::string("Attention tensor '") + tensor_name + "' must have rank 4 [B,H,S,D].");
+        throw std::runtime_error(std::string("Attention tensor '") + tensor_name + "' must have rank 4.");
     }
     if (dims[idx] > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
         throw std::runtime_error(std::string("Attention tensor '") + tensor_name + "' dimension exceeds int64_t range.");
     }
     return static_cast<int64_t>(dims[idx]);
+}
+
+struct AttentionTensorLogicalDims {
+    int64_t batch = 0;
+    int64_t heads = 0;
+    int64_t sequence_length = 0;
+    int64_t head_dim = 0;
+};
+
+static AttentionTensorLogicalDims logicalAttentionDims(const std::vector<uint64_t>& dims,
+                                                       AttentionTensorLayout layout,
+                                                       const char* tensor_name) {
+    if (dims.size() != 4) {
+        throw std::runtime_error(std::string("Thor attention expression tensor '") + tensor_name + "' must have rank 4.");
+    }
+
+    switch (layout) {
+        case AttentionTensorLayout::BHSD:
+            return {checkedDim(dims, 0, tensor_name),
+                    checkedDim(dims, 1, tensor_name),
+                    checkedDim(dims, 2, tensor_name),
+                    checkedDim(dims, 3, tensor_name)};
+        case AttentionTensorLayout::BSHD:
+            return {checkedDim(dims, 0, tensor_name),
+                    checkedDim(dims, 2, tensor_name),
+                    checkedDim(dims, 1, tensor_name),
+                    checkedDim(dims, 3, tensor_name)};
+        default:
+            throw std::runtime_error(std::string("Unsupported attention layout for tensor '") + tensor_name + "'.");
+    }
+}
+
+static std::vector<uint64_t> cudnnSemanticDims(const Tensor& tensor, AttentionTensorLayout layout, const char* tensor_name) {
+    const AttentionTensorLogicalDims logical = logicalAttentionDims(tensor.getDimensions(), layout, tensor_name);
+    return {static_cast<uint64_t>(logical.batch),
+            static_cast<uint64_t>(logical.heads),
+            static_cast<uint64_t>(logical.sequence_length),
+            static_cast<uint64_t>(logical.head_dim)};
+}
+
+static std::vector<uint64_t> cudnnSemanticStrides(const Tensor& tensor, AttentionTensorLayout layout, const char* tensor_name) {
+    const std::vector<uint64_t> dims = tensor.getDimensions();
+    const std::vector<uint64_t> strides = tensor.getStridesElements();
+    if (dims.size() != 4 || strides.size() != 4) {
+        throw std::runtime_error(std::string("Attention tensor '") + tensor_name + "' must have rank-4 strides.");
+    }
+    switch (layout) {
+        case AttentionTensorLayout::BHSD:
+            return {strides[0], strides[1], strides[2], strides[3]};
+        case AttentionTensorLayout::BSHD:
+            return {strides[0], strides[2], strides[1], strides[3]};
+        default:
+            throw std::runtime_error(std::string("Unsupported attention layout for tensor '") + tensor_name + "'.");
+    }
+}
+
+static std::vector<int64_t> toInt64Strides(const std::vector<uint64_t>& strides, const char* tensor_name) {
+    std::vector<int64_t> out;
+    out.reserve(strides.size());
+    for (uint64_t stride : strides) {
+        if (stride > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            throw std::runtime_error(std::string("Attention tensor '") + tensor_name + "' stride exceeds int64_t range.");
+        }
+        out.push_back(static_cast<int64_t>(stride));
+    }
+    return out;
+}
+
+static AttentionTensorSpec attentionSpecForTensor(const Tensor& tensor, AttentionTensorLayout layout, const char* tensor_name) {
+    const AttentionTensorLogicalDims dims = logicalAttentionDims(tensor.getDimensions(), layout, tensor_name);
+    AttentionTensorSpec spec;
+    spec.dimensions = {dims.batch, dims.heads, dims.sequence_length, dims.head_dim};
+    spec.strides = toInt64Strides(cudnnSemanticStrides(tensor, layout, tensor_name), tensor_name);
+    spec.dataType = tensor.getDataType();
+    spec.ragged = false;
+    return spec;
+}
+
+static Tensor cudnnSemanticTensorView(const Tensor& tensor, AttentionTensorLayout layout, const char* tensor_name) {
+    if (layout == AttentionTensorLayout::BHSD) {
+        return tensor;
+    }
+    return tensor.aliasView(cudnnSemanticDims(tensor, layout, tensor_name), cudnnSemanticStrides(tensor, layout, tensor_name), 0);
 }
 
 }  // namespace
@@ -94,39 +177,11 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
                                                           const Tensor& kTensor,
                                                           const Tensor& vTensor,
                                                           const Tensor& oTensor) const {
-    const std::vector<uint64_t> qDims = qTensor.getDimensions();
-    const std::vector<uint64_t> kDims = kTensor.getDimensions();
-    const std::vector<uint64_t> vDims = vTensor.getDimensions();
-    const std::vector<uint64_t> oDims = oTensor.getDimensions();
-    if (qDims.size() != 4 || kDims.size() != 4 || vDims.size() != 4 || oDims.size() != 4) {
-        throw std::runtime_error("Thor cuDNN attention expression stage requires rank-4 tensors in logical [B,H,S,D] order.");
-    }
-
     CudnnAttentionDescriptor descriptor;
-    descriptor.q = AttentionTensorSpec::fromLayout(q_layout,
-                                                   checkedDim(qDims, 0, "q"),
-                                                   checkedDim(qDims, 1, "q"),
-                                                   checkedDim(qDims, 2, "q"),
-                                                   checkedDim(qDims, 3, "q"),
-                                                   qTensor.getDataType());
-    descriptor.k = AttentionTensorSpec::fromLayout(k_layout,
-                                                   checkedDim(kDims, 0, "k"),
-                                                   checkedDim(kDims, 1, "k"),
-                                                   checkedDim(kDims, 2, "k"),
-                                                   checkedDim(kDims, 3, "k"),
-                                                   kTensor.getDataType());
-    descriptor.v = AttentionTensorSpec::fromLayout(v_layout,
-                                                   checkedDim(vDims, 0, "v"),
-                                                   checkedDim(vDims, 1, "v"),
-                                                   checkedDim(vDims, 2, "v"),
-                                                   checkedDim(vDims, 3, "v"),
-                                                   vTensor.getDataType());
-    descriptor.o = AttentionTensorSpec::fromLayout(o_layout,
-                                                   checkedDim(oDims, 0, "o"),
-                                                   checkedDim(oDims, 1, "o"),
-                                                   checkedDim(oDims, 2, "o"),
-                                                   checkedDim(oDims, 3, "o"),
-                                                   oTensor.getDataType());
+    descriptor.q = attentionSpecForTensor(qTensor, q_layout, "q");
+    descriptor.k = attentionSpecForTensor(kTensor, k_layout, "k");
+    descriptor.v = attentionSpecForTensor(vTensor, v_layout, "v");
+    descriptor.o = attentionSpecForTensor(oTensor, o_layout, "o");
     if (use_ragged_offsets) {
         descriptor.q.ragged = true;
         descriptor.k.ragged = true;
@@ -162,38 +217,10 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
                                                                   const Tensor& vTensor,
                                                                   const Tensor& oTensor) const {
     CudnnAttentionDescriptor descriptor;
-    const std::vector<uint64_t> qDims = qTensor.getDimensions();
-    const std::vector<uint64_t> kDims = kTensor.getDimensions();
-    const std::vector<uint64_t> vDims = vTensor.getDimensions();
-    const std::vector<uint64_t> oDims = oTensor.getDimensions();
-    if (qDims.size() != 4 || kDims.size() != 4 || vDims.size() != 4 || oDims.size() != 4) {
-        throw std::runtime_error("Thor cuDNN attention-backward expression stage requires rank-4 tensors in logical [B,H,S,D] order.");
-    }
-
-    descriptor.q = AttentionTensorSpec::fromLayout(q_layout,
-                                                   checkedDim(qDims, 0, "q"),
-                                                   checkedDim(qDims, 1, "q"),
-                                                   checkedDim(qDims, 2, "q"),
-                                                   checkedDim(qDims, 3, "q"),
-                                                   qTensor.getDataType());
-    descriptor.k = AttentionTensorSpec::fromLayout(k_layout,
-                                                   checkedDim(kDims, 0, "k"),
-                                                   checkedDim(kDims, 1, "k"),
-                                                   checkedDim(kDims, 2, "k"),
-                                                   checkedDim(kDims, 3, "k"),
-                                                   kTensor.getDataType());
-    descriptor.v = AttentionTensorSpec::fromLayout(v_layout,
-                                                   checkedDim(vDims, 0, "v"),
-                                                   checkedDim(vDims, 1, "v"),
-                                                   checkedDim(vDims, 2, "v"),
-                                                   checkedDim(vDims, 3, "v"),
-                                                   vTensor.getDataType());
-    descriptor.o = AttentionTensorSpec::fromLayout(o_layout,
-                                                   checkedDim(oDims, 0, "o"),
-                                                   checkedDim(oDims, 1, "o"),
-                                                   checkedDim(oDims, 2, "o"),
-                                                   checkedDim(oDims, 3, "o"),
-                                                   oTensor.getDataType());
+    descriptor.q = attentionSpecForTensor(qTensor, q_layout, "q");
+    descriptor.k = attentionSpecForTensor(kTensor, k_layout, "k");
+    descriptor.v = attentionSpecForTensor(vTensor, v_layout, "v");
+    descriptor.o = attentionSpecForTensor(oTensor, o_layout, "o");
     if (use_ragged_offsets) {
         descriptor.q.ragged = true;
         descriptor.k.ragged = true;
@@ -224,6 +251,7 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
     descriptor.validateBackward();
     return descriptor;
 }
+
 
 TensorDescriptor::DataType CompiledAttentionBackward::outputDTypeFor(ExprOp op) const {
     switch (op) {
@@ -284,7 +312,11 @@ void StampedAttention::runOn(Stream& run_stream) const {
     }
 
     CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output);
-    CudnnAttentionForwardArgs args{.q = q, .k = k, .v = v, .o = output};
+    Tensor cudnnQ = cudnnSemanticTensorView(q, compiled_attention->q_layout, "q");
+    Tensor cudnnK = cudnnSemanticTensorView(k, compiled_attention->k_layout, "k");
+    Tensor cudnnV = cudnnSemanticTensorView(v, compiled_attention->v_layout, "v");
+    Tensor cudnnO = cudnnSemanticTensorView(output, compiled_attention->o_layout, "o");
+    CudnnAttentionForwardArgs args{.q = cudnnQ, .k = cudnnK, .v = cudnnV, .o = cudnnO};
     if (compiled_attention->use_bias) {
         if (!bias.has_value()) {
             throw std::runtime_error("StampedAttention requires an additive bias tensor but none was provided.");
@@ -448,8 +480,18 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
     CudnnAttentionDescriptor descriptor = compiled_attention_backward->descriptorFor(q, k, v, forwardOutput);
     descriptor.generateStats = true;
 
+    Tensor cudnnQ = cudnnSemanticTensorView(q, compiled_attention_backward->q_layout, "q");
+    Tensor cudnnK = cudnnSemanticTensorView(k, compiled_attention_backward->k_layout, "k");
+    Tensor cudnnV = cudnnSemanticTensorView(v, compiled_attention_backward->v_layout, "v");
+    Tensor cudnnO = cudnnSemanticTensorView(forwardOutput, compiled_attention_backward->o_layout, "o");
+    Tensor cudnnDO = cudnnSemanticTensorView(dO, compiled_attention_backward->o_layout, "dO");
+    Tensor cudnnDQ = cudnnSemanticTensorView(dQ, compiled_attention_backward->q_layout, "dQ");
+    Tensor cudnnDK = cudnnSemanticTensorView(dK, compiled_attention_backward->k_layout, "dK");
+    Tensor cudnnDV = cudnnSemanticTensorView(dV, compiled_attention_backward->v_layout, "dV");
+
     if (!use_saved_forward) {
-        CudnnAttentionForwardArgs fwdArgs{.q = q, .k = k, .v = v, .o = oScratch, .stats = stats};
+        Tensor cudnnOScratch = cudnnSemanticTensorView(oScratch, compiled_attention_backward->o_layout, "oScratch");
+        CudnnAttentionForwardArgs fwdArgs{.q = cudnnQ, .k = cudnnK, .v = cudnnV, .o = cudnnOScratch, .stats = stats};
         if (compiled_attention_backward->use_bias) {
             if (!bias.has_value()) {
                 throw std::runtime_error("StampedAttentionBackward requires an additive bias tensor but none was provided.");
@@ -483,7 +525,7 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
     }
 
     CudnnAttentionBackwardArgs bwdArgs{
-        .q = q, .k = k, .v = v, .o = forwardOutput, .dO = dO, .stats = forwardStats, .dQ = dQ, .dK = dK, .dV = dV};
+        .q = cudnnQ, .k = cudnnK, .v = cudnnV, .o = cudnnO, .dO = cudnnDO, .stats = forwardStats, .dQ = cudnnDQ, .dK = cudnnDK, .dV = cudnnDV};
     if (compiled_attention_backward->use_bias) {
         if (!bias.has_value()) {
             throw std::runtime_error("StampedAttentionBackward requires an additive bias tensor but none was provided.");
