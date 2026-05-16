@@ -122,6 +122,25 @@ static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& al
 }
 
 static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& aliases,
+                                       std::unordered_map<uint32_t, DataType>& value_dtypes) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const CompiledValueAlias& alias : aliases) {
+            if (value_dtypes.contains(alias.value_id)) {
+                continue;
+            }
+            auto source_it = value_dtypes.find(alias.source_value_id);
+            if (source_it == value_dtypes.end()) {
+                continue;
+            }
+            value_dtypes.emplace(alias.value_id, source_it->second);
+            changed = true;
+        }
+    }
+}
+
+static void applyAvailableValueAliases(const std::vector<CompiledValueAlias>& aliases,
                                        std::unordered_map<uint32_t, RuntimeInputValue>& values,
                                        std::unordered_map<uint32_t, uint32_t>* producer_stage_by_value_id = nullptr) {
     bool changed = true;
@@ -2178,7 +2197,7 @@ static void collectReachableLocalNodes(const PhysicalExpression& expr, uint32_t 
 //     return out_dims;
 // }
 
-static std::vector<uint64_t> inferRmsNormOutputDims(const ExprNode& node,
+static std::vector<uint64_t> inferRmsNormOutputDims(uint64_t normalized_feature_count,
                                                     const std::vector<uint64_t>& input_dims,
                                                     const std::vector<uint64_t>& scale_dims) {
     if (input_dims.size() != 2) {
@@ -2187,16 +2206,28 @@ static std::vector<uint64_t> inferRmsNormOutputDims(const ExprNode& node,
     if (scale_dims.size() != 1) {
         throw std::runtime_error("RMSNorm expression stage expects a rank-1 scale tensor.");
     }
-    if (node.rms_norm_normalized_feature_count == 0) {
+    if (normalized_feature_count == 0) {
         throw std::runtime_error("RMSNorm expression stage has zero normalized feature count.");
     }
-    if (input_dims[1] != node.rms_norm_normalized_feature_count) {
+    if (input_dims[1] != normalized_feature_count) {
         throw std::runtime_error("RMSNorm expression normalized feature count does not match the input tail dimension.");
     }
-    if (scale_dims[0] != node.rms_norm_normalized_feature_count) {
+    if (scale_dims[0] != normalized_feature_count) {
         throw std::runtime_error("RMSNorm expression scale dimension does not match the normalized feature count.");
     }
     return input_dims;
+}
+
+static std::vector<uint64_t> inferRmsNormOutputDims(const ExprNode& node,
+                                                    const std::vector<uint64_t>& input_dims,
+                                                    const std::vector<uint64_t>& scale_dims) {
+    return inferRmsNormOutputDims(node.rms_norm_normalized_feature_count, input_dims, scale_dims);
+}
+
+static std::vector<uint64_t> inferRmsNormOutputDims(const CompiledRmsNorm& compiled,
+                                                    const std::vector<uint64_t>& input_dims,
+                                                    const std::vector<uint64_t>& scale_dims) {
+    return inferRmsNormOutputDims(compiled.normalized_feature_count, input_dims, scale_dims);
 }
 
 static std::string dimsToString(const std::vector<uint64_t>& dims) {
@@ -3104,7 +3135,7 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
             if (stage_input_dims.size() != 2) {
                 throw std::runtime_error("resolveOutputDimsForStageOutput RMSNorm stage expected input and scale shapes.");
             }
-            return inferRmsNormOutputDims(stage.expr.nodes.at(stage.outputs.at(output_idx).local_node_idx), stage_input_dims[0], stage_input_dims[1]);
+            return inferRmsNormOutputDims(*stage.rms_norm, stage_input_dims[0], stage_input_dims[1]);
         }
 
         case CompiledExecutionStage::Kind::ReduceMinMaxBackward: {
@@ -3954,7 +3985,7 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
             if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
                 throw std::runtime_error("RMSNorm stage expected exactly two inputs and one output.");
             }
-            value_dims[stage.outputs[0].value_id] = inferRmsNormOutputDims(stage.expr.nodes.at(stage.outputs[0].local_node_idx), stage_input_dims[0], stage_input_dims[1]);
+            value_dims[stage.outputs[0].value_id] = inferRmsNormOutputDims(*stage.rms_norm, stage_input_dims[0], stage_input_dims[1]);
         } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");
@@ -4039,6 +4070,46 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
     }
 
     return final_output_shapes;
+}
+
+std::unordered_map<std::string, TensorDescriptor::DataType> FusedEquation::getOutputDataTypes(
+    const std::unordered_map<std::string, Tensor>& inputs) const {
+    std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputsForCompilation(inputs);
+    std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
+
+    if (root_values.empty()) {
+        throw std::runtime_error("FusedEquation::getOutputDataTypes requires at least one bound root input.");
+    }
+
+    std::unordered_map<uint32_t, TensorDescriptor::DataType> value_dtypes;
+    value_dtypes.reserve(root_values.size() + compiled_outputs->stages.size());
+
+    for (const auto& [value_id, value] : root_values) {
+        value_dtypes.emplace(value_id, runtimeInputDType(value));
+    }
+    applyAvailableValueAliases(compiled_outputs->value_aliases, value_dtypes);
+
+    for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
+        for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+            value_dtypes[stage.outputs[output_idx].value_id] = stage.outputDType(output_idx);
+        }
+        applyAvailableValueAliases(compiled_outputs->value_aliases, value_dtypes);
+    }
+
+    applyAvailableValueAliases(compiled_outputs->value_aliases, value_dtypes);
+
+    std::unordered_map<std::string, TensorDescriptor::DataType> final_output_dtypes;
+    final_output_dtypes.reserve(compiled_outputs->final_outputs.size());
+
+    for (const CompiledStageOutput& final_output : compiled_outputs->final_outputs) {
+        auto it = value_dtypes.find(final_output.value_id);
+        if (it == value_dtypes.end()) {
+            throw std::runtime_error("Missing final output dtype for output: " + final_output.name);
+        }
+        final_output_dtypes.emplace(final_output.name, it->second);
+    }
+
+    return final_output_dtypes;
 }
 
 EquationSignature FusedEquation::buildSignature(uint32_t num_inputs, int device_num, bool use_fast_math) {
@@ -6937,7 +7008,7 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
                 throw std::runtime_error("RMSNorm stage expected exactly two inputs and one output.");
             }
-            value_dims[stage.outputs[0].value_id] = inferRmsNormOutputDims(stage.expr.nodes.at(stage.outputs[0].local_node_idx), stage_input_dims[0], stage_input_dims[1]);
+            value_dims[stage.outputs[0].value_id] = inferRmsNormOutputDims(*stage.rms_norm, stage_input_dims[0], stage_input_dims[1]);
         } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");

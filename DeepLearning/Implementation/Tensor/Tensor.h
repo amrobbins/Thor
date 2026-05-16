@@ -83,7 +83,7 @@ class Tensor : private ReferenceCounted {
     ElementDataType *getElementPointer(std::vector<uint64_t> dimensionIndex);
     TensorDescriptor getDescriptor() const;
 
-    uint64_t getTensorId() { return instanceId; }
+    uint64_t getTensorId() const { return instanceId; }
 
     void copyFromAsync(Tensor source, Stream stream);
 

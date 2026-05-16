@@ -512,6 +512,177 @@ def test_expression_reshape_inputs_to_attention_stage_are_metadata_aliases_not_f
     _assert_close(got, expected_storage, dtype)
 
 
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("layout", [AttentionTensorLayout.bhsd, AttentionTensorLayout.bshd])
+@pytest.mark.parametrize(
+    "query_heads,kv_heads",
+    [
+        (4, 4),  # MHA
+        (4, 2),  # GQA
+        (4, 1),  # MQA
+    ],
+)
+def test_attention_dense_layout_contract_matches_reference_for_mha_gqa_mqa(
+    layout: AttentionTensorLayout, query_heads: int, kv_heads: int
+):
+    dtype = thor.DataType.fp16
+    batch = 2
+    query_len = 3
+    kv_len = 5
+    qk_dim = 16
+    v_dim = 16
+    scale = 0.61 / math.sqrt(float(qk_dim))
+    eq = _compile_attention(
+        dtype=dtype,
+        attention_scale=scale,
+        q_layout=layout,
+        k_layout=layout,
+        v_layout=layout,
+        o_layout=layout,
+    )
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=query_len,
+        kv_len=kv_len,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    expected_logical = _cast_reference_to_storage_dtype(_attention_reference(q_np, k_np, v_np, scale=scale), dtype)
+
+    if layout == AttentionTensorLayout.bshd:
+        q_storage = _pack_bshd_dense_storage(q_np)
+        k_storage = _pack_bshd_dense_storage(k_np)
+        v_storage = _pack_bshd_dense_storage(v_np)
+        expected_storage = _pack_bshd_dense_storage(expected_logical)
+        wrong_layout_storage = expected_logical
+    else:
+        q_storage = q_np
+        k_storage = k_np
+        v_storage = v_np
+        expected_storage = expected_logical
+        wrong_layout_storage = _pack_bshd_dense_storage(expected_logical)
+
+    assert not np.allclose(
+        expected_storage.astype(np.float32),
+        wrong_layout_storage.astype(np.float32),
+        rtol=1e-3,
+        atol=1e-3,
+    ), "layout sentinel is degenerate; this test would not catch BHSD/BSHD mixups"
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [batch, query_heads, query_len, v_dim]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, expected_storage, dtype)
+
+
+@pytest.mark.cuda
+def test_composed_projection_to_attention_bshd_layout_contract_matches_reference():
+    dtype = thor.DataType.fp16
+    batch = 2
+    sequence = 3
+    heads = 2
+    kv_heads = 2
+    head_dim = 16
+    value_dim = 16
+    input_features = heads * value_dim
+    scale = 1.0
+
+    x = ex.input("x")
+    qw = ex.input("qw")
+    kw = ex.input("kw")
+    vw = ex.input("vw")
+
+    flat = x.reshape([batch * sequence, input_features])
+    q = ex.matmul(flat, qw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape(
+        [batch, heads, sequence, head_dim]
+    )
+    k = ex.matmul(flat, kw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape(
+        [batch, kv_heads, sequence, head_dim]
+    )
+    v = ex.matmul(flat, vw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape(
+        [batch, kv_heads, sequence, value_dim]
+    )
+    attn = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    merged = attn.reshape([batch * sequence, heads * value_dim])
+    eq = ex.compile(merged, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.zeros((batch, sequence, input_features), dtype=np.float32)
+    for b in range(batch):
+        for s in range(sequence):
+            for h in range(heads):
+                for d in range(value_dim):
+                    # Deliberately non-symmetric across batch, token, head, and dim.
+                    x_np[b, s, h * value_dim + d] = 0.25 * (b + 1) + 0.10 * s + 0.03 * h + 0.001 * d
+    x_np = x_np.astype(storage_dtype)
+
+    qw_np = np.zeros((input_features, heads * head_dim), dtype=storage_dtype)
+    kw_np = np.zeros((input_features, kv_heads * head_dim), dtype=storage_dtype)
+    vw_np = np.zeros((input_features, kv_heads * value_dim), dtype=np.float32)
+    for i in range(kv_heads * value_dim):
+        vw_np[i, i] = 1.0
+    vw_np = vw_np.astype(storage_dtype)
+
+    q_ref = np.zeros((batch, heads, sequence, head_dim), dtype=storage_dtype)
+    k_ref = np.zeros((batch, kv_heads, sequence, head_dim), dtype=storage_dtype)
+    v_ref = x_np.reshape(batch, sequence, kv_heads, value_dim).transpose(0, 2, 1, 3)
+    expected_attention = _cast_reference_to_storage_dtype(_attention_reference(q_ref, k_ref, v_ref, scale=scale), dtype)
+    expected_merged = _pack_bshd_dense_storage(expected_attention).reshape(batch * sequence, heads * value_dim)
+
+    wrong_dense_bhsd_merge_reference = expected_attention.reshape(batch * sequence, heads * value_dim)
+    assert not np.allclose(
+        expected_merged.astype(np.float32),
+        wrong_dense_bhsd_merge_reference.astype(np.float32),
+        rtol=1e-3,
+        atol=1e-3,
+    ), "projection-layout sentinel is degenerate; this test would not catch a bad post-attention merge"
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "qw": _host_to_gpu(qw_np, dtype, stream),
+        "kw": _host_to_gpu(kw_np, dtype, stream),
+        "vw": _host_to_gpu(vw_np, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [batch * sequence, heads * value_dim]
+    stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+    assert sum(kind.startswith("Matmul") for kind in stage_kinds) == 3
+    assert sum(kind.startswith("Attention") for kind in stage_kinds) == 1
+    assert stage_kinds[-1].startswith("Attention")
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, expected_merged, dtype)
+
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", ATTENTION_DTYPES)
 def test_attention_forward_mha_matches_reference(dtype: thor.DataType):

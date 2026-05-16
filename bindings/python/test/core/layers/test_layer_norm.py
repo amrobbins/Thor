@@ -1,5 +1,6 @@
 import json
 
+import numpy as np
 import pytest
 import thor
 
@@ -17,6 +18,53 @@ def _only_layer_architecture(n: thor.Network, layer_type: str):
     layers = [layer for layer in json.loads(n.get_architecture_json())["layers"] if layer["layer_type"] == layer_type]
     assert len(layers) == 1
     return layers[0]
+
+
+def _cpu_tensor(values: np.ndarray, dtype: thor.DataType) -> thor.physical.PhysicalTensor:
+    values = np.asarray(values, dtype=thor.physical.numpy_dtypes.from_thor(dtype), order="C")
+    placement = thor.physical.Placement(thor.physical.DeviceType.cpu, 0)
+    descriptor = thor.physical.PhysicalTensor.Descriptor(dtype, list(values.shape))
+    tensor = thor.physical.PhysicalTensor(placement, descriptor)
+    tensor.numpy()[...] = values
+    return tensor
+
+
+def _layer_norm_reference(x: np.ndarray, normalized_shape, epsilon: float) -> np.ndarray:
+    rank = len(normalized_shape)
+    axes = tuple(range(x.ndim - rank, x.ndim))
+    x32 = x.astype(np.float32)
+    mean = np.mean(x32, axis=axes, keepdims=True)
+    variance = np.mean((x32 - mean) * (x32 - mean), axis=axes, keepdims=True)
+    return (x32 - mean) / np.sqrt(variance + np.float32(epsilon))
+
+
+def _layer_norm_reference_for_dtype(values: np.ndarray, normalized_shape, epsilon: float, dtype: thor.DataType) -> np.ndarray:
+    # Match the values actually provided to Thor: _cpu_tensor stores the input
+    # in the requested dtype before device execution.  For fp16/bf16 this can
+    # slightly change the normalized values, especially for repeated thirds.
+    quantized_values = np.asarray(values, dtype=thor.physical.numpy_dtypes.from_thor(dtype))
+    return _layer_norm_reference(quantized_values, normalized_shape, epsilon).astype(thor.physical.numpy_dtypes.from_thor(dtype))
+
+
+def _run_layer_norm_network(values: np.ndarray, feature_dims, dtype: thor.DataType, *, normalized_shape=None, epsilon=1e-5) -> np.ndarray:
+    dtype_name = str(dtype).split(".")[-1]
+    n = thor.Network(f"test_net_layer_norm_numerical_{dtype_name}_{len(feature_dims)}d")
+    x = _input_tensor(n, feature_dims, dtype)
+    kwargs = {"epsilon": epsilon}
+    if normalized_shape is not None:
+        kwargs["normalized_shape"] = normalized_shape
+    ln = thor.layers.LayerNorm(n, x, **kwargs)
+    thor.layers.NetworkOutput(n, "output", ln.get_feature_output(), dtype)
+
+    placed = n.place(
+        values.shape[0],
+        inference_only=True,
+        forced_devices=[0],
+        forced_num_stamps_per_gpu=1,
+    )
+    outputs = placed.infer({"input": _cpu_tensor(values, dtype)})
+    assert set(outputs.keys()) == {"output"}
+    return np.array(outputs["output"].numpy(), copy=True)
 
 
 def test_layer_norm_constructs_default_last_dim_and_output_preserves_shape_dtype():
@@ -104,3 +152,35 @@ def test_layer_norm_rejects_wrong_types_and_arity():
 
     with pytest.raises(TypeError):
         thor.layers.LayerNorm(n, x, epsilon="1e-5")
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype,atol,rtol", [
+    (thor.DataType.fp16, 1.5e-3, 1.5e-3),
+    (thor.DataType.fp32, 2.5e-5, 2.5e-5),
+])
+def test_layer_norm_forward_matches_numpy_default_last_dim(dtype, atol, rtol):
+    values = np.array(
+        [
+            [[-2.0, -1.0, 0.0, 1.0], [1.5, 2.0, 3.0, 4.0], [-3.0, 0.5, 2.5, 5.0]],
+            [[0.25, -0.75, 1.25, 2.25], [4.0, 1.0, -2.0, -5.0], [3.5, 3.0, 2.5, 2.0]],
+        ],
+        dtype=np.float32,
+    )
+
+    actual = _run_layer_norm_network(values, [3, 4], dtype)
+    expected = _layer_norm_reference_for_dtype(values, [4], 1e-5, dtype)
+
+    np.testing.assert_allclose(actual.astype(np.float32), expected.astype(np.float32), atol=atol, rtol=rtol)
+
+
+@pytest.mark.cuda
+def test_layer_norm_forward_matches_numpy_explicit_trailing_shape():
+    dtype = thor.DataType.fp16
+    epsilon = 1e-4
+    values = (np.arange(2 * 2 * 3 * 4, dtype=np.float32).reshape(2, 2, 3, 4) - 11.5) / 3.0
+
+    actual = _run_layer_norm_network(values, [2, 3, 4], dtype, normalized_shape=[3, 4], epsilon=epsilon)
+    expected = _layer_norm_reference_for_dtype(values, [3, 4], epsilon, dtype)
+
+    np.testing.assert_allclose(actual.astype(np.float32), expected.astype(np.float32), atol=1.5e-3, rtol=1.5e-3)
