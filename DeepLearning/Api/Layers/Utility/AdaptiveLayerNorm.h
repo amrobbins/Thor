@@ -65,6 +65,7 @@ class AdaptiveLayerNorm : public MultiConnectionLayer {
     static bool isAdaptiveLayerNormInputDataType(Tensor::DataType dataType);
     static uint64_t checkedFeatureCount(const std::vector<uint64_t>& shape, const std::string& what);
     static void validateNormalizedShapeForInput(const std::vector<uint64_t>& inputDims, const std::vector<uint64_t>& normalizedShape);
+    static void validateCudnnFrontendContract(uint64_t normalizedFeatureCount, Tensor::DataType inputDataType);
     static const char* portName(uint32_t port);
 
     void resetInputConnectionTracking();

@@ -142,6 +142,10 @@ std::string exprOpExternalName(ExprOp op) {
             return "fill";
         case ExprOp::RESHAPE:
             return "reshape";
+        case ExprOp::STRIDED_VIEW:
+            return "strided_view";
+        case ExprOp::STRIDED_VIEW_BACKWARD:
+            return "strided_view_backward";
         case ExprOp::UNSQUEEZE:
             return "unsqueeze";
         case ExprOp::SQUEEZE:
@@ -244,6 +248,10 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"softmax", ExprOp::SOFTMAX},
         {"fill", ExprOp::FILL},
         {"reshape", ExprOp::RESHAPE},
+        {"strided_view", ExprOp::STRIDED_VIEW},
+        {"alias_view", ExprOp::STRIDED_VIEW},
+        {"strided_view_backward", ExprOp::STRIDED_VIEW_BACKWARD},
+        {"alias_view_backward", ExprOp::STRIDED_VIEW_BACKWARD},
         {"unsqueeze", ExprOp::UNSQUEEZE},
         {"squeeze", ExprOp::SQUEEZE},
         {"transpose", ExprOp::TRANSPOSE},
@@ -443,6 +451,9 @@ json exprNodeToJson(const ExprNode& node) {
     setOptionalDTypeJson(j, "backward_compute_dtype", node.backward_compute_dtype);
     j["reduction_axes"] = node.reduction_axes;
     j["reshape_dims"] = node.reshape_dims;
+    j["view_dims"] = node.view_dims;
+    j["view_strides"] = node.view_strides;
+    j["view_element_offset"] = node.view_element_offset;
     j["squeeze_axes"] = node.squeeze_axes;
     j["unsqueeze_axes"] = node.unsqueeze_axes;
     j["fill_dims"] = node.fill_dims;
@@ -525,6 +536,9 @@ ExprNode exprNodeFromJson(const json& j) {
     parseOptionalDTypeField(j, "backward_compute_dtype", node.backward_compute_dtype);
     node.reduction_axes = j.value("reduction_axes", std::vector<uint64_t>{});
     node.reshape_dims = j.value("reshape_dims", std::vector<uint64_t>{});
+    node.view_dims = j.value("view_dims", std::vector<uint64_t>{});
+    node.view_strides = j.value("view_strides", std::vector<uint64_t>{});
+    node.view_element_offset = j.value("view_element_offset", uint64_t{0});
     node.squeeze_axes = j.value("squeeze_axes", std::vector<uint64_t>{});
     node.unsqueeze_axes = j.value("unsqueeze_axes", std::vector<uint64_t>{});
     node.fill_dims = j.value("fill_dims", std::vector<uint64_t>{});
@@ -595,6 +609,10 @@ std::string opName(ExprOp op) {
             return "FILL";
         case ExprOp::RESHAPE:
             return "RESHAPE";
+        case ExprOp::STRIDED_VIEW:
+            return "VIEW";
+        case ExprOp::STRIDED_VIEW_BACKWARD:
+            return "VIEW_BWD";
         case ExprOp::UNSQUEEZE:
             return "UNSQ";
         case ExprOp::SQUEEZE:
@@ -772,6 +790,19 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::RESHAPE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
                   ";dims=" + formatUIntVectorCanonical(n.reshape_dims) + ")";
+            break;
+        case ExprOp::STRIDED_VIEW:
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
+                  ";dims=" + formatUIntVectorCanonical(n.view_dims) +
+                  ";strides=" + formatUIntVectorCanonical(n.view_strides) +
+                  ";offset=" + std::to_string(n.view_element_offset) + ")";
+            break;
+        case ExprOp::STRIDED_VIEW_BACKWARD:
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
+                  ";sourceDims=" + formatUIntVectorCanonical(n.fill_dims) +
+                  ";viewDims=" + formatUIntVectorCanonical(n.view_dims) +
+                  ";viewStrides=" + formatUIntVectorCanonical(n.view_strides) +
+                  ";offset=" + std::to_string(n.view_element_offset) + ")";
             break;
         case ExprOp::UNSQUEEZE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
@@ -1369,6 +1400,8 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::SOFTMAX:
         case ExprOp::TRANSPOSE:
         case ExprOp::RESHAPE:
+        case ExprOp::STRIDED_VIEW:
+        case ExprOp::STRIDED_VIEW_BACKWARD:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
         case ExprOp::REDUCE_SUM:
@@ -2153,6 +2186,26 @@ Expression Expression::reshape(const std::vector<uint64_t>& new_dims) const {
     return out;
 }
 
+Expression Expression::stridedView(const std::vector<uint64_t>& dims,
+                                   const std::vector<uint64_t>& strides_elements,
+                                   uint64_t element_offset) const {
+    if (!expr)
+        throw std::runtime_error("Cannot create a strided view from an empty expression");
+    if (dims.empty() || dims.size() != strides_elements.size()) {
+        throw std::invalid_argument("Expression::stridedView requires dimensions and strides with the same non-zero rank.");
+    }
+    for (uint64_t d : dims) {
+        if (d == 0)
+            throw std::invalid_argument("Expression::stridedView dimensions must be non-zero.");
+    }
+    Expression out = unaryOp(*this, ExprOp::STRIDED_VIEW);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.view_dims = dims;
+    node.view_strides = strides_elements;
+    node.view_element_offset = element_offset;
+    return out;
+}
+
 Expression Expression::unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const {
     if (!expr)
         throw std::runtime_error("Cannot unsqueeze an empty expression");
@@ -2463,10 +2516,11 @@ void validateAttentionOptions(const AttentionOptions& options, bool use_bias, bo
     if (options.use_paged_kv_cache && options.dropout_probability > 0.0f) {
         throw std::runtime_error("Paged KV attention is inference-only and cannot currently be combined with dropout.");
     }
-    if (options.mask_kind == AttentionMaskKind::CausalBottomRight &&
+    if ((options.mask_kind == AttentionMaskKind::CausalBottomRight ||
+         options.mask_kind == AttentionMaskKind::SlidingWindowBottomRight) &&
         (use_bias || options.use_alibi_mask || options.dropout_probability > 0.0f)) {
         throw std::runtime_error(
-            "AttentionMaskKind::CausalBottomRight is currently supported only without additive bias, ALiBi, or dropout in the cuDNN primary SDPA path.");
+            "AttentionMaskKind::CausalBottomRight/SlidingWindowBottomRight is currently supported only without additive bias, ALiBi, or dropout in the cuDNN primary SDPA path.");
     }
 }
 }  // namespace

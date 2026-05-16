@@ -260,6 +260,7 @@ class TensorDescriptor {
         for (uint32_t i = 0; i < dimensions.size(); ++i)
             newTotalNumElements *= newDimensions[i];
         THOR_THROW_IF_FALSE(newTotalNumElements == totalNumElements);
+        recomputeStrides();
     }
 
     uint64_t getFlatIndex(std::vector<uint64_t> element) const {
@@ -347,8 +348,11 @@ class TensorDescriptor {
             totalNumElements *= dimensions[i];
         THOR_THROW_IF_FALSE(totalNumElements > 0);
 
-        for (int32_t i = (int)dimensions.size() - 1; i >= 0; --i)
-            stridePerDimension.push_back(1);
+        recomputeStrides();
+    }
+
+    void recomputeStrides() {
+        stridePerDimension.assign(dimensions.size(), 1);
         for (int32_t i = (int)dimensions.size() - 2; i >= 0; --i)
             stridePerDimension[i] = stridePerDimension[i + 1] * dimensions[i + 1];
     }

@@ -4059,7 +4059,7 @@ void Tensor::launchFillValueGpuKernel(T value, T *mem, uint64_t numElements, uin
     ScopedGpu scopedGpu(gpuNum);
 
     dim3 blockSize(256);
-    if (is_same<T, half>::value || is_same<T, uint16_t>::value || is_same<T, int16_t>::value) {
+    if (is_same<T, half>::value || is_same<T, __nv_bfloat16>::value || is_same<T, uint16_t>::value || is_same<T, int16_t>::value) {
         dim3 gridSize((numElements + 2047) / 2048);
         fillValue2B<T><<<gridSize, blockSize, 0, stream>>>(value, mem, numElements);
     } else if (is_same<T, float>::value || is_same<T, uint32_t>::value || is_same<T, int32_t>::value) {
@@ -4074,6 +4074,8 @@ void Tensor::launchFillValueGpuKernel(T value, T *mem, uint64_t numElements, uin
 }
 
 template void Tensor::launchFillValueGpuKernel<half>(half value, half *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
+template void Tensor::launchFillValueGpuKernel<__nv_bfloat16>(
+    __nv_bfloat16 value, __nv_bfloat16 *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
 template void Tensor::launchFillValueGpuKernel<float>(float value, float *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
 template void Tensor::launchFillValueGpuKernel<uint8_t>(
     uint8_t value, uint8_t *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);

@@ -69,6 +69,22 @@ std::shared_ptr<Thor::ParameterSpecification> makeParameter(const std::string& n
     return std::make_shared<Thor::ParameterSpecification>(builder.build());
 }
 
+constexpr bool kUsePackedQkvProjection = Thor::Attention::USE_PACKED_QKV_PROJECTION;
+constexpr bool kUsePackedQkvProjectionWithRope = Thor::Attention::USE_PACKED_QKV_PROJECTION_WITH_ROPE;
+
+bool usePackedQkvProjectionForLayer(bool useRope) {
+    if constexpr (!kUsePackedQkvProjection) {
+        return false;
+    } else if constexpr (kUsePackedQkvProjectionWithRope) {
+        (void)useRope;
+        return true;
+    } else {
+        // RoPE is still a generic expression op and must not consume non-dense Q/K views sliced out of packed QKV.
+        // Keep RoPE layers on the legacy split projection path until a layout-aware RoPE materialization path lands.
+        return !useRope;
+    }
+}
+
 ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceLength,
                                                               uint64_t inputFeatures,
                                                               uint64_t outputFeatures,
@@ -96,12 +112,22 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
     using ThorImplementation::FusedEquation;
     using ThorImplementation::Tensor;
 
-    std::vector<std::string> expectedInputs = {"feature_input", "query_weights", "key_weights", "value_weights", "output_weights"};
-    if (hasBias) {
-        expectedInputs.push_back("query_bias");
-        expectedInputs.push_back("key_bias");
-        expectedInputs.push_back("value_bias");
-        expectedInputs.push_back("output_bias");
+    const bool usePackedQkvProjection = usePackedQkvProjectionForLayer(useRope);
+    std::vector<std::string> expectedInputs;
+    if (usePackedQkvProjection) {
+        expectedInputs = {"feature_input", "qkv_weights", "output_weights"};
+        if (hasBias) {
+            expectedInputs.push_back("qkv_bias");
+            expectedInputs.push_back("output_bias");
+        }
+    } else {
+        expectedInputs = {"feature_input", "query_weights", "key_weights", "value_weights", "output_weights"};
+        if (hasBias) {
+            expectedInputs.push_back("query_bias");
+            expectedInputs.push_back("key_bias");
+            expectedInputs.push_back("value_bias");
+            expectedInputs.push_back("output_bias");
+        }
     }
 
     return DynamicExpression(
@@ -110,6 +136,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
         [sequenceLength,
          inputFeatures,
          outputFeatures,
+         usePackedQkvProjection,
          numHeads,
          numKeyValueHeads,
          headDim,
@@ -140,6 +167,11 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                 throw std::runtime_error("Attention runtime feature input shape does not match the API shape.");
             }
 
+            const uint64_t queryWidth = checkedMul(numHeads, headDim, "query projection width");
+            const uint64_t keyWidth = checkedMul(numKeyValueHeads, headDim, "key projection width");
+            const uint64_t valueWidth = checkedMul(numKeyValueHeads, valueDim, "value projection width");
+            const uint64_t qkvWidth = queryWidth + keyWidth + valueWidth;
+
             auto validateWeight = [&](const char* name, uint64_t in, uint64_t out) {
                 const Tensor& w = inputs.at(name);
                 if (w.getDimensions() != std::vector<uint64_t>{in, out}) {
@@ -149,9 +181,13 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                     throw std::runtime_error(std::string("Attention ") + name + " dtype mismatch.");
                 }
             };
-            validateWeight("query_weights", inputFeatures, checkedMul(numHeads, headDim, "query projection width"));
-            validateWeight("key_weights", inputFeatures, checkedMul(numKeyValueHeads, headDim, "key projection width"));
-            validateWeight("value_weights", inputFeatures, checkedMul(numKeyValueHeads, valueDim, "value projection width"));
+            if (usePackedQkvProjection) {
+                validateWeight("qkv_weights", inputFeatures, qkvWidth);
+            } else {
+                validateWeight("query_weights", inputFeatures, queryWidth);
+                validateWeight("key_weights", inputFeatures, keyWidth);
+                validateWeight("value_weights", inputFeatures, valueWidth);
+            }
             validateWeight("output_weights", checkedMul(numHeads, valueDim, "output projection input width"), outputFeatures);
 
             if (hasBias) {
@@ -164,33 +200,87 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                         throw std::runtime_error(std::string("Attention ") + name + " dtype mismatch.");
                     }
                 };
-                validateBias("query_bias", checkedMul(numHeads, headDim, "query bias width"));
-                validateBias("key_bias", checkedMul(numKeyValueHeads, headDim, "key bias width"));
-                validateBias("value_bias", checkedMul(numKeyValueHeads, valueDim, "value bias width"));
+                if (usePackedQkvProjection) {
+                    validateBias("qkv_bias", qkvWidth);
+                } else {
+                    validateBias("query_bias", queryWidth);
+                    validateBias("key_bias", keyWidth);
+                    validateBias("value_bias", valueWidth);
+                }
                 validateBias("output_bias", outputFeatures);
             }
 
             featureInput.reshape({batch * sequenceLength, inputFeatures});
 
             Expression x = Expression::input("feature_input", inputDType, inputDType);
-            Expression qw = Expression::input("query_weights", weightsDType, weightsDType);
-            Expression kw = Expression::input("key_weights", weightsDType, weightsDType);
-            Expression vw = Expression::input("value_weights", weightsDType, weightsDType);
             Expression ow = Expression::input("output_weights", weightsDType, weightsDType);
 
-            Expression q = Expression::matmul(x, qw, false, false, computeDType, outputDType);
-            Expression k = Expression::matmul(x, kw, false, false, computeDType, outputDType);
-            Expression v = Expression::matmul(x, vw, false, false, computeDType, outputDType);
-            if (hasBias) {
-                q = q + Expression::input("query_bias", weightsDType, weightsDType);
-                k = k + Expression::input("key_bias", weightsDType, weightsDType);
-                v = v + Expression::input("value_bias", weightsDType, weightsDType);
-            }
+            struct ProjectedQkv {
+                Expression q;
+                Expression k;
+                Expression v;
+            };
 
-            // The projection matmuls produce dense [B*S, H*D] storage, which is physically [B,S,H,D].
-            // The cuDNN attention wrapper, however, takes semantic dimensions in [B,H,S,D] order and uses
-            // AttentionTensorLayout::BSHD strides to describe the physical storage.  Preserve the dense BSHD
-            // storage while presenting semantic BHSD dimensions to the attention stage.
+            auto buildSplitProjection = [&]() -> ProjectedQkv {
+                Expression qw = Expression::input("query_weights", weightsDType, weightsDType);
+                Expression kw = Expression::input("key_weights", weightsDType, weightsDType);
+                Expression vw = Expression::input("value_weights", weightsDType, weightsDType);
+
+                Expression q = Expression::matmul(x, qw, false, false, computeDType, outputDType);
+                Expression k = Expression::matmul(x, kw, false, false, computeDType, outputDType);
+                Expression v = Expression::matmul(x, vw, false, false, computeDType, outputDType);
+                if (hasBias) {
+                    q = q + Expression::input("query_bias", weightsDType, weightsDType);
+                    k = k + Expression::input("key_bias", weightsDType, weightsDType);
+                    v = v + Expression::input("value_bias", weightsDType, weightsDType);
+                }
+
+                // Keep Thor's high-level attention tensors dense and logical [B,S,H,D].  AttentionTensorLayout::BSHD
+                // tells the cuDNN adapter how to reinterpret that token-major storage for cuDNN's [B,H,S,D]
+                // descriptor contract; generic Thor expression ops never see a fake [B,H,S,D] reshape.
+                q = q.reshape({batch, sequenceLength, numHeads, headDim}).withOutputDType(outputDType);
+                k = k.reshape({batch, sequenceLength, numKeyValueHeads, headDim}).withOutputDType(outputDType);
+                v = v.reshape({batch, sequenceLength, numKeyValueHeads, valueDim}).withOutputDType(outputDType);
+                return ProjectedQkv{std::move(q), std::move(k), std::move(v)};
+            };
+
+            auto buildPackedProjection = [&]() -> ProjectedQkv {
+                Expression qkvWeights = Expression::input("qkv_weights", weightsDType, weightsDType);
+                Expression qkv = Expression::matmul(x, qkvWeights, false, false, computeDType, outputDType);
+                if (hasBias) {
+                    qkv = qkv + Expression::input("qkv_bias", weightsDType, weightsDType);
+                }
+
+                // Packed QKV produces one token-major [B*S, Q+K+V] buffer.  Q/K/V are zero-copy strided views into
+                // that buffer, with row stride equal to the full packed width.  This is the final no-split form needed
+                // for packed-QKV forward and for packed-QKV training once view backward accumulates dQ/dK/dV to dQKV.
+                const uint64_t batchStride = sequenceLength * qkvWidth;
+                Expression q = qkv.stridedView({batch, sequenceLength, numHeads, headDim}, {batchStride, qkvWidth, headDim, 1}, 0)
+                                   .withOutputDType(outputDType);
+                Expression k = qkv.stridedView({batch, sequenceLength, numKeyValueHeads, headDim},
+                                               {batchStride, qkvWidth, headDim, 1},
+                                               queryWidth)
+                                   .withOutputDType(outputDType);
+                Expression v = qkv.stridedView({batch, sequenceLength, numKeyValueHeads, valueDim},
+                                               {batchStride, qkvWidth, valueDim, 1},
+                                               queryWidth + keyWidth)
+                                   .withOutputDType(outputDType);
+                return ProjectedQkv{std::move(q), std::move(k), std::move(v)};
+            };
+
+            ProjectedQkv projected = [&]() -> ProjectedQkv {
+                if constexpr (kUsePackedQkvProjection) {
+                    if (usePackedQkvProjection) {
+                        return buildPackedProjection();
+                    }
+                }
+                return buildSplitProjection();
+            }();
+
+            Expression q = std::move(projected.q);
+            Expression k = std::move(projected.k);
+            Expression v = std::move(projected.v);
+
             if (useRope) {
                 ThorImplementation::RotaryPositionEmbeddingOptions opts = ropeOptions;
                 opts.sequence_axis = 1;
@@ -202,20 +292,9 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                     opts.output_dtype = outputDType;
                 }
 
-                // RoPE is a pointwise expression op, so apply it while the tensor is logically [B,S,H,D].
-                // After RoPE materialization/fusion, reinterpret that same dense BSHD storage as semantic
-                // [B,H,S,D] for cuDNN SDPA by pairing the reshape below with AttentionTensorLayout::BSHD.
-                q = q.reshape({batch, sequenceLength, numHeads, headDim}).withOutputDType(outputDType).rotaryPositionEmbedding(opts);
-                k = k.reshape({batch, sequenceLength, numKeyValueHeads, headDim})
-                        .withOutputDType(outputDType)
-                        .rotaryPositionEmbedding(opts);
-                q = q.reshape({batch, numHeads, sequenceLength, headDim}).withOutputDType(outputDType);
-                k = k.reshape({batch, numKeyValueHeads, sequenceLength, headDim}).withOutputDType(outputDType);
-            } else {
-                q = q.reshape({batch, numHeads, sequenceLength, headDim}).withOutputDType(outputDType);
-                k = k.reshape({batch, numKeyValueHeads, sequenceLength, headDim}).withOutputDType(outputDType);
+                q = q.rotaryPositionEmbedding(opts);
+                k = k.rotaryPositionEmbedding(opts);
             }
-            v = v.reshape({batch, numKeyValueHeads, sequenceLength, valueDim}).withOutputDType(outputDType);
 
             AttentionOptions options;
             options.q_layout = AttentionTensorLayout::BSHD;
@@ -316,6 +395,11 @@ void Attention::Builder::verifyConfig() const {
     if (useAlibi && rightBound != 0) {
         throw std::invalid_argument("Attention ALiBi requires diagonalRightBound == 0.");
     }
+    if (useAlibi && (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
+                     maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {
+        throw std::invalid_argument(
+            "Attention ALiBi cannot currently be combined with bottom-right/decode masks in cuDNN SDPA.");
+    }
     if (_attentionScale.has_value() && (!std::isfinite(_attentionScale.value()) || _attentionScale.value() <= 0.0)) {
         throw std::invalid_argument("Attention attentionScale must be finite and positive.");
     }
@@ -388,19 +472,31 @@ Attention Attention::Builder::build() {
     const uint64_t kvValueWidth = checkedMul(_numKeyValueHeads.value(), _valueDim.value(), "value projection width");
     const uint64_t mergedWidth = checkedMul(_numHeads.value(), _valueDim.value(), "merged head width");
 
+    const uint64_t qkvWidth = qWidth + kvKeyWidth + kvValueWidth;
+    const bool usePackedQkvProjection = usePackedQkvProjectionForLayer(_useRope.value());
+
     std::vector<std::shared_ptr<ParameterSpecification>> parameters;
-    parameters.push_back(
-        makeParameter("query_weights", {inputFeatures, qWidth}, _weightsDataType.value(), _weightsInitializer, _optimizer));
-    parameters.push_back(
-        makeParameter("key_weights", {inputFeatures, kvKeyWidth}, _weightsDataType.value(), _weightsInitializer, _optimizer));
-    parameters.push_back(
-        makeParameter("value_weights", {inputFeatures, kvValueWidth}, _weightsDataType.value(), _weightsInitializer, _optimizer));
+    if (usePackedQkvProjection) {
+        parameters.push_back(
+            makeParameter("qkv_weights", {inputFeatures, qkvWidth}, _weightsDataType.value(), _weightsInitializer, _optimizer));
+    } else {
+        parameters.push_back(
+            makeParameter("query_weights", {inputFeatures, qWidth}, _weightsDataType.value(), _weightsInitializer, _optimizer));
+        parameters.push_back(
+            makeParameter("key_weights", {inputFeatures, kvKeyWidth}, _weightsDataType.value(), _weightsInitializer, _optimizer));
+        parameters.push_back(
+            makeParameter("value_weights", {inputFeatures, kvValueWidth}, _weightsDataType.value(), _weightsInitializer, _optimizer));
+    }
     parameters.push_back(
         makeParameter("output_weights", {mergedWidth, _outputFeatures.value()}, _weightsDataType.value(), _weightsInitializer, _optimizer));
     if (_hasBias.value()) {
-        parameters.push_back(makeParameter("query_bias", {qWidth}, _weightsDataType.value(), _biasInitializer, _optimizer));
-        parameters.push_back(makeParameter("key_bias", {kvKeyWidth}, _weightsDataType.value(), _biasInitializer, _optimizer));
-        parameters.push_back(makeParameter("value_bias", {kvValueWidth}, _weightsDataType.value(), _biasInitializer, _optimizer));
+        if (usePackedQkvProjection) {
+            parameters.push_back(makeParameter("qkv_bias", {qkvWidth}, _weightsDataType.value(), _biasInitializer, _optimizer));
+        } else {
+            parameters.push_back(makeParameter("query_bias", {qWidth}, _weightsDataType.value(), _biasInitializer, _optimizer));
+            parameters.push_back(makeParameter("key_bias", {kvKeyWidth}, _weightsDataType.value(), _biasInitializer, _optimizer));
+            parameters.push_back(makeParameter("value_bias", {kvValueWidth}, _weightsDataType.value(), _biasInitializer, _optimizer));
+        }
         parameters.push_back(
             makeParameter("output_bias", {_outputFeatures.value()}, _weightsDataType.value(), _biasInitializer, _optimizer));
     }

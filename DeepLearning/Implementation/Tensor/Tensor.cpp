@@ -1,5 +1,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include <optional>
+#include <cmath>
+#include <limits>
 
 #include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
@@ -172,6 +174,9 @@ void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, u
     this->placement = placement;
 
     this->descriptor = descriptor;
+    storageElementOffset = 0;
+    storageNumElements = descriptor.getTotalNumElements();
+    customStridesElements.clear();
     descriptorOverridden = false;
 
     instanceId = nextInstanceId.fetch_add(1);
@@ -312,6 +317,9 @@ void Tensor::copyObject(const Tensor &other) {
 
     placement = other.placement;
     mem = other.mem;
+    storageElementOffset = other.storageElementOffset;
+    storageNumElements = other.storageNumElements;
+    customStridesElements = other.customStridesElements;
     instanceId = other.instanceId;
 
     descriptor = other.descriptor;
@@ -349,6 +357,66 @@ void Tensor::destroy() {
                             placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     }
     mem = nullptr;
+}
+
+static uint64_t checkedWholeByteElementSizeBytes(TensorDescriptor::DataType dataType, const char *context) {
+    const float size = TensorDescriptor::getElementSizeInBytes(dataType);
+    if (size < 1.0f || size != std::floor(size)) {
+        throw std::runtime_error(std::string(context) + " does not support packed sub-byte element types.");
+    }
+    return static_cast<uint64_t>(size);
+}
+
+static uint8_t *dataPointerWithElementOffset(void *mem, TensorDescriptor::DataType dataType, uint64_t elementOffset) {
+    if (elementOffset == 0) {
+        return static_cast<uint8_t *>(mem);
+    }
+    const uint64_t elementSizeBytes = checkedWholeByteElementSizeBytes(dataType, "Tensor storage offsets");
+    return static_cast<uint8_t *>(mem) + elementOffset * elementSizeBytes;
+}
+
+static const uint8_t *dataPointerWithElementOffset(const void *mem, TensorDescriptor::DataType dataType, uint64_t elementOffset) {
+    if (elementOffset == 0) {
+        return static_cast<const uint8_t *>(mem);
+    }
+    const uint64_t elementSizeBytes = checkedWholeByteElementSizeBytes(dataType, "Tensor storage offsets");
+    return static_cast<const uint8_t *>(mem) + elementOffset * elementSizeBytes;
+}
+
+static std::vector<uint64_t> denseStridesForDims(const std::vector<uint64_t>& dims) {
+    if (dims.empty()) {
+        throw std::runtime_error("Tensor dense strides require non-empty dimensions.");
+    }
+    std::vector<uint64_t> strides(dims.size(), 1);
+    for (int64_t i = static_cast<int64_t>(dims.size()) - 2; i >= 0; --i) {
+        if (strides[static_cast<size_t>(i) + 1] > std::numeric_limits<uint64_t>::max() / dims[static_cast<size_t>(i) + 1]) {
+            throw std::runtime_error("Tensor dense stride computation overflowed.");
+        }
+        strides[static_cast<size_t>(i)] = strides[static_cast<size_t>(i) + 1] * dims[static_cast<size_t>(i) + 1];
+    }
+    return strides;
+}
+
+static uint64_t maxElementOffsetForView(const std::vector<uint64_t>& dims, const std::vector<uint64_t>& strides) {
+    if (dims.size() != strides.size() || dims.empty()) {
+        throw std::runtime_error("Tensor alias view dimensions/strides must have the same non-zero rank.");
+    }
+    uint64_t maxOffset = 0;
+    for (size_t i = 0; i < dims.size(); ++i) {
+        if (dims[i] == 0) {
+            throw std::runtime_error("Tensor alias view dimensions must be non-zero.");
+        }
+        const uint64_t extentMinusOne = dims[i] - 1;
+        if (extentMinusOne != 0 && strides[i] > std::numeric_limits<uint64_t>::max() / extentMinusOne) {
+            throw std::runtime_error("Tensor alias view stride extent overflowed.");
+        }
+        const uint64_t axisMax = extentMinusOne * strides[i];
+        if (maxOffset > std::numeric_limits<uint64_t>::max() - axisMax) {
+            throw std::runtime_error("Tensor alias view max offset overflowed.");
+        }
+        maxOffset += axisMax;
+    }
+    return maxOffset;
 }
 
 template <typename ElementDataType>
@@ -399,7 +467,7 @@ ElementDataType *Tensor::getMemPtr() {
         else
             THOR_UNREACHABLE();
     }
-    return reinterpret_cast<ElementDataType *>(mem);
+    return reinterpret_cast<ElementDataType *>(dataPointerWithElementOffset(mem, descriptor.getDataType(), storageElementOffset));
 }
 
 template <typename ElementDataType>
@@ -450,7 +518,8 @@ const ElementDataType *Tensor::getMemPtr() const {
             THOR_UNREACHABLE();
     }
 
-    return reinterpret_cast<const ElementDataType *>(mem);
+    return reinterpret_cast<const ElementDataType *>(
+        dataPointerWithElementOffset(mem, descriptor.getDataType(), storageElementOffset));
 }
 
 template <typename ElementDataType>
@@ -496,7 +565,7 @@ ElementDataType Tensor::getElement(vector<unsigned long> dimensionIndex) {
 #endif
 
     THOR_THROW_IF_FALSE(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
-    return *((ElementDataType *)getDescriptor().getChunkAddress(dimensionIndex, mem));
+    return *getElementPointer<ElementDataType>(dimensionIndex);
 }
 
 template <typename ElementDataType>
@@ -542,7 +611,7 @@ void Tensor::setElement(std::vector<unsigned long> dimensionIndex, const Element
 #endif
 
     THOR_THROW_IF_FALSE(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
-    *((ElementDataType *)getDescriptor().getChunkAddress(dimensionIndex, mem)) = value;
+    *getElementPointer<ElementDataType>(dimensionIndex) = value;
 }
 
 template <typename ElementDataType>
@@ -588,17 +657,80 @@ ElementDataType *Tensor::getElementPointer(std::vector<unsigned long> dimensionI
 #endif
 
     THOR_THROW_IF_FALSE(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
-    return (ElementDataType *)getDescriptor().getChunkAddress(dimensionIndex, mem);
+    const std::vector<uint64_t> dims = getDimensions();
+    const std::vector<uint64_t> strides = getStridesElements();
+    THOR_THROW_IF_FALSE(dimensionIndex.size() <= dims.size());
+    uint64_t elementOffset = storageElementOffset;
+    for (size_t i = 0; i < dimensionIndex.size(); ++i) {
+        THOR_THROW_IF_FALSE(dimensionIndex[i] < dims[i]);
+        elementOffset += dimensionIndex[i] * strides[i];
+    }
+    return reinterpret_cast<ElementDataType *>(dataPointerWithElementOffset(mem, descriptor.getDataType(), elementOffset));
 }
 
 // Use same memory, but change dimension sizes, must be exactly the same number of elements.
-void Tensor::reshape(vector<unsigned long> dimensions) { descriptor.reshape(dimensions); }
+void Tensor::reshape(vector<unsigned long> dimensions) {
+    descriptor.reshape(dimensions);
+    if (customStridesElements.empty()) {
+        // TensorDescriptor::reshape preserves the original descriptor stride cache. Keep view-stride
+        // queries correct by computing dense strides from the current visible dimensions on demand.
+        return;
+    }
+    customStridesElements = denseStridesForDims(dimensions);
+}
+
+Tensor Tensor::aliasView(vector<unsigned long> dimensions, vector<unsigned long> strides_elements, uint64_t element_offset) const {
+    THOR_THROW_IF_FALSE(isInitialized());
+    (void)checkedWholeByteElementSizeBytes(descriptor.getDataType(), "Tensor::aliasView");
+    if (dimensions.empty() || dimensions.size() != strides_elements.size()) {
+        throw std::runtime_error("Tensor::aliasView requires dimensions and strides with the same non-zero rank.");
+    }
+    for (uint64_t dim : dimensions) {
+        if (dim == 0) {
+            throw std::runtime_error("Tensor::aliasView dimensions must be non-zero.");
+        }
+    }
+    const uint64_t maxRelativeOffset = maxElementOffsetForView(dimensions, strides_elements);
+    if (element_offset > std::numeric_limits<uint64_t>::max() - maxRelativeOffset) {
+        throw std::runtime_error("Tensor::aliasView offset overflowed.");
+    }
+    const uint64_t totalVisibleMaxOffset = element_offset + maxRelativeOffset;
+    if (storageElementOffset > std::numeric_limits<uint64_t>::max() - totalVisibleMaxOffset) {
+        throw std::runtime_error("Tensor::aliasView base offset overflowed.");
+    }
+    const uint64_t sourceAllocationElements = storageNumElements;
+    if (storageElementOffset + totalVisibleMaxOffset >= sourceAllocationElements) {
+        throw std::runtime_error("Tensor::aliasView would address beyond the source tensor allocation.");
+    }
+
+    Tensor view = *this;
+    view.descriptor = TensorDescriptor(descriptor.getDataType(), dimensions);
+    view.storageElementOffset = storageElementOffset + element_offset;
+    view.customStridesElements = std::move(strides_elements);
+    return view;
+}
+
+std::vector<uint64_t> Tensor::getStridesElements() const {
+    THOR_THROW_IF_FALSE(isInitialized());
+    if (!customStridesElements.empty()) {
+        return customStridesElements;
+    }
+    return denseStridesForDims(getDimensions());
+}
+
+bool Tensor::isDenseContiguous() const {
+    THOR_THROW_IF_FALSE(isInitialized());
+    return getStridesElements() == denseStridesForDims(getDimensions());
+}
 
 // Change the dimensions of the tensor, possibly changing the amount of memory used.
 // Frees the old memory and uses a new, uninitialized block of memory.
 void Tensor::resize(vector<unsigned long> dimensions) {
     descriptor = TensorDescriptor(descriptor.getDataType(), dimensions);
     destroy();
+    storageElementOffset = 0;
+    storageNumElements = descriptor.getTotalNumElements();
+    customStridesElements.clear();
     allocateMemory();
 }
 
@@ -1543,6 +1675,19 @@ void fillValue(void *params) {
                 mem[i] = value;
             }
         }
+    } else if (dataType == TensorDescriptor::DataType::BF16) {
+        __nv_bfloat16 *mem = cpuFillParams->tensor.getMemPtr<__nv_bfloat16>();
+        __nv_bfloat16 value = __float2bfloat16(static_cast<float>(cpuFillParams->value));
+        if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        } else {
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        }
     } else if (dataType == TensorDescriptor::DataType::FP32) {
         float *mem = cpuFillParams->tensor.getMemPtr<float>();
         float value = cpuFillParams->value;
@@ -1676,6 +1821,12 @@ void Tensor::fill(double value, Stream stream) {
         if (dataType == TensorDescriptor::DataType::FP16) {
             launchFillValueGpuKernel<half>(
                 (half)(float)value, (half *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::BF16) {
+            launchFillValueGpuKernel<__nv_bfloat16>(__float2bfloat16(static_cast<float>(value)),
+                                                   (__nv_bfloat16 *)getMemPtr(),
+                                                   getTotalNumElements(),
+                                                   getPlacement().getDeviceNum(),
+                                                   stream);
         } else if (dataType == TensorDescriptor::DataType::FP32) {
             launchFillValueGpuKernel<float>(value, (float *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == TensorDescriptor::DataType::UINT8) {

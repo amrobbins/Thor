@@ -46,6 +46,20 @@ bool isSupportedInstanceNormIoDtype(TensorDescriptor::DataType dtype) {
     }
 }
 
+bool isReducedPrecisionInstanceNormIoDtype(TensorDescriptor::DataType dtype) {
+    return dtype == TensorDescriptor::DataType::FP16 || dtype == TensorDescriptor::DataType::BF16;
+}
+
+void validateCudnnFrontendPrimaryEngineContract(const CudnnInstanceNormDescriptor& descriptor) {
+    if ((isReducedPrecisionInstanceNormIoDtype(descriptor.inputDataType) ||
+         isReducedPrecisionInstanceNormIoDtype(descriptor.outputDataType)) &&
+        descriptor.channelCount % 8 != 0) {
+        throwInvalidInstanceNorm(
+            "cuDNN Frontend primary InstanceNorm engines require fp16/bf16 channelCount to be a multiple of 8; got " +
+            to_string(descriptor.channelCount));
+    }
+}
+
 fe::DataType_t toFrontendDataType(TensorDescriptor::DataType dtype) {
     switch (dtype) {
         case TensorDescriptor::DataType::FP16:
@@ -410,6 +424,7 @@ void CudnnInstanceNormDescriptor::validateForward() const {
     if (!(epsilon > 0.0f)) {
         throwInvalidInstanceNorm("epsilon must be > 0");
     }
+    validateCudnnFrontendPrimaryEngineContract(*this);
 }
 
 void CudnnInstanceNormDescriptor::validateBackward() const { validateForward(); }

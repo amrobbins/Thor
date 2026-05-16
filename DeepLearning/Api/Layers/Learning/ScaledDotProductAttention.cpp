@@ -179,6 +179,11 @@ void ScaledDotProductAttention::Builder::verifyConfig() const {
     if (useAlibi && rightBound != 0) {
         throw std::invalid_argument("ScaledDotProductAttention ALiBi requires diagonalRightBound == 0.");
     }
+    if (useAlibi && (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
+                     maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {
+        throw std::invalid_argument(
+            "ScaledDotProductAttention ALiBi cannot currently be combined with bottom-right/decode masks in cuDNN SDPA.");
+    }
 
     if (_attentionScale.has_value() && (!std::isfinite(_attentionScale.value()) || _attentionScale.value() <= 0.0)) {
         throw std::invalid_argument("ScaledDotProductAttention attentionScale must be finite and positive.");

@@ -209,6 +209,9 @@ struct StageNodeKey {
     std::vector<uint64_t> squeeze_axes;
     std::vector<uint64_t> unsqueeze_axes;
     std::vector<uint64_t> fill_dims;
+    std::vector<uint64_t> view_dims;
+    std::vector<uint64_t> view_strides;
+    uint64_t view_element_offset = 0;
 
     bool operator==(const StageNodeKey& other) const = default;
 };
@@ -263,6 +266,13 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<size_t>{}(k.fill_dims.size()));
         for (uint64_t dim : k.fill_dims)
             hashCombine(h, std::hash<uint64_t>{}(dim));
+        hashCombine(h, std::hash<size_t>{}(k.view_dims.size()));
+        for (uint64_t dim : k.view_dims)
+            hashCombine(h, std::hash<uint64_t>{}(dim));
+        hashCombine(h, std::hash<size_t>{}(k.view_strides.size()));
+        for (uint64_t stride : k.view_strides)
+            hashCombine(h, std::hash<uint64_t>{}(stride));
+        hashCombine(h, std::hash<uint64_t>{}(k.view_element_offset));
         return h;
     }
 };
@@ -345,6 +355,9 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
                 key.aux = n.aux;
             }
             key.reduction_axes = n.reduction_axes;
+            key.view_dims = n.view_dims;
+            key.view_strides = n.view_strides;
+            key.view_element_offset = n.view_element_offset;
             key.squeeze_axes = n.squeeze_axes;
             key.unsqueeze_axes = n.unsqueeze_axes;
             break;
@@ -511,7 +524,7 @@ static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
     return isCudnnReduceOp(op) || isSoftmaxOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) || isAttentionBackwardOp(op) ||
-           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isTransposeOp(op);
+           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isTransposeOp(op) || op == ExprOp::STRIDED_VIEW;
 }
 
 static uint32_t peelExplicitTransposeChain(const PhysicalExpression& expr, uint32_t node_idx, bool& transpose_toggled) {
@@ -697,6 +710,10 @@ static const char* fusedOpTag(ExprOp op) {
             return "FILL";
         case ExprOp::RESHAPE:
             return "RESHAPE";
+        case ExprOp::STRIDED_VIEW:
+            return "VIEW";
+        case ExprOp::STRIDED_VIEW_BACKWARD:
+            return "VIEW_BW";
         case ExprOp::UNSQUEEZE:
             return "UNSQ";
         case ExprOp::SQUEEZE:
@@ -3535,7 +3552,7 @@ static bool regionContainsShapeOnlyOp(const PhysicalExpression& expr, const std:
             throw std::runtime_error("regionContainsShapeOnlyOp node index out of range.");
         }
         const ExprNode& node = expr.nodes[node_idx];
-        if (node.op == ExprOp::RESHAPE || node.op == ExprOp::UNSQUEEZE || node.op == ExprOp::SQUEEZE) {
+        if (node.op == ExprOp::RESHAPE || node.op == ExprOp::STRIDED_VIEW || node.op == ExprOp::UNSQUEEZE || node.op == ExprOp::SQUEEZE) {
             return true;
         }
     }
@@ -3583,24 +3600,25 @@ static void forceReductionProducerOutputDTypeIfNeeded(PhysicalExpression& expr, 
 }
 
 static bool isContiguousReshapeAliasOp(ExprOp op) { return op == ExprOp::RESHAPE; }
+static bool isStorageAliasOp(ExprOp op) { return op == ExprOp::RESHAPE || op == ExprOp::STRIDED_VIEW; }
 
 static bool reshapeAliasPreservesDType(const PhysicalExpression& expr, uint32_t reshape_idx) {
     if (reshape_idx >= expr.nodes.size()) {
         throw std::runtime_error("reshapeAliasPreservesDType node index out of range.");
     }
     const ExprNode& reshape_node = expr.nodes[reshape_idx];
-    if (!isContiguousReshapeAliasOp(reshape_node.op)) {
+    if (!isStorageAliasOp(reshape_node.op)) {
         return false;
     }
     if (reshape_node.lhs == UINT32_MAX || reshape_node.lhs >= expr.nodes.size()) {
-        throw std::runtime_error("Reshape alias node is missing a valid source while checking dtype preservation.");
+        throw std::runtime_error("Storage alias node is missing a valid source while checking dtype preservation.");
     }
     if (!reshape_node.output_dtype.has_value()) {
-        throw std::runtime_error("Reshape alias node missing resolved output dtype.");
+        throw std::runtime_error("Storage alias node missing resolved output dtype.");
     }
     const ExprNode& source_node = expr.nodes[reshape_node.lhs];
     if (!source_node.output_dtype.has_value()) {
-        throw std::runtime_error("Reshape alias source node missing resolved output dtype.");
+        throw std::runtime_error("Storage alias source node missing resolved output dtype.");
     }
     return reshape_node.output_dtype.value() == source_node.output_dtype.value();
 }
@@ -3699,7 +3717,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
     std::function<void(size_t)> materializeTerminalGroup;
     std::function<void(uint32_t)> emitForDependency;
-    std::function<uint32_t(uint32_t, std::optional<uint32_t>)> emitContiguousReshapeAlias;
+    std::function<uint32_t(uint32_t, std::optional<uint32_t>)> emitStorageAlias;
     std::function<bool(uint32_t, uint32_t, const std::string&)> tryEmitTiledTransposeMaterializedFusedStage;
 
     materializeTerminalGroup = [&](size_t group_idx) {
@@ -3725,7 +3743,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         group.emitted = true;
     };
 
-    emitContiguousReshapeAlias = [&](uint32_t reshape_idx, std::optional<uint32_t> forced_value_id) -> uint32_t {
+    emitStorageAlias = [&](uint32_t reshape_idx, std::optional<uint32_t> forced_value_id) -> uint32_t {
         auto existing_it = node_output_value_id.find(reshape_idx);
         if (existing_it != node_output_value_id.end()) {
             return existing_it->second;
@@ -3734,24 +3752,34 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             throw std::runtime_error("Reshape alias node index out of range.");
         }
         const ExprNode& reshape_node = expr.nodes[reshape_idx];
-        if (!isContiguousReshapeAliasOp(reshape_node.op)) {
-            throw std::runtime_error("emitContiguousReshapeAlias called on a non-reshape node.");
+        if (!isStorageAliasOp(reshape_node.op)) {
+            throw std::runtime_error("emitStorageAlias called on a non-alias node.");
         }
         if (!reshapeAliasPreservesDType(expr, reshape_idx)) {
-            throw std::runtime_error("emitContiguousReshapeAlias called on a reshape that requires dtype conversion.");
+            throw std::runtime_error("emitStorageAlias called on a reshape that requires dtype conversion.");
         }
         if (reshape_node.lhs == UINT32_MAX || reshape_node.lhs >= expr.nodes.size()) {
             throw std::runtime_error("Reshape alias node is missing a valid source.");
         }
-        if (reshape_node.reshape_dims.empty()) {
-            throw std::runtime_error("Reshape alias node is missing output dimensions.");
+        const std::vector<uint64_t>& alias_dims = reshape_node.op == ExprOp::STRIDED_VIEW ? reshape_node.view_dims : reshape_node.reshape_dims;
+        if (alias_dims.empty()) {
+            throw std::runtime_error("Storage alias node is missing output dimensions.");
+        }
+        std::vector<uint64_t> alias_strides;
+        uint64_t alias_offset = 0;
+        if (reshape_node.op == ExprOp::STRIDED_VIEW) {
+            alias_strides = reshape_node.view_strides;
+            alias_offset = reshape_node.view_element_offset;
+            if (alias_strides.size() != alias_dims.size()) {
+                throw std::runtime_error("Strided-view alias dimensions and strides must have the same rank.");
+            }
         }
 
         const uint32_t source_node_idx = reshape_node.lhs;
         const ExprNode& source_node = expr.nodes[source_node_idx];
         uint32_t source_value_id = UINT32_MAX;
-        if (isContiguousReshapeAliasOp(source_node.op) && reshapeAliasPreservesDType(expr, source_node_idx)) {
-            source_value_id = emitContiguousReshapeAlias(source_node_idx, std::nullopt);
+        if (isStorageAliasOp(source_node.op) && reshapeAliasPreservesDType(expr, source_node_idx)) {
+            source_value_id = emitStorageAlias(source_node_idx, std::nullopt);
         } else if (source_node.op == ExprOp::INPUT && !inputRequiresMaterialization(source_node)) {
             source_value_id = source_node.input_slot;
         } else {
@@ -3768,7 +3796,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         planned.value_aliases.push_back(CompiledValueAlias{
             .value_id = alias_value_id,
             .source_value_id = source_value_id,
-            .dimensions = reshape_node.reshape_dims,
+            .dimensions = alias_dims,
+            .strides = std::move(alias_strides),
+            .element_offset = alias_offset,
         });
         return alias_value_id;
     };
@@ -3831,8 +3861,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
 
         const ExprNode& root = expr.nodes[root_idx];
-        if (isContiguousReshapeAliasOp(root.op) && reshapeAliasPreservesDType(expr, root_idx)) {
-            emitContiguousReshapeAlias(root_idx, std::nullopt);
+        if (isStorageAliasOp(root.op) && reshapeAliasPreservesDType(expr, root_idx)) {
+            emitStorageAlias(root_idx, std::nullopt);
             return;
         }
         if (isTransposeOp(root.op)) {
@@ -4093,8 +4123,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             continue;
         }
 
-        if (isContiguousReshapeAliasOp(root.op) && reshapeAliasPreservesDType(expr, named_output.node_idx)) {
-            const uint32_t alias_value_id = emitContiguousReshapeAlias(named_output.node_idx, std::nullopt);
+        if (isStorageAliasOp(root.op) && reshapeAliasPreservesDType(expr, named_output.node_idx)) {
+            const uint32_t alias_value_id = emitStorageAlias(named_output.node_idx, std::nullopt);
             planned.final_outputs.push_back(CompiledStageOutput{
                 .name = named_output.name,
                 .local_node_idx = UINT32_MAX,

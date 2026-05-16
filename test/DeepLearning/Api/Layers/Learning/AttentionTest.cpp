@@ -8,6 +8,7 @@
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 
 #include "cuda_fp16.h"
+#include <cuda_bf16.h>
 #include "gtest/gtest.h"
 
 #include <algorithm>
@@ -53,6 +54,12 @@ void writeCpuTensor(Impl::Tensor& tensor, const vector<float>& values) {
                 ptr[i] = __float2half(values[i]);
             break;
         }
+        case DataType::BF16: {
+            auto* ptr = static_cast<__nv_bfloat16*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                ptr[i] = __float2bfloat16(values[i]);
+            break;
+        }
         case DataType::FP32: {
             auto* ptr = static_cast<float*>(tensor.getMemPtr());
             for (uint64_t i = 0; i < values.size(); ++i)
@@ -73,6 +80,12 @@ vector<float> readCpuTensor(const Impl::Tensor& tensor) {
             const auto* ptr = static_cast<const half*>(tensor.getMemPtr());
             for (uint64_t i = 0; i < values.size(); ++i)
                 values[i] = __half2float(ptr[i]);
+            break;
+        }
+        case DataType::BF16: {
+            const auto* ptr = static_cast<const __nv_bfloat16*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i)
+                values[i] = __bfloat162float(ptr[i]);
             break;
         }
         case DataType::FP32: {
@@ -106,13 +119,15 @@ void expectNotAllClose(const vector<float>& lhs, const vector<float>& rhs, float
             return;
         }
     }
-    FAIL() << "sentinel references are too close; this test would not catch a RoPE layout mismatch";
+    FAIL() << "sentinel references are too close; this test would not catch the intended feature mismatch";
 }
 
 float castToStorage(float value, DataType dataType) {
     switch (dataType) {
         case DataType::FP16:
             return __half2float(__float2half(value));
+        case DataType::BF16:
+            return __bfloat162float(__float2bfloat16(value));
         case DataType::FP32:
             return value;
         default:
@@ -201,6 +216,9 @@ struct AttentionReferenceCase {
     bool useRope = false;
     Impl::RotaryPositionEmbeddingOptions ropeOptions;
     Impl::AttentionMaskKind maskKind = Impl::AttentionMaskKind::None;
+    int64_t diagonalLeftBound = 0;
+    int64_t diagonalRightBound = 0;
+    bool useAlibiMask = false;
     float attentionScale = 1.0f;
     DataType dataType = DataType::FP16;
 };
@@ -220,7 +238,47 @@ struct AttentionReferenceInputs {
 uint32_t qWidth(const AttentionReferenceCase& c) { return c.numHeads * c.headDim; }
 uint32_t kWidth(const AttentionReferenceCase& c) { return c.numKeyValueHeads * c.headDim; }
 uint32_t vWidth(const AttentionReferenceCase& c) { return c.numKeyValueHeads * c.valueDim; }
+uint32_t qkvWidth(const AttentionReferenceCase& c) { return qWidth(c) + kWidth(c) + vWidth(c); }
 uint32_t mergedWidth(const AttentionReferenceCase& c) { return c.numHeads * c.valueDim; }
+
+constexpr bool attentionUsesPackedQkv(bool useRope) {
+    if constexpr (!Api::Attention::USE_PACKED_QKV_PROJECTION) {
+        return false;
+    } else if constexpr (Api::Attention::USE_PACKED_QKV_PROJECTION_WITH_ROPE) {
+        (void)useRope;
+        return true;
+    } else {
+        return !useRope;
+    }
+}
+
+bool attentionUsesPackedQkv(const AttentionReferenceCase& c) { return attentionUsesPackedQkv(c.useRope); }
+
+vector<float> packQkvWeights(const AttentionReferenceInputs& inputs, const AttentionReferenceCase& c) {
+    vector<float> qkv(static_cast<uint64_t>(c.inputFeatures) * qkvWidth(c), 0.0f);
+    for (uint32_t f = 0; f < c.inputFeatures; ++f) {
+        const uint64_t packedRow = static_cast<uint64_t>(f) * qkvWidth(c);
+        const uint64_t qRow = static_cast<uint64_t>(f) * qWidth(c);
+        const uint64_t kRow = static_cast<uint64_t>(f) * kWidth(c);
+        const uint64_t vRow = static_cast<uint64_t>(f) * vWidth(c);
+        std::copy(inputs.queryWeights.begin() + qRow, inputs.queryWeights.begin() + qRow + qWidth(c), qkv.begin() + packedRow);
+        std::copy(inputs.keyWeights.begin() + kRow,
+                  inputs.keyWeights.begin() + kRow + kWidth(c),
+                  qkv.begin() + packedRow + qWidth(c));
+        std::copy(inputs.valueWeights.begin() + vRow,
+                  inputs.valueWeights.begin() + vRow + vWidth(c),
+                  qkv.begin() + packedRow + qWidth(c) + kWidth(c));
+    }
+    return qkv;
+}
+
+vector<float> packQkvBias(const AttentionReferenceInputs& inputs, const AttentionReferenceCase& c) {
+    vector<float> qkv(qkvWidth(c), 0.0f);
+    std::copy(inputs.queryBias.begin(), inputs.queryBias.end(), qkv.begin());
+    std::copy(inputs.keyBias.begin(), inputs.keyBias.end(), qkv.begin() + qWidth(c));
+    std::copy(inputs.valueBias.begin(), inputs.valueBias.end(), qkv.begin() + qWidth(c) + kWidth(c));
+    return qkv;
+}
 
 vector<float> makePatternVector(uint64_t count, float scale, int64_t a, int64_t b, int64_t modulus) {
     vector<float> values(count, 0.0f);
@@ -334,6 +392,50 @@ AttentionReferenceInputs makeRopeLayoutSentinelInputs(const AttentionReferenceCa
     return inputs;
 }
 
+AttentionReferenceInputs makeAlibiSentinelInputs(const AttentionReferenceCase& c) {
+    if (c.numHeads != c.numKeyValueHeads || c.headDim != c.valueDim || c.inputFeatures < mergedWidth(c) ||
+        c.outputFeatures > mergedWidth(c) || c.hasBias || c.useRope) {
+        throw std::runtime_error(
+            "ALiBi sentinel input helper expects bias-free non-RoPE MHA with input/output widths compatible with the merged head width.");
+    }
+
+    AttentionReferenceInputs inputs;
+    inputs.featureInput.resize(static_cast<uint64_t>(c.batchSize) * c.sequenceLength * c.inputFeatures, 0.0f);
+    for (uint32_t b = 0; b < c.batchSize; ++b) {
+        for (uint32_t s = 0; s < c.sequenceLength; ++s) {
+            for (uint32_t h = 0; h < c.numHeads; ++h) {
+                for (uint32_t d = 0; d < c.valueDim; ++d) {
+                    const uint32_t f = h * c.valueDim + d;
+                    inputs.featureInput[idx3(b, s, f, c.sequenceLength, c.inputFeatures)] =
+                        0.05f * static_cast<float>(b + 1) + 0.40f * static_cast<float>(s + 1) +
+                        0.03f * static_cast<float>(h + 1) + 0.002f * static_cast<float>(d + 1);
+                }
+            }
+        }
+    }
+
+    inputs.queryWeights.resize(static_cast<uint64_t>(c.inputFeatures) * qWidth(c), 0.0f);
+    inputs.keyWeights.resize(static_cast<uint64_t>(c.inputFeatures) * kWidth(c), 0.0f);
+    inputs.valueWeights.resize(static_cast<uint64_t>(c.inputFeatures) * vWidth(c), 0.0f);
+    inputs.outputWeights.resize(static_cast<uint64_t>(mergedWidth(c)) * c.outputFeatures, 0.0f);
+
+    // Keep Q/K logits at zero so the no-ALiBi reference is a uniform average over the causal prefix.
+    // Value/output identity projections make the ALiBi preference for recent keys directly visible in feature_output.
+    for (uint32_t i = 0; i < mergedWidth(c); ++i) {
+        inputs.valueWeights[static_cast<uint64_t>(i) * vWidth(c) + i] = 1.0f;
+        if (i < c.outputFeatures) {
+            inputs.outputWeights[static_cast<uint64_t>(i) * c.outputFeatures + i] = 1.0f;
+        }
+    }
+
+    inputs.featureInput = castVectorToStorage(std::move(inputs.featureInput), c.dataType);
+    inputs.queryWeights = castVectorToStorage(std::move(inputs.queryWeights), c.dataType);
+    inputs.keyWeights = castVectorToStorage(std::move(inputs.keyWeights), c.dataType);
+    inputs.valueWeights = castVectorToStorage(std::move(inputs.valueWeights), c.dataType);
+    inputs.outputWeights = castVectorToStorage(std::move(inputs.outputWeights), c.dataType);
+    return inputs;
+}
+
 vector<float> projectToBhsd(const vector<float>& featureInput,
                             const vector<float>& weights,
                             const vector<float>* bias,
@@ -414,14 +516,42 @@ void applyRopeInPlace(vector<float>& bhsd, const AttentionReferenceCase& c, uint
 }
 
 bool attentionKeyAllowed(const AttentionReferenceCase& c, uint32_t queryIndex, uint32_t keyIndex) {
+    const int64_t q = static_cast<int64_t>(queryIndex);
+    const int64_t k = static_cast<int64_t>(keyIndex);
+
     switch (c.maskKind) {
         case Impl::AttentionMaskKind::None:
             return true;
         case Impl::AttentionMaskKind::CausalTopLeft:
-            return keyIndex <= queryIndex;
+            return k <= q;
+        case Impl::AttentionMaskKind::CausalBottomRight:
+            // Attention layer is self-attention today, so query length and KV length are the same; bottom-right
+            // diagonal alignment numerically matches top-left alignment, but still exercises the cuDNN option path.
+            return k <= q;
+        case Impl::AttentionMaskKind::SlidingWindowTopLeft:
+            return k > (q - c.diagonalLeftBound) && k <= (q + c.diagonalRightBound);
+        case Impl::AttentionMaskKind::SlidingWindowBottomRight:
+            return k > (q - c.diagonalLeftBound) && k <= (q + c.diagonalRightBound);
         default:
             throw std::runtime_error("Unsupported mask kind in Attention API CPU reference test.");
     }
+}
+
+float alibiSlope(uint32_t numHeads, uint32_t head) {
+    const uint32_t closestPowerOfTwo = 1U << static_cast<uint32_t>(std::floor(std::log2(static_cast<float>(numHeads))));
+    if (head < closestPowerOfTwo) {
+        const float base = std::pow(2.0f, -8.0f / static_cast<float>(closestPowerOfTwo));
+        return std::pow(base, static_cast<float>(head + 1));
+    }
+
+    const float extraBase = std::pow(2.0f, -4.0f / static_cast<float>(closestPowerOfTwo));
+    const uint32_t extraIndex = head - closestPowerOfTwo;
+    return std::pow(extraBase, static_cast<float>(1 + 2 * extraIndex));
+}
+
+float alibiBias(uint32_t numHeads, uint32_t head, uint32_t queryIndex, uint32_t keyIndex) {
+    return alibiSlope(numHeads, head) *
+           (static_cast<float>(static_cast<int64_t>(keyIndex) - static_cast<int64_t>(queryIndex)));
 }
 
 vector<float> sdpaReference(const vector<float>& q, const vector<float>& k, const vector<float>& v, const AttentionReferenceCase& c) {
@@ -442,6 +572,8 @@ vector<float> sdpaReference(const vector<float>& q, const vector<float>& k, cons
                                k[idx4(b, kvHead, sk, d, c.numKeyValueHeads, c.sequenceLength, c.headDim)];
                     }
                     scores[sk] = dot * c.attentionScale;
+                    if (c.useAlibiMask)
+                        scores[sk] += alibiBias(c.numHeads, h, sq, sk);
                     maxScore = std::max(maxScore, scores[sk]);
                 }
 
@@ -627,14 +759,22 @@ void setAttentionParameters(const shared_ptr<Impl::CustomLayer>& physicalAttenti
                             const AttentionReferenceInputs& inputs,
                             const AttentionReferenceCase& c,
                             Stream& stream) {
-    setParameterTensor(physicalAttention->getParameter("query_weights"), inputs.queryWeights, stream);
-    setParameterTensor(physicalAttention->getParameter("key_weights"), inputs.keyWeights, stream);
-    setParameterTensor(physicalAttention->getParameter("value_weights"), inputs.valueWeights, stream);
+    if (attentionUsesPackedQkv(c)) {
+        setParameterTensor(physicalAttention->getParameter("qkv_weights"), packQkvWeights(inputs, c), stream);
+    } else {
+        setParameterTensor(physicalAttention->getParameter("query_weights"), inputs.queryWeights, stream);
+        setParameterTensor(physicalAttention->getParameter("key_weights"), inputs.keyWeights, stream);
+        setParameterTensor(physicalAttention->getParameter("value_weights"), inputs.valueWeights, stream);
+    }
     setParameterTensor(physicalAttention->getParameter("output_weights"), inputs.outputWeights, stream);
     if (c.hasBias) {
-        setParameterTensor(physicalAttention->getParameter("query_bias"), inputs.queryBias, stream);
-        setParameterTensor(physicalAttention->getParameter("key_bias"), inputs.keyBias, stream);
-        setParameterTensor(physicalAttention->getParameter("value_bias"), inputs.valueBias, stream);
+        if (attentionUsesPackedQkv(c)) {
+            setParameterTensor(physicalAttention->getParameter("qkv_bias"), packQkvBias(inputs, c), stream);
+        } else {
+            setParameterTensor(physicalAttention->getParameter("query_bias"), inputs.queryBias, stream);
+            setParameterTensor(physicalAttention->getParameter("key_bias"), inputs.keyBias, stream);
+            setParameterTensor(physicalAttention->getParameter("value_bias"), inputs.valueBias, stream);
+        }
         setParameterTensor(physicalAttention->getParameter("output_bias"), inputs.outputBias, stream);
     }
     stream.synchronize();
@@ -662,6 +802,9 @@ void runAttentionApiReferenceCaseWithInputs(const std::string& networkName,
         .outputFeatures(c.outputFeatures)
         .hasBias(c.hasBias)
         .maskKind(c.maskKind)
+        .diagonalLeftBound(c.diagonalLeftBound)
+        .diagonalRightBound(c.diagonalRightBound)
+        .useAlibiMask(c.useAlibiMask)
         .weightsDataType(c.dataType)
         .computeDataType(DataType::FP32)
         .outputDataType(c.dataType)
@@ -799,6 +942,26 @@ TEST(AttentionApi, RejectsRank3FeatureInputForComposedAttention) {
                  std::invalid_argument);
 }
 
+TEST(AttentionApi, RejectsBottomRightMaskWithAlibi) {
+    Api::Network network("attention_api_rejects_bottom_right_mask_with_alibi");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({8, 64})
+                                  .dataType(DataType::FP16)
+                                  .build();
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(4)
+                     .maskKind(Impl::AttentionMaskKind::SlidingWindowBottomRight)
+                     .diagonalLeftBound(4)
+                     .useAlibiMask()
+                     .build(),
+                 std::invalid_argument);
+}
+
 TEST(AttentionApi, ForwardUniformAttentionMatchesBshdProjectionLayoutReference) {
     constexpr uint32_t batchSize = 2;
     constexpr uint32_t sequenceLength = 3;
@@ -839,8 +1002,12 @@ TEST(AttentionApi, ForwardUniformAttentionMatchesBshdProjectionLayoutReference) 
 
     PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, input, output, attention, batchSize, true);
     ASSERT_EQ(fixture.stampedNetwork->getNumTrainableLayers(), 1u);
-    ASSERT_EQ(fixture.physicalAttention->listParameters(),
-              (vector<string>{"query_weights", "key_weights", "value_weights", "output_weights"}));
+    if constexpr (Api::Attention::USE_PACKED_QKV_PROJECTION) {
+        ASSERT_EQ(fixture.physicalAttention->listParameters(), (vector<string>{"qkv_weights", "output_weights"}));
+    } else {
+        ASSERT_EQ(fixture.physicalAttention->listParameters(),
+                  (vector<string>{"query_weights", "key_weights", "value_weights", "output_weights"}));
+    }
 
     vector<float> queryWeights(inputFeatures * numHeads * headDim, 0.0f);
     vector<float> keyWeights(inputFeatures * numHeads * headDim, 0.0f);
@@ -851,12 +1018,27 @@ TEST(AttentionApi, ForwardUniformAttentionMatchesBshdProjectionLayoutReference) 
         outputWeights[i * outputFeatures + i] = 1.0f;
     }
 
+    AttentionReferenceCase parameterCase;
+    parameterCase.batchSize = batchSize;
+    parameterCase.sequenceLength = sequenceLength;
+    parameterCase.inputFeatures = inputFeatures;
+    parameterCase.outputFeatures = outputFeatures;
+    parameterCase.numHeads = numHeads;
+    parameterCase.numKeyValueHeads = numHeads;
+    parameterCase.headDim = headDim;
+    parameterCase.valueDim = valueDim;
+    parameterCase.hasBias = false;
+    parameterCase.useRope = false;
+    parameterCase.dataType = dataType;
+
+    AttentionReferenceInputs parameterInputs;
+    parameterInputs.queryWeights = queryWeights;
+    parameterInputs.keyWeights = keyWeights;
+    parameterInputs.valueWeights = valueWeights;
+    parameterInputs.outputWeights = outputWeights;
+
     Stream stream = fixture.physicalAttention->getStreams()[0];
-    setParameterTensor(fixture.physicalAttention->getParameter("query_weights"), queryWeights, stream);
-    setParameterTensor(fixture.physicalAttention->getParameter("key_weights"), keyWeights, stream);
-    setParameterTensor(fixture.physicalAttention->getParameter("value_weights"), valueWeights, stream);
-    setParameterTensor(fixture.physicalAttention->getParameter("output_weights"), outputWeights, stream);
-    stream.synchronize();
+    setAttentionParameters(fixture.physicalAttention, parameterInputs, parameterCase, stream);
 
     vector<float> inputValues(batchSize * sequenceLength * inputFeatures, 0.0f);
     auto inputIndex = [=](uint32_t b, uint32_t s, uint32_t feature) {
@@ -1010,3 +1192,142 @@ TEST(AttentionApi, ForwardRopeLayoutSentinelMatchesFullCpuReference) {
     runAttentionApiReferenceCaseWithInputs(
         "attention_api_forward_rope_layout_sentinel_matches_full_cpu_reference", c, inputs, 2.0e-1f, 2.0e-1f);
 }
+
+TEST(AttentionApi, ForwardBf16MhaWithBiasMatchesFullCpuReference) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 4;
+    c.numHeads = 2;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 32;
+    c.outputFeatures = 24;
+    c.hasBias = true;
+    c.maskKind = Impl::AttentionMaskKind::None;
+    c.attentionScale = 0.17f;
+    c.dataType = DataType::BF16;
+
+    runAttentionApiReferenceCase("attention_api_forward_bf16_mha_with_bias_matches_full_cpu_reference", c, 1.8e-1f, 1.8e-1f);
+}
+
+TEST(AttentionApi, ForwardCausalBottomRightNoBiasMatchesFullCpuReference) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 5;
+    c.numHeads = 2;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 32;
+    c.outputFeatures = 32;
+    c.hasBias = false;
+    c.maskKind = Impl::AttentionMaskKind::CausalBottomRight;
+    c.attentionScale = 0.21f;
+    c.dataType = DataType::FP16;
+
+    runAttentionApiReferenceCase("attention_api_forward_causal_bottom_right_no_bias_matches_full_cpu_reference", c, 1.2e-1f, 1.2e-1f);
+}
+
+TEST(AttentionApi, ForwardSlidingWindowTopLeftWithRightBoundMatchesFullCpuReference) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 5;
+    c.numHeads = 4;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 64;
+    c.outputFeatures = 48;
+    c.hasBias = true;
+    c.maskKind = Impl::AttentionMaskKind::SlidingWindowTopLeft;
+    c.diagonalLeftBound = 2;
+    c.diagonalRightBound = 1;
+    c.attentionScale = 0.19f;
+    c.dataType = DataType::FP16;
+
+    runAttentionApiReferenceCase("attention_api_forward_sliding_window_top_left_with_right_bound_matches_full_cpu_reference", c, 1.3e-1f, 1.3e-1f);
+}
+
+TEST(AttentionApi, ForwardCausalTopLeftWithAlibiMatchesFullCpuReferenceAndDiffersFromPlainMask) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 5;
+    c.numHeads = 4;
+    c.numKeyValueHeads = 4;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 64;
+    c.outputFeatures = 40;
+    c.hasBias = false;
+    c.maskKind = Impl::AttentionMaskKind::CausalTopLeft;
+    c.useAlibiMask = true;
+    c.attentionScale = 0.18f;
+    c.dataType = DataType::FP16;
+
+    const AttentionReferenceInputs inputs = makeAlibiSentinelInputs(c);
+    AttentionReferenceCase plainMaskCase = c;
+    plainMaskCase.useAlibiMask = false;
+    const vector<float> expected = attentionLayerReference(inputs, c);
+    const vector<float> plainMaskExpected = attentionLayerReference(inputs, plainMaskCase);
+    expectNotAllClose(expected, plainMaskExpected, 2.0e-2f, 2.0e-2f);
+
+    runAttentionApiReferenceCaseWithInputs(
+        "attention_api_forward_causal_top_left_with_alibi_matches_full_cpu_reference", c, inputs, 1.5e-1f, 1.5e-1f);
+}
+
+TEST(AttentionApi, ForwardRopeLinearInverseGqaWithBiasMatchesFullCpuReference) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 4;
+    c.numHeads = 4;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 64;
+    c.outputFeatures = 48;
+    c.hasBias = true;
+    c.useRope = true;
+    c.ropeOptions.rotary_dim = 8;
+    c.ropeOptions.base = 256.0;
+    c.ropeOptions.position_offset = 2;
+    c.ropeOptions.inverse = true;
+    c.ropeOptions.scaling_kind = Impl::RotaryScalingKind::Linear;
+    c.ropeOptions.scaling_factor = 2.0;
+    c.ropeOptions.output_dtype = DataType::FP16;
+    c.ropeOptions.compute_dtype = DataType::FP32;
+    c.maskKind = Impl::AttentionMaskKind::None;
+    c.attentionScale = 0.18f;
+    c.dataType = DataType::FP16;
+
+    runAttentionApiReferenceCase("attention_api_forward_rope_linear_inverse_gqa_with_bias_matches_full_cpu_reference", c, 1.5e-1f, 1.5e-1f);
+}
+
+TEST(AttentionApi, ForwardRopeDynamicNtkInterleavedMhaMatchesFullCpuReference) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 6;
+    c.numHeads = 2;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 32;
+    c.outputFeatures = 32;
+    c.hasBias = false;
+    c.useRope = true;
+    c.ropeOptions.rotary_dim = 8;
+    c.ropeOptions.base = 10000.0;
+    c.ropeOptions.position_offset = 1;
+    c.ropeOptions.interleaved = true;
+    c.ropeOptions.scaling_kind = Impl::RotaryScalingKind::DynamicNTK;
+    c.ropeOptions.scaling_factor = 2.0;
+    c.ropeOptions.original_max_position_embeddings = 4;
+    c.ropeOptions.output_dtype = DataType::FP16;
+    c.ropeOptions.compute_dtype = DataType::FP32;
+    c.maskKind = Impl::AttentionMaskKind::None;
+    c.attentionScale = 0.22f;
+    c.dataType = DataType::FP16;
+
+    runAttentionApiReferenceCase("attention_api_forward_rope_dynamic_ntk_interleaved_mha_matches_full_cpu_reference", c, 1.6e-1f, 1.6e-1f);
+}
+

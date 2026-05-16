@@ -287,6 +287,10 @@ struct CompiledValueAlias {
     uint32_t value_id = UINT32_MAX;
     uint32_t source_value_id = UINT32_MAX;
     std::vector<uint64_t> dimensions;
+    // Empty strides means a dense contiguous reshape alias. Non-empty strides are element strides
+    // relative to the alias base pointer, and element_offset is relative to the source tensor view.
+    std::vector<uint64_t> strides;
+    uint64_t element_offset = 0;
 };
 
 struct CompiledOutputs {

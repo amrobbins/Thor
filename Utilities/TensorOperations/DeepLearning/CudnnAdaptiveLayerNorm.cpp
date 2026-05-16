@@ -48,6 +48,15 @@ bool isSupportedAdaptiveLayerNormIoDtype(TensorDescriptor::DataType dtype) {
     }
 }
 
+void validateCudnnFrontendPrimaryEngineContract(const CudnnAdaptiveLayerNormDescriptor& descriptor) {
+    if ((descriptor.inputDataType == TensorDescriptor::DataType::FP32 || descriptor.outputDataType == TensorDescriptor::DataType::FP32) &&
+        descriptor.normalizedFeatureCount % 32 != 0) {
+        throwInvalidAdaptiveLayerNorm(
+            "cuDNN Frontend primary AdaptiveLayerNorm engines require fp32 normalizedFeatureCount to be a multiple of 32; got " +
+            to_string(descriptor.normalizedFeatureCount));
+    }
+}
+
 fe::DataType_t toFrontendDataType(TensorDescriptor::DataType dtype) {
     switch (dtype) {
         case TensorDescriptor::DataType::FP16:
@@ -81,7 +90,15 @@ uint64_t checkedMul(uint64_t a, uint64_t b, string_view what) {
 }
 
 uint64_t ioElementCount(const CudnnAdaptiveLayerNormDescriptor& descriptor) {
-    return checkedMul(descriptor.outerSize, descriptor.normalizedFeatureCount, "IO");
+    return checkedMul(checkedMul(descriptor.batchSize, descriptor.leadingFeatureCount, "IO leading"), descriptor.normalizedFeatureCount, "IO");
+}
+
+uint64_t scaleBiasElementCount(const CudnnAdaptiveLayerNormDescriptor& descriptor) {
+    return checkedMul(descriptor.batchSize, descriptor.normalizedFeatureCount, "scale/bias");
+}
+
+uint64_t statsElementCount(const CudnnAdaptiveLayerNormDescriptor& descriptor) {
+    return checkedMul(descriptor.batchSize, descriptor.leadingFeatureCount, "stats");
 }
 
 void requireInitialized(const Tensor& tensor, string_view name) {
@@ -130,10 +147,16 @@ void requireIoTensor(const Tensor& tensor,
     requireNumElements(tensor, ioElementCount(descriptor), name);
 }
 
+void requireScaleBiasTensor(const Tensor& tensor, const CudnnAdaptiveLayerNormDescriptor& descriptor, int gpuNum, string_view name) {
+    requireSameGpu(tensor, gpuNum, name);
+    requireDtype(tensor, descriptor.scaleBiasDataType, name);
+    requireNumElements(tensor, scaleBiasElementCount(descriptor), name);
+}
+
 void requireStatsTensor(const Tensor& tensor, const CudnnAdaptiveLayerNormDescriptor& descriptor, int gpuNum, string_view name) {
     requireSameGpu(tensor, gpuNum, name);
     requireDtype(tensor, TensorDescriptor::DataType::FP32, name);
-    requireNumElements(tensor, descriptor.outerSize, name);
+    requireNumElements(tensor, statsElementCount(descriptor), name);
 }
 
 void insertTensor(unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor& tensor) {
@@ -141,19 +164,34 @@ void insertTensor(unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor
 }
 
 vector<int64_t> ioDims(const CudnnAdaptiveLayerNormDescriptor& descriptor) {
-    return {checkedI64(descriptor.outerSize, "outerSize"), checkedI64(descriptor.normalizedFeatureCount, "normalizedFeatureCount"), 1, 1};
+    return {checkedI64(descriptor.batchSize, "batchSize"),
+            checkedI64(descriptor.leadingFeatureCount, "leadingFeatureCount"),
+            checkedI64(descriptor.normalizedFeatureCount, "normalizedFeatureCount")};
 }
 
 vector<int64_t> ioStrides(const CudnnAdaptiveLayerNormDescriptor& descriptor) {
+    const int64_t leading = checkedI64(descriptor.leadingFeatureCount, "leadingFeatureCount");
     const int64_t hidden = checkedI64(descriptor.normalizedFeatureCount, "normalizedFeatureCount");
-    return {hidden, 1, hidden, hidden};
+    return {leading * hidden, hidden, 1};
+}
+
+vector<int64_t> scaleBiasDims(const CudnnAdaptiveLayerNormDescriptor& descriptor) {
+    return {checkedI64(descriptor.batchSize, "batchSize"), 1, checkedI64(descriptor.normalizedFeatureCount, "normalizedFeatureCount")};
+}
+
+vector<int64_t> scaleBiasStrides(const CudnnAdaptiveLayerNormDescriptor& descriptor) {
+    const int64_t hidden = checkedI64(descriptor.normalizedFeatureCount, "normalizedFeatureCount");
+    return {hidden, hidden, 1};
 }
 
 vector<int64_t> statsDims(const CudnnAdaptiveLayerNormDescriptor& descriptor) {
-    return {checkedI64(descriptor.outerSize, "outerSize"), 1, 1, 1};
+    return {checkedI64(descriptor.batchSize, "batchSize"), checkedI64(descriptor.leadingFeatureCount, "leadingFeatureCount"), 1};
 }
 
-vector<int64_t> statsStrides(const CudnnAdaptiveLayerNormDescriptor&) { return {1, 1, 1, 1}; }
+vector<int64_t> statsStrides(const CudnnAdaptiveLayerNormDescriptor& descriptor) {
+    const int64_t leading = checkedI64(descriptor.leadingFeatureCount, "leadingFeatureCount");
+    return {leading, 1, 1};
+}
 
 struct BuiltGraph {
     shared_ptr<fe::graph::Graph> graph;
@@ -253,8 +291,18 @@ class AdaptiveLayerNormGraphCache {
         const vector<int64_t> dims = ioDims(descriptor);
         const vector<int64_t> strides = ioStrides(descriptor);
         auto x = ioTensor(built.graph, descriptor.debugName + "_x", UID_X, dims, strides);
-        auto scale = tensor(built.graph, descriptor.debugName + "_scale", UID_SCALE, dims, strides, descriptor.scaleBiasDataType);
-        auto bias = tensor(built.graph, descriptor.debugName + "_bias", UID_BIAS, dims, strides, descriptor.scaleBiasDataType);
+        auto scale = tensor(built.graph,
+                            descriptor.debugName + "_scale",
+                            UID_SCALE,
+                            scaleBiasDims(descriptor),
+                            scaleBiasStrides(descriptor),
+                            descriptor.scaleBiasDataType);
+        auto bias = tensor(built.graph,
+                           descriptor.debugName + "_bias",
+                           UID_BIAS,
+                           scaleBiasDims(descriptor),
+                           scaleBiasStrides(descriptor),
+                           descriptor.scaleBiasDataType);
         auto epsilon = built.graph->tensor(descriptor.epsilon);
 
         auto attrs = fe::graph::AdaLayernorm_attributes()
@@ -302,7 +350,12 @@ class AdaptiveLayerNormGraphCache {
         const vector<int64_t> strides = ioStrides(descriptor);
         auto dy = ioTensor(built.graph, descriptor.debugName + "_dy", UID_DY, dims, strides);
         auto x = ioTensor(built.graph, descriptor.debugName + "_x", UID_X, dims, strides);
-        auto scale = tensor(built.graph, descriptor.debugName + "_scale", UID_SCALE, dims, strides, descriptor.scaleBiasDataType);
+        auto scale = tensor(built.graph,
+                            descriptor.debugName + "_scale",
+                            UID_SCALE,
+                            scaleBiasDims(descriptor),
+                            scaleBiasStrides(descriptor),
+                            descriptor.scaleBiasDataType);
         auto mean = tensor(built.graph,
                            descriptor.debugName + "_mean",
                            UID_MEAN,
@@ -325,11 +378,14 @@ class AdaptiveLayerNormGraphCache {
         dx->set_output(true).set_uid(UID_DX).set_dim(dims).set_stride(strides);
         dscale->set_output(true)
             .set_uid(UID_DSCALE)
-            .set_dim(dims)
-            .set_stride(strides)
+            .set_dim(scaleBiasDims(descriptor))
+            .set_stride(scaleBiasStrides(descriptor))
             .set_data_type(toFrontendDataType(descriptor.scaleBiasDataType));
-        dbias->set_output(true).set_uid(UID_DBIAS).set_dim(dims).set_stride(strides).set_data_type(
-            toFrontendDataType(descriptor.scaleBiasDataType));
+        dbias->set_output(true)
+            .set_uid(UID_DBIAS)
+            .set_dim(scaleBiasDims(descriptor))
+            .set_stride(scaleBiasStrides(descriptor))
+            .set_data_type(toFrontendDataType(descriptor.scaleBiasDataType));
 
         finalize(built, gpuNum);
         return built;
@@ -347,9 +403,12 @@ AdaptiveLayerNormGraphCache& cache() {
 }  // namespace
 
 void CudnnAdaptiveLayerNormDescriptor::validateForward() const {
-    checkedI64(outerSize, "outerSize");
+    checkedI64(batchSize, "batchSize");
+    checkedI64(leadingFeatureCount, "leadingFeatureCount");
     checkedI64(normalizedFeatureCount, "normalizedFeatureCount");
     (void)ioElementCount(*this);
+    (void)scaleBiasElementCount(*this);
+    (void)statsElementCount(*this);
     if (!isSupportedAdaptiveLayerNormIoDtype(inputDataType)) {
         throwInvalidAdaptiveLayerNorm("inputDataType must be fp16, bf16, or fp32; got " + dtypeName(inputDataType));
     }
@@ -365,14 +424,15 @@ void CudnnAdaptiveLayerNormDescriptor::validateForward() const {
     if (!(epsilon > 0.0f)) {
         throwInvalidAdaptiveLayerNorm("epsilon must be > 0");
     }
+    validateCudnnFrontendPrimaryEngineContract(*this);
 }
 
 void CudnnAdaptiveLayerNormDescriptor::validateBackward() const { validateForward(); }
 
 string CudnnAdaptiveLayerNormDescriptor::cacheKey(string_view passName, int gpuNum) const {
     ostringstream out;
-    out << "adalayernorm:" << passName << ":gpu=" << gpuNum << ":outer=" << outerSize << ":hidden=" << normalizedFeatureCount
-        << ":in=" << static_cast<int>(inputDataType) << ":out=" << static_cast<int>(outputDataType)
+    out << "adalayernorm:" << passName << ":gpu=" << gpuNum << ":batch=" << batchSize << ":leading=" << leadingFeatureCount
+        << ":hidden=" << normalizedFeatureCount << ":in=" << static_cast<int>(inputDataType) << ":out=" << static_cast<int>(outputDataType)
         << ":scale_bias=" << static_cast<int>(scaleBiasDataType) << ":compute=" << static_cast<int>(computeDataType) << ":eps=" << epsilon
         << ":training=" << training;
     return out.str();
@@ -390,8 +450,8 @@ void CudnnAdaptiveLayerNorm::forward(const CudnnAdaptiveLayerNormDescriptor& des
     const int gpuNum = stream.getGpuNum();
     requireIoTensor(args.x, descriptor, descriptor.inputDataType, gpuNum, "x");
     requireIoTensor(args.y, descriptor, descriptor.outputDataType, gpuNum, "y");
-    requireIoTensor(args.scale, descriptor, descriptor.scaleBiasDataType, gpuNum, "scale");
-    requireIoTensor(args.bias, descriptor, descriptor.scaleBiasDataType, gpuNum, "bias");
+    requireScaleBiasTensor(args.scale, descriptor, gpuNum, "scale");
+    requireScaleBiasTensor(args.bias, descriptor, gpuNum, "bias");
     if (descriptor.training) {
         if (!args.mean.has_value() || !args.invVariance.has_value()) {
             throw invalid_argument("cuDNN AdaptiveLayerNorm forward training requires mean and invVariance output tensors.");
@@ -427,11 +487,11 @@ void CudnnAdaptiveLayerNorm::backward(const CudnnAdaptiveLayerNormDescriptor& de
     requireIoTensor(args.dy, descriptor, descriptor.outputDataType, gpuNum, "dy");
     requireIoTensor(args.x, descriptor, descriptor.inputDataType, gpuNum, "x");
     requireIoTensor(args.dx, descriptor, descriptor.inputDataType, gpuNum, "dx");
-    requireIoTensor(args.scale, descriptor, descriptor.scaleBiasDataType, gpuNum, "scale");
+    requireScaleBiasTensor(args.scale, descriptor, gpuNum, "scale");
     requireStatsTensor(args.mean, descriptor, gpuNum, "mean");
     requireStatsTensor(args.invVariance, descriptor, gpuNum, "invVariance");
-    requireIoTensor(args.dscale, descriptor, descriptor.scaleBiasDataType, gpuNum, "dscale");
-    requireIoTensor(args.dbias, descriptor, descriptor.scaleBiasDataType, gpuNum, "dbias");
+    requireScaleBiasTensor(args.dscale, descriptor, gpuNum, "dscale");
+    requireScaleBiasTensor(args.dbias, descriptor, gpuNum, "dbias");
 
     ScopedGpu scopedGpu(gpuNum);
     BuiltGraph& built = cache().getOrBuildBackward(descriptor, gpuNum);

@@ -51,31 +51,30 @@ def _ragged_element_offsets(lengths: np.ndarray, heads: int, dim: int) -> np.nda
 
 
 
-def _pack_bshd_dense_storage(logical: np.ndarray) -> np.ndarray:
-    # cuDNN BSHD layout still carries semantic [B,H,S,D] dimensions in Thor.
-    # Fill a tensor with those semantic dimensions but BSHD physical row-major order.
-    batch, heads, sequence_length, head_dim = logical.shape
-    packed = np.empty_like(logical)
-    packed.reshape(-1)[:] = logical.transpose(0, 2, 1, 3).reshape(-1)
-    return packed
+def _pack_bshd_dense_storage(logical_bhsd: np.ndarray) -> np.ndarray:
+    # Thor-side BSHD tensors are actually shaped [B,S,H,D].  References stay in
+    # semantic BHSD order, so convert reference values to the Thor tensor shape.
+    return np.ascontiguousarray(logical_bhsd.transpose(0, 2, 1, 3))
 
-def _pack_bshd_ragged_storage(logical: np.ndarray, lengths: np.ndarray) -> np.ndarray:
-    # cuDNN ragged offsets index packed THD/token-contiguous storage in element offsets.  Thor tensors still carry
-    # semantic [B,H,S,D] dimensions here, so tests fill the underlying row-major buffer with BSHD/THD physical order.
-    batch, heads, sequence_length, head_dim = logical.shape
-    packed = np.zeros_like(logical)
+
+def _pack_bshd_ragged_storage(logical_bhsd: np.ndarray, lengths: np.ndarray) -> np.ndarray:
+    # Ragged cuDNN offsets index token-contiguous THD storage.  The Thor tensor
+    # shape is still [B,S,H,D], but valid tokens from all batch items are packed
+    # at the front of the flat buffer according to the supplied offsets.
+    batch, heads, sequence_length, head_dim = logical_bhsd.shape
+    packed = np.zeros((batch, sequence_length, heads, head_dim), dtype=logical_bhsd.dtype)
     flat = packed.reshape(-1)
     cursor = 0
     for b in range(batch):
         valid = int(lengths[b])
-        token_contiguous = logical[b, :, :valid, :].transpose(1, 0, 2).reshape(-1)
+        token_contiguous = logical_bhsd[b, :, :valid, :].transpose(1, 0, 2).reshape(-1)
         flat[cursor:cursor + token_contiguous.size] = token_contiguous
         cursor += token_contiguous.size
     return packed
 
 
 def _packed_bshd_ragged_valid_values(storage: np.ndarray, lengths: np.ndarray) -> np.ndarray:
-    batch, heads, _, head_dim = storage.shape
+    batch, _, heads, head_dim = storage.shape
     offsets = _ragged_element_offsets(lengths, heads, head_dim)
     flat = storage.reshape(-1)
     pieces = [flat[int(offsets[b]):int(offsets[b + 1])] for b in range(batch)]
@@ -415,11 +414,11 @@ def test_composed_attention_projection_biases_lower_to_matmul_bias_epilogues_wit
 
     flat = x.reshape([batch * sequence, input_features])
     q = (ex.matmul(flat, qw, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + qb).reshape(
-        [batch, heads, sequence, head_dim])
+        [batch, sequence, heads, head_dim])
     k = (ex.matmul(flat, kw, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + kb).reshape(
-        [batch, kv_heads, sequence, head_dim])
+        [batch, sequence, kv_heads, head_dim])
     v = (ex.matmul(flat, vw, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + vb).reshape(
-        [batch, kv_heads, sequence, value_dim])
+        [batch, sequence, kv_heads, value_dim])
     attn = ex.scaled_dot_product_attention(
         q,
         k,
@@ -468,13 +467,12 @@ def test_expression_reshape_inputs_to_attention_stage_are_metadata_aliases_not_f
     dim = 16
     scale = 0.77 / math.sqrt(float(dim))
 
-    # The cuDNN BSHD layout uses semantic [B,H,S,D] dimensions with BSHD
-    # physical strides.  The source flat tensors below carry BSHD physical
-    # storage, and the reshape alias retags them with semantic [B,H,S,D]
-    # dimensions without materializing.
-    q = ex.input("q_flat").reshape([batch, heads, sequence, dim])
-    k = ex.input("k_flat").reshape([batch, heads, sequence, dim])
-    v = ex.input("v_flat").reshape([batch, heads, sequence, dim])
+    # BSHD now means the Thor tensor is actually shaped [B,S,H,D].  Reshaping
+    # the flat projection output into that layout is a metadata alias and must
+    # not introduce a fused/materialization kernel.
+    q = ex.input("q_flat").reshape([batch, sequence, heads, dim])
+    k = ex.input("k_flat").reshape([batch, sequence, heads, dim])
+    v = ex.input("v_flat").reshape([batch, sequence, heads, dim])
     out = ex.scaled_dot_product_attention(
         q,
         k,
@@ -503,7 +501,7 @@ def test_expression_reshape_inputs_to_attention_stage_are_metadata_aliases_not_f
         "v_flat": _host_to_gpu(v_storage.reshape(batch * sequence, heads * dim), dtype, stream),
     }
 
-    assert eq.output_shape(inputs_gpu) == [batch, heads, sequence, dim]
+    assert eq.output_shape(inputs_gpu) == [batch, sequence, heads, dim]
     assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
 
     stamped = eq.stamp(inputs_gpu, stream)
@@ -569,8 +567,8 @@ def test_attention_dense_layout_contract_matches_reference_for_mha_gqa_mqa(
         wrong_layout_storage = _pack_bshd_dense_storage(expected_logical)
 
     assert not np.allclose(
-        expected_storage.astype(np.float32),
-        wrong_layout_storage.astype(np.float32),
+        expected_storage.reshape(-1).astype(np.float32),
+        wrong_layout_storage.reshape(-1).astype(np.float32),
         rtol=1e-3,
         atol=1e-3,
     ), "layout sentinel is degenerate; this test would not catch BHSD/BSHD mixups"
@@ -582,13 +580,196 @@ def test_attention_dense_layout_contract_matches_reference_for_mha_gqa_mqa(
         "v": _host_to_gpu(v_storage, dtype, stream),
     }
 
-    assert eq.output_shape(inputs_gpu) == [batch, query_heads, query_len, v_dim]
+    expected_shape = [batch, query_heads, query_len, v_dim]
+    if layout == AttentionTensorLayout.bshd:
+        expected_shape = [batch, query_len, query_heads, v_dim]
+    assert eq.output_shape(inputs_gpu) == expected_shape
     assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
 
     stamped = eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = _copy_to_host(stamped.output(), dtype, stream)
     _assert_close(got, expected_storage, dtype)
+
+
+@pytest.mark.cuda
+def test_attention_bshd_strided_packed_qkv_view_backward_scatter_add_matches_reference():
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    batch = 2
+    sequence = 3
+    query_heads = 4
+    kv_heads = 2
+    qk_dim = 16
+    v_dim = 16
+    scale = 0.61 / math.sqrt(float(qk_dim))
+
+    q_width = query_heads * qk_dim
+    k_width = kv_heads * qk_dim
+    v_width = kv_heads * v_dim
+    total_width = q_width + k_width + v_width
+
+    qkv = ex.input("qkv")
+    q = qkv.strided_view(
+        [batch, sequence, query_heads, qk_dim],
+        [sequence * total_width, total_width, qk_dim, 1],
+        0,
+    )
+    k = qkv.strided_view(
+        [batch, sequence, kv_heads, qk_dim],
+        [sequence * total_width, total_width, qk_dim, 1],
+        q_width,
+    )
+    v = qkv.strided_view(
+        [batch, sequence, kv_heads, v_dim],
+        [sequence * total_width, total_width, v_dim, 1],
+        q_width + k_width,
+    )
+    attn = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(attn, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["qkv"], error_input_name=upstream_name)
+    assert bwd_eq.output_names() == ["qkv_grad"]
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=sequence,
+        kv_len=sequence,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    q_storage = _pack_bshd_dense_storage(q_np)
+    k_storage = _pack_bshd_dense_storage(k_np)
+    v_storage = _pack_bshd_dense_storage(v_np)
+
+    qkv_np = np.zeros((batch * sequence, total_width), dtype=_numpy_storage_dtype(dtype))
+    qkv_np[:, 0:q_width] = q_storage.reshape(batch * sequence, q_width)
+    qkv_np[:, q_width:q_width + k_width] = k_storage.reshape(batch * sequence, k_width)
+    qkv_np[:, q_width + k_width:] = v_storage.reshape(batch * sequence, v_width)
+
+    rng = np.random.default_rng(271828)
+    dO_np = rng.normal(0.0, 0.25, size=(batch, query_heads, sequence, v_dim)).astype(_numpy_storage_dtype(dtype))
+    dO_storage = _pack_bshd_dense_storage(dO_np)
+    expected_dq, expected_dk, expected_dv = _attention_backward_reference(q_np, k_np, v_np, dO_np, scale=scale)
+
+    expected_qkv_grad = np.zeros((batch * sequence, total_width), dtype=np.float32)
+    expected_qkv_grad[:, 0:q_width] = _pack_bshd_dense_storage(expected_dq).reshape(batch * sequence, q_width)
+    expected_qkv_grad[:, q_width:q_width + k_width] = _pack_bshd_dense_storage(expected_dk).reshape(batch * sequence, k_width)
+    expected_qkv_grad[:, q_width + k_width:] = _pack_bshd_dense_storage(expected_dv).reshape(batch * sequence, v_width)
+    expected_qkv_grad = _cast_reference_to_storage_dtype(expected_qkv_grad, dtype)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "qkv": _host_to_gpu(qkv_np, dtype, stream),
+        upstream_name: _host_to_gpu(dO_storage, dtype, stream),
+    }
+
+    assert bwd_eq.output_shapes(inputs_gpu) == {"qkv_grad": [batch * sequence, total_width]}
+    stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert stage_kinds.count("AttentionBackward") == 1
+    assert stage_kinds.count("FusedKernel") == 1
+    assert stage_kinds.index("AttentionBackward") < stage_kinds.index("FusedKernel")
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.outputs()["qkv_grad"], dtype, stream)
+    _assert_close(got, expected_qkv_grad, dtype)
+
+
+@pytest.mark.cuda
+def test_attention_bshd_strided_packed_qkv_views_match_reference_without_split_kernel():
+    dtype = thor.DataType.fp16
+    batch = 2
+    sequence = 3
+    query_heads = 4
+    kv_heads = 2
+    qk_dim = 16
+    v_dim = 16
+    scale = 0.73 / math.sqrt(float(qk_dim))
+
+    q_width = query_heads * qk_dim
+    k_width = kv_heads * qk_dim
+    v_width = kv_heads * v_dim
+    total_width = q_width + k_width + v_width
+
+    qkv = ex.input("qkv")
+    q = qkv.strided_view(
+        [batch, sequence, query_heads, qk_dim],
+        [sequence * total_width, total_width, qk_dim, 1],
+        0,
+    )
+    k = qkv.strided_view(
+        [batch, sequence, kv_heads, qk_dim],
+        [sequence * total_width, total_width, qk_dim, 1],
+        q_width,
+    )
+    v = qkv.strided_view(
+        [batch, sequence, kv_heads, v_dim],
+        [sequence * total_width, total_width, v_dim, 1],
+        q_width + k_width,
+    )
+    attn = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(attn, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=sequence,
+        kv_len=sequence,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    q_storage = _pack_bshd_dense_storage(q_np).reshape(batch, sequence, q_width)
+    k_storage = _pack_bshd_dense_storage(k_np).reshape(batch, sequence, k_width)
+    v_storage = _pack_bshd_dense_storage(v_np).reshape(batch, sequence, v_width)
+
+    qkv_np = np.zeros((batch, sequence, total_width), dtype=_numpy_storage_dtype(dtype))
+    qkv_np[:, :, 0:q_width] = q_storage
+    qkv_np[:, :, q_width:q_width + k_width] = k_storage
+    qkv_np[:, :, q_width + k_width:] = v_storage
+    qkv_np = np.ascontiguousarray(qkv_np.reshape(batch * sequence, total_width))
+
+    expected = _pack_bshd_dense_storage(
+        _cast_reference_to_storage_dtype(_attention_reference(q_np, k_np, v_np, scale=scale), dtype)
+    )
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {"qkv": _host_to_gpu(qkv_np, dtype, stream)}
+
+    assert eq.output_shape(inputs_gpu) == [batch, sequence, query_heads, v_dim]
+    # Q/K/V are storage aliases into one packed input, so no split/materialize stage should be planned.
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, expected, dtype)
 
 
 @pytest.mark.cuda
@@ -610,13 +791,13 @@ def test_composed_projection_to_attention_bshd_layout_contract_matches_reference
 
     flat = x.reshape([batch * sequence, input_features])
     q = ex.matmul(flat, qw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape(
-        [batch, heads, sequence, head_dim]
+        [batch, sequence, heads, head_dim]
     )
     k = ex.matmul(flat, kw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape(
-        [batch, kv_heads, sequence, head_dim]
+        [batch, sequence, kv_heads, head_dim]
     )
     v = ex.matmul(flat, vw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape(
-        [batch, kv_heads, sequence, value_dim]
+        [batch, sequence, kv_heads, value_dim]
     )
     attn = ex.scaled_dot_product_attention(
         q,
@@ -1519,21 +1700,24 @@ def test_attention_forward_ragged_offsets_plans_single_stage_and_validates_shape
     kv_lengths = np.asarray([7, 5], dtype=np.int32)
     q_offsets_np = _ragged_element_offsets(q_lengths, heads=2, dim=16)
     kv_offsets_np = _ragged_element_offsets(kv_lengths, heads=2, dim=16)
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
     stream = Stream(gpu_num=0)
     inputs_gpu = {
-        "q": _host_to_gpu(q_np, dtype, stream),
-        "k": _host_to_gpu(k_np, dtype, stream),
-        "v": _host_to_gpu(v_np, dtype, stream),
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
         "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
         "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
         "q_offsets": _host_to_gpu(q_offsets_np, thor.DataType.int32, stream),
         "kv_offsets": _host_to_gpu(kv_offsets_np, thor.DataType.int32, stream),
     }
 
-    assert eq.output_shape(inputs_gpu) == [2, 2, 6, 16]
+    assert eq.output_shape(inputs_gpu) == [2, 6, 2, 16]
     assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
     stamped = eq.stamp(inputs_gpu, stream)
-    assert list(stamped.output().dimensions) == [2, 2, 6, 16]
+    assert list(stamped.output().dimensions) == [2, 6, 2, 16]
 
 
 @pytest.mark.cuda
@@ -1586,7 +1770,7 @@ def test_attention_forward_ragged_offsets_bshd_packed_matches_reference():
         "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
     }
 
-    assert eq.output_shape(inputs_gpu) == [2, 2, 6, 16]
+    assert eq.output_shape(inputs_gpu) == [2, 6, 2, 16]
     assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
 
     stamped = eq.stamp(inputs_gpu, stream)
@@ -1647,7 +1831,7 @@ def test_attention_forward_ragged_offsets_gqa_bshd_packed_matches_reference():
         "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
     }
 
-    assert eq.output_shape(inputs_gpu) == [2, 4, 6, 16]
+    assert eq.output_shape(inputs_gpu) == [2, 6, 4, 16]
     assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
 
     stamped = eq.stamp(inputs_gpu, stream)
@@ -1706,7 +1890,7 @@ def test_attention_forward_ragged_offsets_mqa_bshd_packed_matches_reference():
         "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=1, dim=16), thor.DataType.int32, stream),
     }
 
-    assert eq.output_shape(inputs_gpu) == [2, 4, 6, 16]
+    assert eq.output_shape(inputs_gpu) == [2, 6, 4, 16]
     assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
 
     stamped = eq.stamp(inputs_gpu, stream)
@@ -1774,7 +1958,7 @@ def test_attention_forward_ragged_offsets_causal_top_left_bshd_packed_matches_re
         "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
     }
 
-    assert eq.output_shape(inputs_gpu) == [2, 2, 6, 16]
+    assert eq.output_shape(inputs_gpu) == [2, 6, 2, 16]
     assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
     stamped = eq.stamp(inputs_gpu, stream)
     stamped.run()
@@ -1839,11 +2023,14 @@ def test_attention_ragged_offsets_require_int32_and_batch_plus_one_shape():
     q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
     q_lengths = np.asarray([6, 4], dtype=np.int32)
     kv_lengths = np.asarray([7, 5], dtype=np.int32)
+    q_storage = _pack_bshd_dense_storage(q_np)
+    k_storage = _pack_bshd_dense_storage(k_np)
+    v_storage = _pack_bshd_dense_storage(v_np)
     stream = Stream(gpu_num=0)
     base_inputs = {
-        "q": _host_to_gpu(q_np, dtype, stream),
-        "k": _host_to_gpu(k_np, dtype, stream),
-        "v": _host_to_gpu(v_np, dtype, stream),
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
         "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
         "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
     }
@@ -1968,11 +2155,14 @@ def test_attention_ragged_offsets_feeds_fused_epilogue_and_multi_output_reuses_s
     q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
     q_lengths = np.asarray([6, 4], dtype=np.int32)
     kv_lengths = np.asarray([7, 5], dtype=np.int32)
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
     stream = Stream(gpu_num=0)
     inputs_gpu = {
-        "q": _host_to_gpu(q_np, dtype, stream),
-        "k": _host_to_gpu(k_np, dtype, stream),
-        "v": _host_to_gpu(v_np, dtype, stream),
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
         "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
         "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
         "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, 2, 16), thor.DataType.int32, stream),
@@ -1980,8 +2170,8 @@ def test_attention_ragged_offsets_feeds_fused_epilogue_and_multi_output_reuses_s
     }
 
     assert eq.output_shapes(inputs_gpu) == {
-        "attention": [2, 2, 6, 16],
-        "shifted": [2, 2, 6, 16]
+        "attention": [2, 6, 2, 16],
+        "shifted": [2, 6, 2, 16]
     }
     kinds = eq._debug_stage_kinds(inputs_gpu)
     assert kinds.count("Attention") == 1
@@ -2406,15 +2596,18 @@ def test_attention_bshd_layout_options_stamp_without_teaching_planner_new_stage_
         o_layout=AttentionTensorLayout.bshd,
     )
     q_np, k_np, v_np = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=4, kv_len=4, dtype=dtype)
+    q_storage = _pack_bshd_dense_storage(q_np)
+    k_storage = _pack_bshd_dense_storage(k_np)
+    v_storage = _pack_bshd_dense_storage(v_np)
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
-        "q": _host_to_gpu(q_np, dtype, stream),
-        "k": _host_to_gpu(k_np, dtype, stream),
-        "v": _host_to_gpu(v_np, dtype, stream),
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
     }
 
-    assert eq.output_shape(inputs_gpu) == [1, 2, 4, 16]
+    assert eq.output_shape(inputs_gpu) == [1, 4, 2, 16]
     assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
     # Stamping validates the layout/options descriptor.  This deliberately does
     # not run numerically because the default Thor tensor fill path is row-major
@@ -2677,9 +2870,9 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_bshd_packed_matches_
     }
 
     assert bwd_eq.output_shapes(inputs_gpu) == {
-        "q_grad": [2, 2, 64, 64],
-        "k_grad": [2, 2, 64, 64],
-        "v_grad": [2, 2, 64, 64],
+        "q_grad": [2, 64, 2, 64],
+        "k_grad": [2, 64, 2, 64],
+        "v_grad": [2, 64, 2, 64],
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
@@ -2778,9 +2971,9 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_gqa_bshd_packed_matc
     }
 
     assert bwd_eq.output_shapes(inputs_gpu) == {
-        "q_grad": [2, 4, 64, 64],
-        "k_grad": [2, 2, 64, 64],
-        "v_grad": [2, 2, 64, 64],
+        "q_grad": [2, 64, 4, 64],
+        "k_grad": [2, 64, 2, 64],
+        "v_grad": [2, 64, 2, 64],
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
@@ -2863,9 +3056,9 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_causal_top_left_bshd
     }
 
     assert bwd_eq.output_shapes(inputs_gpu) == {
-        "q_grad": [2, 2, 64, 64],
-        "k_grad": [2, 2, 64, 64],
-        "v_grad": [2, 2, 64, 64],
+        "q_grad": [2, 64, 2, 64],
+        "k_grad": [2, 64, 2, 64],
+        "v_grad": [2, 64, 2, 64],
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
@@ -2929,9 +3122,9 @@ def test_attention_backward_with_ragged_offsets_reuses_same_plan_forward_stats_m
     }
 
     assert bwd_eq.output_shapes(inputs_gpu) == {
-        "q_grad": [2, 2, 64, 64],
-        "k_grad": [2, 2, 64, 64],
-        "v_grad": [2, 2, 64, 64],
+        "q_grad": [2, 64, 2, 64],
+        "k_grad": [2, 64, 2, 64],
+        "v_grad": [2, 64, 2, 64],
     }
     kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
     assert kinds.count("Attention") == 1

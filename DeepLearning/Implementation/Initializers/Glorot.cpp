@@ -47,6 +47,13 @@ void Glorot::initializeUniform(Stream initStream) {
                 float value = d * fanInOutTerm;
                 bufferMem[i] = (half)value;
             }
+        } else if (buffer.getDataType() == TensorDescriptor::DataType::BF16) {
+            __nv_bfloat16 *bufferMem = (__nv_bfloat16 *)buffer.getMemPtr();
+            for (uint64_t i = start; i < end; ++i) {
+                float d = distribution(generator);
+                float value = d * fanInOutTerm;
+                bufferMem[i] = __float2bfloat16(value);
+            }
         } else if (buffer.getDataType() == TensorDescriptor::DataType::FP32) {
             float *bufferMem = (float *)buffer.getMemPtr();
             for (uint64_t i = start; i < end; ++i) {
@@ -92,6 +99,11 @@ void Glorot::initializeNormal(Stream initStream) {
             half *bufferMem = (half *)buffer.getMemPtr();
             for (uint64_t i = start; i < end; ++i) {
                 bufferMem[i] = (half)distribution(generator);
+            }
+        } else if (buffer.getDataType() == TensorDescriptor::DataType::BF16) {
+            __nv_bfloat16 *bufferMem = (__nv_bfloat16 *)buffer.getMemPtr();
+            for (uint64_t i = start; i < end; ++i) {
+                bufferMem[i] = __float2bfloat16(distribution(generator));
             }
         } else if (buffer.getDataType() == TensorDescriptor::DataType::FP32) {
             float *bufferMem = (float *)buffer.getMemPtr();

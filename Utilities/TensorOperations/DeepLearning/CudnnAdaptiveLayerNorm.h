@@ -14,17 +14,27 @@ namespace ThorImplementation {
 /**
  * cuDNN Frontend Adaptive LayerNorm wrapper.
  *
- * Adaptive LayerNorm is LayerNorm with per-sample scale and bias tensors. Thor exposes it over an
- * arbitrary contiguous trailing normalized shape. The frontend graph is built with NVIDIA's canonical 4D view:
+ * cuDNN's Adaptive LayerNorm shape contract is different from ordinary LayerNorm:
+ * scale and bias vary per batch sample, but are broadcast across the non-normalized
+ * leading feature dimensions. Thor exposes this as:
  *
- *   x/y/scale/bias: [outer, hidden, 1, 1]
- *   stats:          [outer, 1, 1, 1]
+ *   data feature shape:       [leading..., normalized...]
+ *   scale/bias feature shape: [normalized...]
  *
- * where hidden is the product of the normalized trailing dimensions and outer is the product of the remaining
- * leading dimensions, including the physical batch dimension. No tensor materialization is required for this view.
+ * Once the network batch dimension is included, the frontend graph is built with
+ * NVIDIA's canonical 3D view:
+ *
+ *   x/y:        [batch, leading, hidden]
+ *   scale/bias: [batch, 1, hidden]
+ *   stats:      [batch, leading, 1]
+ *
+ * where hidden is the product of the normalized trailing dimensions and leading is
+ * the product of the non-normalized feature dimensions. No tensor materialization is
+ * required for this view.
  */
 struct CudnnAdaptiveLayerNormDescriptor {
-    uint64_t outerSize = 0;
+    uint64_t batchSize = 0;
+    uint64_t leadingFeatureCount = 0;
     uint64_t normalizedFeatureCount = 0;
 
     TensorDescriptor::DataType inputDataType = TensorDescriptor::DataType::FP16;
@@ -47,7 +57,7 @@ struct CudnnAdaptiveLayerNormForwardArgs {
     Tensor bias;
     Tensor y;
 
-    // Required when descriptor.training is true. FP32 tensors with outerSize elements.
+    // Required when descriptor.training is true. FP32 tensors with batchSize * leadingFeatureCount elements.
     std::optional<Tensor> mean;
     std::optional<Tensor> invVariance;
 };
