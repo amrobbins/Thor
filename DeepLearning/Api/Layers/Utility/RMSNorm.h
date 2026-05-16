@@ -31,7 +31,6 @@ class RMSNorm : public TrainableLayer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<RMSNorm>(*this); }
 
     std::string getLayerType() const override { return "RMSNorm"; }
-    bool isMultiLayer() const { return false; }
 
     const std::vector<uint64_t>& getNormalizedShape() const { return normalizedShape; }
     double getEpsilon() const { return epsilon; }
@@ -45,8 +44,7 @@ class RMSNorm : public TrainableLayer {
         return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
     }
 
-    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(
-        const ThorImplementation::Expression& expression) {
+    [[nodiscard]] static ThorImplementation::ExpressionDefinition makeEpilogueDefinition(const ThorImplementation::Expression& expression) {
         return LayerEpilogue::makeDefinition(expression, epilogueInputName(), epilogueOutputName(), "RMSNorm");
     }
 
@@ -159,9 +157,7 @@ class RMSNorm::Builder {
         return *this;
     }
 
-    virtual RMSNorm::Builder& epilogue(const Activation& activation) {
-        return epilogue(activation.toExpression(RMSNorm::epilogueInput()));
-    }
+    virtual RMSNorm::Builder& epilogue(const Activation& activation) { return epilogue(activation.toExpression(RMSNorm::epilogueInput())); }
 
     virtual RMSNorm::Builder& epilogue(const std::shared_ptr<Activation>& activation) {
         if (activation == nullptr) {
