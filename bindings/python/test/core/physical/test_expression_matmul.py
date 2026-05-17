@@ -170,7 +170,7 @@ def test_matmul_bf16_inputs_fp32_output_numerical():
         "b": _host_to_gpu(b_np, b_dtype, stream),
     }
 
-    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(lhsT=0,rhsT=0,auxT=0)"]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(op=MATMUL,lhsT=0,rhsT=0,auxT=0)"]
 
     stamped = eq.stamp(inputs_gpu, stream)
     stamped.run()
@@ -206,7 +206,7 @@ def test_gemm_fp16_inputs_fp32_addend_and_output_numerical():
         "c": _host_to_gpu(c_np, c_dtype, stream),
     }
 
-    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(lhsT=0,rhsT=0,auxT=0)"]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(op=GEMM,lhsT=0,rhsT=0,auxT=0)"]
 
     stamped = eq.stamp(inputs_gpu, stream)
     stamped.run()
@@ -243,7 +243,7 @@ def test_operator_gemm_pattern_preserves_fp16_inputs_fp32_addend_and_output_nume
     }
 
     # This guards the GEMM pattern path, not just the explicit ex.gemm API.
-    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(lhsT=0,rhsT=0,auxT=0)"]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(op=GEMM,lhsT=0,rhsT=0,auxT=0)"]
 
     stamped = eq.stamp(inputs_gpu, stream)
     stamped.run()
@@ -276,7 +276,7 @@ def test_matmul_fp8_inputs_fp32_output_tn_rejected_with_first_class_error():
         "b": _host_to_gpu(b_np, b_dtype, stream),
     }
 
-    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(lhsT=1,rhsT=0,auxT=0)"]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Matmul(op=MATMUL,lhsT=1,rhsT=0,auxT=0)"]
 
     with pytest.raises(Exception, match="FP8 input GEMM with FP32 C/D output"):
         stamped = eq.stamp(inputs_gpu, stream)

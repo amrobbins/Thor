@@ -17,6 +17,7 @@
 
 #include "Utilities/Cache/LruCache.h"
 #include "Utilities/Expression/CompiledEquation.h"
+#include "Utilities/Expression/InPlaceRopeKernel.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 
@@ -737,8 +738,51 @@ class StampedReduceMinMaxBackward {
     const void* beta = &beta_0;
 };
 
+
+class StampedInPlaceRope {
+   public:
+    StampedInPlaceRope(std::shared_ptr<CompiledInPlaceRope> compiled, std::vector<Tensor> tensors, const Stream& stream)
+        : compiled(std::move(compiled)), tensors(std::move(tensors)), stream(stream) {
+        if (!this->compiled) {
+            throw std::runtime_error("StampedInPlaceRope requires a compiled plan.");
+        }
+        if (this->compiled->tensors.size() != this->tensors.size()) {
+            throw std::runtime_error("StampedInPlaceRope tensor count mismatch.");
+        }
+    }
+
+    [[nodiscard]] uint32_t gpuNum() const {
+        if (tensors.empty()) {
+            throw std::runtime_error("StampedInPlaceRope has no tensors.");
+        }
+        return static_cast<uint32_t>(tensors.front().getPlacement().getDeviceNum());
+    }
+
+    [[nodiscard]] const Tensor& outputTensor(size_t idx) const {
+        if (idx >= tensors.size()) {
+            throw std::runtime_error("StampedInPlaceRope output index out of range.");
+        }
+        return tensors[idx];
+    }
+
+    void runOn(Stream& run_stream) const {
+        std::vector<RotaryPositionEmbeddingOptions> options;
+        options.reserve(compiled->tensors.size());
+        for (const CompiledInPlaceRopeTensor& tensor : compiled->tensors) {
+            options.push_back(tensor.options);
+        }
+        std::vector<Tensor> mutable_tensors = tensors;
+        runGroupedInPlaceRotaryPositionEmbedding(mutable_tensors, options, run_stream);
+    }
+
+   private:
+    std::shared_ptr<CompiledInPlaceRope> compiled;
+    std::vector<Tensor> tensors;
+    Stream stream;
+};
+
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -753,6 +797,8 @@ struct StampedExecutionStage {
                 return "RmsNorm";
             case Kind::Matmul:
                 return "Matmul";
+            case Kind::InPlaceRope:
+                return "InPlaceRope";
             case Kind::Attention:
                 return "Attention";
             case Kind::AttentionBackward:
@@ -779,6 +825,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedSoftmax> softmax = nullptr;
     const std::shared_ptr<StampedRmsNorm> rms_norm = nullptr;
     const std::shared_ptr<StampedMatmul> matmul = nullptr;
+    const std::shared_ptr<StampedInPlaceRope> in_place_rope = nullptr;
     const std::shared_ptr<StampedAttention> attention = nullptr;
     const std::shared_ptr<StampedAttentionBackward> attention_backward = nullptr;
     const std::shared_ptr<StampedConvolution> convolution = nullptr;
@@ -839,6 +886,15 @@ struct StampedExecutionStage {
           gpu_num(matmul->gpuNum()),
           flop_count(flop_count),
           matmul(matmul) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedInPlaceRope>& in_place_rope,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::InPlaceRope),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(in_place_rope->gpuNum()),
+          flop_count(flop_count),
+          in_place_rope(in_place_rope) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedAttention>& attention,
                                    std::vector<uint32_t> dependency_stage_indices = {},
@@ -914,6 +970,9 @@ struct StampedExecutionStage {
                 matmul->runOn(run_stream);
             else
                 matmul->runOn(run_stream, runtime_scalars);
+        } else if (kind == Kind::InPlaceRope) {
+            THOR_THROW_IF_FALSE(in_place_rope != nullptr);
+            in_place_rope->runOn(run_stream);
         } else if (kind == Kind::Attention) {
             THOR_THROW_IF_FALSE(attention != nullptr);
             attention->runOn(run_stream);

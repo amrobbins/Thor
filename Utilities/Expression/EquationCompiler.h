@@ -18,12 +18,13 @@
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/InPlaceRopeKernel.h"
 #include "Utilities/Expression/StampedEquation.h"
 
 namespace ThorImplementation {
 
 struct PhysicalExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
 
     Kind kind;
     PhysicalExpression expr;
@@ -56,6 +57,7 @@ class EquationCompiler {
     static std::shared_ptr<CompiledSoftmax> compileSoftmax(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledRmsNorm> compileRmsNorm(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledMatmul> compileMatmul(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs = {});
+    static std::shared_ptr<CompiledInPlaceRope> compileInPlaceRope(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs = {});
     static std::shared_ptr<CompiledAttention> compileAttention(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledAttentionBackward> compileAttentionBackward(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledConvolution> compileConvolution(const PhysicalExpression& expr);

@@ -73,7 +73,7 @@ constexpr bool kUsePackedQkvProjection = Thor::Attention::USE_PACKED_QKV_PROJECT
 
 bool usePackedQkvProjectionForLayer(bool useRope) {
     // PackedQkvProjection is not being supported anymore as it was shown to be slower.
-    // It is being left here as an orphaned reference if there is some future opportunity to gain performance using a packed QKV.
+    // It's being left here as an orphaned reference if there is some future opportunity to gain performance using a packed QKV.
     if constexpr (!kUsePackedQkvProjection) {
         return false;
     } else {
@@ -92,6 +92,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                                                               uint32_t valueDim,
                                                               bool hasBias,
                                                               bool useRope,
+                                                              bool ropeInPlace,
                                                               ThorImplementation::RotaryPositionEmbeddingOptions ropeOptions,
                                                               ThorImplementation::AttentionMaskKind maskKind,
                                                               int64_t diagonalLeftBound,
@@ -141,6 +142,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
          valueDim,
          hasBias,
          useRope,
+         ropeInPlace,
          ropeOptions,
          maskKind,
          diagonalLeftBound,
@@ -282,6 +284,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                 ThorImplementation::RotaryPositionEmbeddingOptions opts = ropeOptions;
                 opts.sequence_axis = 1;
                 opts.head_dim_axis = 3;
+                opts.allow_in_place_materialization = ropeInPlace;
                 if (!opts.compute_dtype.has_value()) {
                     opts.compute_dtype = computeDType;
                 }
@@ -396,6 +399,9 @@ void Attention::Builder::verifyConfig() const {
                      maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {
         throw std::invalid_argument("Attention ALiBi cannot currently be combined with bottom-right/decode masks in cuDNN SDPA.");
     }
+    if (_ropeInPlace.value_or(false) && !_useRope.value_or(false)) {
+        throw std::invalid_argument("Attention ropeInPlace requires useRope to be enabled.");
+    }
     if (_attentionScale.has_value() && (!std::isfinite(_attentionScale.value()) || _attentionScale.value() <= 0.0)) {
         throw std::invalid_argument("Attention attentionScale must be finite and positive.");
     }
@@ -438,6 +444,9 @@ Attention Attention::Builder::build() {
     }
     if (!_useRope.has_value()) {
         _useRope = false;
+    }
+    if (!_ropeInPlace.has_value()) {
+        _ropeInPlace = false;
     }
     if (!_ropeOptions.has_value()) {
         _ropeOptions = ThorImplementation::RotaryPositionEmbeddingOptions{};
@@ -507,6 +516,7 @@ Attention Attention::Builder::build() {
                                             _valueDim.value(),
                                             _hasBias.value(),
                                             _useRope.value(),
+                                            _ropeInPlace.value(),
                                             _ropeOptions.value(),
                                             _maskKind.value(),
                                             _diagonalLeftBound.value(),
@@ -527,6 +537,7 @@ Attention Attention::Builder::build() {
                     _outputFeatures.value(),
                     _hasBias.value(),
                     _useRope.value(),
+                    _ropeInPlace.value(),
                     _ropeOptions.value(),
                     _maskKind.value(),
                     _diagonalLeftBound.value(),

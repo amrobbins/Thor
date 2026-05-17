@@ -198,6 +198,7 @@ struct StageNodeKey {
     int32_t rope_scaling_kind = 0;
     uint64_t rope_scaling_factor_bits = 0;
     uint64_t rope_original_max_position_embeddings = 0;
+    bool rope_allow_in_place_materialization = false;
     bool attention_use_bias = false;
     uint64_t attention_dropout_probability_bits = 0;
     int32_t input_tensor_dtype = -1;
@@ -247,6 +248,7 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<int32_t>{}(k.rope_scaling_kind));
         hashCombine(h, std::hash<uint64_t>{}(k.rope_scaling_factor_bits));
         hashCombine(h, std::hash<uint64_t>{}(k.rope_original_max_position_embeddings));
+        hashCombine(h, std::hash<bool>{}(k.rope_allow_in_place_materialization));
         hashCombine(h, std::hash<bool>{}(k.attention_use_bias));
         hashCombine(h, std::hash<uint64_t>{}(k.attention_dropout_probability_bits));
         hashCombine(h, std::hash<int32_t>{}(k.input_tensor_dtype));
@@ -321,6 +323,7 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.rope_scaling_kind = static_cast<int32_t>(n.rope_scaling_kind);
     key.rope_scaling_factor_bits = scalarBits(n.rope_scaling_factor);
     key.rope_original_max_position_embeddings = n.rope_original_max_position_embeddings;
+    key.rope_allow_in_place_materialization = n.rope_allow_in_place_materialization;
     key.attention_use_bias = n.attention_use_bias;
     key.attention_dropout_probability_bits = scalarBits(n.attention_dropout_probability);
 
@@ -1044,7 +1047,8 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",interleaved=" + std::to_string(node.rope_interleaved ? 1 : 0) + ",inverse=" + std::to_string(node.rope_inverse ? 1 : 0) +
                 ",scaling=" + std::to_string(static_cast<int>(node.rope_scaling_kind)) +
                 ",factor=" + std::to_string(scalarBits(node.rope_scaling_factor)) +
-                ",originalMax=" + std::to_string(node.rope_original_max_position_embeddings) + ")";
+                ",originalMax=" + std::to_string(node.rope_original_max_position_embeddings) +
+                ",allowInPlace=" + std::to_string(node.rope_allow_in_place_materialization ? 1 : 0) + ")";
         } else {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
         }
@@ -2900,6 +2904,60 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
     };
 }
 
+
+std::shared_ptr<CompiledInPlaceRope> EquationCompiler::compileInPlaceRope(const PhysicalExpression& expr,
+                                                                           const std::vector<CompiledStageOutput>& outputs) {
+    if (outputs.empty()) {
+        throw std::runtime_error("In-place RoPE stage requires at least one output.");
+    }
+    auto compiled = std::make_shared<CompiledInPlaceRope>();
+    compiled->tensors.reserve(outputs.size());
+
+    for (const CompiledStageOutput& output : outputs) {
+        if (output.local_node_idx >= expr.nodes.size()) {
+            throw std::runtime_error("In-place RoPE output node index out of range.");
+        }
+        const ExprNode& rope = expr.nodes.at(output.local_node_idx);
+        if (rope.op != ExprOp::ROPE || rope.lhs == UINT32_MAX || rope.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("In-place RoPE stage output must be a ROPE node.");
+        }
+        const ExprNode& reshape = expr.nodes.at(rope.lhs);
+        if (reshape.op != ExprOp::RESHAPE || reshape.lhs == UINT32_MAX || reshape.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("In-place RoPE stage expects ROPE(RESHAPE(INPUT)).");
+        }
+        const ExprNode& input = expr.nodes.at(reshape.lhs);
+        if (input.op != ExprOp::INPUT || input.input_slot == UINT32_MAX) {
+            throw std::runtime_error("In-place RoPE stage reshape source must be an INPUT node.");
+        }
+        if (!input.input_tensor_dtype.has_value() || !rope.output_dtype.has_value()) {
+            throw std::runtime_error("In-place RoPE stage nodes must have resolved dtypes.");
+        }
+        if (input.input_tensor_dtype.value() != rope.output_dtype.value()) {
+            throw std::runtime_error("In-place RoPE requires input and output dtype to match.");
+        }
+        RotaryPositionEmbeddingOptions options;
+        options.sequence_axis = rope.rope_sequence_axis;
+        options.head_dim_axis = rope.rope_head_dim_axis;
+        options.rotary_dim = rope.rope_rotary_dim;
+        options.base = rope.rope_base;
+        options.position_offset = rope.rope_position_offset;
+        options.interleaved = rope.rope_interleaved;
+        options.inverse = rope.rope_inverse;
+        options.scaling_kind = rope.rope_scaling_kind;
+        options.scaling_factor = rope.rope_scaling_factor;
+        options.original_max_position_embeddings = rope.rope_original_max_position_embeddings;
+        options.output_dtype = rope.output_dtype;
+        options.compute_dtype = rope.compute_dtype;
+        compiled->tensors.push_back(CompiledInPlaceRopeTensor{
+            .input_slot = input.input_slot,
+            .logical_dims = reshape.reshape_dims,
+            .options = options,
+            .dtype = rope.output_dtype.value(),
+        });
+    }
+    return compiled;
+}
+
 static void forceAttentionSeqLenLocalInputDType(PhysicalExpression& stage_expr, uint32_t local_idx, const char* label) {
     if (local_idx >= stage_expr.nodes.size()) {
         throw std::runtime_error(std::string("Attention sequence-length local input index out of range for ") + label + ".");
@@ -3643,6 +3701,169 @@ static bool isMatmulBiasGradientReduction(const PhysicalExpression& expr, uint32
     return true;
 }
 
+
+static std::vector<uint32_t> computeNodeUseCounts(const PhysicalExpression& expr) {
+    std::vector<uint32_t> use_counts(expr.nodes.size(), 0);
+    auto bump = [&](uint32_t idx) {
+        if (idx != UINT32_MAX && idx < use_counts.size()) {
+            ++use_counts[idx];
+        }
+    };
+    for (const ExprNode& node : expr.nodes) {
+        if (!Expression::isLeafOp(node.op)) {
+            bump(node.lhs);
+        }
+        if (Expression::isBinaryOp(node.op)) {
+            bump(node.rhs);
+        }
+        if (node.op == ExprOp::GEMM || node.op == ExprOp::ATTENTION_BACKWARD_Q || node.op == ExprOp::ATTENTION_BACKWARD_K ||
+            node.op == ExprOp::ATTENTION_BACKWARD_V || node.op == ExprOp::ATTENTION_BACKWARD_BIAS) {
+            bump(node.aux);
+        }
+        bump(node.alpha_node);
+        bump(node.beta_node);
+        bump(node.matmul_epilogue_aux);
+        bump(node.attention_seq_len_q_node);
+        bump(node.attention_seq_len_kv_node);
+        bump(node.attention_ragged_offset_q_node);
+        bump(node.attention_ragged_offset_kv_node);
+        bump(node.attention_page_table_k_node);
+        bump(node.attention_page_table_v_node);
+        bump(node.attention_dropout_seed_node);
+        bump(node.attention_dropout_offset_node);
+    }
+    return use_counts;
+}
+
+struct InPlaceRopeMaterializationCandidate {
+    uint32_t rope_root = UINT32_MAX;
+    uint32_t source_node = UINT32_MAX;
+    std::vector<uint64_t> logical_dims;
+};
+
+static std::optional<InPlaceRopeMaterializationCandidate> classifySplitProjectionInPlaceRopeCandidate(
+    const PhysicalExpression& expr, uint32_t rope_root, const std::vector<uint32_t>& node_use_counts) {
+    if (rope_root >= expr.nodes.size()) {
+        return std::nullopt;
+    }
+    const ExprNode& rope = expr.nodes.at(rope_root);
+    if (rope.op != ExprOp::ROPE || rope.lhs == UINT32_MAX || rope.lhs >= expr.nodes.size()) {
+        return std::nullopt;
+    }
+    if (!rope.rope_allow_in_place_materialization) {
+        return std::nullopt;
+    }
+    if (!rope.output_dtype.has_value()) {
+        return std::nullopt;
+    }
+    const ExprNode& reshape = expr.nodes.at(rope.lhs);
+    if (reshape.op != ExprOp::RESHAPE || reshape.lhs == UINT32_MAX || reshape.lhs >= expr.nodes.size()) {
+        return std::nullopt;
+    }
+    if (!reshapeAliasPreservesDType(expr, rope.lhs) || reshape.reshape_dims.size() != 4) {
+        return std::nullopt;
+    }
+    if (node_use_counts.at(rope.lhs) != 1) {
+        return std::nullopt;
+    }
+    const ExprNode& source = expr.nodes.at(reshape.lhs);
+    if (!isMatmulOp(source.op) || !source.output_dtype.has_value() || source.output_dtype.value() != rope.output_dtype.value()) {
+        return std::nullopt;
+    }
+    // This optimization mutates the projection output in-place. Only use it for private split-Q/K projection
+    // materializations whose dense reshape is the sole consumer. Bias/GEMM and packed-QKV strided views intentionally
+    // fall back to the normal out-of-place grouped RoPE path.
+    if (source.op != ExprOp::MATMUL || node_use_counts.at(reshape.lhs) != 1) {
+        return std::nullopt;
+    }
+    return InPlaceRopeMaterializationCandidate{.rope_root = rope_root, .source_node = reshape.lhs, .logical_dims = reshape.reshape_dims};
+}
+
+static bool sameRopeOptionsForInPlaceGrouping(const PhysicalExpression& expr, const std::vector<InPlaceRopeMaterializationCandidate>& candidates) {
+    if (candidates.empty()) {
+        return false;
+    }
+    const ExprNode& first = expr.nodes.at(candidates.front().rope_root);
+    for (const InPlaceRopeMaterializationCandidate& candidate : candidates) {
+        const ExprNode& node = expr.nodes.at(candidate.rope_root);
+        if (node.rope_sequence_axis != first.rope_sequence_axis || node.rope_head_dim_axis != first.rope_head_dim_axis ||
+            node.rope_rotary_dim != first.rope_rotary_dim || node.rope_base != first.rope_base ||
+            node.rope_position_offset != first.rope_position_offset || node.rope_interleaved != first.rope_interleaved ||
+            node.rope_inverse != first.rope_inverse || node.rope_scaling_kind != first.rope_scaling_kind ||
+            node.rope_scaling_factor != first.rope_scaling_factor ||
+            node.rope_original_max_position_embeddings != first.rope_original_max_position_embeddings ||
+            node.rope_allow_in_place_materialization != first.rope_allow_in_place_materialization) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static PhysicalExecutionStage buildInPlaceRopeStage(
+    const PhysicalExpression& expr,
+    const std::vector<InPlaceRopeMaterializationCandidate>& candidates,
+    const std::unordered_map<uint32_t, uint32_t>& node_output_value_id,
+    const std::unordered_map<uint32_t, uint32_t>& rope_output_value_ids) {
+    if (candidates.empty()) {
+        throw std::runtime_error("buildInPlaceRopeStage requires at least one candidate.");
+    }
+
+    PhysicalExpression stage_expr;
+    std::vector<uint32_t> input_value_ids;
+    std::vector<CompiledStageOutput> stage_outputs;
+    input_value_ids.reserve(candidates.size());
+    stage_outputs.reserve(candidates.size());
+
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        const InPlaceRopeMaterializationCandidate& candidate = candidates[i];
+        auto value_it = node_output_value_id.find(candidate.source_node);
+        if (value_it == node_output_value_id.end()) {
+            throw std::runtime_error("In-place RoPE candidate source has not been materialized.");
+        }
+        input_value_ids.push_back(value_it->second);
+
+        const ExprNode& source = expr.nodes.at(candidate.source_node);
+        stage_expr.inputs.push_back(NamedInput{"__arg" + std::to_string(i), static_cast<uint32_t>(i), NamedInput::Kind::Tensor});
+
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = static_cast<uint32_t>(i);
+        input_node.input_tensor_dtype = source.output_dtype;
+        input_node.output_dtype = source.output_dtype;
+        input_node.compute_dtype = source.compute_dtype;
+        const uint32_t input_local = static_cast<uint32_t>(stage_expr.nodes.size());
+        stage_expr.nodes.push_back(std::move(input_node));
+
+        ExprNode reshape_node;
+        reshape_node.op = ExprOp::RESHAPE;
+        reshape_node.lhs = input_local;
+        reshape_node.reshape_dims = candidate.logical_dims;
+        reshape_node.output_dtype = source.output_dtype;
+        reshape_node.compute_dtype = source.compute_dtype;
+        const uint32_t reshape_local = static_cast<uint32_t>(stage_expr.nodes.size());
+        stage_expr.nodes.push_back(std::move(reshape_node));
+
+        ExprNode rope_node = expr.nodes.at(candidate.rope_root);
+        rope_node.lhs = reshape_local;
+        const uint32_t rope_local = static_cast<uint32_t>(stage_expr.nodes.size());
+        stage_expr.nodes.push_back(std::move(rope_node));
+
+        auto out_it = rope_output_value_ids.find(candidate.rope_root);
+        if (out_it == rope_output_value_ids.end()) {
+            throw std::runtime_error("In-place RoPE candidate missing output value id.");
+        }
+        stage_outputs.push_back(CompiledStageOutput{.name = "", .local_node_idx = rope_local, .value_id = out_it->second});
+    }
+
+    stage_expr.output_node = stage_outputs.front().local_node_idx;
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::InPlaceRope,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = std::move(stage_outputs),
+    };
+}
+
 static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     if (!outputs.expr) {
         throw std::runtime_error("Cannot split null PhysicalOutputs expression.");
@@ -3661,6 +3882,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             throw std::runtime_error("PhysicalOutputs contains output node_idx out of range.");
         }
     }
+
+    const std::vector<uint32_t> node_use_counts = computeNodeUseCounts(expr);
 
     std::unordered_map<uint32_t, uint32_t> node_output_value_id;
     std::map<std::string, uint32_t> fused_region_value_id;
@@ -3872,6 +4095,39 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
         if (rope_roots.size() < 2) {
             return {};
+        }
+
+        std::vector<InPlaceRopeMaterializationCandidate> in_place_candidates;
+        in_place_candidates.reserve(rope_roots.size());
+        bool all_in_place_candidates = true;
+        for (uint32_t rope_root : rope_roots) {
+            std::optional<InPlaceRopeMaterializationCandidate> candidate =
+                classifySplitProjectionInPlaceRopeCandidate(expr, rope_root, node_use_counts);
+            if (!candidate.has_value()) {
+                all_in_place_candidates = false;
+                break;
+            }
+            in_place_candidates.push_back(std::move(candidate.value()));
+        }
+        if (all_in_place_candidates && sameRopeOptionsForInPlaceGrouping(expr, in_place_candidates)) {
+            for (const InPlaceRopeMaterializationCandidate& candidate : in_place_candidates) {
+                emitForDependency(candidate.source_node);
+            }
+
+            std::unordered_map<uint32_t, uint32_t> rope_output_value_ids;
+            std::unordered_set<uint32_t> emitted_roots;
+            for (uint32_t rope_root : rope_roots) {
+                if (node_output_value_id.find(rope_root) != node_output_value_id.end()) {
+                    return {};
+                }
+                const uint32_t value_id = next_value_id++;
+                node_output_value_id[rope_root] = value_id;
+                rope_output_value_ids.emplace(rope_root, value_id);
+                emitted_roots.insert(rope_root);
+            }
+
+            planned.stages.push_back(buildInPlaceRopeStage(expr, in_place_candidates, node_output_value_id, rope_output_value_ids));
+            return emitted_roots;
         }
 
         std::unordered_set<uint32_t> merged_region;
@@ -4514,6 +4770,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::Matmul: {
                 std::shared_ptr<CompiledMatmul> matmul = compileMatmul(stage.expr, stage.outputs);
                 compiled->stages.emplace_back(matmul, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::InPlaceRope: {
+                std::shared_ptr<CompiledInPlaceRope> in_place_rope = compileInPlaceRope(stage.expr, stage.outputs);
+                compiled->stages.emplace_back(in_place_rope, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::Attention: {

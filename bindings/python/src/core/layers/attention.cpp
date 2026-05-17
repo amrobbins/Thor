@@ -62,8 +62,6 @@ std::string attentionMaskKindName(AttentionMaskKind value) {
 bool attentionUsesPackedQkvProjection(const Attention& self) {
     if constexpr (!Attention::USE_PACKED_QKV_PROJECTION) {
         return false;
-    } else if constexpr (Attention::USE_PACKED_QKV_PROJECTION_WITH_ROPE) {
-        return true;
     } else {
         return !self.getUseRope();
     }
@@ -97,7 +95,8 @@ void bind_attention(nb::module_& layers) {
            std::optional<DataType> output_data_type,
            std::shared_ptr<Initializer> weights_initializer,
            std::shared_ptr<Initializer> bias_initializer,
-           std::shared_ptr<Optimizer> optimizer) {
+           std::shared_ptr<Optimizer> optimizer,
+           bool rope_in_place) {
             if (num_heads == 0) {
                 throw nb::value_error("Attention instance: num_heads must be > 0.");
             }
@@ -115,7 +114,11 @@ void bind_attention(nb::module_& layers) {
             }
 
             Attention::Builder builder;
-            builder.network(network).featureInput(feature_input).numHeads(num_heads).hasBias(has_bias).maskKind(parseAttentionMaskKind(mask_kind));
+            builder.network(network)
+                .featureInput(feature_input)
+                .numHeads(num_heads)
+                .hasBias(has_bias)
+                .maskKind(parseAttentionMaskKind(mask_kind));
 
             if (num_key_value_heads.has_value()) {
                 builder.numKeyValueHeads(num_key_value_heads.value());
@@ -143,6 +146,9 @@ void bind_attention(nb::module_& layers) {
             }
             if (use_rope) {
                 builder.useRope(true);
+            }
+            if (rope_in_place) {
+                builder.ropeInPlace(true);
             }
             if (weights_data_type.has_value()) {
                 builder.weightsDataType(weights_data_type.value());
@@ -183,6 +189,7 @@ void bind_attention(nb::module_& layers) {
         "weights_initializer"_a.none() = nb::none(),
         "bias_initializer"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
+        "rope_in_place"_a = false,
         R"nbdoc(
 Public transformer attention layer.
 
@@ -198,6 +205,7 @@ hot path consumes ``[batch, sequence, input_features]``.
     attention.def("get_output_features", &Attention::getOutputFeatures);
     attention.def("get_has_bias", &Attention::getHasBias);
     attention.def("get_use_rope", &Attention::getUseRope);
+    attention.def("get_rope_in_place", &Attention::getRopeInPlace);
     attention.def("get_mask_kind", [](Attention& self) { return attentionMaskKindName(self.getMaskKind()); });
     attention.def("get_diagonal_left_bound", &Attention::getDiagonalLeftBound);
     attention.def("get_diagonal_right_bound", &Attention::getDiagonalRightBound);
@@ -208,6 +216,7 @@ hot path consumes ``[batch, sequence, input_features]``.
     attention.def("get_output_data_type", &Attention::getOutputDataType);
 
     attention.def("_debug_uses_packed_qkv_projection", &attentionUsesPackedQkvProjection);
-    attention.def("_debug_qkv_projection_mode", [](Attention& self) { return attentionUsesPackedQkvProjection(self) ? "packed" : "split"; });
+    attention.def("_debug_qkv_projection_mode",
+                  [](Attention& self) { return attentionUsesPackedQkvProjection(self) ? "packed" : "split"; });
     attention.def("_debug_expression", [](Attention& self) { return self.getExpression(); });
 }

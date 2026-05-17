@@ -441,6 +441,7 @@ json exprNodeToJson(const ExprNode& node) {
     j["rope_scaling_kind"] = static_cast<int>(node.rope_scaling_kind);
     j["rope_scaling_factor"] = node.rope_scaling_factor;
     j["rope_original_max_position_embeddings"] = node.rope_original_max_position_embeddings;
+    j["rope_allow_in_place_materialization"] = node.rope_allow_in_place_materialization;
     j["rms_norm_normalized_feature_count"] = node.rms_norm_normalized_feature_count;
     j["rms_norm_epsilon"] = node.rms_norm_epsilon;
     j["rms_norm_fused_activation"] = toString(node.rms_norm_fused_activation);
@@ -524,6 +525,7 @@ ExprNode exprNodeFromJson(const json& j) {
     node.rope_scaling_kind = static_cast<RotaryScalingKind>(j.value("rope_scaling_kind", static_cast<int>(RotaryScalingKind::None)));
     node.rope_scaling_factor = j.value("rope_scaling_factor", 1.0);
     node.rope_original_max_position_embeddings = j.value("rope_original_max_position_embeddings", uint64_t{0});
+    node.rope_allow_in_place_materialization = j.value("rope_allow_in_place_materialization", false);
     node.rms_norm_normalized_feature_count = j.value("rms_norm_normalized_feature_count", uint64_t{0});
     node.rms_norm_epsilon = j.value("rms_norm_epsilon", 1.0e-5);
     node.rms_norm_fused_activation = j.contains("rms_norm_fused_activation")
@@ -2440,6 +2442,7 @@ Expression Expression::rotaryPositionEmbedding(RotaryPositionEmbeddingOptions op
     node.rope_scaling_kind = options.scaling_kind;
     node.rope_scaling_factor = options.scaling_factor;
     node.rope_original_max_position_embeddings = options.original_max_position_embeddings;
+    node.rope_allow_in_place_materialization = options.allow_in_place_materialization;
     if (options.output_dtype.has_value()) {
         node.output_dtype = options.output_dtype.value();
     }

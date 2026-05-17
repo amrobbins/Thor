@@ -3481,6 +3481,10 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
                 throw std::runtime_error("Matmul stage missing payload while computing FLOPs.");
             return computeMatmulStageFlops(*stage.matmul, stage_input_dims);
 
+        case CompiledExecutionStage::Kind::InPlaceRope:
+            // RoPE FLOPs are intentionally approximate and are not part of the attention benchmark TFLOP estimate.
+            return stage_input_dims.empty() ? 0 : checkedMulU64(numelFromDims(stage_input_dims[0]), 8, "computeInPlaceRopeStageFlops");
+
         case CompiledExecutionStage::Kind::Attention:
             if (!stage.attention)
                 throw std::runtime_error("Attention stage missing payload while computing FLOPs.");
@@ -3586,6 +3590,16 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 return std::vector<uint64_t>{matrix_dims[1]};
             }
             throw std::runtime_error("Matmul stage requested secondary output but has no bias-gradient epilogue.");
+        }
+
+        case CompiledExecutionStage::Kind::InPlaceRope: {
+            if (!stage.in_place_rope) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput in-place RoPE stage missing payload.");
+            }
+            if (output_idx >= stage.in_place_rope->tensors.size()) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput in-place RoPE output index out of range.");
+            }
+            return stage.in_place_rope->tensors[output_idx].logical_dims;
         }
 
         case CompiledExecutionStage::Kind::Attention: {
@@ -4454,6 +4468,16 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                     throw std::runtime_error("Matmul/gemm bias-gradient output requires a rank-2 matrix output.");
                 }
                 value_dims[stage.outputs[1].value_id] = std::vector<uint64_t>{matrix_dims[1]};
+            }
+        } else if (stage.kind == CompiledExecutionStage::Kind::InPlaceRope) {
+            if (!stage.in_place_rope) {
+                throw std::runtime_error("Missing compiled in-place RoPE stage.");
+            }
+            if (stage.outputs.size() != stage.in_place_rope->tensors.size()) {
+                throw std::runtime_error("In-place RoPE stage output count mismatch.");
+            }
+            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                value_dims[stage.outputs[output_idx].value_id] = stage.in_place_rope->tensors[output_idx].logical_dims;
             }
         } else if (stage.kind == CompiledExecutionStage::Kind::Attention) {
             if (!stage.attention) {
@@ -6861,6 +6885,36 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedMatmul, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
+            case CompiledExecutionStage::Kind::InPlaceRope: {
+                if (!stage.in_place_rope) {
+                    throw std::runtime_error("In-place RoPE stage missing compiled payload.");
+                }
+                if (stageInputs.size() != stage.in_place_rope->tensors.size() || stage.outputs.size() != stage.in_place_rope->tensors.size()) {
+                    throw std::runtime_error("In-place RoPE stage input/output count mismatch.");
+                }
+
+                std::vector<Tensor> ropeTensors;
+                ropeTensors.reserve(stageInputs.size());
+                for (size_t i = 0; i < stageInputs.size(); ++i) {
+                    Tensor tensor = runtimeInputTensor(stageInputs[i]);
+                    if (tensor.getDimensions() != stage.in_place_rope->tensors[i].logical_dims) {
+                        tensor.reshape(stage.in_place_rope->tensors[i].logical_dims);
+                    }
+                    if (tensor.getDataType() != stage.in_place_rope->tensors[i].dtype) {
+                        throw std::runtime_error("In-place RoPE tensor dtype mismatch.");
+                    }
+                    ropeTensors.push_back(tensor);
+                }
+
+                auto stampedRope = std::make_shared<StampedInPlaceRope>(stage.in_place_rope, ropeTensors, stream);
+                const uint32_t rope_stage_idx = static_cast<uint32_t>(stampedStages.size());
+                for (size_t i = 0; i < stage.outputs.size(); ++i) {
+                    values[stage.outputs[i].value_id] = stampedRope->outputTensor(i);
+                    producer_stage_by_value_id[stage.outputs[i].value_id] = rope_stage_idx;
+                }
+                stampedStages.emplace_back(stampedRope, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
             case CompiledExecutionStage::Kind::Attention: {
                 if (!stage.attention) {
                     throw std::runtime_error("Attention stage missing compiled payload.");
@@ -7484,6 +7538,8 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                 stage, stage_input_dims, resolved_stage_output_dims, root_input_name_by_slot, parameter_names, result);
         } else if (stage.kind == CompiledExecutionStage::Kind::Matmul) {
             addMatmulParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
+        } else if (stage.kind == CompiledExecutionStage::Kind::InPlaceRope) {
+            // In-place RoPE has no trainable parameters.
         } else if (stage.kind == CompiledExecutionStage::Kind::Attention) {
             // Attention stages do not currently infer initializer fan overrides for q/k/v inputs.
         } else if (stage.kind == CompiledExecutionStage::Kind::AttentionBackward) {
@@ -7564,6 +7620,13 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                     throw std::runtime_error("Matmul/gemm bias-gradient output requires a rank-2 matrix output.");
                 }
                 value_dims[stage.outputs[1].value_id] = std::vector<uint64_t>{matrix_dims[1]};
+            }
+        } else if (stage.kind == CompiledExecutionStage::Kind::InPlaceRope) {
+            if (!stage.in_place_rope) {
+                throw std::runtime_error("Missing compiled in-place RoPE stage.");
+            }
+            for (size_t i = 0; i < stage.outputs.size(); ++i) {
+                value_dims[stage.outputs[i].value_id] = stage.in_place_rope->tensors[i].logical_dims;
             }
         } else if (stage.kind == CompiledExecutionStage::Kind::Attention) {
             if (!stage.attention) {

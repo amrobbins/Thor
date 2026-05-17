@@ -626,7 +626,8 @@ Shorthand for ``self.transpose()``.
                                double scaling_factor,
                                uint64_t original_max_position_embeddings,
                                nb::object output_dtype_obj,
-                               nb::object compute_dtype_obj) {
+                               nb::object compute_dtype_obj,
+                               bool allow_in_place_materialization) {
             RotaryPositionEmbeddingOptions options;
             options.sequence_axis = sequence_axis;
             options.head_dim_axis = head_dim_axis;
@@ -638,6 +639,7 @@ Shorthand for ``self.transpose()``.
             options.scaling_kind = scaling_kind;
             options.scaling_factor = scaling_factor;
             options.original_max_position_embeddings = original_max_position_embeddings;
+            options.allow_in_place_materialization = allow_in_place_materialization;
             options.output_dtype = parse_optional_dtype(output_dtype_obj);
             options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
             return Expression::rotaryPositionEmbedding(input, std::move(options));
@@ -655,6 +657,7 @@ Shorthand for ``self.transpose()``.
         "original_max_position_embeddings"_a = 0,
         "output_dtype"_a.none() = nb::none(),
         "compute_dtype"_a.none() = nb::none(),
+        "allow_in_place_materialization"_a = false,
         R"nbdoc(
 Apply rotary positional embedding as a fused expression primitive.
 
@@ -678,7 +681,8 @@ which is used by autodiff.
                                double scaling_factor,
                                uint64_t original_max_position_embeddings,
                                nb::object output_dtype_obj,
-                               nb::object compute_dtype_obj) {
+                               nb::object compute_dtype_obj,
+                               bool allow_in_place_materialization) {
             RotaryPositionEmbeddingOptions options;
             options.sequence_axis = sequence_axis;
             options.head_dim_axis = head_dim_axis;
@@ -690,6 +694,7 @@ which is used by autodiff.
             options.scaling_kind = scaling_kind;
             options.scaling_factor = scaling_factor;
             options.original_max_position_embeddings = original_max_position_embeddings;
+            options.allow_in_place_materialization = allow_in_place_materialization;
             options.output_dtype = parse_optional_dtype(output_dtype_obj);
             options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
             return Expression::rotaryPositionEmbedding(input, std::move(options));
@@ -707,6 +712,7 @@ which is used by autodiff.
         "original_max_position_embeddings"_a = 0,
         "output_dtype"_a.none() = nb::none(),
         "compute_dtype"_a.none() = nb::none(),
+        "allow_in_place_materialization"_a = false,
         R"nbdoc(Alias for rotary_position_embedding().)nbdoc");
 
     expr.def_static(
