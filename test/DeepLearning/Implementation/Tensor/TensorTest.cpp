@@ -16,6 +16,30 @@
 using namespace ThorImplementation;
 using namespace std;
 
+static vector<TensorDescriptor::DataType> allWholeElementTensorDataTypes() {
+    return {TensorDescriptor::DataType::FP16,
+            TensorDescriptor::DataType::BF16,
+            TensorDescriptor::DataType::FP8_E4M3,
+            TensorDescriptor::DataType::FP8_E5M2,
+            TensorDescriptor::DataType::FP32,
+            TensorDescriptor::DataType::FP64,
+            TensorDescriptor::DataType::INT8,
+            TensorDescriptor::DataType::INT16,
+            TensorDescriptor::DataType::INT32,
+            TensorDescriptor::DataType::INT64,
+            TensorDescriptor::DataType::UINT8,
+            TensorDescriptor::DataType::UINT16,
+            TensorDescriptor::DataType::UINT32,
+            TensorDescriptor::DataType::UINT64,
+            TensorDescriptor::DataType::BOOLEAN};
+}
+
+static vector<TensorDescriptor::DataType> allTensorDataTypes() {
+    vector<TensorDescriptor::DataType> dataTypes = allWholeElementTensorDataTypes();
+    dataTypes.push_back(TensorDescriptor::DataType::PACKED_BOOLEAN);
+    return dataTypes;
+}
+
 TEST(Tensor, Copies) {
     srand(time(nullptr));
 
@@ -1614,6 +1638,30 @@ TEST(Tensor, identityMatrixGpu) {
     Tensor::identityMatrix(300, cpuPlacement, TensorDescriptor::DataType::FP32, stream);
 }
 
+TEST(Tensor, identityMatrixSupportsAllNonPackedDataTypesCpuAndGpu) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
+    Stream stream(0);
+    const uint32_t N = 11;
+
+    for (TensorDescriptor::DataType dataType : allWholeElementTensorDataTypes()) {
+        for (TensorPlacement placement : {cpuPlacement, gpuPlacement}) {
+            Tensor identity = Tensor::identityMatrix(N, placement, dataType, stream);
+            Tensor identityFp32 = identity.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+            identityFp32.copyFromAsync(identity, stream);
+            stream.synchronize();
+
+            float *mem = identityFp32.getMemPtr<float>();
+            for (uint32_t row = 0; row < N; ++row) {
+                for (uint32_t col = 0; col < N; ++col) {
+                    ASSERT_EQ(mem[row * N + col], row == col ? 1.0f : 0.0f)
+                        << "dataType=" << TensorDescriptor::getElementTypeName(dataType) << " row=" << row << " col=" << col;
+                }
+            }
+        }
+    }
+}
+
 TEST(Tensor, zerosCpu) {
     srand(time(nullptr));
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -2029,6 +2077,27 @@ TEST(Tensor, valuesGpu) {
     }
 }
 
+TEST(Tensor, valuesSupportsAllDataTypesCpuAndGpu) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
+    Stream stream(0);
+    vector<uint64_t> dimensions{37};
+
+    for (TensorDescriptor::DataType dataType : allTensorDataTypes()) {
+        for (TensorPlacement placement : {cpuPlacement, gpuPlacement}) {
+            Tensor tensor = Tensor::values(placement, TensorDescriptor(dataType, dimensions), stream, 1.0);
+            Tensor tensorFp32 = tensor.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+            tensorFp32.copyFromAsync(tensor, stream);
+            stream.synchronize();
+
+            float *mem = tensorFp32.getMemPtr<float>();
+            for (uint64_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+                ASSERT_EQ(mem[i], 1.0f) << "dataType=" << TensorDescriptor::getElementTypeName(dataType) << " i=" << i;
+            }
+        }
+    }
+}
+
 TEST(Tensor, fillRandomCpu) {
     srand(time(nullptr));
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -2198,6 +2267,38 @@ TEST(Tensor, fillRandomGpu) {
                 if (!(mem[i] <= maxValue && mem[i] >= minValue))
                     printf("[%d] %d <= %f <= %d failed.   dt = %d\n", i, minValue, mem[i], maxValue, dt);
                 ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
+            }
+        }
+    }
+}
+
+TEST(Tensor, fillRandomSupportsAllDataTypesCpuAndGpu) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
+    Stream stream(0);
+    vector<uint64_t> dimensions{257};
+
+    for (TensorDescriptor::DataType dataType : allTensorDataTypes()) {
+        double minValue = -1.0;
+        double maxValue = 1.0;
+        if (dataType == TensorDescriptor::DataType::UINT8 || dataType == TensorDescriptor::DataType::UINT16 ||
+            dataType == TensorDescriptor::DataType::UINT32 || dataType == TensorDescriptor::DataType::UINT64 ||
+            dataType == TensorDescriptor::DataType::BOOLEAN || dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+            minValue = 0.0;
+            maxValue = dataType == TensorDescriptor::DataType::BOOLEAN || dataType == TensorDescriptor::DataType::PACKED_BOOLEAN ? 1.0 : 5.0;
+        }
+
+        for (TensorPlacement placement : {cpuPlacement, gpuPlacement}) {
+            Tensor tensor(placement, TensorDescriptor(dataType, dimensions));
+            tensor.fillRandom(minValue, maxValue, stream);
+            Tensor tensorFp32 = tensor.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+            tensorFp32.copyFromAsync(tensor, stream);
+            stream.synchronize();
+
+            float *mem = tensorFp32.getMemPtr<float>();
+            for (uint64_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+                ASSERT_GE(mem[i], minValue) << "dataType=" << TensorDescriptor::getElementTypeName(dataType) << " i=" << i;
+                ASSERT_LE(mem[i], maxValue) << "dataType=" << TensorDescriptor::getElementTypeName(dataType) << " i=" << i;
             }
         }
     }
