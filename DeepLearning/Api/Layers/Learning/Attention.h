@@ -77,9 +77,8 @@ class Attention : public CustomLayer {
 
     ~Attention() override = default;
 
-    // Compile-time experiment switch for benchmarking packed QKV projection against the legacy split-Q/K/V path.
-    // Keep USE_PACKED_QKV_PROJECTION_WITH_ROPE disabled until RoPE can consume non-dense packed Q/K views directly
-    // or a dedicated layout-aware RoPE materialization path is added.
+    // Dormant compile-time experiment switch for benchmarking packed QKV projection against the maintained split-Q/K/V path.
+    // Packed QKV is intentionally not updated by split-path projection/RoPE fusion work unless a future use case reactivates it.
     static constexpr bool USE_PACKED_QKV_PROJECTION = false;
     static constexpr bool USE_PACKED_QKV_PROJECTION_WITH_ROPE = false;
 
