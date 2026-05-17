@@ -245,7 +245,7 @@ def test_explicit_transpose_is_absorbed_into_matmul_stage(dtype: thor.DataType):
     }
 
     stage_kinds = eq._debug_stage_kinds(inputs_gpu)
-    assert stage_kinds == ["Matmul(lhsT=1,rhsT=0,auxT=0)"]
+    assert stage_kinds == ["Matmul(op=MATMUL,lhsT=1,rhsT=0,auxT=0)"]
 
     stamped = eq.stamp(inputs_gpu, stream)
     stamped.run()
@@ -279,7 +279,7 @@ def test_explicit_transpose_is_absorbed_into_operator_lowered_gemm_stage(dtype: 
     }
 
     stage_kinds = eq._debug_stage_kinds(inputs_gpu)
-    assert stage_kinds == ["Matmul(lhsT=0,rhsT=1,auxT=0)"]
+    assert stage_kinds == ["Matmul(op=GEMM,lhsT=0,rhsT=1,auxT=0)"]
 
     stamped = eq.stamp(inputs_gpu, stream)
     stamped.run()
@@ -313,7 +313,7 @@ def test_explicit_transpose_is_absorbed_into_explicit_gemm_stage(dtype: thor.Dat
     }
 
     stage_kinds = eq._debug_stage_kinds(inputs_gpu)
-    assert stage_kinds == ["Matmul(lhsT=1,rhsT=0,auxT=0)"]
+    assert stage_kinds == ["Matmul(op=GEMM,lhsT=1,rhsT=0,auxT=0)"]
 
     stamped = eq.stamp(inputs_gpu, stream)
     stamped.run()

@@ -120,6 +120,9 @@ struct RotaryPositionEmbeddingOptions {
     uint64_t original_max_position_embeddings = 0;
     std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt;
     std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt;
+    // Allows planner/runtime to rotate a private projection output in-place instead of materializing a separate RoPE output.
+    // Defaults to false because out-of-place RoPE has benchmarked faster; set true only when memory pressure matters.
+    bool allow_in_place_materialization = false;
 };
 
 inline bool isCudnnReduceOp(ExprOp op) {
@@ -214,6 +217,7 @@ struct ExprNode {
     RotaryScalingKind rope_scaling_kind = RotaryScalingKind::None;
     double rope_scaling_factor = 1.0;
     uint64_t rope_original_max_position_embeddings = 0;
+    bool rope_allow_in_place_materialization = false;
 
     uint64_t rms_norm_normalized_feature_count = 0;
     double rms_norm_epsilon = 1.0e-5;

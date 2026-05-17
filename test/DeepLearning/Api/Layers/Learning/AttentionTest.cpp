@@ -7,8 +7,8 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 
-#include "cuda_fp16.h"
 #include <cuda_bf16.h>
+#include "cuda_fp16.h"
 #include "gtest/gtest.h"
 
 #include <algorithm>
@@ -16,8 +16,8 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
-#include <string>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -171,9 +171,12 @@ PlacedAttentionFixture placeSingleAttentionNetwork(Api::Network& network,
     EXPECT_NE(fixture.placedNetwork, nullptr);
     fixture.stampedNetwork = &fixture.placedNetwork->getStampedNetwork(0);
 
-    fixture.physicalInput = dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiInput.getId()));
-    fixture.physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiOutput.getId()));
-    fixture.physicalAttention = dynamic_pointer_cast<Impl::CustomLayer>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiAttention.getId()));
+    fixture.physicalInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiInput.getId()));
+    fixture.physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiOutput.getId()));
+    fixture.physicalAttention =
+        dynamic_pointer_cast<Impl::CustomLayer>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiAttention.getId()));
 
     EXPECT_NE(fixture.physicalInput, nullptr);
     EXPECT_NE(fixture.physicalOutput, nullptr);
@@ -244,9 +247,6 @@ uint32_t mergedWidth(const AttentionReferenceCase& c) { return c.numHeads * c.va
 constexpr bool attentionUsesPackedQkv(bool useRope) {
     if constexpr (!Api::Attention::USE_PACKED_QKV_PROJECTION) {
         return false;
-    } else if constexpr (Api::Attention::USE_PACKED_QKV_PROJECTION_WITH_ROPE) {
-        (void)useRope;
-        return true;
     } else {
         return !useRope;
     }
@@ -262,9 +262,7 @@ vector<float> packQkvWeights(const AttentionReferenceInputs& inputs, const Atten
         const uint64_t kRow = static_cast<uint64_t>(f) * kWidth(c);
         const uint64_t vRow = static_cast<uint64_t>(f) * vWidth(c);
         std::copy(inputs.queryWeights.begin() + qRow, inputs.queryWeights.begin() + qRow + qWidth(c), qkv.begin() + packedRow);
-        std::copy(inputs.keyWeights.begin() + kRow,
-                  inputs.keyWeights.begin() + kRow + kWidth(c),
-                  qkv.begin() + packedRow + qWidth(c));
+        std::copy(inputs.keyWeights.begin() + kRow, inputs.keyWeights.begin() + kRow + kWidth(c), qkv.begin() + packedRow + qWidth(c));
         std::copy(inputs.valueWeights.begin() + vRow,
                   inputs.valueWeights.begin() + vRow + vWidth(c),
                   qkv.begin() + packedRow + qWidth(c) + kWidth(c));
@@ -351,8 +349,8 @@ AttentionReferenceInputs makeAttentionReferenceInputs(const AttentionReferenceCa
 }
 
 AttentionReferenceInputs makeRopeLayoutSentinelInputs(const AttentionReferenceCase& c) {
-    if (c.numHeads != c.numKeyValueHeads || c.headDim != c.valueDim || c.inputFeatures != qWidth(c) ||
-        c.outputFeatures != mergedWidth(c) || c.hasBias) {
+    if (c.numHeads != c.numKeyValueHeads || c.headDim != c.valueDim || c.inputFeatures != qWidth(c) || c.outputFeatures != mergedWidth(c) ||
+        c.hasBias) {
         throw std::runtime_error("RoPE layout sentinel input helper expects bias-free MHA with identity-sized projections.");
     }
 
@@ -407,8 +405,8 @@ AttentionReferenceInputs makeAlibiSentinelInputs(const AttentionReferenceCase& c
                 for (uint32_t d = 0; d < c.valueDim; ++d) {
                     const uint32_t f = h * c.valueDim + d;
                     inputs.featureInput[idx3(b, s, f, c.sequenceLength, c.inputFeatures)] =
-                        0.05f * static_cast<float>(b + 1) + 0.40f * static_cast<float>(s + 1) +
-                        0.03f * static_cast<float>(h + 1) + 0.002f * static_cast<float>(d + 1);
+                        0.05f * static_cast<float>(b + 1) + 0.40f * static_cast<float>(s + 1) + 0.03f * static_cast<float>(h + 1) +
+                        0.002f * static_cast<float>(d + 1);
                 }
             }
         }
@@ -479,9 +477,8 @@ void applyRopeInPlace(vector<float>& bhsd, const AttentionReferenceCase& c, uint
                 }
                 float ropeBase = static_cast<float>(opts.base);
                 if (opts.scaling_kind == Impl::RotaryScalingKind::DynamicNTK) {
-                    const float ropeSeqLen = std::max(static_cast<float>(c.sequenceLength) +
-                                                          static_cast<float>(std::max<int64_t>(0, opts.position_offset)),
-                                                      1.0f);
+                    const float ropeSeqLen = std::max(
+                        static_cast<float>(c.sequenceLength) + static_cast<float>(std::max<int64_t>(0, opts.position_offset)), 1.0f);
                     const float ropeOriginalMax = static_cast<float>(opts.original_max_position_embeddings);
                     if (ropeSeqLen > ropeOriginalMax && rotaryDim > 2) {
                         const float ratio = static_cast<float>(opts.scaling_factor) * ropeSeqLen / ropeOriginalMax -
@@ -500,7 +497,8 @@ void applyRopeInPlace(vector<float>& bhsd, const AttentionReferenceCase& c, uint
                     const uint64_t pairIndex = opts.interleaved ? (d >> 1U) : (d < halfDim ? d : d - halfDim);
                     const uint64_t peerDelta = opts.interleaved ? 1U : halfDim;
                     const uint32_t peerD = static_cast<uint32_t>(firstLane ? d + peerDelta : d - peerDelta);
-                    const float theta = ropePosition * powf(ropeBase, -2.0f * static_cast<float>(pairIndex) / static_cast<float>(rotaryDim));
+                    const float theta =
+                        ropePosition * powf(ropeBase, -2.0f * static_cast<float>(pairIndex) / static_cast<float>(rotaryDim));
                     float sTheta = sinf(theta);
                     const float cTheta = cosf(theta);
                     if (opts.inverse)
@@ -550,8 +548,7 @@ float alibiSlope(uint32_t numHeads, uint32_t head) {
 }
 
 float alibiBias(uint32_t numHeads, uint32_t head, uint32_t queryIndex, uint32_t keyIndex) {
-    return alibiSlope(numHeads, head) *
-           (static_cast<float>(static_cast<int64_t>(keyIndex) - static_cast<int64_t>(queryIndex)));
+    return alibiSlope(numHeads, head) * (static_cast<float>(static_cast<int64_t>(keyIndex) - static_cast<int64_t>(queryIndex)));
 }
 
 vector<float> sdpaReference(const vector<float>& q, const vector<float>& k, const vector<float>& v, const AttentionReferenceCase& c) {
@@ -599,18 +596,14 @@ vector<float> sdpaReference(const vector<float>& q, const vector<float>& k, cons
     return out;
 }
 
-vector<float> bhsdSemanticToBshdStorage(const vector<float>& bhsd,
-                                           uint32_t batchSize,
-                                           uint32_t sequenceLength,
-                                           uint32_t heads,
-                                           uint32_t dim) {
+vector<float> bhsdSemanticToBshdStorage(
+    const vector<float>& bhsd, uint32_t batchSize, uint32_t sequenceLength, uint32_t heads, uint32_t dim) {
     vector<float> storage(static_cast<uint64_t>(batchSize) * sequenceLength * heads * dim, 0.0f);
     for (uint32_t b = 0; b < batchSize; ++b) {
         for (uint32_t h = 0; h < heads; ++h) {
             for (uint32_t s = 0; s < sequenceLength; ++s) {
                 for (uint32_t d = 0; d < dim; ++d) {
-                    storage[idxBshd(b, s, h, d, sequenceLength, heads, dim)] =
-                        bhsd[idx4(b, h, s, d, heads, sequenceLength, dim)];
+                    storage[idxBshd(b, s, h, d, sequenceLength, heads, dim)] = bhsd[idx4(b, h, s, d, heads, sequenceLength, dim)];
                 }
             }
         }
@@ -618,18 +611,14 @@ vector<float> bhsdSemanticToBshdStorage(const vector<float>& bhsd,
     return storage;
 }
 
-vector<float> bshdStorageToBhsdSemantic(const vector<float>& storage,
-                                         uint32_t batchSize,
-                                         uint32_t sequenceLength,
-                                         uint32_t heads,
-                                         uint32_t dim) {
+vector<float> bshdStorageToBhsdSemantic(
+    const vector<float>& storage, uint32_t batchSize, uint32_t sequenceLength, uint32_t heads, uint32_t dim) {
     vector<float> bhsd(static_cast<uint64_t>(batchSize) * heads * sequenceLength * dim, 0.0f);
     for (uint32_t b = 0; b < batchSize; ++b) {
         for (uint32_t h = 0; h < heads; ++h) {
             for (uint32_t s = 0; s < sequenceLength; ++s) {
                 for (uint32_t d = 0; d < dim; ++d) {
-                    bhsd[idx4(b, h, s, d, heads, sequenceLength, dim)] =
-                        storage[idxBshd(b, s, h, d, sequenceLength, heads, dim)];
+                    bhsd[idx4(b, h, s, d, heads, sequenceLength, dim)] = storage[idxBshd(b, s, h, d, sequenceLength, heads, dim)];
                 }
             }
         }
@@ -652,7 +641,9 @@ vector<float> mergeBhsdToBsd(const vector<float>& bhsd, const AttentionReference
     return merged;
 }
 
-vector<float> outputProjectionReference(const vector<float>& merged, const AttentionReferenceInputs& inputs, const AttentionReferenceCase& c) {
+vector<float> outputProjectionReference(const vector<float>& merged,
+                                        const AttentionReferenceInputs& inputs,
+                                        const AttentionReferenceCase& c) {
     vector<float> out(static_cast<uint64_t>(c.batchSize) * c.sequenceLength * c.outputFeatures, 0.0f);
     for (uint32_t b = 0; b < c.batchSize; ++b) {
         for (uint32_t s = 0; s < c.sequenceLength; ++s) {
@@ -673,15 +664,8 @@ vector<float> attentionLayerReference(const AttentionReferenceInputs& inputs, co
     const vector<float>* qBias = c.hasBias ? &inputs.queryBias : nullptr;
     const vector<float>* kBias = c.hasBias ? &inputs.keyBias : nullptr;
     const vector<float>* vBias = c.hasBias ? &inputs.valueBias : nullptr;
-    vector<float> q = projectToBhsd(inputs.featureInput,
-                                    inputs.queryWeights,
-                                    qBias,
-                                    c.batchSize,
-                                    c.sequenceLength,
-                                    c.inputFeatures,
-                                    c.numHeads,
-                                    c.headDim,
-                                    c.dataType);
+    vector<float> q = projectToBhsd(
+        inputs.featureInput, inputs.queryWeights, qBias, c.batchSize, c.sequenceLength, c.inputFeatures, c.numHeads, c.headDim, c.dataType);
     vector<float> k = projectToBhsd(inputs.featureInput,
                                     inputs.keyWeights,
                                     kBias,
@@ -712,15 +696,8 @@ vector<float> attentionLayerReferenceWithRopeAppliedAfterBadBshdReinterpret(cons
     const vector<float>* qBias = c.hasBias ? &inputs.queryBias : nullptr;
     const vector<float>* kBias = c.hasBias ? &inputs.keyBias : nullptr;
     const vector<float>* vBias = c.hasBias ? &inputs.valueBias : nullptr;
-    vector<float> q = projectToBhsd(inputs.featureInput,
-                                    inputs.queryWeights,
-                                    qBias,
-                                    c.batchSize,
-                                    c.sequenceLength,
-                                    c.inputFeatures,
-                                    c.numHeads,
-                                    c.headDim,
-                                    c.dataType);
+    vector<float> q = projectToBhsd(
+        inputs.featureInput, inputs.queryWeights, qBias, c.batchSize, c.sequenceLength, c.inputFeatures, c.numHeads, c.headDim, c.dataType);
     vector<float> k = projectToBhsd(inputs.featureInput,
                                     inputs.keyWeights,
                                     kBias,
@@ -781,10 +758,10 @@ void setAttentionParameters(const shared_ptr<Impl::CustomLayer>& physicalAttenti
 }
 
 void runAttentionApiReferenceCaseWithInputs(const std::string& networkName,
-                                           const AttentionReferenceCase& c,
-                                           const AttentionReferenceInputs& inputs,
-                                           float atol = 9e-2f,
-                                           float rtol = 9e-2f) {
+                                            const AttentionReferenceCase& c,
+                                            const AttentionReferenceInputs& inputs,
+                                            float atol = 9e-2f,
+                                            float rtol = 9e-2f) {
     Api::Network network(networkName);
     Api::NetworkInput input = Api::NetworkInput::Builder()
                                   .network(network)
@@ -838,22 +815,13 @@ void runAttentionApiReferenceCase(const std::string& networkName, const Attentio
 
 }  // namespace
 
-
 TEST(AttentionApi, BuildsComposedCausalSelfAttention) {
     Api::Network network("attention_api_builds_composed_causal_self_attention");
-    Api::NetworkInput input = Api::NetworkInput::Builder()
-                                  .network(network)
-                                  .name("tokens")
-                                  .dimensions({16, 64})
-                                  .dataType(DataType::FP16)
-                                  .build();
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({16, 64}).dataType(DataType::FP16).build();
 
-    Api::Attention attention = Api::Attention::Builder()
-                                   .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
-                                   .numHeads(4)
-                                   .causal()
-                                   .build();
+    Api::Attention attention =
+        Api::Attention::Builder().network(network).featureInput(input.getFeatureOutput().value()).numHeads(4).causal().build();
 
     EXPECT_EQ(attention.getLayerType(), "Attention");
     EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"feature_input"}));
@@ -870,12 +838,8 @@ TEST(AttentionApi, BuildsComposedCausalSelfAttention) {
 
 TEST(AttentionApi, BuildsComposedGqaAttentionWithExplicitDimsBiasAndRope) {
     Api::Network network("attention_api_builds_composed_gqa_attention_with_explicit_dims_bias_and_rope");
-    Api::NetworkInput input = Api::NetworkInput::Builder()
-                                  .network(network)
-                                  .name("tokens")
-                                  .dimensions({8, 96})
-                                  .dataType(DataType::BF16)
-                                  .build();
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 96}).dataType(DataType::BF16).build();
 
     Impl::RotaryPositionEmbeddingOptions rope;
     rope.rotary_dim = 16;
@@ -894,6 +858,7 @@ TEST(AttentionApi, BuildsComposedGqaAttentionWithExplicitDimsBiasAndRope) {
                                    .outputFeatures(80)
                                    .hasBias(true)
                                    .ropeOptions(rope)
+                                   .ropeInPlace(true)
                                    .attentionScale(0.25)
                                    .outputDataType(DataType::BF16)
                                    .build();
@@ -906,18 +871,15 @@ TEST(AttentionApi, BuildsComposedGqaAttentionWithExplicitDimsBiasAndRope) {
     EXPECT_EQ(attention.getOutputFeatures(), 80U);
     EXPECT_TRUE(attention.getHasBias());
     EXPECT_TRUE(attention.getUseRope());
+    EXPECT_TRUE(attention.getRopeInPlace());
     ASSERT_TRUE(attention.getAttentionScale().has_value());
     EXPECT_DOUBLE_EQ(attention.getAttentionScale().value(), 0.25);
 }
 
 TEST(AttentionApi, RejectsInvalidHeadConfiguration) {
     Api::Network network("attention_api_rejects_invalid_head_configuration");
-    Api::NetworkInput input = Api::NetworkInput::Builder()
-                                  .network(network)
-                                  .name("tokens")
-                                  .dimensions({8, 64})
-                                  .dataType(DataType::FP16)
-                                  .build();
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 64}).dataType(DataType::FP16).build();
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
@@ -931,12 +893,8 @@ TEST(AttentionApi, RejectsInvalidHeadConfiguration) {
 
 TEST(AttentionApi, RejectsRank3FeatureInputForComposedAttention) {
     Api::Network network("attention_api_rejects_rank3_feature_input_for_composed_attention");
-    Api::NetworkInput input = Api::NetworkInput::Builder()
-                                  .network(network)
-                                  .name("tokens")
-                                  .dimensions({2, 8, 64})
-                                  .dataType(DataType::FP16)
-                                  .build();
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({2, 8, 64}).dataType(DataType::FP16).build();
 
     EXPECT_THROW(Api::Attention::Builder().network(network).featureInput(input.getFeatureOutput().value()).numHeads(4).build(),
                  std::invalid_argument);
@@ -944,12 +902,8 @@ TEST(AttentionApi, RejectsRank3FeatureInputForComposedAttention) {
 
 TEST(AttentionApi, RejectsBottomRightMaskWithAlibi) {
     Api::Network network("attention_api_rejects_bottom_right_mask_with_alibi");
-    Api::NetworkInput input = Api::NetworkInput::Builder()
-                                  .network(network)
-                                  .name("tokens")
-                                  .dimensions({8, 64})
-                                  .dataType(DataType::FP16)
-                                  .build();
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 64}).dataType(DataType::FP16).build();
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
@@ -973,12 +927,8 @@ TEST(AttentionApi, ForwardUniformAttentionMatchesBshdProjectionLayoutReference) 
     const DataType dataType = DataType::FP16;
 
     Api::Network network("attention_api_forward_uniform_attention_matches_bshd_projection_layout_reference");
-    Api::NetworkInput input = Api::NetworkInput::Builder()
-                                  .network(network)
-                                  .name("tokens")
-                                  .dimensions({sequenceLength, inputFeatures})
-                                  .dataType(dataType)
-                                  .build();
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({sequenceLength, inputFeatures}).dataType(dataType).build();
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
                                    .featureInput(input.getFeatureOutput().value())
@@ -1041,18 +991,14 @@ TEST(AttentionApi, ForwardUniformAttentionMatchesBshdProjectionLayoutReference) 
     setAttentionParameters(fixture.physicalAttention, parameterInputs, parameterCase, stream);
 
     vector<float> inputValues(batchSize * sequenceLength * inputFeatures, 0.0f);
-    auto inputIndex = [=](uint32_t b, uint32_t s, uint32_t feature) {
-        return (b * sequenceLength + s) * inputFeatures + feature;
-    };
+    auto inputIndex = [=](uint32_t b, uint32_t s, uint32_t feature) { return (b * sequenceLength + s) * inputFeatures + feature; };
     for (uint32_t b = 0; b < batchSize; ++b) {
         for (uint32_t s = 0; s < sequenceLength; ++s) {
             for (uint32_t h = 0; h < numHeads; ++h) {
                 for (uint32_t d = 0; d < valueDim; ++d) {
                     const uint32_t feature = h * valueDim + d;
-                    inputValues[inputIndex(b, s, feature)] = 0.25f * static_cast<float>(b + 1) +
-                                                             0.10f * static_cast<float>(s) +
-                                                             0.03f * static_cast<float>(h) +
-                                                             0.001f * static_cast<float>(d);
+                    inputValues[inputIndex(b, s, feature)] = 0.25f * static_cast<float>(b + 1) + 0.10f * static_cast<float>(s) +
+                                                             0.03f * static_cast<float>(h) + 0.001f * static_cast<float>(d);
                 }
             }
         }
@@ -1246,7 +1192,8 @@ TEST(AttentionApi, ForwardSlidingWindowTopLeftWithRightBoundMatchesFullCpuRefere
     c.attentionScale = 0.19f;
     c.dataType = DataType::FP16;
 
-    runAttentionApiReferenceCase("attention_api_forward_sliding_window_top_left_with_right_bound_matches_full_cpu_reference", c, 1.3e-1f, 1.3e-1f);
+    runAttentionApiReferenceCase(
+        "attention_api_forward_sliding_window_top_left_with_right_bound_matches_full_cpu_reference", c, 1.3e-1f, 1.3e-1f);
 }
 
 TEST(AttentionApi, ForwardCausalTopLeftWithAlibiMatchesFullCpuReferenceAndDiffersFromPlainMask) {
@@ -1330,4 +1277,3 @@ TEST(AttentionApi, ForwardRopeDynamicNtkInterleavedMhaMatchesFullCpuReference) {
 
     runAttentionApiReferenceCase("attention_api_forward_rope_dynamic_ntk_interleaved_mha_matches_full_cpu_reference", c, 1.6e-1f, 1.6e-1f);
 }
-

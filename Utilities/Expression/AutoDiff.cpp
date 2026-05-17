@@ -27,6 +27,11 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
 
     const ExprNode& src_node = src.nodes[src_node_index];
     ExprNode new_node = src_node;
+    if (new_node.op == ExprOp::ROPE) {
+        // Backward graphs may clone forward RoPE subtrees for saved activations. Keep those clones out-of-place so
+        // gradient evaluation cannot destructively mutate recomputed forward values.
+        new_node.rope_allow_in_place_materialization = false;
+    }
 
     if (Expression::isUnaryOp(src_node.op)) {
         if (src_node.lhs == UINT32_MAX) {
@@ -1037,6 +1042,7 @@ class BackwardGraphBuilder {
         node.rope_scaling_kind = forward_rope.rope_scaling_kind;
         node.rope_scaling_factor = forward_rope.rope_scaling_factor;
         node.rope_original_max_position_embeddings = forward_rope.rope_original_max_position_embeddings;
+        node.rope_allow_in_place_materialization = false;
         if (output_dtype.has_value()) {
             node.output_dtype = output_dtype.value();
         }

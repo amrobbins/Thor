@@ -405,6 +405,7 @@ def _build_packed_qkv_layer_case(
     rope_scaling_kind: RotaryScalingKind = RotaryScalingKind.none,
     rope_scaling_factor: float = 1.0,
     rope_original_max_position_embeddings: int = 0,
+    rope_in_place: bool = False,
 ):
 
     def build(dtype: thor.DataType):
@@ -449,6 +450,7 @@ def _build_packed_qkv_layer_case(
                 "scaling_kind": rope_scaling_kind,
                 "scaling_factor": rope_scaling_factor,
                 "original_max_position_embeddings": rope_original_max_position_embeddings,
+                "allow_in_place_materialization": rope_in_place,
                 "output_dtype": dtype,
                 "compute_dtype": thor.DataType.fp32,
             }
@@ -500,12 +502,14 @@ def _build_packed_qkv_layer_case(
             "qkv_projection_mode": "packed",
             "has_bias": has_bias,
             "use_rope": use_rope,
+            "rope_in_place": rope_in_place,
         }
         if use_rope:
             metadata.update({
                 "rope_rotary_dim": rope_rotary_dim if rope_rotary_dim != 0 else qk_dim,
                 "rope_interleaved": rope_interleaved,
                 "rope_scaling_kind": _rotary_scaling_kind_name(rope_scaling_kind),
+                "rope_in_place": rope_in_place,
             })
         return ex.compile(out, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape, flops, metadata
 
@@ -530,6 +534,7 @@ def _build_split_qkv_layer_case(
     rope_scaling_kind: RotaryScalingKind = RotaryScalingKind.none,
     rope_scaling_factor: float = 1.0,
     rope_original_max_position_embeddings: int = 0,
+    rope_in_place: bool = False,
 ):
 
     def build(dtype: thor.DataType):
@@ -566,6 +571,7 @@ def _build_split_qkv_layer_case(
                 "scaling_kind": rope_scaling_kind,
                 "scaling_factor": rope_scaling_factor,
                 "original_max_position_embeddings": rope_original_max_position_embeddings,
+                "allow_in_place_materialization": rope_in_place,
                 "output_dtype": dtype,
                 "compute_dtype": thor.DataType.fp32,
             }
@@ -620,12 +626,14 @@ def _build_split_qkv_layer_case(
             "source": "expression",
             "qkv_projection_mode": "split",
             "use_rope": use_rope,
+            "rope_in_place": rope_in_place,
         }
         if use_rope:
             metadata.update({
                 "rope_rotary_dim": rope_rotary_dim if rope_rotary_dim != 0 else qk_dim,
                 "rope_interleaved": rope_interleaved,
                 "rope_scaling_kind": _rotary_scaling_kind_name(rope_scaling_kind),
+                "rope_in_place": rope_in_place,
             })
         return ex.compile(out, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape, flops, metadata
 
@@ -650,6 +658,7 @@ def _build_public_attention_layer_case(
     rope_scaling_kind: RotaryScalingKind = RotaryScalingKind.none,
     rope_scaling_factor: float = 1.0,
     rope_original_max_position_embeddings: int = 0,
+    rope_in_place: bool = False,
 ):
 
     def build(dtype: thor.DataType):
@@ -707,6 +716,7 @@ def _build_public_attention_layer_case(
             mask_kind=mask_kind_name,
             attention_scale=1.0 / math.sqrt(float(qk_dim)),
             use_rope=use_rope,
+            rope_in_place=rope_in_place,
             weights_data_type=dtype,
             compute_data_type=thor.DataType.fp32,
             output_data_type=dtype,
@@ -756,12 +766,14 @@ def _build_public_attention_layer_case(
             "qkv_projection_mode": projection_mode,
             "has_bias": has_bias,
             "use_rope": use_rope,
+            "rope_in_place": rope_in_place,
         }
         if use_rope:
             metadata.update({
                 "rope_rotary_dim": effective_rope_rotary_dim,
                 "rope_interleaved": rope_interleaved,
                 "rope_scaling_kind": _rotary_scaling_kind_name(rope_scaling_kind),
+                "rope_in_place": rope_in_place,
             })
         return layer._debug_expression(), input_shapes, output_shape, flops, metadata
 
@@ -1076,6 +1088,25 @@ CASES = [
         description="Hand-built expression hot path with split Q/K/V projections, RoPE on Q/K, cuDNN SDPA, and output projection.",
     ),
     AttentionPerfCase(
+        name="expression_split_qkv_rope_in_place_attention_layer_llama_style_b1_s2048_model4096_h32_kv8_d128",
+        builder=_build_split_qkv_layer_case(
+            batch=int(os.getenv("THOR_ATTENTION_PERF_LAYER_BATCH", "1")),
+            sequence=int(os.getenv("THOR_ATTENTION_PERF_LAYER_SEQUENCE", "2048")),
+            input_features=4096,
+            output_features=4096,
+            query_heads=32,
+            kv_heads=8,
+            qk_dim=128,
+            v_dim=128,
+            has_bias=False,
+            mask_kind=AttentionMaskKind.causal_top_left,
+            use_rope=True,
+            rope_rotary_dim=128,
+            rope_in_place=True,
+        ),
+        description="Hand-built expression hot path with split Q/K/V projections and memory-saving in-place RoPE on Q/K.",
+    ),
+    AttentionPerfCase(
         name="public_attention_layer_llama_style_b1_s2048_model4096_h32_kv8_d128",
         builder=_build_public_attention_layer_case(
             batch=int(os.getenv("THOR_ATTENTION_PERF_LAYER_BATCH", "1")),
@@ -1107,6 +1138,24 @@ CASES = [
             use_rope=True,
         ),
         description="Public thor.layers.Attention hot path with the layer's built-in RoPE option enabled.",
+    ),
+    AttentionPerfCase(
+        name="public_attention_layer_llama_style_rope_in_place_b1_s2048_model4096_h32_kv8_d128",
+        builder=_build_public_attention_layer_case(
+            batch=int(os.getenv("THOR_ATTENTION_PERF_LAYER_BATCH", "1")),
+            sequence=int(os.getenv("THOR_ATTENTION_PERF_LAYER_SEQUENCE", "2048")),
+            input_features=4096,
+            output_features=4096,
+            query_heads=32,
+            kv_heads=8,
+            qk_dim=128,
+            v_dim=128,
+            has_bias=False,
+            mask_kind=AttentionMaskKind.causal_top_left,
+            use_rope=True,
+            rope_in_place=True,
+        ),
+        description="Public thor.layers.Attention hot path with memory-saving in-place RoPE enabled.",
     ),
     AttentionPerfCase(
         name="public_attention_layer_llama_style_with_bias_b1_s2048_model4096_h32_kv8_d128",
@@ -1304,7 +1353,7 @@ def test_public_attention_projection_biases_compile_as_gemm_epilogues(dtype: tho
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", DTYPES, ids=_dtype_name)
-def test_rope_qk_materialization_compiles_as_one_fused_stage(dtype: thor.DataType, record_property):
+def test_rope_qk_materialization_policy_controls_in_place_stage(dtype: thor.DataType, record_property):
     if not cudnn_frontend_attention_available():
         pytest.skip("Thor was not built with cuDNN Frontend attention support")
 
@@ -1341,7 +1390,26 @@ def test_rope_qk_materialization_compiles_as_one_fused_stage(dtype: thor.DataTyp
                 use_rope=True,
                 rope_rotary_dim=16,
             ),
-            description="Public split-QKV Attention should use one grouped Q/K RoPE post-projection materialization stage.",
+            description="Public split-QKV Attention defaults to the faster out-of-place grouped RoPE materialization.",
+        ),
+        AttentionPerfCase(
+            name="public_attention_split_qkv_rope_in_place_materialization_contract",
+            builder=_build_public_attention_layer_case(
+                batch=2,
+                sequence=8,
+                input_features=64,
+                output_features=64,
+                query_heads=4,
+                kv_heads=2,
+                qk_dim=16,
+                v_dim=16,
+                has_bias=False,
+                mask_kind=AttentionMaskKind.causal_top_left,
+                use_rope=True,
+                rope_rotary_dim=16,
+                rope_in_place=True,
+            ),
+            description="Public split-QKV Attention can opt into memory-saving in-place Q/K RoPE postprocessing.",
         ),
     ]
 
@@ -1355,8 +1423,16 @@ def test_rope_qk_materialization_compiles_as_one_fused_stage(dtype: thor.DataTyp
         record_property(f"{case.name}_metadata", str(metadata))
 
         assert _stage_count(runtime_stage_kinds, "Attention") == 1
-        assert _stage_count(runtime_stage_kinds, "FusedKernel") == 1
-        assert _stage_count(compiled_stage_kinds, "FusedKernel") == 1
+        if metadata.get("rope_in_place"):
+            assert _stage_count(runtime_stage_kinds, "InPlaceRope") == 1
+            assert _stage_count(compiled_stage_kinds, "InPlaceRope") == 1
+            assert _stage_count(runtime_stage_kinds, "FusedKernel") == 0
+            assert _stage_count(compiled_stage_kinds, "FusedKernel") == 0
+        else:
+            assert _stage_count(runtime_stage_kinds, "FusedKernel") == 1
+            assert _stage_count(compiled_stage_kinds, "FusedKernel") == 1
+            assert _stage_count(runtime_stage_kinds, "InPlaceRope") == 0
+            assert _stage_count(compiled_stage_kinds, "InPlaceRope") == 0
 
 
 @pytest.mark.cuda

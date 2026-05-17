@@ -10,6 +10,7 @@
 #include "Utilities/Cache/LruCache.h"
 #include "Utilities/Expression/EquationRunner.h"
 #include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/InPlaceRopeKernel.h"
 #include "Utilities/Expression/SqueezeAxes.h"
 #include "Utilities/Expression/StampedEquation.h"
 
@@ -31,7 +32,7 @@ struct ParameterFanOverride {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -46,6 +47,8 @@ struct CompiledExecutionStage {
                 return "RmsNorm";
             case Kind::Matmul:
                 return "Matmul";
+            case Kind::InPlaceRope:
+                return "InPlaceRope";
             case Kind::Attention:
                 return "Attention";
             case Kind::AttentionBackward:
@@ -70,6 +73,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
     const std::shared_ptr<CompiledRmsNorm> rms_norm = nullptr;
     const std::shared_ptr<CompiledMatmul> matmul = nullptr;
+    const std::shared_ptr<CompiledInPlaceRope> in_place_rope = nullptr;
     const std::shared_ptr<CompiledAttention> attention = nullptr;
     const std::shared_ptr<CompiledAttentionBackward> attention_backward = nullptr;
     const std::shared_ptr<CompiledConvolution> convolution = nullptr;
@@ -127,6 +131,12 @@ struct CompiledExecutionStage {
                     return matmul->bgrad_output_dtype.value();
                 }
                 throw std::runtime_error("Matmul stage secondary output requested but no bias-gradient output dtype is available.");
+
+            case Kind::InPlaceRope:
+                if (!in_place_rope) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing in-place RoPE stage.");
+                }
+                return in_place_rope->outputDType(output_idx);
 
             case Kind::Attention:
                 if (!attention) {
@@ -226,6 +236,16 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::Matmul),
           matmul(matmul),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledInPlaceRope>& in_place_rope,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::InPlaceRope),
+          in_place_rope(in_place_rope),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}

@@ -42,6 +42,7 @@ class Attention : public CustomLayer {
               uint32_t outputFeatures,
               bool hasBias,
               bool useRope,
+              bool ropeInPlace,
               ThorImplementation::RotaryPositionEmbeddingOptions ropeOptions,
               ThorImplementation::AttentionMaskKind maskKind,
               int64_t diagonalLeftBound,
@@ -65,6 +66,7 @@ class Attention : public CustomLayer {
           outputFeatures(outputFeatures),
           hasBias(hasBias),
           useRope(useRope),
+          ropeInPlace(ropeInPlace),
           ropeOptions(ropeOptions),
           maskKind(maskKind),
           diagonalLeftBound(diagonalLeftBound),
@@ -91,6 +93,9 @@ class Attention : public CustomLayer {
     uint32_t getOutputFeatures() const { return outputFeatures; }
     bool getHasBias() const { return hasBias; }
     bool getUseRope() const { return useRope; }
+    // When true, private split Q/K projection outputs may be rotated in-place to reduce peak memory.
+    // Defaults false because the out-of-place fused RoPE path has benchmarked faster.
+    bool getRopeInPlace() const { return ropeInPlace; }
     const ThorImplementation::RotaryPositionEmbeddingOptions& getRopeOptions() const { return ropeOptions; }
     ThorImplementation::AttentionMaskKind getMaskKind() const { return maskKind; }
     int64_t getDiagonalLeftBound() const { return diagonalLeftBound; }
@@ -109,6 +114,7 @@ class Attention : public CustomLayer {
     uint32_t outputFeatures;
     bool hasBias;
     bool useRope;
+    bool ropeInPlace;
     ThorImplementation::RotaryPositionEmbeddingOptions ropeOptions;
     ThorImplementation::AttentionMaskKind maskKind;
     int64_t diagonalLeftBound;
@@ -216,6 +222,12 @@ class Attention::Builder {
         return *this;
     }
 
+    virtual Attention::Builder& ropeInPlace(bool value = true) {
+        THOR_THROW_IF_FALSE(!this->_ropeInPlace.has_value());
+        this->_ropeInPlace = value;
+        return *this;
+    }
+
     virtual Attention::Builder& ropeOptions(ThorImplementation::RotaryPositionEmbeddingOptions value) {
         THOR_THROW_IF_FALSE(!this->_ropeOptions.has_value());
         this->_ropeOptions = value;
@@ -276,6 +288,7 @@ class Attention::Builder {
     std::optional<bool> _useAlibiMask;
     std::optional<double> _attentionScale;
     std::optional<bool> _useRope;
+    std::optional<bool> _ropeInPlace;
     std::optional<ThorImplementation::RotaryPositionEmbeddingOptions> _ropeOptions;
     std::optional<Tensor::DataType> _weightsDataType;
     std::optional<Tensor::DataType> _computeDataType;
