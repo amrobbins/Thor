@@ -1661,8 +1661,8 @@ outputs: dict[str, PhysicalTensor]
                         return "unknown";
                     };
                     std::ostringstream oss;
-                    oss << label << "(lhsT=" << (stage.matmul->transpose_lhs ? 1 : 0) << ",rhsT=" << (stage.matmul->transpose_rhs ? 1 : 0)
-                        << ",auxT=" << (stage.matmul->transpose_aux ? 1 : 0);
+                    oss << label << "(op=" << ThorImplementation::opName(stage.matmul->op) << ",lhsT=" << (stage.matmul->transpose_lhs ? 1 : 0)
+                        << ",rhsT=" << (stage.matmul->transpose_rhs ? 1 : 0) << ",auxT=" << (stage.matmul->transpose_aux ? 1 : 0);
                     if (stage.matmul->epilogue != ThorImplementation::MatmulEpilogue::Default) {
                         oss << ",epilogue=" << epilogue_name(stage.matmul->epilogue);
                     }
