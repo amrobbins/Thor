@@ -1037,8 +1037,13 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
     // If the destination data type is larger than the source data type, then this is always supported.
     //      - The data is copied to the dest device and then up converted in place.
     //
-    // If the destination data type is smaller than the source data type, then this is only supported when mustPreserveSourceValue is false.
-    //      - In this case an inplace down conversion is performed in source memory and the converted mem is copied to the dest device.
+    // If the destination data type is smaller than the source data type and the source value must be preserved, then convert
+    // out-of-place on a GPU temporary.  CPU->GPU copies first move the wide source value to the destination GPU and then
+    // downcast there.  GPU->CPU and GPU->GPU copies downcast on the transmitting/source GPU before the narrower value is
+    // transferred.  This avoids mutating the source and never routes the preserving downcast through CPU conversion.
+    //
+    // If the source value does not need to be preserved, an in-place down-conversion in source memory is still used to avoid the
+    // temporary allocation.
     if (sourceDescriptor.getDataType() != destDescriptor.getDataType() && source.placement != placement) {
         if (sourceDescriptor.getArraySizeInBytes() <= destDescriptor.getArraySizeInBytes()) {
             if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU)
@@ -1059,7 +1064,48 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
 
             return;
         } else {
-            THOR_THROW_IF_FALSE(!mustPreserveSourceValue);
+            if (mustPreserveSourceValue) {
+                const bool sourceOnGpu = source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU;
+                const bool destOnGpu = placement.getMemDevice() == TensorPlacement::MemDevices::GPU;
+                THOR_THROW_IF_FALSE(sourceOnGpu || destOnGpu);
+
+                // Run the preserving down-conversion on a GPU.  When the source is already on a GPU, downcast on that
+                // transmitting/source device and transfer the narrower value.  When the source is CPU and the destination is
+                // GPU, transfer the wide source value first and downcast on the destination GPU.
+                const int conversionGpuNum = sourceOnGpu ? sourceDeviceNum : destDeviceNum;
+                THOR_THROW_IF_FALSE(copyStream.getGpuNum() == conversionGpuNum);
+                TensorPlacement conversionPlacement(TensorPlacement::MemDevices::GPU, conversionGpuNum);
+
+                optional<Tensor> sourceGpuTemporary;
+                Tensor sourceForConversion = source;
+                if (!sourceOnGpu || sourceDeviceNum != conversionGpuNum) {
+                    sourceGpuTemporary.emplace(conversionPlacement, sourceDescriptor);
+                    sourceGpuTemporary->copyFromAsync(source, copyStream, /*mustPreserveSourceValue=*/true);
+                    sourceForConversion = *sourceGpuTemporary;
+                }
+
+                if (destOnGpu && destDeviceNum == conversionGpuNum) {
+                    TypeConverter::convertType(sourceForConversion.mem,
+                                               mem,
+                                               sourceDescriptor.getDataType(),
+                                               destDescriptor.getDataType(),
+                                               sourceDescriptor.getTotalNumElements(),
+                                               copyStream,
+                                               conversionGpuNum);
+                } else {
+                    Tensor convertedGpuTemporary(conversionPlacement, destDescriptor);
+                    TypeConverter::convertType(sourceForConversion.mem,
+                                               convertedGpuTemporary.mem,
+                                               sourceDescriptor.getDataType(),
+                                               destDescriptor.getDataType(),
+                                               sourceDescriptor.getTotalNumElements(),
+                                               copyStream,
+                                               conversionGpuNum);
+                    copyFromAsync(convertedGpuTemporary, copyStream, /*mustPreserveSourceValue=*/true);
+                }
+
+                return;
+            }
 
             if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU)
                 THOR_THROW_IF_FALSE(source.placement.getDeviceNum() == copyStream.getGpuNum());
@@ -1180,6 +1226,40 @@ struct IdentityMatrixArgs : HostFunctionArgsBase {
     Tensor tensor;
 };
 
+template <typename T>
+inline T castCpuTensorValue(double value) {
+    return T(value);
+}
+
+template <>
+inline half castCpuTensorValue<half>(double value) {
+    return half(static_cast<float>(value));
+}
+
+template <>
+inline __nv_bfloat16 castCpuTensorValue<__nv_bfloat16>(double value) {
+    return __float2bfloat16(static_cast<float>(value));
+}
+
+template <>
+inline __nv_fp8_e4m3 castCpuTensorValue<__nv_fp8_e4m3>(double value) {
+    return __nv_fp8_e4m3(static_cast<float>(value));
+}
+
+template <>
+inline __nv_fp8_e5m2 castCpuTensorValue<__nv_fp8_e5m2>(double value) {
+    return __nv_fp8_e5m2(static_cast<float>(value));
+}
+
+template <typename T>
+static void fillCpuIdentityMatrixOnesTyped(Tensor tensor) {
+    uint64_t N = tensor.getDimensions()[0];
+    T *mem = tensor.getMemPtr<T>();
+    const T one = castCpuTensorValue<T>(1.0);
+    for (uint64_t i = 0; i < N; ++i)
+        mem[i * N + i] = one;
+}
+
 void fillCpuIdentityMatrixOnes(void *data) {
     HostFunctionArgsBase *baseArgs = static_cast<HostFunctionArgsBase *>(data);
     THOR_THROW_IF_FALSE(baseArgs != nullptr);
@@ -1188,21 +1268,44 @@ void fillCpuIdentityMatrixOnes(void *data) {
 
     THOR_THROW_IF_FALSE(args->tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     TensorDescriptor::DataType dataType = args->tensor.getDataType();
+    THOR_THROW_IF_FALSE(dataType != TensorDescriptor::DataType::PACKED_BOOLEAN);
 
-    uint64_t N = args->tensor.getDimensions()[0];
-    if (dataType == TensorDescriptor::DataType::FP16) {
-        half *mem = args->tensor.getMemPtr<half>();
-        for (uint32_t i = 0; i < N; ++i)
-            mem[i * N + i] = 1.0f;
-    } else {
-        float *mem = args->tensor.getMemPtr<float>();
-        for (uint32_t i = 0; i < N; ++i)
-            mem[i * N + i] = 1.0f;
-    }
+    if (dataType == TensorDescriptor::DataType::FP16)
+        fillCpuIdentityMatrixOnesTyped<half>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::BF16)
+        fillCpuIdentityMatrixOnesTyped<__nv_bfloat16>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::FP8_E4M3)
+        fillCpuIdentityMatrixOnesTyped<__nv_fp8_e4m3>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::FP8_E5M2)
+        fillCpuIdentityMatrixOnesTyped<__nv_fp8_e5m2>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::FP32)
+        fillCpuIdentityMatrixOnesTyped<float>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::FP64)
+        fillCpuIdentityMatrixOnesTyped<double>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::INT8)
+        fillCpuIdentityMatrixOnesTyped<int8_t>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::INT16)
+        fillCpuIdentityMatrixOnesTyped<int16_t>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::INT32)
+        fillCpuIdentityMatrixOnesTyped<int32_t>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::INT64)
+        fillCpuIdentityMatrixOnesTyped<int64_t>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::UINT8)
+        fillCpuIdentityMatrixOnesTyped<uint8_t>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::UINT16)
+        fillCpuIdentityMatrixOnesTyped<uint16_t>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::UINT32)
+        fillCpuIdentityMatrixOnesTyped<uint32_t>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::UINT64)
+        fillCpuIdentityMatrixOnesTyped<uint64_t>(args->tensor);
+    else if (dataType == TensorDescriptor::DataType::BOOLEAN)
+        fillCpuIdentityMatrixOnesTyped<bool>(args->tensor);
+    else
+        THOR_UNREACHABLE();
 }
 
 Tensor Tensor::identityMatrix(uint32_t N, TensorPlacement placement, TensorDescriptor::DataType dataType, Stream stream) {
-    THOR_THROW_IF_FALSE(dataType == TensorDescriptor::DataType::FP16 || dataType == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(dataType != TensorDescriptor::DataType::PACKED_BOOLEAN);
     Tensor tensor(placement, TensorDescriptor(dataType, {N, N}));
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
@@ -1294,6 +1397,99 @@ struct FillRandomArgs : HostFunctionArgsBase {
     double maxValue;
 };
 
+template <typename T>
+static void fillCpuRandomFloating(Tensor tensor, double minValue, double maxValue, uint32_t numProcs, uint64_t elementsPerThread) {
+    const uint64_t numElements = tensor.getTotalNumElements();
+    T *mem = tensor.getMemPtr<T>();
+    if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+        {
+            random_device rd;
+            uint32_t seed = Tensor::getThreadIdHash(rd());
+            mt19937 gen(seed);
+            uniform_real_distribution<double> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = castCpuTensorValue<T>(dis(gen));
+            }
+        }
+    } else {
+        random_device rd;
+        uint32_t seed = Tensor::getThreadIdHash(rd());
+        mt19937 gen(seed);
+        uniform_real_distribution<double> dis(minValue, maxValue);
+
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = castCpuTensorValue<T>(dis(gen));
+        }
+    }
+}
+
+template <typename T, typename DISTRIBUTION_VALUE_TYPE>
+static void fillCpuRandomIntegral(Tensor tensor,
+                                  DISTRIBUTION_VALUE_TYPE minValue,
+                                  DISTRIBUTION_VALUE_TYPE maxValue,
+                                  uint32_t numProcs,
+                                  uint64_t elementsPerThread) {
+    const uint64_t numElements = tensor.getTotalNumElements();
+    T *mem = tensor.getMemPtr<T>();
+    if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+        {
+            random_device rd;
+            uint32_t seed = Tensor::getThreadIdHash(rd());
+            mt19937 gen(seed);
+            uniform_int_distribution<DISTRIBUTION_VALUE_TYPE> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = static_cast<T>(dis(gen));
+            }
+        }
+    } else {
+        random_device rd;
+        uint32_t seed = Tensor::getThreadIdHash(rd());
+        mt19937 gen(seed);
+        uniform_int_distribution<DISTRIBUTION_VALUE_TYPE> dis(minValue, maxValue);
+
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = static_cast<T>(dis(gen));
+        }
+    }
+}
+
+static void fillCpuRandomPackedBoolean(Tensor tensor) {
+    uint64_t numElements = (tensor.getTotalNumElements() + 7) / 8;
+    const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
+    const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
+
+    uint8_t *mem = tensor.getMemPtr<uint8_t>();
+    if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+        {
+            random_device rd;
+            uint32_t seed = Tensor::getThreadIdHash(rd());
+            mt19937 gen(seed);
+            uniform_int_distribution<uint16_t> dis(0, 255);
+
+#pragma omp for schedule(static, elementsPerThread)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = static_cast<uint8_t>(dis(gen));
+            }
+        }
+    } else {
+        random_device rd;
+        uint32_t seed = Tensor::getThreadIdHash(rd());
+        mt19937 gen(seed);
+        uniform_int_distribution<uint16_t> dis(0, 255);
+
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = static_cast<uint8_t>(dis(gen));
+        }
+    }
+}
+
 void fillCpuRandom(void *data) {
     HostFunctionArgsBase *baseArgs = static_cast<HostFunctionArgsBase *>(data);
     THOR_THROW_IF_FALSE(baseArgs != nullptr);
@@ -1312,261 +1508,58 @@ void fillCpuRandom(void *data) {
     const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
     const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
 
-    if (dataType == TensorDescriptor::DataType::FP16) {
-        half *mem = tensor.getMemPtr<half>();
-        if (numProcs > 1) {
-#pragma omp parallel num_threads(numProcs)
-            {
-                random_device rd;
-                uint32_t seed = Tensor::getThreadIdHash(rd());
-                mt19937 gen(seed);
-                uniform_real_distribution<double> dis(minValue, maxValue);
+    if (dataType == TensorDescriptor::DataType::FP16)
+        fillCpuRandomFloating<half>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::BF16)
+        fillCpuRandomFloating<__nv_bfloat16>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::FP8_E4M3)
+        fillCpuRandomFloating<__nv_fp8_e4m3>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::FP8_E5M2)
+        fillCpuRandomFloating<__nv_fp8_e5m2>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::FP32)
+        fillCpuRandomFloating<float>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::FP64)
+        fillCpuRandomFloating<double>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::INT8)
+        fillCpuRandomIntegral<int8_t, int16_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::INT16)
+        fillCpuRandomIntegral<int16_t, int32_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::INT32)
+        fillCpuRandomIntegral<int32_t, int64_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::INT64)
+        fillCpuRandomIntegral<int64_t, int64_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::UINT8)
+        fillCpuRandomIntegral<uint8_t, uint16_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::UINT16)
+        fillCpuRandomIntegral<uint16_t, uint32_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::UINT32)
+        fillCpuRandomIntegral<uint32_t, uint64_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::UINT64)
+        fillCpuRandomIntegral<uint64_t, uint64_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::BOOLEAN)
+        fillCpuRandomIntegral<bool, uint16_t>(tensor, 0, 1, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN)
+        fillCpuRandomPackedBoolean(tensor);
+    else
+        THOR_UNREACHABLE();
+}
 
-#pragma omp for schedule(static, elementsPerThread)
-                for (uint64_t i = 0; i < numElements; ++i) {
-                    mem[i] = (half)dis(gen);
-                }
-            }
-        } else {
-            random_device rd;
-            uint32_t seed = Tensor::getThreadIdHash(rd());
-            mt19937 gen(seed);
-            uniform_real_distribution<double> dis(minValue, maxValue);
-
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = (half)dis(gen);
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
-        float *mem = tensor.getMemPtr<float>();
-        if (numProcs > 1) {
-#pragma omp parallel num_threads(numProcs)
-            {
-                random_device rd;
-                uint32_t seed = Tensor::getThreadIdHash(rd());
-                mt19937 gen(seed);
-                uniform_real_distribution<double> dis(minValue, maxValue);
-
-#pragma omp for schedule(static, elementsPerThread)
-                for (uint64_t i = 0; i < numElements; ++i) {
-                    mem[i] = (float)dis(gen);
-                }
-            }
-        } else {
-            random_device rd;
-            uint32_t seed = Tensor::getThreadIdHash(rd());
-            mt19937 gen(seed);
-            uniform_real_distribution<double> dis(minValue, maxValue);
-
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = (float)dis(gen);
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
-        int8_t *mem = tensor.getMemPtr<int8_t>();
-        if (numProcs > 1) {
-#pragma omp parallel num_threads(numProcs)
-            {
-                random_device rd;
-                uint32_t seed = Tensor::getThreadIdHash(rd());
-                mt19937 gen(seed);
-                uniform_int_distribution<int16_t> dis(minValue, maxValue);
-
-#pragma omp for schedule(static, elementsPerThread)
-                for (uint64_t i = 0; i < numElements; ++i) {
-                    mem[i] = (int8_t)dis(gen);
-                }
-            }
-        } else {
-            random_device rd;
-            uint32_t seed = Tensor::getThreadIdHash(rd());
-            mt19937 gen(seed);
-            uniform_int_distribution<int16_t> dis(minValue, maxValue);
-
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = (int8_t)dis(gen);
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
-        int16_t *mem = tensor.getMemPtr<int16_t>();
-        if (numProcs > 1) {
-#pragma omp parallel num_threads(numProcs)
-            {
-                random_device rd;
-                uint32_t seed = Tensor::getThreadIdHash(rd());
-                mt19937 gen(seed);
-                uniform_int_distribution<int32_t> dis(minValue, maxValue);
-
-#pragma omp for schedule(static, elementsPerThread)
-                for (uint64_t i = 0; i < numElements; ++i) {
-                    mem[i] = (int16_t)dis(gen);
-                }
-            }
-        } else {
-            random_device rd;
-            uint32_t seed = Tensor::getThreadIdHash(rd());
-            mt19937 gen(seed);
-            uniform_int_distribution<int32_t> dis(minValue, maxValue);
-
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = (int16_t)dis(gen);
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
-        int32_t *mem = tensor.getMemPtr<int32_t>();
-        if (numProcs > 1) {
-#pragma omp parallel num_threads(numProcs)
-            {
-                random_device rd;
-                uint32_t seed = Tensor::getThreadIdHash(rd());
-                mt19937 gen(seed);
-                uniform_int_distribution<int64_t> dis(minValue, maxValue);
-
-#pragma omp for schedule(static, elementsPerThread)
-                for (uint64_t i = 0; i < numElements; ++i) {
-                    mem[i] = (int32_t)dis(gen);
-                }
-            }
-        } else {
-            random_device rd;
-            uint32_t seed = Tensor::getThreadIdHash(rd());
-            mt19937 gen(seed);
-            uniform_int_distribution<int64_t> dis(minValue, maxValue);
-
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = (int32_t)dis(gen);
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
-        uint8_t *mem = tensor.getMemPtr<uint8_t>();
-        if (numProcs > 1) {
-#pragma omp parallel num_threads(numProcs)
-            {
-                random_device rd;
-                uint32_t seed = Tensor::getThreadIdHash(rd());
-                mt19937 gen(seed);
-                uniform_int_distribution<uint16_t> dis(minValue, maxValue);
-
-#pragma omp for schedule(static, elementsPerThread)
-                for (uint64_t i = 0; i < numElements; ++i) {
-                    mem[i] = (uint8_t)dis(gen);
-                }
-            }
-        } else {
-            random_device rd;
-            uint32_t seed = Tensor::getThreadIdHash(rd());
-            mt19937 gen(seed);
-            uniform_int_distribution<uint16_t> dis(minValue, maxValue);
-
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = (uint8_t)dis(gen);
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
-        uint16_t *mem = tensor.getMemPtr<uint16_t>();
-        if (numProcs > 1) {
-#pragma omp parallel num_threads(numProcs)
-            {
-                random_device rd;
-                uint32_t seed = Tensor::getThreadIdHash(rd());
-                mt19937 gen(seed);
-                uniform_int_distribution<uint32_t> dis(minValue, maxValue);
-
-#pragma omp for schedule(static, elementsPerThread)
-                for (uint64_t i = 0; i < numElements; ++i) {
-                    mem[i] = (uint16_t)dis(gen);
-                }
-            }
-        } else {
-            random_device rd;
-            uint32_t seed = Tensor::getThreadIdHash(rd());
-            mt19937 gen(seed);
-            uniform_int_distribution<uint32_t> dis(minValue, maxValue);
-
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = (uint16_t)dis(gen);
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        uint32_t *mem = tensor.getMemPtr<uint32_t>();
-        if (numProcs > 1) {
-#pragma omp parallel num_threads(numProcs)
-            {
-                random_device rd;
-                uint32_t seed = Tensor::getThreadIdHash(rd());
-                mt19937 gen(seed);
-                uniform_int_distribution<uint64_t> dis(minValue, maxValue);
-
-#pragma omp for schedule(static, elementsPerThread)
-                for (uint64_t i = 0; i < numElements; ++i) {
-                    mem[i] = (uint32_t)dis(gen);
-                }
-            }
-        } else {
-            random_device rd;
-            uint32_t seed = Tensor::getThreadIdHash(rd());
-            mt19937 gen(seed);
-            uniform_int_distribution<uint64_t> dis(minValue, maxValue);
-
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = (uint32_t)dis(gen);
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
-        bool *mem = tensor.getMemPtr<bool>();
-        if (numProcs > 1) {
-#pragma omp parallel num_threads(numProcs)
-            {
-                random_device rd;
-                uint32_t seed = Tensor::getThreadIdHash(rd());
-                mt19937 gen(seed);
-                uniform_int_distribution<uint8_t> dis(0, 2);
-
-#pragma omp for schedule(static, elementsPerThread)
-                for (uint64_t i = 0; i < numElements; ++i) {
-                    mem[i] = (bool)dis(gen);
-                }
-            }
-        } else {
-            random_device rd;
-            uint32_t seed = Tensor::getThreadIdHash(rd());
-            mt19937 gen(seed);
-            uniform_int_distribution<uint8_t> dis(0, 2);
-
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = (bool)dis(gen);
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
-        numElements = (numElements + 7) / 8;
-        const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
-        const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
-
-        uint8_t *mem = tensor.getMemPtr<uint8_t>();
-        if (numProcs > 1) {
-#pragma omp parallel num_threads(numProcs)
-            {
-                random_device rd;
-                uint32_t seed = Tensor::getThreadIdHash(rd());
-                mt19937 gen(seed);
-                uniform_int_distribution<uint16_t> dis(0, 256);
-
-#pragma omp for schedule(static, elementsPerThread)
-                for (uint64_t i = 0; i < numElements; ++i) {
-                    mem[i] = (uint8_t)dis(gen);
-                }
-            }
-        } else {
-            random_device rd;
-            uint32_t seed = Tensor::getThreadIdHash(rd());
-            mt19937 gen(seed);
-            uniform_int_distribution<uint16_t> dis(0, 256);
-
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = (uint8_t)dis(gen);
-            }
-        }
+static void adjustSignedIntegralRandomRange(double& minValue, double& maxValue) {
+    if (maxValue > 0) {
+        // integer rounding (truncation) rounds away from maxValue in this case
+        if (maxValue == int64_t(maxValue))
+            maxValue += 0.99999;
     }
+    if (minValue < 0) {
+        // integer rounding (truncation) rounds away from minValue in this case
+        if (minValue == int64_t(minValue))
+            minValue -= 0.99999;
+    }
+}
+
+static void adjustUnsignedIntegralRandomRange(double& maxValue) {
+    if (maxValue == uint64_t(maxValue))
+        maxValue += 0.99999;
 }
 
 void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
@@ -1580,63 +1573,49 @@ void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
         TensorDescriptor::DataType dataType = getDataType();
         if (dataType == TensorDescriptor::DataType::FP16) {
             launchGpuFillRandom<half>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::BF16) {
+            launchGpuFillRandom<__nv_bfloat16>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::FP8_E4M3) {
+            launchGpuFillRandom<__nv_fp8_e4m3>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::FP8_E5M2) {
+            launchGpuFillRandom<__nv_fp8_e5m2>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::FP32) {
             launchGpuFillRandom<float>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::FP64) {
+            launchGpuFillRandom<double>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::INT8) {
             // Since for int I am rounding down for integer types, adding just under 1.0 to the continuous distribution gives
             // the range [minValue, maxValue] where minValue and maxValue have equal likelihood of being generated to all other values.
             // Note that converting to an integer truncates and so rounds toward 0.
-            if (maxValue > 0) {
-                // integer rounding (truncation) rounds away from maxValue in this case
-                if (maxValue == int32_t(maxValue))
-                    maxValue += 0.99999;
-            }
-            if (minValue < 0) {
-                // integer rounding (truncation) rounds away from minValue in this case
-                if (minValue == int32_t(minValue))
-                    minValue -= 0.99999;
-            }
+            adjustSignedIntegralRandomRange(minValue, maxValue);
             launchGpuFillRandom<int8_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::INT16) {
-            if (maxValue > 0) {
-                // integer rounding (truncation) rounds away from maxValue in this case
-                if (maxValue == int32_t(maxValue))
-                    maxValue += 0.99999;
-            }
-            if (minValue < 0) {
-                // integer rounding (truncation) rounds away from minValue in this case
-                if (minValue == int32_t(minValue))
-                    minValue -= 0.99999;
-            }
+            adjustSignedIntegralRandomRange(minValue, maxValue);
             launchGpuFillRandom<int16_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::INT32) {
-            if (maxValue > 0) {
-                // integer rounding (truncation) rounds away from maxValue in this case
-                if (maxValue == int32_t(maxValue))
-                    maxValue += 0.99999;
-            }
-            if (minValue < 0) {
-                // integer rounding (truncation) rounds away from minValue in this case
-                if (minValue == int32_t(minValue))
-                    minValue -= 0.99999;
-            }
+            adjustSignedIntegralRandomRange(minValue, maxValue);
             launchGpuFillRandom<int32_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::INT64) {
+            adjustSignedIntegralRandomRange(minValue, maxValue);
+            launchGpuFillRandom<int64_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::UINT8) {
-            if (maxValue == uint32_t(maxValue))
-                maxValue += 0.99999;
+            adjustUnsignedIntegralRandomRange(maxValue);
             launchGpuFillRandom<uint8_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::UINT16) {
-            if (maxValue == uint32_t(maxValue))
-                maxValue += 0.99999;
+            adjustUnsignedIntegralRandomRange(maxValue);
             launchGpuFillRandom<uint16_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::UINT32) {
-            if (maxValue == uint32_t(maxValue))
-                maxValue += 0.99999;
+            adjustUnsignedIntegralRandomRange(maxValue);
             launchGpuFillRandom<uint32_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::UINT64) {
+            adjustUnsignedIntegralRandomRange(maxValue);
+            launchGpuFillRandom<uint64_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
             launchGpuFillRandom<bool>(getMemPtr(), getTotalNumElements(), 0, 1.999999, stream);
         } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
             launchGpuFillRandom<uint8_t>(getMemPtr(), (getTotalNumElements() + 7) / 8, 0, 255.999999, stream);
+        } else {
+            THOR_UNREACHABLE();
         }
     }
 }
@@ -1650,6 +1629,23 @@ struct CpuFillParams : HostFunctionArgsBase {
     Tensor tensor;
 };
 
+template <typename T>
+static void fillValueTyped(Tensor tensor, double rawValue, uint32_t numProcs, uint64_t elementsPerThread) {
+    uint64_t numElements = tensor.getTotalNumElements();
+    T *mem = tensor.getMemPtr<T>();
+    T value = castCpuTensorValue<T>(rawValue);
+    if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = value;
+        }
+    } else {
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = value;
+        }
+    }
+}
+
 void fillValue(void *params) {
     HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
     THOR_THROW_IF_FALSE(baseParams != nullptr);
@@ -1662,144 +1658,44 @@ void fillValue(void *params) {
 
     TensorDescriptor::DataType dataType = cpuFillParams->tensor.getDataType();
 
-    if (dataType == TensorDescriptor::DataType::FP16) {
-        half *mem = cpuFillParams->tensor.getMemPtr<half>();
-        half value = cpuFillParams->value;
-        if (numProcs > 1) {
-#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        } else {
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::BF16) {
-        __nv_bfloat16 *mem = cpuFillParams->tensor.getMemPtr<__nv_bfloat16>();
-        __nv_bfloat16 value = __float2bfloat16(static_cast<float>(cpuFillParams->value));
-        if (numProcs > 1) {
-#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        } else {
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
-        float *mem = cpuFillParams->tensor.getMemPtr<float>();
-        float value = cpuFillParams->value;
-        if (numProcs > 1) {
-#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        } else {
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
-        int8_t *mem = cpuFillParams->tensor.getMemPtr<int8_t>();
-        int8_t value = cpuFillParams->value;
-        if (numProcs > 1) {
-#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        } else {
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
-        int16_t *mem = cpuFillParams->tensor.getMemPtr<int16_t>();
-        int16_t value = cpuFillParams->value;
-        if (numProcs > 1) {
-#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        } else {
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
-        int32_t *mem = cpuFillParams->tensor.getMemPtr<int32_t>();
-        int32_t value = cpuFillParams->value;
-        if (numProcs > 1) {
-#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        } else {
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    if (dataType == TensorDescriptor::DataType::FP16)
+        fillValueTyped<half>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::BF16)
+        fillValueTyped<__nv_bfloat16>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::FP8_E4M3)
+        fillValueTyped<__nv_fp8_e4m3>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::FP8_E5M2)
+        fillValueTyped<__nv_fp8_e5m2>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::FP32)
+        fillValueTyped<float>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::FP64)
+        fillValueTyped<double>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::INT8)
+        fillValueTyped<int8_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::INT16)
+        fillValueTyped<int16_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::INT32)
+        fillValueTyped<int32_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::INT64)
+        fillValueTyped<int64_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::UINT8)
+        fillValueTyped<uint8_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::UINT16)
+        fillValueTyped<uint16_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::UINT32)
+        fillValueTyped<uint32_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::UINT64)
+        fillValueTyped<uint64_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::BOOLEAN)
+        fillValueTyped<bool>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
+    else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
         uint8_t *mem = cpuFillParams->tensor.getMemPtr<uint8_t>();
-        uint8_t value = cpuFillParams->value;
-        if (numProcs > 1) {
-#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        } else {
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
-        uint16_t *mem = cpuFillParams->tensor.getMemPtr<uint16_t>();
-        uint16_t value = cpuFillParams->value;
-        if (numProcs > 1) {
-#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        } else {
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        uint32_t *mem = cpuFillParams->tensor.getMemPtr<uint32_t>();
-        uint32_t value = cpuFillParams->value;
-        if (numProcs > 1) {
-#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        } else {
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
-        bool *mem = cpuFillParams->tensor.getMemPtr<bool>();
-        bool value = cpuFillParams->value ? true : false;
-        if (numProcs > 1) {
-#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        } else {
-            for (uint64_t i = 0; i < numElements; ++i) {
-                mem[i] = value;
-            }
-        }
-    } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
-        uint8_t *mem = cpuFillParams->tensor.getMemPtr<uint8_t>();
-        uint8_t value = cpuFillParams->value;
-        if (value)
-            value = 0b11111111;
+        uint8_t value = cpuFillParams->value ? 0b11111111 : 0;
         numElements = (numElements + 7) / 8;
-        if (numProcs > 1) {
-#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+        const uint32_t packedNumProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
+        const uint64_t packedElementsPerThread = (numElements + (packedNumProcs - 1)) / packedNumProcs;
+        if (packedNumProcs > 1) {
+#pragma omp parallel for schedule(static, packedElementsPerThread) shared(mem, value, packedElementsPerThread, numElements) default(none)
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = value;
             }
@@ -1808,6 +1704,8 @@ void fillValue(void *params) {
                 mem[i] = value;
             }
         }
+    } else {
+        THOR_UNREACHABLE();
     }
 }
 
@@ -1820,15 +1718,29 @@ void Tensor::fill(double value, Stream stream) {
     } else {
         if (dataType == TensorDescriptor::DataType::FP16) {
             launchFillValueGpuKernel<half>(
-                (half)(float)value, (half *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+                castCpuTensorValue<half>(value), (half *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == TensorDescriptor::DataType::BF16) {
-            launchFillValueGpuKernel<__nv_bfloat16>(__float2bfloat16(static_cast<float>(value)),
+            launchFillValueGpuKernel<__nv_bfloat16>(castCpuTensorValue<__nv_bfloat16>(value),
                                                    (__nv_bfloat16 *)getMemPtr(),
+                                                   getTotalNumElements(),
+                                                   getPlacement().getDeviceNum(),
+                                                   stream);
+        } else if (dataType == TensorDescriptor::DataType::FP8_E4M3) {
+            launchFillValueGpuKernel<__nv_fp8_e4m3>(castCpuTensorValue<__nv_fp8_e4m3>(value),
+                                                   (__nv_fp8_e4m3 *)getMemPtr(),
+                                                   getTotalNumElements(),
+                                                   getPlacement().getDeviceNum(),
+                                                   stream);
+        } else if (dataType == TensorDescriptor::DataType::FP8_E5M2) {
+            launchFillValueGpuKernel<__nv_fp8_e5m2>(castCpuTensorValue<__nv_fp8_e5m2>(value),
+                                                   (__nv_fp8_e5m2 *)getMemPtr(),
                                                    getTotalNumElements(),
                                                    getPlacement().getDeviceNum(),
                                                    stream);
         } else if (dataType == TensorDescriptor::DataType::FP32) {
             launchFillValueGpuKernel<float>(value, (float *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::FP64) {
+            launchFillValueGpuKernel<double>(value, (double *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == TensorDescriptor::DataType::UINT8) {
             launchFillValueGpuKernel<uint8_t>(value, (uint8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == TensorDescriptor::DataType::UINT16) {
@@ -1837,12 +1749,17 @@ void Tensor::fill(double value, Stream stream) {
         } else if (dataType == TensorDescriptor::DataType::UINT32) {
             launchFillValueGpuKernel<uint32_t>(
                 value, (uint32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::UINT64) {
+            launchFillValueGpuKernel<uint64_t>(
+                value, (uint64_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == TensorDescriptor::DataType::INT8) {
             launchFillValueGpuKernel<int8_t>(value, (int8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == TensorDescriptor::DataType::INT16) {
             launchFillValueGpuKernel<int16_t>(value, (int16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == TensorDescriptor::DataType::INT32) {
             launchFillValueGpuKernel<int32_t>(value, (int32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::INT64) {
+            launchFillValueGpuKernel<int64_t>(value, (int64_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
             launchFillValueGpuKernel<bool>(value, (bool *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
