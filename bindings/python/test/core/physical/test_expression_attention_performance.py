@@ -15,6 +15,7 @@ from thor.physical import (
     Expression as ex,
     PhysicalTensor,
     Placement,
+    RotaryScalingKind,
     Stream,
     cudnn_frontend_attention_available,
 )
@@ -47,6 +48,10 @@ class AttentionPerfCase:
 
 def _dtype_name(dtype: thor.DataType) -> str:
     return str(dtype).split(".")[-1]
+
+
+def _rotary_scaling_kind_name(value: RotaryScalingKind) -> str:
+    return str(value).split(".")[-1]
 
 
 def _bytes_per_element(dtype: thor.DataType) -> int:
@@ -126,6 +131,41 @@ def _unpack_built_case(built: tuple):
         program, input_shapes, output_shape, flops_per_launch, metadata = built
         return program, input_shapes, output_shape, flops_per_launch, dict(metadata)
     raise AssertionError(f"Unexpected benchmark builder return arity: {len(built)}")
+
+
+def _debug_program_stage_kinds(
+    program,
+    input_shapes: dict[str, tuple[int, ...]],
+    dtype: thor.DataType,
+    stream: Stream,
+) -> tuple[list[str], list[str]]:
+    """Return logical compiled stages and concrete stamped runtime stages for a benchmark case."""
+    inputs = {
+        name: _gpu_tensor(shape, dtype) for name, shape in input_shapes.items()
+    }
+
+    if isinstance(program, thor.physical.DynamicExpression):
+        prepared = program.prepare(inputs, {}, stream)
+        compiled_stage_kinds = prepared.equation._debug_stage_kinds(
+            prepared.stamp_inputs,
+            tensor_scalar_inputs=prepared.tensor_scalar_inputs,
+        )
+        stamped = prepared.stamp()
+    else:
+        compiled_stage_kinds = program._debug_stage_kinds(inputs)
+        stamped = _stamp_program(program, inputs, stream)
+
+    runtime_stage_kinds = stamped._debug_stage_kinds()
+    stream.synchronize()
+    return list(compiled_stage_kinds), list(runtime_stage_kinds)
+
+
+def _stage_summary(stage_kinds: list[str]) -> str:
+    return " -> ".join(stage_kinds)
+
+
+def _stage_count(stage_kinds: list[str], prefix: str) -> int:
+    return sum(1 for stage in stage_kinds if stage.startswith(prefix))
 
 
 def _make_stamped_launch_pool(program, input_shapes: dict[str, tuple[int, ...]], dtype: thor.DataType, stream: Stream):
@@ -272,6 +312,81 @@ def _build_sdpa_case(
     return build
 
 
+def _build_sdpa_with_rope_case(
+    *,
+    batch: int,
+    sequence: int,
+    query_heads: int,
+    kv_heads: int,
+    qk_dim: int,
+    v_dim: int,
+    mask_kind: AttentionMaskKind = AttentionMaskKind.none,
+    rotary_dim: int = 0,
+    interleaved: bool = False,
+    scaling_kind: RotaryScalingKind = RotaryScalingKind.none,
+    scaling_factor: float = 1.0,
+    original_max_position_embeddings: int = 0,
+    metadata: dict[str, str] | None = None,
+):
+
+    def build(dtype: thor.DataType):
+        q = ex.input("q")
+        k = ex.input("k")
+        v = ex.input("v")
+        rope_kwargs = {
+            "sequence_axis": 1,
+            "head_dim_axis": 3,
+            "rotary_dim": rotary_dim,
+            "interleaved": interleaved,
+            "scaling_kind": scaling_kind,
+            "scaling_factor": scaling_factor,
+            "original_max_position_embeddings": original_max_position_embeddings,
+            "output_dtype": dtype,
+            "compute_dtype": thor.DataType.fp32,
+        }
+        q = ex.rope(q, **rope_kwargs)
+        k = ex.rope(k, **rope_kwargs)
+        out = ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            q_layout=AttentionTensorLayout.bshd,
+            k_layout=AttentionTensorLayout.bshd,
+            v_layout=AttentionTensorLayout.bshd,
+            o_layout=AttentionTensorLayout.bshd,
+            mask_kind=mask_kind,
+            attention_scale=1.0 / math.sqrt(float(qk_dim)),
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        )
+        input_shapes = {
+            "q": (batch, sequence, query_heads, qk_dim),
+            "k": (batch, sequence, kv_heads, qk_dim),
+            "v": (batch, sequence, kv_heads, v_dim),
+        }
+        output_shape = (batch, sequence, query_heads, v_dim)
+        flops = _attention_flops(
+            batch=batch,
+            query_len=sequence,
+            kv_len=sequence,
+            query_heads=query_heads,
+            qk_dim=qk_dim,
+            v_dim=v_dim,
+        )
+        case_metadata = {
+            "source": "expression_sdpa_rope",
+            "use_rope": True,
+            "rope_rotary_dim": rotary_dim if rotary_dim != 0 else qk_dim,
+            "rope_interleaved": interleaved,
+            "rope_scaling_kind": _rotary_scaling_kind_name(scaling_kind),
+        }
+        if metadata:
+            case_metadata.update(metadata)
+        return ex.compile(out, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape, flops, case_metadata
+
+    return build
+
+
 def _build_packed_qkv_layer_case(
     *,
     batch: int,
@@ -284,6 +399,12 @@ def _build_packed_qkv_layer_case(
     v_dim: int,
     has_bias: bool,
     mask_kind: AttentionMaskKind = AttentionMaskKind.none,
+    use_rope: bool = False,
+    rope_rotary_dim: int = 0,
+    rope_interleaved: bool = False,
+    rope_scaling_kind: RotaryScalingKind = RotaryScalingKind.none,
+    rope_scaling_factor: float = 1.0,
+    rope_original_max_position_embeddings: int = 0,
 ):
 
     def build(dtype: thor.DataType):
@@ -318,6 +439,21 @@ def _build_packed_qkv_layer_case(
             [batch_stride, qkv_width, v_dim, 1],
             q_width + k_width,
         ).with_output_dtype(dtype)
+
+        if use_rope:
+            rope_kwargs = {
+                "sequence_axis": 1,
+                "head_dim_axis": 3,
+                "rotary_dim": rope_rotary_dim,
+                "interleaved": rope_interleaved,
+                "scaling_kind": rope_scaling_kind,
+                "scaling_factor": rope_scaling_factor,
+                "original_max_position_embeddings": rope_original_max_position_embeddings,
+                "output_dtype": dtype,
+                "compute_dtype": thor.DataType.fp32,
+            }
+            q = ex.rope(q, **rope_kwargs)
+            k = ex.rope(k, **rope_kwargs)
 
         attn = ex.scaled_dot_product_attention(
             q,
@@ -362,8 +498,15 @@ def _build_packed_qkv_layer_case(
         metadata = {
             "source": "expression",
             "qkv_projection_mode": "packed",
-            "has_bias": has_bias
+            "has_bias": has_bias,
+            "use_rope": use_rope,
         }
+        if use_rope:
+            metadata.update({
+                "rope_rotary_dim": rope_rotary_dim if rope_rotary_dim != 0 else qk_dim,
+                "rope_interleaved": rope_interleaved,
+                "rope_scaling_kind": _rotary_scaling_kind_name(rope_scaling_kind),
+            })
         return ex.compile(out, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape, flops, metadata
 
     return build
@@ -381,6 +524,12 @@ def _build_split_qkv_layer_case(
     v_dim: int,
     has_bias: bool,
     mask_kind: AttentionMaskKind = AttentionMaskKind.none,
+    use_rope: bool = False,
+    rope_rotary_dim: int = 0,
+    rope_interleaved: bool = False,
+    rope_scaling_kind: RotaryScalingKind = RotaryScalingKind.none,
+    rope_scaling_factor: float = 1.0,
+    rope_original_max_position_embeddings: int = 0,
 ):
 
     def build(dtype: thor.DataType):
@@ -407,6 +556,21 @@ def _build_split_qkv_layer_case(
         q = q.reshape([batch, sequence, query_heads, qk_dim]).with_output_dtype(dtype)
         k = k.reshape([batch, sequence, kv_heads, qk_dim]).with_output_dtype(dtype)
         v = v.reshape([batch, sequence, kv_heads, v_dim]).with_output_dtype(dtype)
+
+        if use_rope:
+            rope_kwargs = {
+                "sequence_axis": 1,
+                "head_dim_axis": 3,
+                "rotary_dim": rope_rotary_dim,
+                "interleaved": rope_interleaved,
+                "scaling_kind": rope_scaling_kind,
+                "scaling_factor": rope_scaling_factor,
+                "original_max_position_embeddings": rope_original_max_position_embeddings,
+                "output_dtype": dtype,
+                "compute_dtype": thor.DataType.fp32,
+            }
+            q = ex.rope(q, **rope_kwargs)
+            k = ex.rope(k, **rope_kwargs)
 
         attn = ex.scaled_dot_product_attention(
             q,
@@ -454,8 +618,15 @@ def _build_split_qkv_layer_case(
         )
         metadata = {
             "source": "expression",
-            "qkv_projection_mode": "split"
+            "qkv_projection_mode": "split",
+            "use_rope": use_rope,
         }
+        if use_rope:
+            metadata.update({
+                "rope_rotary_dim": rope_rotary_dim if rope_rotary_dim != 0 else qk_dim,
+                "rope_interleaved": rope_interleaved,
+                "rope_scaling_kind": _rotary_scaling_kind_name(rope_scaling_kind),
+            })
         return ex.compile(out, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape, flops, metadata
 
     return build
@@ -473,11 +644,36 @@ def _build_public_attention_layer_case(
     v_dim: int,
     has_bias: bool,
     mask_kind: AttentionMaskKind = AttentionMaskKind.none,
+    use_rope: bool = False,
+    rope_rotary_dim: int = 0,
+    rope_interleaved: bool = False,
+    rope_scaling_kind: RotaryScalingKind = RotaryScalingKind.none,
+    rope_scaling_factor: float = 1.0,
+    rope_original_max_position_embeddings: int = 0,
 ):
 
     def build(dtype: thor.DataType):
         if not hasattr(thor.layers, "Attention"):
             pytest.skip("thor.layers.Attention is not exposed in this build")
+
+        effective_rope_rotary_dim = rope_rotary_dim if rope_rotary_dim != 0 else qk_dim
+        if use_rope:
+            # The public Attention layer currently exposes only its default RoPE configuration.
+            # Keep this helper accepting the same metadata knobs as the expression builders so
+            # benchmark/test call sites stay uniform, but fail loudly if a case asks the public
+            # API to exercise a non-default RoPE variant it cannot actually configure yet.
+            if effective_rope_rotary_dim != qk_dim:
+                raise AssertionError(
+                    "thor.layers.Attention benchmark helper cannot configure a non-default RoPE rotary_dim yet.")
+            if rope_interleaved:
+                raise AssertionError("thor.layers.Attention benchmark helper cannot configure interleaved RoPE yet.")
+            if rope_scaling_kind != RotaryScalingKind.none:
+                raise AssertionError("thor.layers.Attention benchmark helper cannot configure RoPE scaling yet.")
+            if rope_scaling_factor != 1.0:
+                raise AssertionError("thor.layers.Attention benchmark helper cannot configure a RoPE scaling factor yet.")
+            if rope_original_max_position_embeddings != 0:
+                raise AssertionError(
+                    "thor.layers.Attention benchmark helper cannot configure original_max_position_embeddings yet.")
 
         if mask_kind == AttentionMaskKind.none:
             mask_kind_name = "none"
@@ -510,6 +706,7 @@ def _build_public_attention_layer_case(
             has_bias=has_bias,
             mask_kind=mask_kind_name,
             attention_scale=1.0 / math.sqrt(float(qk_dim)),
+            use_rope=use_rope,
             weights_data_type=dtype,
             compute_data_type=thor.DataType.fp32,
             output_data_type=dtype,
@@ -557,8 +754,15 @@ def _build_public_attention_layer_case(
         metadata = {
             "source": "thor.layers.Attention",
             "qkv_projection_mode": projection_mode,
-            "has_bias": has_bias
+            "has_bias": has_bias,
+            "use_rope": use_rope,
         }
+        if use_rope:
+            metadata.update({
+                "rope_rotary_dim": effective_rope_rotary_dim,
+                "rope_interleaved": rope_interleaved,
+                "rope_scaling_kind": _rotary_scaling_kind_name(rope_scaling_kind),
+            })
         return layer._debug_expression(), input_shapes, output_shape, flops, metadata
 
     return build
@@ -645,6 +849,7 @@ def _public_attention_case(
     value_dim: int | None = None,
     has_bias: bool = False,
     mask_kind: AttentionMaskKind = AttentionMaskKind.causal_top_left,
+    use_rope: bool = False,
     requires_large_opt_in: bool = False,
 ) -> AttentionPerfCase:
     value_dim = head_dim if value_dim is None else value_dim
@@ -661,6 +866,7 @@ def _public_attention_case(
             v_dim=value_dim,
             has_bias=has_bias,
             mask_kind=mask_kind,
+            use_rope=use_rope,
         ),
         description=description,
         requires_large_opt_in=requires_large_opt_in,
@@ -718,6 +924,24 @@ CASES = [
             },
         ),
         description="Llama-style causal prefill SDPA with grouped-query attention.",
+    ),
+    AttentionPerfCase(
+        name="sdpa_rope_llama_style_prefill_gqa_s2048_h32_kv8_d128",
+        builder=_build_sdpa_with_rope_case(
+            batch=int(os.getenv("THOR_ATTENTION_PERF_PREFILL_BATCH", "1")),
+            sequence=int(os.getenv("THOR_ATTENTION_PERF_PREFILL_SEQUENCE", "2048")),
+            query_heads=32,
+            kv_heads=8,
+            qk_dim=128,
+            v_dim=128,
+            mask_kind=AttentionMaskKind.causal_top_left,
+            rotary_dim=128,
+            metadata={
+                "reference_shape": "thor_local_llama_style_h32_gqa",
+                "estimated_tflops_note": "excludes_rope_trig",
+            },
+        ),
+        description="Llama-style causal prefill SDPA with RoPE applied to Q and K before cuDNN attention.",
     ),
     AttentionPerfCase(
         name="sdpa_llama_style_decode_gqa_q1_kv4096_h32_kv8_d128",
@@ -834,6 +1058,24 @@ CASES = [
         description="Hand-built expression hot path: split Q/K/V projections, cuDNN SDPA, output projection.",
     ),
     AttentionPerfCase(
+        name="expression_split_qkv_rope_attention_layer_llama_style_b1_s2048_model4096_h32_kv8_d128",
+        builder=_build_split_qkv_layer_case(
+            batch=int(os.getenv("THOR_ATTENTION_PERF_LAYER_BATCH", "1")),
+            sequence=int(os.getenv("THOR_ATTENTION_PERF_LAYER_SEQUENCE", "2048")),
+            input_features=4096,
+            output_features=4096,
+            query_heads=32,
+            kv_heads=8,
+            qk_dim=128,
+            v_dim=128,
+            has_bias=False,
+            mask_kind=AttentionMaskKind.causal_top_left,
+            use_rope=True,
+            rope_rotary_dim=128,
+        ),
+        description="Hand-built expression hot path with split Q/K/V projections, RoPE on Q/K, cuDNN SDPA, and output projection.",
+    ),
+    AttentionPerfCase(
         name="public_attention_layer_llama_style_b1_s2048_model4096_h32_kv8_d128",
         builder=_build_public_attention_layer_case(
             batch=int(os.getenv("THOR_ATTENTION_PERF_LAYER_BATCH", "1")),
@@ -848,6 +1090,23 @@ CASES = [
             mask_kind=AttentionMaskKind.causal_top_left,
         ),
         description="Public thor.layers.Attention hot path using the C++ layer's configured QKV projection mode.",
+    ),
+    AttentionPerfCase(
+        name="public_attention_layer_llama_style_rope_b1_s2048_model4096_h32_kv8_d128",
+        builder=_build_public_attention_layer_case(
+            batch=int(os.getenv("THOR_ATTENTION_PERF_LAYER_BATCH", "1")),
+            sequence=int(os.getenv("THOR_ATTENTION_PERF_LAYER_SEQUENCE", "2048")),
+            input_features=4096,
+            output_features=4096,
+            query_heads=32,
+            kv_heads=8,
+            qk_dim=128,
+            v_dim=128,
+            has_bias=False,
+            mask_kind=AttentionMaskKind.causal_top_left,
+            use_rope=True,
+        ),
+        description="Public thor.layers.Attention hot path with the layer's built-in RoPE option enabled.",
     ),
     AttentionPerfCase(
         name="public_attention_layer_llama_style_with_bias_b1_s2048_model4096_h32_kv8_d128",
@@ -1044,6 +1303,63 @@ def test_public_attention_projection_biases_compile_as_gemm_epilogues(dtype: tho
 
 
 @pytest.mark.cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_dtype_name)
+def test_rope_qk_materialization_compiles_as_one_fused_stage(dtype: thor.DataType, record_property):
+    if not cudnn_frontend_attention_available():
+        pytest.skip("Thor was not built with cuDNN Frontend attention support")
+
+    stream = Stream(Placement(DeviceType.gpu, GPU_NUM))
+
+    cases = [
+        AttentionPerfCase(
+            name="sdpa_rope_gqa_grouped_materialization_contract",
+            builder=_build_sdpa_with_rope_case(
+                batch=2,
+                sequence=8,
+                query_heads=4,
+                kv_heads=2,
+                qk_dim=16,
+                v_dim=16,
+                mask_kind=AttentionMaskKind.causal_top_left,
+                rotary_dim=16,
+            ),
+            description="Standalone SDPA should materialize Q/K RoPE with one grouped fused stage before attention.",
+        ),
+        AttentionPerfCase(
+            name="public_attention_split_qkv_rope_grouped_materialization_contract",
+            builder=_build_public_attention_layer_case(
+                batch=2,
+                sequence=8,
+                input_features=64,
+                output_features=64,
+                query_heads=4,
+                kv_heads=2,
+                qk_dim=16,
+                v_dim=16,
+                has_bias=False,
+                mask_kind=AttentionMaskKind.causal_top_left,
+                use_rope=True,
+                rope_rotary_dim=16,
+            ),
+            description="Public split-QKV Attention should use one grouped Q/K RoPE post-projection materialization stage.",
+        ),
+    ]
+
+    for case in cases:
+        program, input_shapes, output_shape, _, metadata = _unpack_built_case(case.builder(dtype))
+        compiled_stage_kinds, runtime_stage_kinds = _debug_program_stage_kinds(program, input_shapes, dtype, stream)
+
+        record_property(f"{case.name}_compiled_stage_kinds", str(compiled_stage_kinds))
+        record_property(f"{case.name}_runtime_stage_kinds", str(runtime_stage_kinds))
+        record_property(f"{case.name}_output_shape", str(output_shape))
+        record_property(f"{case.name}_metadata", str(metadata))
+
+        assert _stage_count(runtime_stage_kinds, "Attention") == 1
+        assert _stage_count(runtime_stage_kinds, "FusedKernel") == 1
+        assert _stage_count(compiled_stage_kinds, "FusedKernel") == 1
+
+
+@pytest.mark.cuda
 @pytest.mark.performance
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.name)
 @pytest.mark.parametrize("dtype", DTYPES, ids=_dtype_name)
@@ -1053,6 +1369,7 @@ def test_attention_layer_real_size_throughput(case: AttentionPerfCase, dtype: th
 
     stream = Stream(Placement(DeviceType.gpu, GPU_NUM))
     program, input_shapes, output_shape, flops_per_launch, metadata = _unpack_built_case(case.builder(dtype))
+    compiled_stage_kinds, runtime_stage_kinds = _debug_program_stage_kinds(program, input_shapes, dtype, stream)
     launches, input_bytes, pool_slots = _make_stamped_launch_pool(program, input_shapes, dtype, stream)
 
     elapsed_s = _benchmark_rotating_launches(launches, stream)
@@ -1077,6 +1394,12 @@ def test_attention_layer_real_size_throughput(case: AttentionPerfCase, dtype: th
     record_property("estimated_tflops", tflops)
     record_property("input_gib_per_second", input_gib_per_s)
     record_property("output_elements_per_second", output_elems_per_s)
+    record_property("compiled_stage_kinds", str(compiled_stage_kinds))
+    record_property("runtime_stage_kinds", str(runtime_stage_kinds))
+    record_property("compiled_fused_kernel_stage_count", _stage_count(compiled_stage_kinds, "FusedKernel"))
+    record_property("runtime_fused_kernel_stage_count", _stage_count(runtime_stage_kinds, "FusedKernel"))
+    record_property("compiled_attention_stage_count", _stage_count(compiled_stage_kinds, "Attention"))
+    record_property("runtime_attention_stage_count", _stage_count(runtime_stage_kinds, "Attention"))
     for key, value in metadata.items():
         record_property(key, value)
 
@@ -1091,7 +1414,11 @@ def test_attention_layer_real_size_throughput(case: AttentionPerfCase, dtype: th
         f"{tflops:.3f} estimated TFLOP/s | "
         f"{input_gib_per_s:.3f} input GiB/s | "
         f"rotating pool={pool_slots} slots/{rotating_pool_gib:.2f} GiB"
-        f"{metadata_suffix}")
+        f"{metadata_suffix} | "
+        f"compiled_stages={_stage_summary(compiled_stage_kinds)} | "
+        f"runtime_stages={_stage_summary(runtime_stage_kinds)}")
 
+    if metadata.get("use_rope"):
+        assert _stage_count(runtime_stage_kinds, "Attention") == 1
     assert elapsed_s > 0.0
     assert pool_slots >= 2 or EXPLICIT_POOL_SLOTS == "1"

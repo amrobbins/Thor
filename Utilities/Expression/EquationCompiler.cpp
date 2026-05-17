@@ -3719,6 +3719,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     std::function<void(uint32_t)> emitForDependency;
     std::function<uint32_t(uint32_t, std::optional<uint32_t>)> emitStorageAlias;
     std::function<bool(uint32_t, uint32_t, const std::string&)> tryEmitTiledTransposeMaterializedFusedStage;
+    std::function<std::unordered_set<uint32_t>(const std::vector<uint32_t>&)> tryEmitGroupedRopeMaterialization;
 
     materializeTerminalGroup = [&](size_t group_idx) {
         if (group_idx >= terminal_groups.size() || !terminal_groups[group_idx].has_value()) {
@@ -3855,6 +3856,85 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         return true;
     };
 
+    tryEmitGroupedRopeMaterialization = [&](const std::vector<uint32_t>& roots) -> std::unordered_set<uint32_t> {
+        std::vector<uint32_t> rope_roots;
+        rope_roots.reserve(roots.size());
+        for (uint32_t root_candidate : roots) {
+            if (root_candidate == UINT32_MAX || root_candidate >= expr.nodes.size()) {
+                continue;
+            }
+            if (node_output_value_id.find(root_candidate) != node_output_value_id.end()) {
+                continue;
+            }
+            if (expr.nodes[root_candidate].op == ExprOp::ROPE) {
+                rope_roots.push_back(root_candidate);
+            }
+        }
+        if (rope_roots.size() < 2) {
+            return {};
+        }
+
+        std::unordered_set<uint32_t> merged_region;
+        std::unordered_set<uint32_t> boundary_nodes;
+        std::vector<std::string> region_sigs;
+        region_sigs.reserve(rope_roots.size());
+
+        for (uint32_t rope_root : rope_roots) {
+            const std::string region_sig = fusedRegionSignature(expr, rope_root);
+            if (fused_region_value_id.find(region_sig) != fused_region_value_id.end() ||
+                pending_terminal_region_to_group.find(region_sig) != pending_terminal_region_to_group.end()) {
+                return {};
+            }
+
+            std::unordered_set<uint32_t> region;
+            collectFusableRegion(expr, rope_root, region);
+            std::unordered_set<uint32_t> deps;
+            collectBoundaryDependencies(expr, region, deps);
+
+            for (uint32_t dep : deps) {
+                if (dep >= expr.nodes.size()) {
+                    throw std::runtime_error("Grouped RoPE dependency node index out of range.");
+                }
+                // Packed-QKV views are intentionally not part of this optimization path. Fused kernels still
+                // cannot consume non-dense STRIDED_VIEW dependencies directly; packed QKV remains a dormant
+                // experimental path and should not receive split-path RoPE upgrades by accident.
+                if (expr.nodes[dep].op == ExprOp::STRIDED_VIEW) {
+                    return {};
+                }
+            }
+
+            merged_region.insert(region.begin(), region.end());
+            boundary_nodes.insert(deps.begin(), deps.end());
+            region_sigs.push_back(region_sig);
+        }
+
+        for (uint32_t boundary_root : boundary_nodes) {
+            emitForDependency(boundary_root);
+        }
+
+        std::vector<RequestedStageOutput> requested_outputs;
+        requested_outputs.reserve(rope_roots.size());
+        std::unordered_set<uint32_t> emitted_roots;
+        for (size_t i = 0; i < rope_roots.size(); ++i) {
+            const uint32_t rope_root = rope_roots[i];
+            if (node_output_value_id.find(rope_root) != node_output_value_id.end()) {
+                return {};
+            }
+            const uint32_t value_id = next_value_id++;
+            node_output_value_id[rope_root] = value_id;
+            fused_region_value_id.emplace(region_sigs[i], value_id);
+            requested_outputs.push_back(RequestedStageOutput{
+                .name = "",
+                .old_root_idx = rope_root,
+                .value_id = value_id,
+            });
+            emitted_roots.insert(rope_root);
+        }
+
+        planned.stages.push_back(buildFusedStage(expr, merged_region, requested_outputs, node_output_value_id));
+        return emitted_roots;
+    };
+
     emitForDependency = [&](uint32_t root_idx) {
         if (node_output_value_id.find(root_idx) != node_output_value_id.end()) {
             return;
@@ -3917,10 +3997,19 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 rhs_dependency_idx = peelExplicitTransposeChain(expr, root.rhs, ignored);
             }
 
-            ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
+            std::unordered_set<uint32_t> grouped_rope_roots;
+            if (root.op == ExprOp::ATTENTION) {
+                grouped_rope_roots = tryEmitGroupedRopeMaterialization({root.lhs, root.rhs});
+            }
+
+            if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
+                ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
+            }
             if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
                 isConvolutionOp(root.op)) {
-                ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
+                if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
+                    ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
+                }
             }
             if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);
@@ -4195,10 +4284,19 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 rhs_dependency_idx = peelExplicitTransposeChain(expr, root.rhs, ignored);
             }
 
-            ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
+            std::unordered_set<uint32_t> grouped_rope_roots;
+            if (root.op == ExprOp::ATTENTION) {
+                grouped_rope_roots = tryEmitGroupedRopeMaterialization({root.lhs, root.rhs});
+            }
+
+            if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
+                ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
+            }
             if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
                 isConvolutionOp(root.op)) {
-                ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
+                if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
+                    ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
+                }
             }
             if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux", false);

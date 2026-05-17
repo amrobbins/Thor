@@ -73,6 +73,8 @@ constexpr bool kUsePackedQkvProjection = Thor::Attention::USE_PACKED_QKV_PROJECT
 constexpr bool kUsePackedQkvProjectionWithRope = Thor::Attention::USE_PACKED_QKV_PROJECTION_WITH_ROPE;
 
 bool usePackedQkvProjectionForLayer(bool useRope) {
+    // PackedQkvProjection is not being supported anymore as it was shown to be slower.
+    // It is being left here as an orphaned reference if there is some future opportunity to gain performance using a packed QKV.
     if constexpr (!kUsePackedQkvProjection) {
         return false;
     } else if constexpr (kUsePackedQkvProjectionWithRope) {
@@ -257,14 +259,13 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                 const uint64_t batchStride = sequenceLength * qkvWidth;
                 Expression q = qkv.stridedView({batch, sequenceLength, numHeads, headDim}, {batchStride, qkvWidth, headDim, 1}, 0)
                                    .withOutputDType(outputDType);
-                Expression k = qkv.stridedView({batch, sequenceLength, numKeyValueHeads, headDim},
-                                               {batchStride, qkvWidth, headDim, 1},
-                                               queryWidth)
-                                   .withOutputDType(outputDType);
-                Expression v = qkv.stridedView({batch, sequenceLength, numKeyValueHeads, valueDim},
-                                               {batchStride, qkvWidth, valueDim, 1},
-                                               queryWidth + keyWidth)
-                                   .withOutputDType(outputDType);
+                Expression k =
+                    qkv.stridedView({batch, sequenceLength, numKeyValueHeads, headDim}, {batchStride, qkvWidth, headDim, 1}, queryWidth)
+                        .withOutputDType(outputDType);
+                Expression v =
+                    qkv.stridedView(
+                           {batch, sequenceLength, numKeyValueHeads, valueDim}, {batchStride, qkvWidth, valueDim, 1}, queryWidth + keyWidth)
+                        .withOutputDType(outputDType);
                 return ProjectedQkv{std::move(q), std::move(k), std::move(v)};
             };
 
@@ -397,8 +398,7 @@ void Attention::Builder::verifyConfig() const {
     }
     if (useAlibi && (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
                      maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {
-        throw std::invalid_argument(
-            "Attention ALiBi cannot currently be combined with bottom-right/decode masks in cuDNN SDPA.");
+        throw std::invalid_argument("Attention ALiBi cannot currently be combined with bottom-right/decode masks in cuDNN SDPA.");
     }
     if (_attentionScale.has_value() && (!std::isfinite(_attentionScale.value()) || _attentionScale.value() <= 0.0)) {
         throw std::invalid_argument("Attention attentionScale must be finite and positive.");
