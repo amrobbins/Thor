@@ -1032,15 +1032,19 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
     int sourceDeviceNum = source.placement.getDeviceNum();
     int destDeviceNum = placement.getDeviceNum();
 
-    // Handle across device conversions:
+    // Handle data type conversions that also need a placement change.
+    //
+    // CPU->CPU conversion intentionally stays in the ordinary CPU copy path below.  That keeps CPU-only use cases from
+    // depending on CUDA-capable hardware just to preserve a wide source value during a downcast.
     //
     // If the destination data type is larger than the source data type, then this is always supported.
     //      - The data is copied to the dest device and then up converted in place.
     //
     // If the destination data type is smaller than the source data type and the source value must be preserved, then convert
-    // out-of-place on a GPU temporary.  CPU->GPU copies first move the wide source value to the destination GPU and then
-    // downcast there.  GPU->CPU and GPU->GPU copies downcast on the transmitting/source GPU before the narrower value is
-    // transferred.  This avoids mutating the source and never routes the preserving downcast through CPU conversion.
+    // out-of-place on a GPU temporary whenever a GPU is involved.  CPU->GPU copies first move the wide source value to the
+    // destination GPU and then downcast there.  GPU->CPU and GPU->GPU copies downcast on the transmitting/source GPU before
+    // the narrower value is transferred.  This avoids mutating the source and never routes a GPU-involved preserving downcast
+    // through CPU conversion.
     //
     // If the source value does not need to be preserved, an in-place down-conversion in source memory is still used to avoid the
     // temporary allocation.
@@ -1101,7 +1105,29 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
                                                sourceDescriptor.getTotalNumElements(),
                                                copyStream,
                                                conversionGpuNum);
-                    copyFromAsync(convertedGpuTemporary, copyStream, /*mustPreserveSourceValue=*/true);
+
+                    // Keep the transfer ordered after the source-GPU conversion on the same transmitting/source stream.
+                    // Recursing through copyFromAsync() would enter the generic placement-copy path, whose cross-GPU branch
+                    // assumes the caller supplied a destination-device stream.  For preserving GPU->GPU downcasts the stream
+                    // is intentionally on the source GPU, because the conversion must also run there.
+                    if (destOnGpu) {
+                        ScopedGpu scopedGpu(conversionGpuNum);
+                        cudaStatus = cudaMemcpyPeerAsync(mem,
+                                                         destDeviceNum,
+                                                         convertedGpuTemporary.mem,
+                                                         conversionGpuNum,
+                                                         destDescriptor.getArraySizeInBytes(),
+                                                         copyStream.getStream());
+                        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                    } else {
+                        ScopedGpu scopedGpu(conversionGpuNum);
+                        cudaStatus = cudaMemcpyAsync(mem,
+                                                     convertedGpuTemporary.mem,
+                                                     destDescriptor.getArraySizeInBytes(),
+                                                     cudaMemcpyDeviceToHost,
+                                                     copyStream.getStream());
+                        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+                    }
                 }
 
                 return;
