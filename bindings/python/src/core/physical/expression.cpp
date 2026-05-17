@@ -1902,6 +1902,15 @@ Conventions:
                          R"nbdoc(
 Return the per-stage semantic FLOP counts for this stamped execution plan.
 )nbdoc");
+
+    stamped_equation.def("_debug_stage_kinds",
+                         &StampedExecutionPlan::stageKindNames,
+                         R"nbdoc(
+Return the concrete runtime stage kinds in this stamped execution plan.
+
+This reflects stages that will actually run, after runtime-stage elision such as
+direct packed-QKV attention-backward outputs.
+)nbdoc");
 }
 
 void bind_dynamic_expression(nb::module_& physical) {

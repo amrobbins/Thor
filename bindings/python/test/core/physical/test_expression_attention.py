@@ -684,6 +684,10 @@ def test_attention_bshd_strided_packed_qkv_view_backward_scatter_add_matches_ref
     assert stage_kinds.index("AttentionBackward") < stage_kinds.index("FusedKernel")
 
     stamped = bwd_eq.stamp(inputs_gpu, stream)
+    runtime_stage_kinds = stamped._debug_stage_kinds()
+    assert runtime_stage_kinds == ["AttentionBackward"]
+    assert "FusedKernel" not in runtime_stage_kinds
+
     stamped.run()
     got = _copy_to_host(stamped.outputs()["qkv_grad"], dtype, stream)
     _assert_close(got, expected_qkv_grad, dtype)

@@ -6,6 +6,7 @@
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <memory>
 #include <type_traits>
 #include <unordered_map>
@@ -738,6 +739,34 @@ class StampedReduceMinMaxBackward {
 
 struct StampedExecutionStage {
     enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    static std::string kindToString(const Kind kind) {
+        switch (kind) {
+            case Kind::FusedKernel:
+                return "FusedKernel";
+            case Kind::Reduction:
+                return "Reduction";
+            case Kind::ArgMinMax:
+                return "ArgMinMax";
+            case Kind::Softmax:
+                return "Softmax";
+            case Kind::RmsNorm:
+                return "RmsNorm";
+            case Kind::Matmul:
+                return "Matmul";
+            case Kind::Attention:
+                return "Attention";
+            case Kind::AttentionBackward:
+                return "AttentionBackward";
+            case Kind::Convolution:
+                return "Convolution";
+            case Kind::ConvolutionBackward:
+                return "ConvolutionBackward";
+            case Kind::ReduceMinMaxBackward:
+                return "ReduceMinMaxBackward";
+        }
+        return "<unknown>";
+    }
+
     const Kind kind;
 
     const std::vector<uint32_t> dependency_stage_indices;
@@ -933,6 +962,15 @@ class StampedExecutionPlan {
         out.reserve(steps.size());
         for (const StampedExecutionStage& step : steps) {
             out.push_back(step.flopCount());
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<std::string> stageKindNames() const {
+        std::vector<std::string> out;
+        out.reserve(steps.size());
+        for (const StampedExecutionStage& step : steps) {
+            out.push_back(StampedExecutionStage::kindToString(step.kind));
         }
         return out;
     }
