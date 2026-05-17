@@ -14,6 +14,7 @@ using namespace Thor;
 
 void bind_drop_out(nb::module_ &m);
 void bind_adaptive_layer_norm(nb::module_ &m);
+void bind_attention(nb::module_ &m);
 void bind_batch_normalization(nb::module_ &m);
 void bind_concatenate(nb::module_ &m);
 void bind_convolution_2d(nb::module_ &m);
@@ -41,13 +42,14 @@ void bind_layers(nb::module_ &layers) {
     auto trainable_layer = nb::class_<TrainableLayer, MultiConnectionLayer>(layers, "TrainableLayer");
     trainable_layer.attr("__module__") = "thor.layers";
 
+    bind_custom_layer(layers);
     bind_adaptive_layer_norm(layers);
+    bind_attention(layers);
     bind_batch_normalization(layers);
     bind_drop_out(layers);
     bind_concatenate(layers);
     bind_convolution_2d(layers);
     bind_convolution_3d(layers);
-    bind_custom_layer(layers);
     bind_flatten(layers);
     bind_fully_connected(layers);
     bind_instance_norm(layers);
