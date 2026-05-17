@@ -87,6 +87,30 @@ TEST(Tensor, Copies) {
 }
 
 // Reshape keeps contents unchanged
+TEST(Tensor, PreservingCpuToCpuDowncastStaysCpuOnly) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Stream stream(0);
+
+    TensorDescriptor sourceDescriptor(TensorDescriptor::DataType::FP64, {6});
+    TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP32, {6});
+    Tensor source(cpuPlacement, sourceDescriptor);
+    Tensor dest(cpuPlacement, destDescriptor);
+
+    double *sourceMem = static_cast<double *>(source.getMemPtr());
+    for (uint32_t i = 0; i < 6; ++i) {
+        sourceMem[i] = 1.25 + static_cast<double>(i);
+    }
+
+    dest.copyFromAsync(source, stream);
+    stream.synchronize();
+
+    float *destMem = static_cast<float *>(dest.getMemPtr());
+    for (uint32_t i = 0; i < 6; ++i) {
+        ASSERT_EQ(destMem[i], static_cast<float>(sourceMem[i]));
+        ASSERT_EQ(sourceMem[i], 1.25 + static_cast<double>(i));
+    }
+}
+
 TEST(Tensor, Reshapes) {
     srand(time(nullptr));
 
