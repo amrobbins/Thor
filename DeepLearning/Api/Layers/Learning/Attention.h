@@ -80,7 +80,6 @@ class Attention : public CustomLayer {
     // Dormant compile-time experiment switch for benchmarking packed QKV projection against the maintained split-Q/K/V path.
     // Packed QKV is intentionally not updated by split-path projection/RoPE fusion work unless a future use case reactivates it.
     static constexpr bool USE_PACKED_QKV_PROJECTION = false;
-    static constexpr bool USE_PACKED_QKV_PROJECTION_WITH_ROPE = false;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Attention>(*this); }
     std::string getLayerType() const override { return "Attention"; }

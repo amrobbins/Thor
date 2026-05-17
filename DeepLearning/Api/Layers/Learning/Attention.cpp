@@ -70,16 +70,12 @@ std::shared_ptr<Thor::ParameterSpecification> makeParameter(const std::string& n
 }
 
 constexpr bool kUsePackedQkvProjection = Thor::Attention::USE_PACKED_QKV_PROJECTION;
-constexpr bool kUsePackedQkvProjectionWithRope = Thor::Attention::USE_PACKED_QKV_PROJECTION_WITH_ROPE;
 
 bool usePackedQkvProjectionForLayer(bool useRope) {
     // PackedQkvProjection is not being supported anymore as it was shown to be slower.
     // It is being left here as an orphaned reference if there is some future opportunity to gain performance using a packed QKV.
     if constexpr (!kUsePackedQkvProjection) {
         return false;
-    } else if constexpr (kUsePackedQkvProjectionWithRope) {
-        (void)useRope;
-        return true;
     } else {
         // RoPE is still a generic expression op and must not consume non-dense Q/K views sliced out of packed QKV.
         // Keep RoPE layers on the legacy split projection path until a layout-aware RoPE materialization path lands.
