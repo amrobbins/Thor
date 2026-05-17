@@ -1,5 +1,6 @@
 #include "Utilities/Expression/FusedEquation.h"
 #include <optional>
+#include <array>
 
 #include "Utilities/Expression/AutoDiff.h"
 #include "Utilities/Expression/CudaSourceEmitter.h"
@@ -80,6 +81,327 @@ static std::vector<uint64_t> runtimeInputDims(const RuntimeInputValue& value) {
 
 static bool runtimeInputIsNonDenseTensorView(const RuntimeInputValue& value) {
     return std::holds_alternative<Tensor>(value) && !std::get<Tensor>(value).isDenseContiguous();
+}
+
+
+struct PackedAttentionBackwardDirectSlice {
+    size_t attention_slot = 0;
+    uint32_t attention_value_id = UINT32_MAX;
+    std::vector<uint64_t> view_dims;
+    std::vector<uint64_t> view_strides;
+    uint64_t view_element_offset = 0;
+    uint64_t start = 0;
+    uint64_t end = 0;
+};
+
+struct PackedAttentionBackwardDirectOutput {
+    size_t attention_stage_idx = 0;
+    size_t packing_stage_idx = 0;
+    uint32_t packed_value_id = UINT32_MAX;
+    std::string packed_output_name;
+    TensorDescriptor::DataType packed_dtype = TensorDescriptor::DataType::FP16;
+    std::vector<uint64_t> packed_dims;
+    std::array<std::optional<PackedAttentionBackwardDirectSlice>, 3> slices;
+};
+
+static std::optional<size_t> attentionBackwardQkvSlotForOp(ExprOp op) {
+    switch (op) {
+        case ExprOp::ATTENTION_BACKWARD_Q:
+            return 0;
+        case ExprOp::ATTENTION_BACKWARD_K:
+            return 1;
+        case ExprOp::ATTENTION_BACKWARD_V:
+            return 2;
+        default:
+            return std::nullopt;
+    }
+}
+
+static bool isStaticZeroNodeForPackedAttentionBackwardDirectOutput(const PhysicalExpression& expr, uint32_t node_idx) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+    const ExprNode& node = expr.nodes.at(node_idx);
+    if ((node.op == ExprOp::SCALAR_FP || node.op == ExprOp::FILL) && node.scalar_fp == 0.0) {
+        return true;
+    }
+    if (node.op == ExprOp::MUL) {
+        return isStaticZeroNodeForPackedAttentionBackwardDirectOutput(expr, node.lhs) ||
+               isStaticZeroNodeForPackedAttentionBackwardDirectOutput(expr, node.rhs);
+    }
+    return false;
+}
+
+static bool collectStridedViewBackwardSumLeaves(const PhysicalExpression& expr,
+                                                uint32_t node_idx,
+                                                std::vector<uint32_t>& leaves) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+
+    const ExprNode& node = expr.nodes.at(node_idx);
+    if (node.op == ExprOp::ADD) {
+        return collectStridedViewBackwardSumLeaves(expr, node.lhs, leaves) &&
+               collectStridedViewBackwardSumLeaves(expr, node.rhs, leaves);
+    }
+    if (node.op == ExprOp::STRIDED_VIEW_BACKWARD) {
+        leaves.push_back(node_idx);
+        return true;
+    }
+    return isStaticZeroNodeForPackedAttentionBackwardDirectOutput(expr, node_idx);
+}
+
+static bool classifyPackedRowSliceForDirectAttentionBackward(const ExprNode& node,
+                                                              uint64_t& start,
+                                                              uint64_t& end) {
+    if (node.op != ExprOp::STRIDED_VIEW_BACKWARD || node.fill_dims.size() != 2 || node.view_dims.size() < 2 ||
+        node.view_dims.size() != node.view_strides.size()) {
+        return false;
+    }
+    if (node.fill_dims[0] == 0 || node.fill_dims[1] == 0) {
+        return false;
+    }
+    for (uint64_t dim : node.view_dims) {
+        if (dim == 0) {
+            return false;
+        }
+    }
+    for (uint64_t stride : node.view_strides) {
+        if (stride == 0) {
+            return false;
+        }
+    }
+
+    const std::vector<uint64_t>& dims = node.view_dims;
+    const std::vector<uint64_t>& strides = node.view_strides;
+    for (size_t collapsed_last_axis = 0; collapsed_last_axis + 1 < dims.size(); ++collapsed_last_axis) {
+        bool ok = true;
+
+        uint64_t dense_suffix_width = 1;
+        for (size_t axis = dims.size(); axis-- > collapsed_last_axis + 1;) {
+            if (strides[axis] != dense_suffix_width) {
+                ok = false;
+                break;
+            }
+            if (dense_suffix_width > std::numeric_limits<uint64_t>::max() / dims[axis]) {
+                return false;
+            }
+            dense_suffix_width *= dims[axis];
+        }
+        if (!ok) {
+            continue;
+        }
+
+        uint64_t expected_prefix_stride = strides[collapsed_last_axis];
+        for (size_t axis = collapsed_last_axis; axis-- > 0;) {
+            if (expected_prefix_stride > std::numeric_limits<uint64_t>::max() / dims[axis + 1]) {
+                return false;
+            }
+            expected_prefix_stride *= dims[axis + 1];
+            if (strides[axis] != expected_prefix_stride) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) {
+            continue;
+        }
+
+        uint64_t outer = 1;
+        for (size_t axis = 0; axis <= collapsed_last_axis; ++axis) {
+            if (outer > std::numeric_limits<uint64_t>::max() / dims[axis]) {
+                return false;
+            }
+            outer *= dims[axis];
+        }
+        const uint64_t row_width = strides[collapsed_last_axis];
+        if (outer != node.fill_dims[0] || row_width != node.fill_dims[1]) {
+            continue;
+        }
+        if (node.view_element_offset > row_width || dense_suffix_width > row_width - node.view_element_offset) {
+            continue;
+        }
+
+        start = node.view_element_offset;
+        end = node.view_element_offset + dense_suffix_width;
+        return true;
+    }
+
+    return false;
+}
+
+static std::optional<PackedAttentionBackwardDirectOutput> tryBuildPackedAttentionBackwardDirectOutput(
+    const std::vector<CompiledExecutionStage>& stages,
+    const std::unordered_map<uint32_t, uint32_t>& consumer_count_by_value_id,
+    size_t attention_stage_idx,
+    size_t packing_stage_idx) {
+    if (attention_stage_idx >= stages.size() || packing_stage_idx >= stages.size()) {
+        return std::nullopt;
+    }
+
+    const CompiledExecutionStage& attention_stage = stages.at(attention_stage_idx);
+    const CompiledExecutionStage& packing_stage = stages.at(packing_stage_idx);
+    if (attention_stage.kind != CompiledExecutionStage::Kind::AttentionBackward || !attention_stage.attention_backward ||
+        packing_stage.kind != CompiledExecutionStage::Kind::FusedKernel || packing_stage.outputs.size() != 1) {
+        return std::nullopt;
+    }
+    if (packing_stage.outputs.front().local_node_idx >= packing_stage.expr.nodes.size()) {
+        return std::nullopt;
+    }
+
+    std::unordered_map<uint32_t, size_t> attention_slot_by_value_id;
+    std::array<std::optional<uint32_t>, 3> value_id_by_slot;
+    std::array<std::optional<ExprOp>, 3> op_by_slot;
+    for (const CompiledStageOutput& output : attention_stage.outputs) {
+        if (output.local_node_idx >= attention_stage.expr.nodes.size()) {
+            return std::nullopt;
+        }
+        const ExprOp output_op = attention_stage.expr.nodes.at(output.local_node_idx).op;
+        const std::optional<size_t> slot = attentionBackwardQkvSlotForOp(output_op);
+        if (!slot.has_value()) {
+            continue;
+        }
+        attention_slot_by_value_id.emplace(output.value_id, slot.value());
+        value_id_by_slot.at(slot.value()) = output.value_id;
+        op_by_slot.at(slot.value()) = output_op;
+    }
+    for (const auto& value_id : value_id_by_slot) {
+        if (!value_id.has_value()) {
+            return std::nullopt;
+        }
+        auto consumer_it = consumer_count_by_value_id.find(value_id.value());
+        if (consumer_it == consumer_count_by_value_id.end() || consumer_it->second != 1) {
+            return std::nullopt;
+        }
+    }
+
+    std::vector<uint32_t> leaves;
+    if (!collectStridedViewBackwardSumLeaves(packing_stage.expr, packing_stage.outputs.front().local_node_idx, leaves) ||
+        leaves.size() != 3) {
+        return std::nullopt;
+    }
+
+    PackedAttentionBackwardDirectOutput direct;
+    direct.attention_stage_idx = attention_stage_idx;
+    direct.packing_stage_idx = packing_stage_idx;
+    direct.packed_value_id = packing_stage.outputs.front().value_id;
+    direct.packed_output_name = packing_stage.outputs.front().name;
+    direct.packed_dtype = packing_stage.outputDType(0);
+
+    std::optional<std::vector<uint64_t>> packed_dims;
+    for (uint32_t leaf_idx : leaves) {
+        const ExprNode& leaf = packing_stage.expr.nodes.at(leaf_idx);
+        if (leaf.lhs >= packing_stage.expr.nodes.size()) {
+            return std::nullopt;
+        }
+        const ExprNode& source = packing_stage.expr.nodes.at(leaf.lhs);
+        if (source.op != ExprOp::INPUT || source.input_slot >= packing_stage.input_value_ids.size()) {
+            return std::nullopt;
+        }
+
+        const uint32_t source_value_id = packing_stage.input_value_ids.at(source.input_slot);
+        auto slot_it = attention_slot_by_value_id.find(source_value_id);
+        if (slot_it == attention_slot_by_value_id.end()) {
+            return std::nullopt;
+        }
+        const size_t slot = slot_it->second;
+        if (direct.slices.at(slot).has_value()) {
+            return std::nullopt;
+        }
+
+        if (!packed_dims.has_value()) {
+            packed_dims = leaf.fill_dims;
+        } else if (packed_dims.value() != leaf.fill_dims) {
+            return std::nullopt;
+        }
+
+        if (!op_by_slot.at(slot).has_value()) {
+            return std::nullopt;
+        }
+        const TensorDescriptor::DataType slot_dtype = attention_stage.attention_backward->outputDTypeFor(op_by_slot.at(slot).value());
+        if (slot_dtype != direct.packed_dtype) {
+            return std::nullopt;
+        }
+
+        uint64_t start = 0;
+        uint64_t end = 0;
+        if (!classifyPackedRowSliceForDirectAttentionBackward(leaf, start, end)) {
+            return std::nullopt;
+        }
+
+        PackedAttentionBackwardDirectSlice slice;
+        slice.attention_slot = slot;
+        slice.attention_value_id = source_value_id;
+        slice.view_dims = leaf.view_dims;
+        slice.view_strides = leaf.view_strides;
+        slice.view_element_offset = leaf.view_element_offset;
+        slice.start = start;
+        slice.end = end;
+        direct.slices.at(slot) = std::move(slice);
+    }
+
+    if (!packed_dims.has_value() || packed_dims->size() != 2) {
+        return std::nullopt;
+    }
+    direct.packed_dims = packed_dims.value();
+
+    std::vector<PackedAttentionBackwardDirectSlice> sorted_slices;
+    sorted_slices.reserve(3);
+    for (const auto& slice : direct.slices) {
+        if (!slice.has_value()) {
+            return std::nullopt;
+        }
+        sorted_slices.push_back(slice.value());
+    }
+    std::sort(sorted_slices.begin(), sorted_slices.end(), [](const auto& a, const auto& b) { return a.start < b.start; });
+    uint64_t covered_until = 0;
+    for (const PackedAttentionBackwardDirectSlice& slice : sorted_slices) {
+        if (slice.start != covered_until || slice.end <= slice.start) {
+            return std::nullopt;
+        }
+        covered_until = slice.end;
+    }
+    if (covered_until != direct.packed_dims.at(1)) {
+        return std::nullopt;
+    }
+
+    return direct;
+}
+
+static std::unordered_map<size_t, PackedAttentionBackwardDirectOutput> findPackedAttentionBackwardDirectOutputs(
+    const std::vector<CompiledExecutionStage>& stages,
+    const std::vector<CompiledStageOutput>& final_outputs,
+    std::unordered_map<size_t, size_t>& attention_stage_by_elided_packing_stage) {
+    std::unordered_map<uint32_t, uint32_t> consumer_count_by_value_id;
+    for (const CompiledExecutionStage& stage : stages) {
+        for (uint32_t value_id : stage.input_value_ids) {
+            ++consumer_count_by_value_id[value_id];
+        }
+    }
+    for (const CompiledStageOutput& output : final_outputs) {
+        ++consumer_count_by_value_id[output.value_id];
+    }
+
+    std::unordered_map<size_t, PackedAttentionBackwardDirectOutput> direct_by_attention_stage;
+    for (size_t attention_idx = 0; attention_idx < stages.size(); ++attention_idx) {
+        if (stages.at(attention_idx).kind != CompiledExecutionStage::Kind::AttentionBackward) {
+            continue;
+        }
+        for (size_t packing_idx = attention_idx + 1; packing_idx < stages.size(); ++packing_idx) {
+            if (attention_stage_by_elided_packing_stage.contains(packing_idx)) {
+                continue;
+            }
+            std::optional<PackedAttentionBackwardDirectOutput> direct =
+                tryBuildPackedAttentionBackwardDirectOutput(stages, consumer_count_by_value_id, attention_idx, packing_idx);
+            if (!direct.has_value()) {
+                continue;
+            }
+            attention_stage_by_elided_packing_stage.emplace(packing_idx, attention_idx);
+            direct_by_attention_stage.emplace(attention_idx, std::move(direct.value()));
+            break;
+        }
+    }
+    return direct_by_attention_stage;
 }
 
 static uint64_t dimsNumelForRuntimeAlias(const std::vector<uint64_t>& dims) {
@@ -6092,6 +6414,12 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
     std::unordered_map<uint32_t, std::shared_ptr<AttentionForwardState>> attention_forward_state_by_stage_idx;
     attention_forward_state_by_stage_idx.reserve(compiled_outputs->stages.size());
 
+    std::unordered_map<size_t, size_t> attention_stage_by_elided_packing_stage;
+    std::unordered_map<size_t, PackedAttentionBackwardDirectOutput> direct_packed_attention_backward_by_stage =
+        findPackedAttentionBackwardDirectOutputs(
+            compiled_outputs->stages, compiled_outputs->final_outputs, attention_stage_by_elided_packing_stage);
+
+
     auto stageDependsOn = [&](const std::vector<uint32_t>& direct_dependencies, uint32_t candidate_stage_idx) {
         std::unordered_set<uint32_t> visited;
         std::function<bool(uint32_t)> visit = [&](uint32_t stage_idx) -> bool {
@@ -6119,7 +6447,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
     applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
 
-    for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
+    for (size_t stage_idx = 0; stage_idx < compiled_outputs->stages.size(); ++stage_idx) {
+        const CompiledExecutionStage& stage = compiled_outputs->stages.at(stage_idx);
         applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
 
         std::vector<RuntimeInputValue> stageInputs;
@@ -6151,6 +6480,18 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         for (const RuntimeInputValue& input : stageInputs) {
             stage_input_dims.push_back(runtimeInputDims(input));
         }
+
+        auto elided_pack_it = attention_stage_by_elided_packing_stage.find(stage_idx);
+        if (elided_pack_it != attention_stage_by_elided_packing_stage.end()) {
+            auto direct_it = direct_packed_attention_backward_by_stage.find(elided_pack_it->second);
+            if (direct_it == direct_packed_attention_backward_by_stage.end() ||
+                !values.contains(direct_it->second.packed_value_id)) {
+                throw std::runtime_error("Packed attention-backward output was not produced before eliding the packing stage.");
+            }
+            applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
+            continue;
+        }
+
         const uint64_t stage_flops = computeStageFlops(stage, stage_input_dims);
 
         switch (stage.kind) {
@@ -6665,6 +7006,55 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
                 }
 
+                std::optional<Tensor> directPackedOutput = std::nullopt;
+                auto direct_it = direct_packed_attention_backward_by_stage.find(stage_idx);
+                if (direct_it != direct_packed_attention_backward_by_stage.end()) {
+                    const PackedAttentionBackwardDirectOutput& direct = direct_it->second;
+                    std::vector<uint64_t> packed_dims = direct.packed_dims;
+                    if (!direct.packed_output_name.empty()) {
+                        auto requested_it = effectiveRequestedOutputShapes.find(direct.packed_output_name);
+                        if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                            verifyRequestedOutputLayout(requested_it->second, packed_dims);
+                            packed_dims = requested_it->second;
+                        }
+                    }
+
+                    auto preallocated_it = preallocated_final_outputs_by_name.find(direct.packed_output_name);
+                    if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                        Tensor out = preallocated_it->second;
+                        if (!out.isInitialized()) {
+                            throw std::runtime_error("Preallocated packed attention-backward output tensor is not initialized.");
+                        }
+                        if (out.getPlacement() != qTensor.getPlacement()) {
+                            throw std::runtime_error(
+                                "Preallocated packed attention-backward output placement does not match q placement.");
+                        }
+                        if (out.getDescriptor().getDataType() != direct.packed_dtype) {
+                            throw std::runtime_error("Preallocated packed attention-backward output dtype does not match compiled dtype.");
+                        }
+                        if (out.getDimensions() != packed_dims) {
+                            throw std::runtime_error(
+                                "Preallocated packed attention-backward output dimensions are incompatible with the packed gradient shape.");
+                        }
+                        directPackedOutput = out;
+                    } else {
+                        directPackedOutput = Tensor(qTensor.getPlacement(), TensorDescriptor(direct.packed_dtype, packed_dims));
+                    }
+
+                    if (directPackedOutput->getDimensions() != direct.packed_dims) {
+                        throw std::runtime_error(
+                            "Packed attention-backward output requested shape must match the canonical packed dQKV storage shape.");
+                    }
+
+                    for (size_t slot = 0; slot < direct.slices.size(); ++slot) {
+                        if (!direct.slices.at(slot).has_value()) {
+                            throw std::runtime_error("Packed attention-backward direct-output metadata is missing a Q/K/V slice.");
+                        }
+                        const PackedAttentionBackwardDirectSlice& slice = direct.slices.at(slot).value();
+                        preallocated.at(slot) = directPackedOutput->aliasView(slice.view_dims, slice.view_strides, slice.view_element_offset);
+                    }
+                }
+
                 std::shared_ptr<AttentionForwardState> savedForwardState = nullptr;
                 for (const auto& [candidate_stage_idx, candidate_state] : attention_forward_state_by_stage_idx) {
                     if (!candidate_state || !stageDependsOn(dependency_stage_indices, candidate_stage_idx)) {
@@ -6734,6 +7124,14 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
                     values[stage.outputs[i].value_id] = outputTensors.at(slot);
                     producer_stage_by_value_id[stage.outputs[i].value_id] = static_cast<uint32_t>(stampedStages.size());
+                }
+                if (directPackedOutput.has_value()) {
+                    auto direct_it = direct_packed_attention_backward_by_stage.find(stage_idx);
+                    if (direct_it == direct_packed_attention_backward_by_stage.end()) {
+                        throw std::runtime_error("Internal error: missing packed attention-backward direct-output metadata.");
+                    }
+                    values[direct_it->second.packed_value_id] = directPackedOutput.value();
+                    producer_stage_by_value_id[direct_it->second.packed_value_id] = static_cast<uint32_t>(stampedStages.size());
                 }
                 stampedStages.emplace_back(stampedAttentionBackward, std::move(dependency_stage_indices), stage_flops);
                 break;
