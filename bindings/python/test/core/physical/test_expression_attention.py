@@ -459,6 +459,86 @@ def test_composed_attention_projection_biases_lower_to_matmul_bias_epilogues_wit
 
 
 @pytest.mark.cuda
+def test_packed_qkv_attention_projection_biases_lower_to_matmul_bias_epilogues_without_fused_adds():
+    dtype = thor.DataType.fp16
+    batch = 2
+    sequence = 4
+    input_features = 32
+    query_heads = 4
+    kv_heads = 2
+    qk_dim = 16
+    v_dim = 16
+    output_features = 48
+
+    q_width = query_heads * qk_dim
+    k_width = kv_heads * qk_dim
+    v_width = kv_heads * v_dim
+    qkv_width = q_width + k_width + v_width
+    merged_width = query_heads * v_dim
+
+    x = ex.input("x")
+    qkv_weights = ex.input("qkv_weights")
+    qkv_bias = ex.input("qkv_bias")
+    output_weights = ex.input("output_weights")
+    output_bias = ex.input("output_bias")
+
+    flat = x.reshape([batch * sequence, input_features])
+    qkv = ex.matmul(flat, qkv_weights, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + qkv_bias
+
+    q = qkv.strided_view(
+        [batch, sequence, query_heads, qk_dim],
+        [sequence * qkv_width, qkv_width, qk_dim, 1],
+        0,
+    ).with_output_dtype(dtype)
+    k = qkv.strided_view(
+        [batch, sequence, kv_heads, qk_dim],
+        [sequence * qkv_width, qkv_width, qk_dim, 1],
+        q_width,
+    ).with_output_dtype(dtype)
+    v = qkv.strided_view(
+        [batch, sequence, kv_heads, v_dim],
+        [sequence * qkv_width, qkv_width, v_dim, 1],
+        q_width + k_width,
+    ).with_output_dtype(dtype)
+
+    attn = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=0.7 / math.sqrt(float(qk_dim)),
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    ).with_output_dtype(dtype)
+    merged = attn.reshape([batch * sequence, merged_width])
+    out = (ex.matmul(merged, output_weights, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + output_bias).reshape(
+        [batch, sequence, output_features]
+    )
+    eq = ex.compile(out, device_num=0)
+
+    rng = np.random.default_rng(9017)
+    storage_dtype = _numpy_storage_dtype(dtype)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(rng.normal(0.0, 0.3, size=(batch, sequence, input_features)).astype(storage_dtype), dtype, stream),
+        "qkv_weights": _host_to_gpu(rng.normal(0.0, 0.2, size=(input_features, qkv_width)).astype(storage_dtype), dtype, stream),
+        "qkv_bias": _host_to_gpu(rng.normal(0.0, 0.05, size=(qkv_width,)).astype(storage_dtype), dtype, stream),
+        "output_weights": _host_to_gpu(rng.normal(0.0, 0.2, size=(merged_width, output_features)).astype(storage_dtype), dtype, stream),
+        "output_bias": _host_to_gpu(rng.normal(0.0, 0.05, size=(output_features,)).astype(storage_dtype), dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [batch, sequence, output_features]
+    kinds = eq._debug_stage_kinds(inputs_gpu)
+    assert sum(1 for kind in kinds if kind.startswith("Matmul")) == 2
+    assert kinds.count("Attention") == 1
+    assert "FusedKernel" not in kinds
+
+
+
+@pytest.mark.cuda
 def test_expression_reshape_inputs_to_attention_stage_are_metadata_aliases_not_fused_kernels():
     dtype = thor.DataType.fp16
     batch = 2
