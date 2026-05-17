@@ -361,7 +361,8 @@ def _build_packed_qkv_layer_case(
         )
         metadata = {
             "source": "expression",
-            "qkv_projection_mode": "packed"
+            "qkv_projection_mode": "packed",
+            "has_bias": has_bias
         }
         return ex.compile(out, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape, flops, metadata
 
@@ -555,7 +556,8 @@ def _build_public_attention_layer_case(
         )
         metadata = {
             "source": "thor.layers.Attention",
-            "qkv_projection_mode": projection_mode
+            "qkv_projection_mode": projection_mode,
+            "has_bias": has_bias
         }
         return layer._debug_expression(), input_shapes, output_shape, flops, metadata
 
@@ -847,6 +849,23 @@ CASES = [
         ),
         description="Public thor.layers.Attention hot path using the C++ layer's configured QKV projection mode.",
     ),
+    AttentionPerfCase(
+        name="public_attention_layer_llama_style_with_bias_b1_s2048_model4096_h32_kv8_d128",
+        builder=_build_public_attention_layer_case(
+            batch=int(os.getenv("THOR_ATTENTION_PERF_LAYER_BATCH", "1")),
+            sequence=int(os.getenv("THOR_ATTENTION_PERF_LAYER_SEQUENCE", "2048")),
+            input_features=4096,
+            output_features=4096,
+            query_heads=32,
+            kv_heads=8,
+            qk_dim=128,
+            v_dim=128,
+            has_bias=True,
+            mask_kind=AttentionMaskKind.causal_top_left,
+        ),
+        description=
+        "Public thor.layers.Attention hot path with Q/K/V/output projection biases fused through cuBLASLt epilogues.",
+    ),
     _public_attention_case(
         name="public_attention_layer_llama31_70b_style_b1_s2048_model8192_h64_kv8_d128",
         batch=1,
@@ -923,8 +942,22 @@ def test_packed_qkv_attention_backward_runtime_has_no_pack_scatter_kernel(dtype:
         name: _gpu_tensor(shape, dtype) for name, shape in input_shapes.items()
     }
 
-    compiled_stage_kinds = program._debug_stage_kinds(inputs)
-    stamped = program.stamp(inputs, stream)
+    # DynamicExpression does not expose _debug_stage_kinds directly.  Prepare it first,
+    # then inspect the underlying FusedEquation with the exact stamp-time bindings chosen
+    # by the public layer builder.  The stamped runtime debug path intentionally reports
+    # only concrete runtime stage kinds, so check both surfaces.
+    if isinstance(program, thor.physical.DynamicExpression):
+        prepared = program.prepare(inputs, {}, stream)
+        compiled_stage_kinds = prepared.equation._debug_stage_kinds(
+            prepared.stamp_inputs,
+            tensor_scalar_inputs=prepared.tensor_scalar_inputs,
+        )
+        stamped = prepared.stamp()
+    else:
+        compiled_stage_kinds = program._debug_stage_kinds(inputs)
+        stamped = _stamp_program(program, inputs, stream)
+
+    compiled_matmul_stage_kinds = [stage for stage in compiled_stage_kinds if stage.startswith("Matmul")]
     runtime_stage_kinds = stamped._debug_stage_kinds()
 
     record_property("case", case.name)
@@ -941,6 +974,73 @@ def test_packed_qkv_attention_backward_runtime_has_no_pack_scatter_kernel(dtype:
     assert compiled_stage_kinds.count("FusedKernel") == 1
     assert runtime_stage_kinds == ["AttentionBackward"]
     assert "FusedKernel" not in runtime_stage_kinds
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", DTYPES, ids=_dtype_name)
+def test_public_attention_projection_biases_compile_as_gemm_epilogues(dtype: thor.DataType, record_property):
+    if not cudnn_frontend_attention_available():
+        pytest.skip("Thor was not built with cuDNN Frontend attention support")
+    if not hasattr(thor.layers, "Attention"):
+        pytest.skip("thor.layers.Attention is not exposed in this build")
+
+    case = AttentionPerfCase(
+        name="public_attention_bias_epilogue_contract",
+        builder=_build_public_attention_layer_case(
+            batch=2,
+            sequence=16,
+            input_features=64,
+            output_features=64,
+            query_heads=4,
+            kv_heads=2,
+            qk_dim=16,
+            v_dim=16,
+            has_bias=True,
+            mask_kind=AttentionMaskKind.causal_top_left,
+        ),
+        description="Public Attention projection biases should be rank-1 GEMM addends handled by cuBLASLt epilogues.",
+    )
+
+    stream = Stream(Placement(DeviceType.gpu, GPU_NUM))
+    program, input_shapes, output_shape, _, metadata = _unpack_built_case(case.builder(dtype))
+    inputs = {
+        name: _gpu_tensor(shape, dtype) for name, shape in input_shapes.items()
+    }
+
+    # DynamicExpression does not expose _debug_stage_kinds directly. Prepare it first,
+    # then inspect the underlying FusedEquation with the exact stamp-time bindings chosen
+    # by the public layer builder. The stamped runtime debug path intentionally reports
+    # only concrete runtime stage kinds, so check both surfaces.
+    if isinstance(program, thor.physical.DynamicExpression):
+        prepared = program.prepare(inputs, {}, stream)
+        compiled_stage_kinds = prepared.equation._debug_stage_kinds(
+            prepared.stamp_inputs,
+            tensor_scalar_inputs=prepared.tensor_scalar_inputs,
+        )
+        stamped = prepared.stamp()
+    else:
+        compiled_stage_kinds = program._debug_stage_kinds(inputs)
+        stamped = _stamp_program(program, inputs, stream)
+
+    runtime_stage_kinds = stamped._debug_stage_kinds()
+    compiled_matmul_stage_kinds = [stage for stage in compiled_stage_kinds if stage.startswith("Matmul")]
+    runtime_matmul_stage_kinds = [stage for stage in runtime_stage_kinds if stage.startswith("Matmul")]
+
+    expected_matmul_stages = 2 if metadata.get("qkv_projection_mode") == "packed" else 4
+    record_property("compiled_stage_kinds", str(compiled_stage_kinds))
+    record_property("runtime_stage_kinds", str(runtime_stage_kinds))
+    record_property("projection_mode", str(metadata.get("qkv_projection_mode")))
+    record_property("output_shape", str(output_shape))
+
+    assert len(compiled_matmul_stage_kinds) == expected_matmul_stages
+    # opName(ExprOp::GEMM) is exposed as uppercase "GEMM" in the C++ debug string.
+    # Accept the older lowercase spelling too so this contract remains robust if the
+    # debug helper is normalized later.
+    assert all(("op=GEMM" in stage or "op=gemm" in stage) for stage in compiled_matmul_stage_kinds)
+    assert len(runtime_matmul_stage_kinds) == expected_matmul_stages
+    assert any(stage.startswith("Attention") for stage in runtime_stage_kinds)
+    if metadata.get("qkv_projection_mode") == "split":
+        assert not any(stage.startswith("FusedKernel") for stage in runtime_stage_kinds)
 
 
 @pytest.mark.cuda
