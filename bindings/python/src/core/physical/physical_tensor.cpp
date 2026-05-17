@@ -5,12 +5,17 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <memory>
+#include <stdexcept>
+#include <utility>
+
 #include "bindings/python/src/core/physical/NanobindDTypes.h"
 
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
+#include "Utilities/Common/ScopedGpu.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -18,8 +23,104 @@ using namespace std;
 
 using PhysicalTensor = ThorImplementation::Tensor;
 using TensorPlacement = ThorImplementation::TensorPlacement;
-using TensorDescriptor = ThorImplementation::TensorDescriptor;
 using DataType = ThorImplementation::TensorDescriptor::DataType;
+using TensorDescriptor = ThorImplementation::TensorDescriptor;
+
+namespace {
+
+struct KeepPhysicalTensorsAliveArgs : HostFunctionArgsBase {
+    explicit KeepPhysicalTensorsAliveArgs(std::vector<PhysicalTensor> tensors) : tensors(std::move(tensors)) {}
+
+    std::vector<PhysicalTensor> tensors;
+};
+
+void keepPhysicalTensorsAliveNoOp(void * /*data*/) {}
+
+void keepPhysicalTensorsAliveUntilStreamCompletes(Stream &stream, std::vector<PhysicalTensor> tensors) {
+    stream.enqueueHostFunction(keepPhysicalTensorsAliveNoOp, std::make_unique<KeepPhysicalTensorsAliveArgs>(std::move(tensors)));
+}
+
+bool needsPythonPreservingDowncastTemporary(const PhysicalTensor &dest, const PhysicalTensor &source) {
+    const TensorDescriptor sourceDescriptor = source.getDescriptor();
+    const TensorDescriptor destDescriptor = dest.getDescriptor();
+
+    return sourceDescriptor.getDataType() != destDescriptor.getDataType() &&
+           source.getPlacement() != dest.getPlacement() &&
+           sourceDescriptor.getArraySizeInBytes() > destDescriptor.getArraySizeInBytes();
+}
+
+void copyFromAsyncPythonConvenience(PhysicalTensor &dest, const PhysicalTensor &source, Stream stream) {
+    if (!needsPythonPreservingDowncastTemporary(dest, source)) {
+        dest.copyFromAsync(source, stream);
+        return;
+    }
+
+    const TensorDescriptor sourceDescriptor = source.getDescriptor();
+    const TensorDescriptor destDescriptor = dest.getDescriptor();
+    if (sourceDescriptor.getTotalNumElements() != destDescriptor.getTotalNumElements()) {
+        throw std::runtime_error("PhysicalTensor.copy_from_async requires source and destination to have the same number of elements");
+    }
+
+    const TensorPlacement sourcePlacement = source.getPlacement();
+    const TensorPlacement destPlacement = dest.getPlacement();
+    const bool sourceOnGpu = sourcePlacement.getMemDevice() == TensorPlacement::MemDevices::GPU;
+    const bool destOnGpu = destPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU;
+
+    if (!sourceOnGpu && destOnGpu) {
+        // CPU -> GPU: copy the wide source value to the destination GPU, then downcast locally into dest.
+        PhysicalTensor temporary(destPlacement, sourceDescriptor);
+        temporary.copyFromAsync(source, stream);
+        dest.copyFromAsync(temporary, stream);
+        keepPhysicalTensorsAliveUntilStreamCompletes(stream, {temporary});
+        return;
+    }
+
+    if (sourceOnGpu && !destOnGpu) {
+        // GPU -> CPU: downcast on the source GPU, then transfer only the narrow value to the CPU destination.
+        PhysicalTensor temporary(sourcePlacement, destDescriptor);
+        temporary.copyFromAsync(source, stream);
+        dest.copyFromAsync(temporary, stream);
+        keepPhysicalTensorsAliveUntilStreamCompletes(stream, {temporary});
+        return;
+    }
+
+    if (sourceOnGpu && destOnGpu) {
+        const int sourceDeviceNum = sourcePlacement.getDeviceNum();
+        const int destDeviceNum = destPlacement.getDeviceNum();
+
+        if (stream.getGpuNum() == destDeviceNum) {
+            // Destination stream: move the wide source value to the destination GPU, then downcast locally.
+            PhysicalTensor temporary(destPlacement, sourceDescriptor);
+            temporary.copyFromAsync(source, stream);
+            dest.copyFromAsync(temporary, stream);
+            keepPhysicalTensorsAliveUntilStreamCompletes(stream, {temporary});
+            return;
+        }
+
+        if (stream.getGpuNum() == sourceDeviceNum) {
+            // Source stream: downcast on the source GPU, then peer-copy the narrow value on that same stream.
+            PhysicalTensor temporary(sourcePlacement, destDescriptor);
+            temporary.copyFromAsync(source, stream);
+
+            ScopedGpu scopedGpu(sourceDeviceNum);
+            cudaError_t cudaStatus = cudaMemcpyPeerAsync(dest.getMemPtr<void>(),
+                                                         destDeviceNum,
+                                                         temporary.getMemPtr<void>(),
+                                                         sourceDeviceNum,
+                                                         destDescriptor.getArraySizeInBytes(),
+                                                         stream.getStream());
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+
+            keepPhysicalTensorsAliveUntilStreamCompletes(stream, {temporary});
+            return;
+        }
+    }
+
+    // Let the core implementation produce the canonical stream/device validation failure for any invalid placement.
+    dest.copyFromAsync(source, stream);
+}
+
+}  // namespace
 
 void bind_physical_tensor(nb::module_ &physical) {
     // Tensor Placement
@@ -303,11 +404,15 @@ int
 
     physical_tensor.def(
         "copy_from_async",
-        [](PhysicalTensor &self, const PhysicalTensor &source, Stream stream) { self.copyFromAsync(source, stream); },
+        [](PhysicalTensor &self, const PhysicalTensor &source, Stream stream) { copyFromAsyncPythonConvenience(self, source, stream); },
         "source"_a,
         "stream"_a,
         R"nbdoc(
 Asynchronously copy tensor contents from source into this tensor using the provided stream.
+
+This Python binding preserves Python convenience semantics for cross-placement copies where the destination dtype is
+narrower than the source dtype by allocating an internal temporary. The C++ PhysicalTensor::copyFromAsync contract
+intentionally rejects that preserving slow path unless the caller makes the temporary/conversion explicit.
 
 Parameters
 ----------
