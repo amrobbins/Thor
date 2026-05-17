@@ -1,7 +1,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
-#include <optional>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 #include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
@@ -383,7 +383,7 @@ static const uint8_t *dataPointerWithElementOffset(const void *mem, TensorDescri
     return static_cast<const uint8_t *>(mem) + elementOffset * elementSizeBytes;
 }
 
-static std::vector<uint64_t> denseStridesForDims(const std::vector<uint64_t>& dims) {
+static std::vector<uint64_t> denseStridesForDims(const std::vector<uint64_t> &dims) {
     if (dims.empty()) {
         throw std::runtime_error("Tensor dense strides require non-empty dimensions.");
     }
@@ -397,7 +397,7 @@ static std::vector<uint64_t> denseStridesForDims(const std::vector<uint64_t>& di
     return strides;
 }
 
-static uint64_t maxElementOffsetForView(const std::vector<uint64_t>& dims, const std::vector<uint64_t>& strides) {
+static uint64_t maxElementOffsetForView(const std::vector<uint64_t> &dims, const std::vector<uint64_t> &strides) {
     if (dims.size() != strides.size() || dims.empty()) {
         throw std::runtime_error("Tensor alias view dimensions/strides must have the same non-zero rank.");
     }
@@ -518,8 +518,7 @@ const ElementDataType *Tensor::getMemPtr() const {
             THOR_UNREACHABLE();
     }
 
-    return reinterpret_cast<const ElementDataType *>(
-        dataPointerWithElementOffset(mem, descriptor.getDataType(), storageElementOffset));
+    return reinterpret_cast<const ElementDataType *>(dataPointerWithElementOffset(mem, descriptor.getDataType(), storageElementOffset));
 }
 
 template <typename ElementDataType>
@@ -1391,11 +1390,8 @@ static void fillCpuRandomFloating(Tensor tensor, double minValue, double maxValu
 }
 
 template <typename T, typename DISTRIBUTION_VALUE_TYPE>
-static void fillCpuRandomIntegral(Tensor tensor,
-                                  DISTRIBUTION_VALUE_TYPE minValue,
-                                  DISTRIBUTION_VALUE_TYPE maxValue,
-                                  uint32_t numProcs,
-                                  uint64_t elementsPerThread) {
+static void fillCpuRandomIntegral(
+    Tensor tensor, DISTRIBUTION_VALUE_TYPE minValue, DISTRIBUTION_VALUE_TYPE maxValue, uint32_t numProcs, uint64_t elementsPerThread) {
     const uint64_t numElements = tensor.getTotalNumElements();
     T *mem = tensor.getMemPtr<T>();
     if (numProcs > 1) {
@@ -1508,7 +1504,7 @@ void fillCpuRandom(void *data) {
         THOR_UNREACHABLE();
 }
 
-static void adjustSignedIntegralRandomRange(double& minValue, double& maxValue) {
+static void adjustSignedIntegralRandomRange(double &minValue, double &maxValue) {
     if (maxValue > 0) {
         // integer rounding (truncation) rounds away from maxValue in this case
         if (maxValue == int64_t(maxValue))
@@ -1521,7 +1517,7 @@ static void adjustSignedIntegralRandomRange(double& minValue, double& maxValue) 
     }
 }
 
-static void adjustUnsignedIntegralRandomRange(double& maxValue) {
+static void adjustUnsignedIntegralRandomRange(double &maxValue) {
     if (maxValue == uint64_t(maxValue))
         maxValue += 0.99999;
 }
@@ -1685,22 +1681,22 @@ void Tensor::fill(double value, Stream stream) {
                 castCpuTensorValue<half>(value), (half *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == TensorDescriptor::DataType::BF16) {
             launchFillValueGpuKernel<__nv_bfloat16>(castCpuTensorValue<__nv_bfloat16>(value),
-                                                   (__nv_bfloat16 *)getMemPtr(),
-                                                   getTotalNumElements(),
-                                                   getPlacement().getDeviceNum(),
-                                                   stream);
+                                                    (__nv_bfloat16 *)getMemPtr(),
+                                                    getTotalNumElements(),
+                                                    getPlacement().getDeviceNum(),
+                                                    stream);
         } else if (dataType == TensorDescriptor::DataType::FP8_E4M3) {
             launchFillValueGpuKernel<__nv_fp8_e4m3>(castCpuTensorValue<__nv_fp8_e4m3>(value),
-                                                   (__nv_fp8_e4m3 *)getMemPtr(),
-                                                   getTotalNumElements(),
-                                                   getPlacement().getDeviceNum(),
-                                                   stream);
+                                                    (__nv_fp8_e4m3 *)getMemPtr(),
+                                                    getTotalNumElements(),
+                                                    getPlacement().getDeviceNum(),
+                                                    stream);
         } else if (dataType == TensorDescriptor::DataType::FP8_E5M2) {
             launchFillValueGpuKernel<__nv_fp8_e5m2>(castCpuTensorValue<__nv_fp8_e5m2>(value),
-                                                   (__nv_fp8_e5m2 *)getMemPtr(),
-                                                   getTotalNumElements(),
-                                                   getPlacement().getDeviceNum(),
-                                                   stream);
+                                                    (__nv_fp8_e5m2 *)getMemPtr(),
+                                                    getTotalNumElements(),
+                                                    getPlacement().getDeviceNum(),
+                                                    stream);
         } else if (dataType == TensorDescriptor::DataType::FP32) {
             launchFillValueGpuKernel<float>(value, (float *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
         } else if (dataType == TensorDescriptor::DataType::FP64) {

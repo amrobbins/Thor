@@ -2487,7 +2487,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
      *     a kernel with a higher than requested wave count.
      */
 
-    cublasStatus_t cublasStatus;
+    cublasStatus_t cublasStatus = CUBLAS_STATUS_SUCCESS;
 
     // Ensure there are no unreported runtime errors
     stream.synchronize();
@@ -2734,17 +2734,19 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     for (int run = 0; run < finalRun; ++run) {
         for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
             startEvents[kernelIndex].push_back(stream.putEvent(true));
-            if (!kernels[kernelIndex].getErrorFlag())
-                CHECK_CUBLAS(kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
-                                                                   B[tensorInstance],
-                                                                   C[tensorInstance],
-                                                                   D[tensorInstance],
-                                                                   workspace[workspaceInstance],
-                                                                   &ONE,
-                                                                   &ZERO,
-                                                                   stream,
-                                                                   CublasScalarPointerMode::Host,
-                                                                   fp8Scales));
+            cublasStatus = CUBLAS_STATUS_SUCCESS;
+            if (!kernels[kernelIndex].getErrorFlag()) {
+                cublasStatus = kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
+                                                                     B[tensorInstance],
+                                                                     C[tensorInstance],
+                                                                     D[tensorInstance],
+                                                                     workspace[workspaceInstance],
+                                                                     &ONE,
+                                                                     &ZERO,
+                                                                     stream,
+                                                                     CublasScalarPointerMode::Host,
+                                                                     fp8Scales);
+            }
             tensorInstance += 1;
             if (tensorInstance >= numInstances)
                 tensorInstance = 0;
