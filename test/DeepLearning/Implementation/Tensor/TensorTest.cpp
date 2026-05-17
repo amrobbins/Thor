@@ -40,6 +40,27 @@ static vector<TensorDescriptor::DataType> allTensorDataTypes() {
     return dataTypes;
 }
 
+static Tensor copyToCpuFp32ForVerification(Tensor source, Stream stream) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorDescriptor fp32Descriptor(TensorDescriptor::DataType::FP32, source.getDimensions());
+    Tensor result(cpuPlacement, fp32Descriptor);
+
+    // The C++ Tensor copy contract intentionally rejects preserving cross-placement downcasts because they require
+    // hidden temporaries.  Verification code still often wants a CPU FP32 view of arbitrary GPU tensors, so spell the
+    // temporary explicitly here: downcast on the source GPU first, then copy the already-FP32 value to CPU.
+    if (source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU &&
+        source.getDescriptor().getArraySizeInBytes() > fp32Descriptor.getArraySizeInBytes()) {
+        Tensor convertedOnSourceGpu(source.getPlacement(), fp32Descriptor);
+        convertedOnSourceGpu.copyFromAsync(source, stream);
+        result.copyFromAsync(convertedOnSourceGpu, stream);
+        stream.synchronize();
+    } else {
+        result.copyFromAsync(source, stream);
+    }
+
+    return result;
+}
+
 TEST(Tensor, Copies) {
     srand(time(nullptr));
 
@@ -108,6 +129,33 @@ TEST(Tensor, PreservingCpuToCpuDowncastStaysCpuOnly) {
     for (uint32_t i = 0; i < 6; ++i) {
         ASSERT_EQ(destMem[i], static_cast<float>(sourceMem[i]));
         ASSERT_EQ(sourceMem[i], 1.25 + static_cast<double>(i));
+    }
+}
+
+TEST(Tensor, PreservingCrossPlacementDowncastThrowsWithoutExplicitTemporary) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Stream stream(0);
+
+    TensorDescriptor sourceDescriptor(TensorDescriptor::DataType::FP32, {6});
+    TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, {6});
+    Tensor source(cpuPlacement, sourceDescriptor);
+    Tensor dest(gpuPlacement, destDescriptor);
+
+    float *sourceMem = static_cast<float *>(source.getMemPtr());
+    for (uint32_t i = 0; i < 6; ++i) {
+        sourceMem[i] = 1.25f + static_cast<float>(i);
+    }
+
+    try {
+        dest.copyFromAsync(source, stream);
+        FAIL() << "Expected preserving cross-placement downcast to require an explicit temporary on the C++ side";
+    } catch (const std::runtime_error &e) {
+        ASSERT_NE(std::string(e.what()).find("hidden temporary"), std::string::npos);
+    }
+
+    for (uint32_t i = 0; i < 6; ++i) {
+        ASSERT_EQ(sourceMem[i], 1.25f + static_cast<float>(i));
     }
 }
 
@@ -1671,8 +1719,7 @@ TEST(Tensor, identityMatrixSupportsAllNonPackedDataTypesCpuAndGpu) {
     for (TensorDescriptor::DataType dataType : allWholeElementTensorDataTypes()) {
         for (TensorPlacement placement : {cpuPlacement, gpuPlacement}) {
             Tensor identity = Tensor::identityMatrix(N, placement, dataType, stream);
-            Tensor identityFp32 = identity.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
-            identityFp32.copyFromAsync(identity, stream);
+            Tensor identityFp32 = copyToCpuFp32ForVerification(identity, stream);
             stream.synchronize();
 
             float *mem = identityFp32.getMemPtr<float>();
@@ -2088,8 +2135,7 @@ TEST(Tensor, valuesGpu) {
                 ASSERT_TRUE(mem[i] == value);
             }
         } else {
-            Tensor tensorFp32 = tensor.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
-            tensorFp32.copyFromAsync(tensor, stream);
+            Tensor tensorFp32 = copyToCpuFp32ForVerification(tensor, stream);
             stream.synchronize();
             float *mem = tensorFp32.getMemPtr<float>();
             for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
@@ -2110,8 +2156,7 @@ TEST(Tensor, valuesSupportsAllDataTypesCpuAndGpu) {
     for (TensorDescriptor::DataType dataType : allTensorDataTypes()) {
         for (TensorPlacement placement : {cpuPlacement, gpuPlacement}) {
             Tensor tensor = Tensor::values(placement, TensorDescriptor(dataType, dimensions), stream, 1.0);
-            Tensor tensorFp32 = tensor.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
-            tensorFp32.copyFromAsync(tensor, stream);
+            Tensor tensorFp32 = copyToCpuFp32ForVerification(tensor, stream);
             stream.synchronize();
 
             float *mem = tensorFp32.getMemPtr<float>();
@@ -2315,8 +2360,7 @@ TEST(Tensor, fillRandomSupportsAllDataTypesCpuAndGpu) {
         for (TensorPlacement placement : {cpuPlacement, gpuPlacement}) {
             Tensor tensor(placement, TensorDescriptor(dataType, dimensions));
             tensor.fillRandom(minValue, maxValue, stream);
-            Tensor tensorFp32 = tensor.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
-            tensorFp32.copyFromAsync(tensor, stream);
+            Tensor tensorFp32 = copyToCpuFp32ForVerification(tensor, stream);
             stream.synchronize();
 
             float *mem = tensorFp32.getMemPtr<float>();

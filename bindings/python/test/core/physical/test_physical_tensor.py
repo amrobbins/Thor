@@ -1,4 +1,6 @@
 import copy
+
+import numpy as np
 import pytest
 import thor
 
@@ -150,3 +152,25 @@ def test_physical_tensor_get_descriptor_get_placement_and_size_in_bytes():
     assert isinstance(size, int)
     assert size == desc.get_array_size_in_bytes()
     assert size == 2 * (2 * 3 * 4)
+
+
+@pytest.mark.cuda
+def test_python_copy_from_async_preserving_cross_placement_downcast_uses_binding_temporary():
+    PT = thor.physical.PhysicalTensor
+    cpu = thor.physical.Placement(thor.physical.DeviceType.cpu, 0)
+    gpu = thor.physical.Placement(thor.physical.DeviceType.gpu, 0)
+    stream = thor.physical.Stream(0)
+
+    source = PT(cpu, PT.Descriptor(thor.DataType.fp32, [6]))
+    dest = PT(gpu, PT.Descriptor(thor.DataType.fp16, [6]))
+    roundtrip = PT(cpu, PT.Descriptor(thor.DataType.fp16, [6]))
+
+    values = np.array([1.25, -2.5, 3.75, 4.5, -5.125, 6.25], dtype=np.float32)
+    source.numpy()[:] = values
+
+    dest.copy_from_async(source, stream)
+    roundtrip.copy_from_async(dest, stream)
+    stream.synchronize()
+
+    np.testing.assert_allclose(roundtrip.numpy(), values.astype(np.float16), rtol=0, atol=0)
+    np.testing.assert_allclose(source.numpy(), values, rtol=0, atol=0)
