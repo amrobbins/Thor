@@ -32,6 +32,7 @@ class Attention : public CustomLayer {
     friend class Builder;
 
     Attention(ThorImplementation::DynamicExpression expression,
+              std::vector<std::string> inputNames,
               const std::vector<TensorMap>& inputInterfaces,
               const std::vector<TensorMap>& outputInterfaces,
               std::vector<std::shared_ptr<ParameterSpecification>> parameters,
@@ -49,11 +50,16 @@ class Attention : public CustomLayer {
               int64_t diagonalRightBound,
               bool useAlibiMask,
               std::optional<double> attentionScale,
+              float dropoutProbability,
+              int64_t dropoutSeed,
+              int64_t dropoutOffset,
+              std::optional<Tensor> sequenceLengthsInput,
+              std::optional<Tensor> raggedOffsetsInput,
               Tensor::DataType weightsDataType,
               Tensor::DataType computeDataType,
               Tensor::DataType outputDataType)
         : CustomLayer(std::move(expression),
-                      {"feature_input"},
+                      std::move(inputNames),
                       {"feature_output"},
                       inputInterfaces,
                       outputInterfaces,
@@ -73,6 +79,11 @@ class Attention : public CustomLayer {
           diagonalRightBound(diagonalRightBound),
           useAlibiMask(useAlibiMask),
           attentionScale(attentionScale),
+          dropoutProbability(dropoutProbability),
+          dropoutSeed(dropoutSeed),
+          dropoutOffset(dropoutOffset),
+          sequenceLengthsInput(std::move(sequenceLengthsInput)),
+          raggedOffsetsInput(std::move(raggedOffsetsInput)),
           weightsDataType(weightsDataType),
           computeDataType(computeDataType),
           outputDataType(outputDataType) {}
@@ -109,6 +120,14 @@ class Attention : public CustomLayer {
     int64_t getDiagonalRightBound() const { return diagonalRightBound; }
     bool getUseAlibiMask() const { return useAlibiMask; }
     std::optional<double> getAttentionScale() const { return attentionScale; }
+    float getDropoutProbability() const { return dropoutProbability; }
+    int64_t getDropoutSeed() const { return dropoutSeed; }
+    int64_t getDropoutOffset() const { return dropoutOffset; }
+    std::optional<Tensor> getFeatureInput() const override { return getInputInterface().at("feature_input"); }
+    std::optional<Tensor> getSequenceLengthsInput() const { return sequenceLengthsInput; }
+    std::optional<Tensor> getRaggedOffsetsInput() const { return raggedOffsetsInput; }
+    bool getUseSequenceLengths() const { return sequenceLengthsInput.has_value(); }
+    bool getUseRaggedOffsets() const { return raggedOffsetsInput.has_value(); }
     Tensor::DataType getWeightsDataType() const { return weightsDataType; }
     Tensor::DataType getComputeDataType() const { return computeDataType; }
     Tensor::DataType getOutputDataType() const { return outputDataType; }
@@ -128,6 +147,11 @@ class Attention : public CustomLayer {
     int64_t diagonalRightBound;
     bool useAlibiMask;
     std::optional<double> attentionScale;
+    float dropoutProbability;
+    int64_t dropoutSeed;
+    int64_t dropoutOffset;
+    std::optional<Tensor> sequenceLengthsInput;
+    std::optional<Tensor> raggedOffsetsInput;
     Tensor::DataType weightsDataType;
     Tensor::DataType computeDataType;
     Tensor::DataType outputDataType;
@@ -223,6 +247,44 @@ class Attention::Builder {
         return *this;
     }
 
+    virtual Attention::Builder& dropoutProbability(float value) {
+        THOR_THROW_IF_FALSE(!this->_dropoutProbability.has_value());
+        this->_dropoutProbability = value;
+        return *this;
+    }
+
+    virtual Attention::Builder& dropoutSeed(int64_t value) {
+        THOR_THROW_IF_FALSE(!this->_dropoutSeed.has_value());
+        this->_dropoutSeed = value;
+        return *this;
+    }
+
+    virtual Attention::Builder& dropoutOffset(int64_t value) {
+        THOR_THROW_IF_FALSE(!this->_dropoutOffset.has_value());
+        this->_dropoutOffset = value;
+        return *this;
+    }
+
+    virtual Attention::Builder& dropout(float probability, int64_t seed, int64_t offset) {
+        return dropoutProbability(probability).dropoutSeed(seed).dropoutOffset(offset);
+    }
+
+    // Public dense variable-length self-attention input. Logical shape is [1] INT32; placement supplies [batch, 1],
+    // which the layer views as cuDNN's [batch] q/kv sequence-length vector.
+    virtual Attention::Builder& sequenceLengthsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_sequenceLengthsInput.has_value());
+        this->_sequenceLengthsInput = input;
+        return *this;
+    }
+
+    // Public packed-ragged self-attention metadata. Logical shape is [2] INT32 so placement allocates at least
+    // 2*batch elements; the layer consumes the first batch+1 contiguous values as cuDNN ragged offsets.
+    virtual Attention::Builder& raggedOffsetsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_raggedOffsetsInput.has_value());
+        this->_raggedOffsetsInput = input;
+        return *this;
+    }
+
     virtual Attention::Builder& useRope(bool value = true) {
         THOR_THROW_IF_FALSE(!this->_useRope.has_value());
         this->_useRope = value;
@@ -294,6 +356,11 @@ class Attention::Builder {
     std::optional<int64_t> _diagonalRightBound;
     std::optional<bool> _useAlibiMask;
     std::optional<double> _attentionScale;
+    std::optional<float> _dropoutProbability;
+    std::optional<int64_t> _dropoutSeed;
+    std::optional<int64_t> _dropoutOffset;
+    std::optional<Tensor> _sequenceLengthsInput;
+    std::optional<Tensor> _raggedOffsetsInput;
     std::optional<bool> _useRope;
     std::optional<bool> _ropeInPlace;
     std::optional<ThorImplementation::RotaryPositionEmbeddingOptions> _ropeOptions;

@@ -540,6 +540,16 @@ class Expression {
                                                                     const Expression& q_offsets,
                                                                     const Expression& kv_offsets,
                                                                     AttentionOptions options);
+    [[nodiscard]] static Expression scaledDotProductAttentionRagged(const Expression& q,
+                                                                    const Expression& k,
+                                                                    const Expression& v,
+                                                                    const Expression& q_seq_len,
+                                                                    const Expression& kv_seq_len,
+                                                                    const Expression& q_offsets,
+                                                                    const Expression& kv_offsets,
+                                                                    const Expression& dropout_seed,
+                                                                    const Expression& dropout_offset,
+                                                                    AttentionOptions options);
     [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
                                                               const Expression& k,
                                                               const Expression& v,

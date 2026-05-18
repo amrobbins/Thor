@@ -71,6 +71,15 @@ void writeCpuTensor(Impl::Tensor& tensor, const vector<float>& values) {
     }
 }
 
+void writeCpuInt32Tensor(Impl::Tensor& tensor, const vector<int32_t>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensor.getDataType(), DataType::INT32);
+    ASSERT_EQ(tensorNumel(tensor), values.size());
+    auto* ptr = static_cast<int32_t*>(tensor.getMemPtr());
+    for (uint64_t i = 0; i < values.size(); ++i)
+        ptr[i] = values[i];
+}
+
 vector<float> readCpuTensor(const Impl::Tensor& tensor) {
     EXPECT_EQ(tensor.getPlacement(), cpuPlacement);
 
@@ -194,6 +203,35 @@ vector<float> runForward(Impl::NetworkInput& physicalInput,
     return readCpuTensor(physicalOutput.getFeatureOutput().value());
 }
 
+vector<float> runForwardWithMetadata(Impl::NetworkInput& physicalInput,
+                                     Impl::NetworkInput& physicalSequenceLengthsInput,
+                                     Impl::NetworkOutput& physicalOutput,
+                                     Impl::Tensor& featureInHost,
+                                     Impl::Tensor& sequenceLengthsHost,
+                                     uint32_t batchSize) {
+    physicalInput.forward(featureInHost, false, batchSize);
+    physicalSequenceLengthsInput.forward(sequenceLengthsHost, false, batchSize);
+    Event featureOutReadyEvent = physicalOutput.getOutputReadyEvent();
+    featureOutReadyEvent.synchronize();
+    return readCpuTensor(physicalOutput.getFeatureOutput().value());
+}
+
+vector<float> runForwardWithMetadata(Impl::NetworkInput& physicalInput,
+                                     Impl::NetworkInput& physicalSequenceLengthsInput,
+                                     Impl::NetworkInput& physicalRaggedOffsetsInput,
+                                     Impl::NetworkOutput& physicalOutput,
+                                     Impl::Tensor& featureInHost,
+                                     Impl::Tensor& sequenceLengthsHost,
+                                     Impl::Tensor& raggedOffsetsHost,
+                                     uint32_t batchSize) {
+    physicalInput.forward(featureInHost, false, batchSize);
+    physicalSequenceLengthsInput.forward(sequenceLengthsHost, false, batchSize);
+    physicalRaggedOffsetsInput.forward(raggedOffsetsHost, false, batchSize);
+    Event featureOutReadyEvent = physicalOutput.getOutputReadyEvent();
+    featureOutReadyEvent.synchronize();
+    return readCpuTensor(physicalOutput.getFeatureOutput().value());
+}
+
 uint64_t idx3(uint32_t d0, uint32_t d1, uint32_t d2, uint32_t dim1, uint32_t dim2) {
     return (static_cast<uint64_t>(d0) * dim1 + d1) * dim2 + d2;
 }
@@ -223,6 +261,7 @@ struct AttentionReferenceCase {
     int64_t diagonalRightBound = 0;
     bool useAlibiMask = false;
     float attentionScale = 1.0f;
+    vector<int32_t> sequenceLengths;
     DataType dataType = DataType::FP16;
 };
 
@@ -243,6 +282,12 @@ uint32_t kWidth(const AttentionReferenceCase& c) { return c.numKeyValueHeads * c
 uint32_t vWidth(const AttentionReferenceCase& c) { return c.numKeyValueHeads * c.valueDim; }
 uint32_t qkvWidth(const AttentionReferenceCase& c) { return qWidth(c) + kWidth(c) + vWidth(c); }
 uint32_t mergedWidth(const AttentionReferenceCase& c) { return c.numHeads * c.valueDim; }
+
+uint32_t effectiveSequenceLength(const AttentionReferenceCase& c, uint32_t batch) {
+    if (c.sequenceLengths.empty())
+        return c.sequenceLength;
+    return static_cast<uint32_t>(c.sequenceLengths.at(batch));
+}
 
 constexpr bool attentionUsesPackedQkv(bool useRope) {
     if constexpr (!Api::Attention::USE_PACKED_QKV_PROJECTION) {
@@ -555,13 +600,16 @@ vector<float> sdpaReference(const vector<float>& q, const vector<float>& k, cons
     vector<float> out(static_cast<uint64_t>(c.batchSize) * c.numHeads * c.sequenceLength * c.valueDim, 0.0f);
     const uint32_t headsPerKvHead = c.numHeads / c.numKeyValueHeads;
     for (uint32_t b = 0; b < c.batchSize; ++b) {
+        const uint32_t validLength = effectiveSequenceLength(c, b);
         for (uint32_t h = 0; h < c.numHeads; ++h) {
             const uint32_t kvHead = h / headsPerKvHead;
             for (uint32_t sq = 0; sq < c.sequenceLength; ++sq) {
+                if (sq >= validLength)
+                    continue;
                 vector<float> scores(c.sequenceLength, -std::numeric_limits<float>::infinity());
                 float maxScore = -std::numeric_limits<float>::infinity();
                 for (uint32_t sk = 0; sk < c.sequenceLength; ++sk) {
-                    if (!attentionKeyAllowed(c, sq, sk))
+                    if (sk >= validLength || !attentionKeyAllowed(c, sq, sk))
                         continue;
                     float dot = 0.0f;
                     for (uint32_t d = 0; d < c.headDim; ++d) {
@@ -624,6 +672,43 @@ vector<float> bshdStorageToBhsdSemantic(
         }
     }
     return bhsd;
+}
+
+vector<int32_t> raggedElementOffsets(const vector<int32_t>& lengths, uint32_t width) {
+    vector<int32_t> offsets(lengths.size() + 1, 0);
+    int64_t cursor = 0;
+    for (uint64_t i = 0; i < lengths.size(); ++i) {
+        cursor += static_cast<int64_t>(lengths[i]) * static_cast<int64_t>(width);
+        offsets[i + 1] = static_cast<int32_t>(cursor);
+    }
+    return offsets;
+}
+
+vector<float> packBsfRaggedStorage(const vector<float>& dense,
+                                   const vector<int32_t>& lengths,
+                                   uint32_t batchSize,
+                                   uint32_t sequenceLength,
+                                   uint32_t width) {
+    vector<float> packed(static_cast<uint64_t>(batchSize) * sequenceLength * width, 0.0f);
+    uint64_t cursor = 0;
+    for (uint32_t b = 0; b < batchSize; ++b) {
+        const uint32_t valid = static_cast<uint32_t>(lengths.at(b));
+        for (uint32_t s = 0; s < valid; ++s) {
+            const uint64_t src = idx3(b, s, 0, sequenceLength, width);
+            std::copy(dense.begin() + src, dense.begin() + src + width, packed.begin() + cursor);
+            cursor += width;
+        }
+    }
+    return packed;
+}
+
+vector<float> packedBsfRaggedValidValues(const vector<float>& storage, const vector<int32_t>& lengths, uint32_t width) {
+    vector<float> values;
+    for (int32_t length : lengths) {
+        values.resize(values.size() + static_cast<uint64_t>(length) * width);
+    }
+    std::copy(storage.begin(), storage.begin() + values.size(), values.begin());
+    return values;
 }
 
 vector<float> mergeBhsdToBsd(const vector<float>& bhsd, const AttentionReferenceCase& c) {
@@ -860,6 +945,7 @@ TEST(AttentionApi, BuildsComposedGqaAttentionWithExplicitDimsBiasAndRope) {
                                    .ropeOptions(rope)
                                    .ropeInPlace(true)
                                    .attentionScale(0.25)
+                                   .dropout(0.125f, 123456789LL, 987654321LL)
                                    .outputDataType(DataType::BF16)
                                    .build();
 
@@ -874,6 +960,9 @@ TEST(AttentionApi, BuildsComposedGqaAttentionWithExplicitDimsBiasAndRope) {
     EXPECT_TRUE(attention.getRopeInPlace());
     ASSERT_TRUE(attention.getAttentionScale().has_value());
     EXPECT_DOUBLE_EQ(attention.getAttentionScale().value(), 0.25);
+    EXPECT_FLOAT_EQ(attention.getDropoutProbability(), 0.125f);
+    EXPECT_EQ(attention.getDropoutSeed(), 123456789LL);
+    EXPECT_EQ(attention.getDropoutOffset(), 987654321LL);
 }
 
 
@@ -910,6 +999,7 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveReleaseCriticalOptions)
                                    .diagonalLeftBound(3)
                                    .useAlibiMask(true)
                                    .attentionScale(0.25)
+                                   .dropout(0.2f, 424242LL, 31337LL)
                                    .weightsDataType(DataType::BF16)
                                    .computeDataType(DataType::FP32)
                                    .outputDataType(DataType::BF16)
@@ -930,6 +1020,9 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveReleaseCriticalOptions)
     EXPECT_EQ(arch.at("diagonal_left_bound").get<int64_t>(), 3);
     EXPECT_TRUE(arch.at("use_alibi_mask").get<bool>());
     EXPECT_DOUBLE_EQ(arch.at("attention_scale").get<double>(), 0.25);
+    EXPECT_FLOAT_EQ(arch.at("dropout_probability").get<float>(), 0.2f);
+    EXPECT_EQ(arch.at("dropout_seed").get<int64_t>(), 424242LL);
+    EXPECT_EQ(arch.at("dropout_offset").get<int64_t>(), 31337LL);
     EXPECT_EQ(arch.at("parameters").size(), 8U);
 
     const nlohmann::json ropeJson = arch.at("rope_options");
@@ -968,6 +1061,9 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveReleaseCriticalOptions)
     EXPECT_EQ(restored->getUseAlibiMask(), attention.getUseAlibiMask());
     ASSERT_TRUE(restored->getAttentionScale().has_value());
     EXPECT_DOUBLE_EQ(restored->getAttentionScale().value(), 0.25);
+    EXPECT_FLOAT_EQ(restored->getDropoutProbability(), attention.getDropoutProbability());
+    EXPECT_EQ(restored->getDropoutSeed(), attention.getDropoutSeed());
+    EXPECT_EQ(restored->getDropoutOffset(), attention.getDropoutOffset());
 
     const Impl::RotaryPositionEmbeddingOptions& restoredRope = restored->getRopeOptions();
     EXPECT_EQ(restoredRope.rotary_dim, rope.rotary_dim);
@@ -998,6 +1094,28 @@ TEST(AttentionApi, RejectsInvalidHeadConfiguration) {
                  std::invalid_argument);
 }
 
+TEST(AttentionApi, RejectsInvalidDropoutProbability) {
+    Api::Network network("attention_api_rejects_invalid_dropout_probability");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 64}).dataType(DataType::FP16).build();
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(4)
+                     .dropoutProbability(-0.01f)
+                     .build(),
+                 std::invalid_argument);
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(4)
+                     .dropoutProbability(1.0f)
+                     .build(),
+                 std::invalid_argument);
+}
+
 TEST(AttentionApi, RejectsRank3FeatureInputForComposedAttention) {
     Api::Network network("attention_api_rejects_rank3_feature_input_for_composed_attention");
     Api::NetworkInput input =
@@ -1021,6 +1139,543 @@ TEST(AttentionApi, RejectsBottomRightMaskWithAlibi) {
                      .useAlibiMask()
                      .build(),
                  std::invalid_argument);
+}
+
+TEST(AttentionApi, RejectsBottomRightMaskWithDropout) {
+    Api::Network network("attention_api_rejects_bottom_right_mask_with_dropout");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 64}).dataType(DataType::FP16).build();
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(4)
+                     .maskKind(Impl::AttentionMaskKind::SlidingWindowBottomRight)
+                     .diagonalLeftBound(4)
+                     .dropout(0.1f, 7, 11)
+                     .build(),
+                 std::invalid_argument);
+}
+
+
+TEST(AttentionApi, BuildsComposedAttentionWithPublicVariableLengthInputs) {
+    Api::Network network("attention_api_builds_composed_attention_with_public_variable_length_inputs");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 64}).dataType(DataType::FP16).build();
+    Api::NetworkInput sequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput raggedOffsets =
+        Api::NetworkInput::Builder().network(network).name("ragged_offsets").dimensions({2}).dataType(DataType::INT32).build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .numHeads(4)
+                                   .headDim(16)
+                                   .build();
+
+    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"feature_input", "sequence_lengths", "ragged_offsets"}));
+    EXPECT_TRUE(attention.getUseSequenceLengths());
+    EXPECT_TRUE(attention.getUseRaggedOffsets());
+    ASSERT_TRUE(attention.getSequenceLengthsInput().has_value());
+    ASSERT_TRUE(attention.getRaggedOffsetsInput().has_value());
+    EXPECT_EQ(attention.getSequenceLengthsInput()->getDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(attention.getRaggedOffsetsInput()->getDimensions(), (std::vector<uint64_t>{2}));
+}
+
+TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveVariableLengthInputs) {
+    Api::Network network("attention_api_architecture_json_and_deserialize_preserve_variable_length_inputs");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 64}).dataType(DataType::FP16).build();
+    Api::NetworkInput sequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput raggedOffsets =
+        Api::NetworkInput::Builder().network(network).name("ragged_offsets").dimensions({2}).dataType(DataType::INT32).build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .numHeads(4)
+                                   .headDim(16)
+                                   .attentionScale(0.25)
+                                   .build();
+
+    const nlohmann::json arch = attention.architectureJson();
+    EXPECT_TRUE(arch.at("use_sequence_lengths").get<bool>());
+    EXPECT_TRUE(arch.at("use_ragged_offsets").get<bool>());
+    ASSERT_TRUE(arch.contains("sequence_lengths_input"));
+    ASSERT_TRUE(arch.contains("ragged_offsets_input"));
+
+    const uint32_t previousTrainableLayerCount = network.getNumTrainableLayers();
+    shared_ptr<thor_file::TarReader> archiveReader;
+    Api::Attention::deserialize(archiveReader, arch, &network);
+    ASSERT_EQ(network.getNumTrainableLayers(), previousTrainableLayerCount + 1);
+    auto restored = dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(previousTrainableLayerCount));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_TRUE(restored->getUseSequenceLengths());
+    EXPECT_TRUE(restored->getUseRaggedOffsets());
+    EXPECT_EQ(restored->getInputNames(), (std::vector<std::string>{"feature_input", "sequence_lengths", "ragged_offsets"}));
+}
+
+TEST(AttentionApi, RejectsInvalidVariableLengthInputs) {
+    Api::Network network("attention_api_rejects_invalid_variable_length_inputs");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 64}).dataType(DataType::FP16).build();
+    Api::NetworkInput sequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput badSequenceLengthsDtype =
+        Api::NetworkInput::Builder().network(network).name("bad_sequence_lengths_dtype").dimensions({1}).dataType(DataType::FP16).build();
+    Api::NetworkInput badSequenceLengthsShape =
+        Api::NetworkInput::Builder().network(network).name("bad_sequence_lengths_shape").dimensions({2}).dataType(DataType::INT32).build();
+    Api::NetworkInput raggedOffsets =
+        Api::NetworkInput::Builder().network(network).name("ragged_offsets").dimensions({2}).dataType(DataType::INT32).build();
+    Api::NetworkInput badRaggedOffsetsDtype =
+        Api::NetworkInput::Builder().network(network).name("bad_ragged_offsets_dtype").dimensions({2}).dataType(DataType::FP16).build();
+    Api::NetworkInput badRaggedOffsetsShape =
+        Api::NetworkInput::Builder().network(network).name("bad_ragged_offsets_shape").dimensions({1}).dataType(DataType::INT32).build();
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .sequenceLengthsInput(badSequenceLengthsDtype.getFeatureOutput().value())
+                     .numHeads(4)
+                     .build(),
+                 std::invalid_argument);
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .sequenceLengthsInput(badSequenceLengthsShape.getFeatureOutput().value())
+                     .numHeads(4)
+                     .build(),
+                 std::invalid_argument);
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                     .numHeads(4)
+                     .build(),
+                 std::invalid_argument);
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .raggedOffsetsInput(badRaggedOffsetsDtype.getFeatureOutput().value())
+                     .numHeads(4)
+                     .build(),
+                 std::invalid_argument);
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .raggedOffsetsInput(badRaggedOffsetsShape.getFeatureOutput().value())
+                     .numHeads(4)
+                     .build(),
+                 std::invalid_argument);
+}
+
+TEST(AttentionApi, BuildsRaggedOffsetsWithDropoutAndRope) {
+    Api::Network network("attention_api_builds_ragged_offsets_with_dropout_and_rope");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 64}).dataType(DataType::FP16).build();
+    Api::NetworkInput sequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput raggedOffsets =
+        Api::NetworkInput::Builder().network(network).name("ragged_offsets").dimensions({2}).dataType(DataType::INT32).build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = 16;
+    rope.base = 10000.0;
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .numHeads(4)
+                                   .headDim(16)
+                                   .ropeOptions(rope)
+                                   .dropout(0.125f, 7, 11)
+                                   .build();
+
+    EXPECT_TRUE(attention.getUseRaggedOffsets());
+    EXPECT_TRUE(attention.getUseRope());
+    EXPECT_FLOAT_EQ(attention.getDropoutProbability(), 0.125f);
+    EXPECT_EQ(attention.getDropoutSeed(), 7LL);
+    EXPECT_EQ(attention.getDropoutOffset(), 11LL);
+}
+
+TEST(AttentionApi, ForwardWithSequenceLengthsMatchesPaddingMaskReference) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 4;
+    c.numHeads = 2;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 32;
+    c.outputFeatures = 32;
+    c.hasBias = false;
+    c.maskKind = Impl::AttentionMaskKind::None;
+    c.attentionScale = 0.21f;
+    c.sequenceLengths = {4, 2};
+    c.dataType = DataType::FP16;
+
+    const AttentionReferenceInputs inputs = makeAttentionReferenceInputs(c);
+
+    Api::Network network("attention_api_forward_with_sequence_lengths_matches_padding_mask_reference");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({c.sequenceLength, c.inputFeatures})
+                                  .dataType(c.dataType)
+                                  .build();
+    Api::NetworkInput sequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .numHeads(c.numHeads)
+                                   .numKeyValueHeads(c.numKeyValueHeads)
+                                   .headDim(c.headDim)
+                                   .valueDim(c.valueDim)
+                                   .outputFeatures(c.outputFeatures)
+                                   .hasBias(c.hasBias)
+                                   .weightsDataType(c.dataType)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(c.dataType)
+                                   .attentionScale(c.attentionScale)
+                                   .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(attention.getOutput("feature_output"))
+                                    .dataType(c.dataType)
+                                    .build();
+
+    PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, input, output, attention, c.batchSize, true);
+    auto physicalSequenceLengthsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(sequenceLengths.getId()));
+    ASSERT_NE(physicalSequenceLengthsInput, nullptr);
+
+    Stream stream = fixture.physicalAttention->getStreams()[0];
+    setAttentionParameters(fixture.physicalAttention, inputs, c, stream);
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(c.dataType, {c.batchSize, c.sequenceLength, c.inputFeatures}));
+    writeCpuTensor(featureInHost, inputs.featureInput);
+    Impl::Tensor sequenceLengthsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {c.batchSize, 1}));
+    writeCpuInt32Tensor(sequenceLengthsHost, c.sequenceLengths);
+
+    const vector<float> expected = attentionLayerReference(inputs, c);
+    const vector<float> actual = runForwardWithMetadata(
+        *fixture.physicalInput, *physicalSequenceLengthsInput, *fixture.physicalOutput, featureInHost, sequenceLengthsHost, c.batchSize);
+    expectAllClose(actual, expected, 1.2e-1f, 1.2e-1f);
+}
+
+TEST(AttentionApi, ForwardWithRaggedOffsetsMatchesPackedReference) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 4;
+    c.numHeads = 2;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 32;
+    c.outputFeatures = 32;
+    c.hasBias = false;
+    c.maskKind = Impl::AttentionMaskKind::None;
+    c.attentionScale = 0.21f;
+    c.sequenceLengths = {4, 2};
+    c.dataType = DataType::FP16;
+
+    const AttentionReferenceInputs denseInputs = makeAttentionReferenceInputs(c);
+    AttentionReferenceInputs packedInputs = denseInputs;
+    packedInputs.featureInput = packBsfRaggedStorage(denseInputs.featureInput, c.sequenceLengths, c.batchSize, c.sequenceLength, c.inputFeatures);
+    const vector<float> expectedDense = attentionLayerReference(denseInputs, c);
+    const vector<float> expectedPacked = packBsfRaggedStorage(expectedDense, c.sequenceLengths, c.batchSize, c.sequenceLength, c.outputFeatures);
+
+    Api::Network network("attention_api_forward_with_ragged_offsets_matches_packed_reference");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({c.sequenceLength, c.inputFeatures})
+                                  .dataType(c.dataType)
+                                  .build();
+    Api::NetworkInput sequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput raggedOffsets =
+        Api::NetworkInput::Builder().network(network).name("ragged_offsets").dimensions({2}).dataType(DataType::INT32).build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .numHeads(c.numHeads)
+                                   .numKeyValueHeads(c.numKeyValueHeads)
+                                   .headDim(c.headDim)
+                                   .valueDim(c.valueDim)
+                                   .outputFeatures(c.outputFeatures)
+                                   .hasBias(c.hasBias)
+                                   .weightsDataType(c.dataType)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(c.dataType)
+                                   .attentionScale(c.attentionScale)
+                                   .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(attention.getOutput("feature_output"))
+                                    .dataType(c.dataType)
+                                    .build();
+
+    PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, input, output, attention, c.batchSize, true);
+    auto physicalSequenceLengthsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(sequenceLengths.getId()));
+    auto physicalRaggedOffsetsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(raggedOffsets.getId()));
+    ASSERT_NE(physicalSequenceLengthsInput, nullptr);
+    ASSERT_NE(physicalRaggedOffsetsInput, nullptr);
+
+    Stream stream = fixture.physicalAttention->getStreams()[0];
+    setAttentionParameters(fixture.physicalAttention, denseInputs, c, stream);
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(c.dataType, {c.batchSize, c.sequenceLength, c.inputFeatures}));
+    writeCpuTensor(featureInHost, packedInputs.featureInput);
+    Impl::Tensor sequenceLengthsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {c.batchSize, 1}));
+    writeCpuInt32Tensor(sequenceLengthsHost, c.sequenceLengths);
+
+    vector<int32_t> raggedHostValues(static_cast<uint64_t>(c.batchSize) * 2, 0);
+    const vector<int32_t> offsets = raggedElementOffsets(c.sequenceLengths, c.numHeads * c.headDim);
+    std::copy(offsets.begin(), offsets.end(), raggedHostValues.begin());
+    Impl::Tensor raggedOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {c.batchSize, 2}));
+    writeCpuInt32Tensor(raggedOffsetsHost, raggedHostValues);
+
+    const vector<float> actual = runForwardWithMetadata(*fixture.physicalInput,
+                                                        *physicalSequenceLengthsInput,
+                                                        *physicalRaggedOffsetsInput,
+                                                        *fixture.physicalOutput,
+                                                        featureInHost,
+                                                        sequenceLengthsHost,
+                                                        raggedOffsetsHost,
+                                                        c.batchSize);
+    expectAllClose(packedBsfRaggedValidValues(actual, c.sequenceLengths, c.outputFeatures),
+                   packedBsfRaggedValidValues(expectedPacked, c.sequenceLengths, c.outputFeatures),
+                   1.2e-1f,
+                   1.2e-1f);
+}
+
+TEST(AttentionApi, ForwardWithRaggedOffsetsAndRopeMatchesPackedReference) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 4;
+    c.numHeads = 2;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 32;
+    c.outputFeatures = 32;
+    c.hasBias = false;
+    c.useRope = true;
+    c.ropeOptions.rotary_dim = 16;
+    c.ropeOptions.base = 10000.0;
+    c.maskKind = Impl::AttentionMaskKind::None;
+    c.attentionScale = 0.21f;
+    c.sequenceLengths = {4, 2};
+    c.dataType = DataType::FP16;
+
+    const AttentionReferenceInputs denseInputs = makeAttentionReferenceInputs(c);
+    AttentionReferenceInputs packedInputs = denseInputs;
+    packedInputs.featureInput = packBsfRaggedStorage(denseInputs.featureInput, c.sequenceLengths, c.batchSize, c.sequenceLength, c.inputFeatures);
+    const vector<float> expectedDense = attentionLayerReference(denseInputs, c);
+    const vector<float> expectedPacked = packBsfRaggedStorage(expectedDense, c.sequenceLengths, c.batchSize, c.sequenceLength, c.outputFeatures);
+
+    Api::Network network("attention_api_forward_with_ragged_offsets_and_rope_matches_packed_reference");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({c.sequenceLength, c.inputFeatures})
+                                  .dataType(c.dataType)
+                                  .build();
+    Api::NetworkInput sequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput raggedOffsets =
+        Api::NetworkInput::Builder().network(network).name("ragged_offsets").dimensions({2}).dataType(DataType::INT32).build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .numHeads(c.numHeads)
+                                   .numKeyValueHeads(c.numKeyValueHeads)
+                                   .headDim(c.headDim)
+                                   .valueDim(c.valueDim)
+                                   .outputFeatures(c.outputFeatures)
+                                   .hasBias(c.hasBias)
+                                   .ropeOptions(c.ropeOptions)
+                                   .weightsDataType(c.dataType)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(c.dataType)
+                                   .attentionScale(c.attentionScale)
+                                   .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(attention.getOutput("feature_output"))
+                                    .dataType(c.dataType)
+                                    .build();
+
+    PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, input, output, attention, c.batchSize, true);
+    auto physicalSequenceLengthsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(sequenceLengths.getId()));
+    auto physicalRaggedOffsetsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(raggedOffsets.getId()));
+    ASSERT_NE(physicalSequenceLengthsInput, nullptr);
+    ASSERT_NE(physicalRaggedOffsetsInput, nullptr);
+
+    Stream stream = fixture.physicalAttention->getStreams()[0];
+    setAttentionParameters(fixture.physicalAttention, denseInputs, c, stream);
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(c.dataType, {c.batchSize, c.sequenceLength, c.inputFeatures}));
+    writeCpuTensor(featureInHost, packedInputs.featureInput);
+    Impl::Tensor sequenceLengthsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {c.batchSize, 1}));
+    writeCpuInt32Tensor(sequenceLengthsHost, c.sequenceLengths);
+
+    vector<int32_t> raggedHostValues(static_cast<uint64_t>(c.batchSize) * 2, 0);
+    const vector<int32_t> offsets = raggedElementOffsets(c.sequenceLengths, c.numHeads * c.headDim);
+    std::copy(offsets.begin(), offsets.end(), raggedHostValues.begin());
+    Impl::Tensor raggedOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {c.batchSize, 2}));
+    writeCpuInt32Tensor(raggedOffsetsHost, raggedHostValues);
+
+    const vector<float> actual = runForwardWithMetadata(*fixture.physicalInput,
+                                                        *physicalSequenceLengthsInput,
+                                                        *physicalRaggedOffsetsInput,
+                                                        *fixture.physicalOutput,
+                                                        featureInHost,
+                                                        sequenceLengthsHost,
+                                                        raggedOffsetsHost,
+                                                        c.batchSize);
+    expectAllClose(packedBsfRaggedValidValues(actual, c.sequenceLengths, c.outputFeatures),
+                   packedBsfRaggedValidValues(expectedPacked, c.sequenceLengths, c.outputFeatures),
+                   1.5e-1f,
+                   1.5e-1f);
+}
+
+TEST(AttentionApi, ForwardWithRaggedOffsetsDropoutAndRopeIsDeterministic) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 4;
+    c.numHeads = 2;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 32;
+    c.outputFeatures = 32;
+    c.hasBias = false;
+    c.useRope = true;
+    c.ropeOptions.rotary_dim = 16;
+    c.ropeOptions.base = 10000.0;
+    c.maskKind = Impl::AttentionMaskKind::None;
+    c.attentionScale = 0.21f;
+    c.sequenceLengths = {4, 2};
+    c.dataType = DataType::FP16;
+
+    const AttentionReferenceInputs denseInputs = makeAttentionReferenceInputs(c);
+    AttentionReferenceInputs packedInputs = denseInputs;
+    packedInputs.featureInput = packBsfRaggedStorage(denseInputs.featureInput, c.sequenceLengths, c.batchSize, c.sequenceLength, c.inputFeatures);
+    const vector<float> expectedNoDropoutDense = attentionLayerReference(denseInputs, c);
+    const vector<float> expectedNoDropoutPacked =
+        packBsfRaggedStorage(expectedNoDropoutDense, c.sequenceLengths, c.batchSize, c.sequenceLength, c.outputFeatures);
+
+    Api::Network network("attention_api_forward_with_ragged_offsets_dropout_and_rope_is_deterministic");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({c.sequenceLength, c.inputFeatures})
+                                  .dataType(c.dataType)
+                                  .build();
+    Api::NetworkInput sequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput raggedOffsets =
+        Api::NetworkInput::Builder().network(network).name("ragged_offsets").dimensions({2}).dataType(DataType::INT32).build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .numHeads(c.numHeads)
+                                   .numKeyValueHeads(c.numKeyValueHeads)
+                                   .headDim(c.headDim)
+                                   .valueDim(c.valueDim)
+                                   .outputFeatures(c.outputFeatures)
+                                   .hasBias(c.hasBias)
+                                   .ropeOptions(c.ropeOptions)
+                                   .weightsDataType(c.dataType)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(c.dataType)
+                                   .attentionScale(c.attentionScale)
+                                   .dropout(0.5f, 1234, 5678)
+                                   .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(attention.getOutput("feature_output"))
+                                    .dataType(c.dataType)
+                                    .build();
+
+    PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, input, output, attention, c.batchSize, true);
+    auto physicalSequenceLengthsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(sequenceLengths.getId()));
+    auto physicalRaggedOffsetsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(raggedOffsets.getId()));
+    ASSERT_NE(physicalSequenceLengthsInput, nullptr);
+    ASSERT_NE(physicalRaggedOffsetsInput, nullptr);
+
+    Stream stream = fixture.physicalAttention->getStreams()[0];
+    setAttentionParameters(fixture.physicalAttention, denseInputs, c, stream);
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(c.dataType, {c.batchSize, c.sequenceLength, c.inputFeatures}));
+    writeCpuTensor(featureInHost, packedInputs.featureInput);
+    Impl::Tensor sequenceLengthsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {c.batchSize, 1}));
+    writeCpuInt32Tensor(sequenceLengthsHost, c.sequenceLengths);
+
+    vector<int32_t> raggedHostValues(static_cast<uint64_t>(c.batchSize) * 2, 0);
+    const vector<int32_t> offsets = raggedElementOffsets(c.sequenceLengths, c.numHeads * c.headDim);
+    std::copy(offsets.begin(), offsets.end(), raggedHostValues.begin());
+    Impl::Tensor raggedOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {c.batchSize, 2}));
+    writeCpuInt32Tensor(raggedOffsetsHost, raggedHostValues);
+
+    const vector<float> actual1 = runForwardWithMetadata(*fixture.physicalInput,
+                                                         *physicalSequenceLengthsInput,
+                                                         *physicalRaggedOffsetsInput,
+                                                         *fixture.physicalOutput,
+                                                         featureInHost,
+                                                         sequenceLengthsHost,
+                                                         raggedOffsetsHost,
+                                                         c.batchSize);
+    const vector<float> actual2 = runForwardWithMetadata(*fixture.physicalInput,
+                                                         *physicalSequenceLengthsInput,
+                                                         *physicalRaggedOffsetsInput,
+                                                         *fixture.physicalOutput,
+                                                         featureInHost,
+                                                         sequenceLengthsHost,
+                                                         raggedOffsetsHost,
+                                                         c.batchSize);
+
+    const vector<float> validActual1 = packedBsfRaggedValidValues(actual1, c.sequenceLengths, c.outputFeatures);
+    const vector<float> validActual2 = packedBsfRaggedValidValues(actual2, c.sequenceLengths, c.outputFeatures);
+    expectAllClose(validActual1, validActual2, 0.0f, 0.0f);
+    expectNotAllClose(validActual1,
+                      packedBsfRaggedValidValues(expectedNoDropoutPacked, c.sequenceLengths, c.outputFeatures),
+                      1.0e-2f,
+                      1.0e-2f);
 }
 
 TEST(AttentionApi, ForwardUniformAttentionMatchesBshdProjectionLayoutReference) {

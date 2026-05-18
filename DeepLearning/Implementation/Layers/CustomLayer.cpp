@@ -13,6 +13,16 @@ namespace ThorImplementation {
 
 namespace {
 std::set<std::string> toNameSet(const std::vector<std::string>& names) { return std::set<std::string>(names.begin(), names.end()); }
+
+bool isInternalExpressionInputName(const std::string& name) { return name.rfind("__", 0) == 0; }
+
+std::string joinNames(const std::set<std::string>& names) {
+    std::string result;
+    for (const auto& name : names) {
+        result += name + " ";
+    }
+    return result;
+}
 }  // namespace
 
 CustomLayer::CustomLayer(DynamicExpression expr,
@@ -502,17 +512,25 @@ void CustomLayer::validatePreparedExpressionInputs(const PreparedDynamicExpressi
         actualInputNames.insert(name);
     }
 
-    if (actualInputNames != expectedInputNames) {
-        std::string expectedInputNamesString;
-        for (const auto& name : expectedInputNames)
-            expectedInputNamesString += name + " ";
+    std::set<std::string> missingInputNames;
+    for (const auto& expectedName : expectedInputNames) {
+        if (!actualInputNames.contains(expectedName)) {
+            missingInputNames.insert(expectedName);
+        }
+    }
 
-        std::string actualInputNamesString;
-        for (const auto& name : actualInputNames)
-            actualInputNamesString += name + " ";
+    std::set<std::string> unexpectedInputNames;
+    for (const auto& actualName : actualInputNames) {
+        if (!expectedInputNames.contains(actualName) && !isInternalExpressionInputName(actualName)) {
+            unexpectedInputNames.insert(actualName);
+        }
+    }
 
-        throw runtime_error("CustomLayer expression input mismatch. Expected inputs: " + expectedInputNamesString +
-                            " Actual inputs used by prepared expression: " + actualInputNamesString);
+    if (!missingInputNames.empty() || !unexpectedInputNames.empty()) {
+        throw runtime_error("CustomLayer expression input mismatch. Expected inputs: " + joinNames(expectedInputNames) +
+                            " Missing expected inputs: " + joinNames(missingInputNames) +
+                            " Unexpected non-internal inputs: " + joinNames(unexpectedInputNames) +
+                            " Actual inputs used by prepared expression: " + joinNames(actualInputNames));
     }
 }
 

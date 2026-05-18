@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <utility>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -72,7 +73,7 @@ class NetworkInput : public Layer {
     // then this version of forward is used which causes the loader stream to wait till copy is finished.
     virtual void forward(std::optional<Tensor> featureInput, bool validationPass, Event copyToSourceTensorFinished, uint32_t batchSize = 0) {
         loadStream.waitEvent(copyToSourceTensorFinished);
-        forward(featureInput, validationPass);
+        forward(featureInput, validationPass, batchSize);
     }
 
     // Only called for input endpoints
@@ -89,20 +90,38 @@ class NetworkInput : public Layer {
         if (contentDimensions.has_value()) {
             THOR_THROW_IF_FALSE(featureOutput.has_value());
 
-            // Wait for previous featureOutput load to finish
-            // Copy into buffer using the load stream
-            // stream waits for all previously scheduled work to finish and for copy to finish - copy tends to finish first
-            outputBuffer.copyFromAsync(featureInput.value(), loadStream);
-            stream.waitEvent(loadStream.putEvent());
+            // Ping-pong the network input backing allocations instead of copying the prefetched payload into a
+            // fixed featureOutput allocation. The logical featureOutput tensor stays stable, so downstream layers
+            // that already copied/stamped it continue to see the updated backing pointer without restamping.
+            //
+            // outputBuffer owns the inactive backing allocation at this point. Do not overwrite it until the last
+            // compute-stream consumers of that backing have completed, but do not wait on the host.
+            if (outputBufferReusableEvent.has_value()) {
+                loadStream.waitEvent(outputBufferReusableEvent.value());
+                outputBufferReusableEvent.reset();
+            }
 
-            // Copy from buffer to featureOutput
-            // LoadStream waits for copy to finish.
-            // After this happens the buffer can be loaded with the next payload.
-            featureOutput.value().copyFromAsync(outputBuffer, stream);
-            loadStream.waitEvent(stream.putEvent());
+            // The async copy captures outputBuffer's current raw allocation when it is enqueued.
+            outputBuffer.copyFromAsync(featureInput.value(), loadStream);
+
+            // Downstream work is launched on stream, so order it after the upload without synchronizing the host.
+            Event uploadDone = loadStream.putEvent();
+            stream.waitEvent(uploadDone);
+
+            // Flip the logical featureOutput tensor to the newly uploaded backing before launching consumers. This
+            // is a host-side pointer swap only; already enqueued GPU work captured raw pointers at enqueue time.
+            featureOutput.value().swapBackingMemoryWith(outputBuffer);
+
+            // The reusable event follows the backing allocation, not the Tensor handle. After the backing swap,
+            // outputBuffer owns the previously active backing and must carry its prior reusable event.
+            std::swap(featureOutputReusableEvent, outputBufferReusableEvent);
         }
 
-        nextLayer.value()->forward(featureOutput, validationPass);
+        nextLayer.value()->forward(featureOutput, validationPass, batchSize);
+
+        if (contentDimensions.has_value() && featureOutput.has_value()) {
+            featureOutputReusableEvent = stream.putEvent();
+        }
     }
 
     void backward(std::optional<Tensor> errorInput, uint32_t batchSize = 0) override {}
@@ -114,7 +133,8 @@ class NetworkInput : public Layer {
 
     Tensor outputBuffer;
     Stream loadStream;
-    Event loadReadyEvent;
+    std::optional<Event> featureOutputReusableEvent;
+    std::optional<Event> outputBufferReusableEvent;
 };
 
 }  // namespace ThorImplementation

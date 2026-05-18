@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <set>
@@ -156,6 +157,7 @@ class Tensor : private ReferenceCounted {
     [[nodiscard]] uint64_t getStorageElementOffset() const { return storageElementOffset; }
     [[nodiscard]] std::vector<uint64_t> getStridesElements() const;
     void resize(std::vector<uint64_t> dimensions);
+    void swapBackingMemoryWith(Tensor &other);
     // void concatenateFrom(std::vector<Tensor> sources);
     // void splitInto(std::vector<Tensor> destinations);
 
@@ -799,7 +801,12 @@ class Tensor : private ReferenceCounted {
     void copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue);
 
     TensorPlacement placement;
-    void *mem = nullptr;
+    struct BackingMemory {
+        void *mem = nullptr;
+        bool cpuMemPinnedViaCudaHostRegister = false;
+    };
+
+    std::shared_ptr<BackingMemory> backingMemory;
     uint64_t storageElementOffset = 0;
     uint64_t storageNumElements = 0;
     std::vector<uint64_t> customStridesElements;
@@ -814,14 +821,13 @@ class Tensor : private ReferenceCounted {
     FileAccess fileAccessRequirement;
     off_t fileOffset;
 
-    bool cpuMemPinnedViaCudaHostRegister = false;
-
     // FIXME: get rid of this override descriptor nonsense
     bool descriptorOverridden = false;
     TensorDescriptor overriddenDescriptor;
 
     static std::atomic<uint64_t> nextInstanceId;
 
+    void *getBaseMemPtr() const;
     void allocateMemory(uint32_t alignmentBytes = 0);
 
     template <typename T>
