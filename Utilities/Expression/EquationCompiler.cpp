@@ -198,6 +198,13 @@ struct StageNodeKey {
     int32_t rope_scaling_kind = 0;
     uint64_t rope_scaling_factor_bits = 0;
     uint64_t rope_original_max_position_embeddings = 0;
+    uint64_t rope_attention_factor_bits = 0;
+    uint64_t rope_yarn_beta_fast_bits = 0;
+    uint64_t rope_yarn_beta_slow_bits = 0;
+    uint64_t rope_llama3_low_freq_factor_bits = 0;
+    uint64_t rope_llama3_high_freq_factor_bits = 0;
+    std::vector<uint64_t> rope_long_rope_short_factor_bits;
+    std::vector<uint64_t> rope_long_rope_long_factor_bits;
     bool rope_allow_in_place_materialization = false;
     bool attention_use_bias = false;
     uint64_t attention_dropout_probability_bits = 0;
@@ -248,6 +255,17 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<int32_t>{}(k.rope_scaling_kind));
         hashCombine(h, std::hash<uint64_t>{}(k.rope_scaling_factor_bits));
         hashCombine(h, std::hash<uint64_t>{}(k.rope_original_max_position_embeddings));
+        hashCombine(h, std::hash<uint64_t>{}(k.rope_attention_factor_bits));
+        hashCombine(h, std::hash<uint64_t>{}(k.rope_yarn_beta_fast_bits));
+        hashCombine(h, std::hash<uint64_t>{}(k.rope_yarn_beta_slow_bits));
+        hashCombine(h, std::hash<uint64_t>{}(k.rope_llama3_low_freq_factor_bits));
+        hashCombine(h, std::hash<uint64_t>{}(k.rope_llama3_high_freq_factor_bits));
+        hashCombine(h, std::hash<size_t>{}(k.rope_long_rope_short_factor_bits.size()));
+        for (uint64_t factor_bits : k.rope_long_rope_short_factor_bits)
+            hashCombine(h, std::hash<uint64_t>{}(factor_bits));
+        hashCombine(h, std::hash<size_t>{}(k.rope_long_rope_long_factor_bits.size()));
+        for (uint64_t factor_bits : k.rope_long_rope_long_factor_bits)
+            hashCombine(h, std::hash<uint64_t>{}(factor_bits));
         hashCombine(h, std::hash<bool>{}(k.rope_allow_in_place_materialization));
         hashCombine(h, std::hash<bool>{}(k.attention_use_bias));
         hashCombine(h, std::hash<uint64_t>{}(k.attention_dropout_probability_bits));
@@ -323,6 +341,17 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.rope_scaling_kind = static_cast<int32_t>(n.rope_scaling_kind);
     key.rope_scaling_factor_bits = scalarBits(n.rope_scaling_factor);
     key.rope_original_max_position_embeddings = n.rope_original_max_position_embeddings;
+    key.rope_attention_factor_bits = scalarBits(n.rope_attention_factor);
+    key.rope_yarn_beta_fast_bits = scalarBits(n.rope_yarn_beta_fast);
+    key.rope_yarn_beta_slow_bits = scalarBits(n.rope_yarn_beta_slow);
+    key.rope_llama3_low_freq_factor_bits = scalarBits(n.rope_llama3_low_freq_factor);
+    key.rope_llama3_high_freq_factor_bits = scalarBits(n.rope_llama3_high_freq_factor);
+    key.rope_long_rope_short_factor_bits.reserve(n.rope_long_rope_short_factors.size());
+    for (double factor : n.rope_long_rope_short_factors)
+        key.rope_long_rope_short_factor_bits.push_back(scalarBits(factor));
+    key.rope_long_rope_long_factor_bits.reserve(n.rope_long_rope_long_factors.size());
+    for (double factor : n.rope_long_rope_long_factors)
+        key.rope_long_rope_long_factor_bits.push_back(scalarBits(factor));
     key.rope_allow_in_place_materialization = n.rope_allow_in_place_materialization;
     key.attention_use_bias = n.attention_use_bias;
     key.attention_dropout_probability_bits = scalarBits(n.attention_dropout_probability);
@@ -846,6 +875,18 @@ static std::string uintVecSignature(const std::vector<uint64_t>& v) {
     return s;
 }
 
+static std::string doubleVecSignature(const std::vector<double>& v) {
+    std::string s = "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+        s += std::to_string(scalarBits(v[i]));
+        if (i + 1 < v.size()) {
+            s += ",";
+        }
+    }
+    s += "]";
+    return s;
+}
+
 static std::string gemmScaleSignature(const PhysicalExpression& expr, uint32_t node_idx, double scale_fp) {
     if (node_idx == UINT32_MAX) {
         return std::to_string(scalarBits(scale_fp));
@@ -1048,6 +1089,13 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",scaling=" + std::to_string(static_cast<int>(node.rope_scaling_kind)) +
                 ",factor=" + std::to_string(scalarBits(node.rope_scaling_factor)) +
                 ",originalMax=" + std::to_string(node.rope_original_max_position_embeddings) +
+                ",attentionFactor=" + std::to_string(scalarBits(node.rope_attention_factor)) +
+                ",yarnBetaFast=" + std::to_string(scalarBits(node.rope_yarn_beta_fast)) +
+                ",yarnBetaSlow=" + std::to_string(scalarBits(node.rope_yarn_beta_slow)) +
+                ",llama3LowFreq=" + std::to_string(scalarBits(node.rope_llama3_low_freq_factor)) +
+                ",llama3HighFreq=" + std::to_string(scalarBits(node.rope_llama3_high_freq_factor)) +
+                ",longRopeShort=" + doubleVecSignature(node.rope_long_rope_short_factors) +
+                ",longRopeLong=" + doubleVecSignature(node.rope_long_rope_long_factors) +
                 ",allowInPlace=" + std::to_string(node.rope_allow_in_place_materialization ? 1 : 0) + ")";
         } else {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
@@ -2946,6 +2994,13 @@ std::shared_ptr<CompiledInPlaceRope> EquationCompiler::compileInPlaceRope(const 
         options.scaling_kind = rope.rope_scaling_kind;
         options.scaling_factor = rope.rope_scaling_factor;
         options.original_max_position_embeddings = rope.rope_original_max_position_embeddings;
+        options.attention_factor = rope.rope_attention_factor;
+        options.yarn_beta_fast = rope.rope_yarn_beta_fast;
+        options.yarn_beta_slow = rope.rope_yarn_beta_slow;
+        options.llama3_low_freq_factor = rope.rope_llama3_low_freq_factor;
+        options.llama3_high_freq_factor = rope.rope_llama3_high_freq_factor;
+        options.long_rope_short_factors = rope.rope_long_rope_short_factors;
+        options.long_rope_long_factors = rope.rope_long_rope_long_factors;
         options.output_dtype = rope.output_dtype;
         options.compute_dtype = rope.compute_dtype;
         compiled->tensors.push_back(CompiledInPlaceRopeTensor{
@@ -3792,6 +3847,12 @@ static bool sameRopeOptionsForInPlaceGrouping(const PhysicalExpression& expr, co
             node.rope_inverse != first.rope_inverse || node.rope_scaling_kind != first.rope_scaling_kind ||
             node.rope_scaling_factor != first.rope_scaling_factor ||
             node.rope_original_max_position_embeddings != first.rope_original_max_position_embeddings ||
+            node.rope_attention_factor != first.rope_attention_factor || node.rope_yarn_beta_fast != first.rope_yarn_beta_fast ||
+            node.rope_yarn_beta_slow != first.rope_yarn_beta_slow ||
+            node.rope_llama3_low_freq_factor != first.rope_llama3_low_freq_factor ||
+            node.rope_llama3_high_freq_factor != first.rope_llama3_high_freq_factor ||
+            node.rope_long_rope_short_factors != first.rope_long_rope_short_factors ||
+            node.rope_long_rope_long_factors != first.rope_long_rope_long_factors ||
             node.rope_allow_in_place_materialization != first.rope_allow_in_place_materialization) {
             return false;
         }

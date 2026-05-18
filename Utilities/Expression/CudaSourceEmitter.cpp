@@ -36,6 +36,19 @@ static std::string emitScalarFpLiteral(double x) {
     return formatFloating(x, 9) + "f";
 }
 
+static std::string emitFloatArrayLiteral(const std::vector<double>& values) {
+    std::ostringstream ss;
+    ss << "{";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            ss << ", ";
+        }
+        ss << emitScalarFpLiteral(values[i]);
+    }
+    ss << "}";
+    return ss.str();
+}
+
 static bool isPowerOfTwo(uint64_t x) { return x != 0 && (x & (x - 1)) == 0; }
 
 static uint32_t log2Exact(uint64_t x) {
@@ -1592,6 +1605,7 @@ static void emitScalarNode(
             ss << indent << "    rope_position = rope_position / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
         }
         ss << indent << "    float rope_base = " << emitScalarFpLiteral(n.rope_base) << ";\n";
+        ss << indent << "    float rope_freq = 0.0f;\n";
         if (n.rope_scaling_kind == RotaryScalingKind::DynamicNTK) {
             ss << indent << "    const float rope_seq_len = fmaxf(static_cast<float>(" << seq_extent << ") + "
                << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
@@ -1600,11 +1614,55 @@ static void emitScalarNode(
             ss << indent << "      const float rope_ntk_ratio = (" << emitScalarFpLiteral(n.rope_scaling_factor) << " * rope_seq_len / rope_original_max) - (" << emitScalarFpLiteral(n.rope_scaling_factor) << " - 1.0f);\n";
             ss << indent << "      rope_base = rope_base * powf(rope_ntk_ratio, static_cast<float>(rope_rotary_dim) / static_cast<float>(rope_rotary_dim - 2ULL));\n";
             ss << indent << "    }\n";
+            ss << indent << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
+        } else if (n.rope_scaling_kind == RotaryScalingKind::Yarn) {
+            ss << indent << "    const float rope_pos_freq = powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
+            ss << indent << "    const float rope_inv_freq_extrap = 1.0f / rope_pos_freq;\n";
+            ss << indent << "    const float rope_inv_freq_interp = 1.0f / (" << emitScalarFpLiteral(n.rope_scaling_factor) << " * rope_pos_freq);\n";
+            ss << indent << "    const float rope_original_max = " << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            ss << indent << "    const float rope_log_base = logf(rope_base);\n";
+            ss << indent << "    float rope_yarn_low = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / (" << emitScalarFpLiteral(n.rope_yarn_beta_fast) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
+            ss << indent << "    float rope_yarn_high = (static_cast<float>(rope_rotary_dim) * logf(rope_original_max / (" << emitScalarFpLiteral(n.rope_yarn_beta_slow) << " * 6.2831853071795864769f))) / (2.0f * rope_log_base);\n";
+            ss << indent << "    rope_yarn_low = fmaxf(floorf(rope_yarn_low), 0.0f);\n";
+            ss << indent << "    rope_yarn_high = fminf(ceilf(rope_yarn_high), static_cast<float>(rope_rotary_dim - 1ULL));\n";
+            ss << indent << "    if (rope_yarn_low == rope_yarn_high) { rope_yarn_high += 0.001f; }\n";
+            ss << indent << "    const float rope_yarn_ramp = fminf(fmaxf((static_cast<float>(rope_pair_index) - rope_yarn_low) / (rope_yarn_high - rope_yarn_low), 0.0f), 1.0f);\n";
+            ss << indent << "    rope_freq = rope_inv_freq_interp * rope_yarn_ramp + rope_inv_freq_extrap * (1.0f - rope_yarn_ramp);\n";
+        } else if (n.rope_scaling_kind == RotaryScalingKind::LongRope) {
+            if (n.rope_long_rope_short_factors.empty() || n.rope_long_rope_long_factors.empty()) {
+                throw runtime_error("LongRoPE code generation requires non-empty short/long factor lists.");
+            }
+            ss << indent << "    const float rope_seq_len = fmaxf(static_cast<float>(" << seq_extent << ") + "
+               << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
+            ss << indent << "    const float rope_original_max = " << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            ss << indent << "    const float rope_short_factors[] = " << emitFloatArrayLiteral(n.rope_long_rope_short_factors) << ";\n";
+            ss << indent << "    const float rope_long_factors[] = " << emitFloatArrayLiteral(n.rope_long_rope_long_factors) << ";\n";
+            ss << indent << "    const float rope_ext_factor = rope_seq_len > rope_original_max ? rope_long_factors[rope_pair_index] : rope_short_factors[rope_pair_index];\n";
+            ss << indent << "    rope_freq = 1.0f / (rope_ext_factor * powf(rope_base, 2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim)));\n";
+        } else if (n.rope_scaling_kind == RotaryScalingKind::Llama3) {
+            ss << indent << "    const float rope_inv_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
+            ss << indent << "    const float rope_wavelen = 6.2831853071795864769f / rope_inv_freq;\n";
+            ss << indent << "    const float rope_original_max = " << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
+            ss << indent << "    const float rope_low_freq_wavelen = rope_original_max / " << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ";\n";
+            ss << indent << "    const float rope_high_freq_wavelen = rope_original_max / " << emitScalarFpLiteral(n.rope_llama3_high_freq_factor) << ";\n";
+            ss << indent << "    if (rope_wavelen > rope_low_freq_wavelen) {\n";
+            ss << indent << "      rope_freq = rope_inv_freq / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
+            ss << indent << "    } else if (rope_wavelen < rope_high_freq_wavelen) {\n";
+            ss << indent << "      rope_freq = rope_inv_freq;\n";
+            ss << indent << "    } else {\n";
+            ss << indent << "      const float rope_smooth = (rope_original_max / rope_wavelen - " << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ") / (" << emitScalarFpLiteral(n.rope_llama3_high_freq_factor) << " - " << emitScalarFpLiteral(n.rope_llama3_low_freq_factor) << ");\n";
+            ss << indent << "      rope_freq = (1.0f - rope_smooth) * (rope_inv_freq / " << emitScalarFpLiteral(n.rope_scaling_factor) << ") + rope_smooth * rope_inv_freq;\n";
+            ss << indent << "    }\n";
+        } else {
+            ss << indent << "    rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
         }
-        ss << indent << "    const float rope_freq = powf(rope_base, -2.0f * static_cast<float>(rope_pair_index) / static_cast<float>(rope_rotary_dim));\n";
         ss << indent << "    const float rope_theta = rope_position * rope_freq;\n";
         ss << indent << "    float rope_s = sinf(rope_theta);\n";
-        ss << indent << "    const float rope_c = cosf(rope_theta);\n";
+        ss << indent << "    float rope_c = cosf(rope_theta);\n";
+        if (n.rope_attention_factor != 1.0) {
+            ss << indent << "    rope_s *= " << emitScalarFpLiteral(n.rope_attention_factor) << ";\n";
+            ss << indent << "    rope_c *= " << emitScalarFpLiteral(n.rope_attention_factor) << ";\n";
+        }
         if (n.rope_inverse) {
             ss << indent << "    rope_s = -rope_s;\n";
         }

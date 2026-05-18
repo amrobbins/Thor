@@ -3,6 +3,7 @@
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 
+#include <cmath>
 #include <functional>
 #include <sstream>
 #include "DeepLearning/Implementation/ThorError.h"
@@ -441,6 +442,13 @@ json exprNodeToJson(const ExprNode& node) {
     j["rope_scaling_kind"] = static_cast<int>(node.rope_scaling_kind);
     j["rope_scaling_factor"] = node.rope_scaling_factor;
     j["rope_original_max_position_embeddings"] = node.rope_original_max_position_embeddings;
+    j["rope_attention_factor"] = node.rope_attention_factor;
+    j["rope_yarn_beta_fast"] = node.rope_yarn_beta_fast;
+    j["rope_yarn_beta_slow"] = node.rope_yarn_beta_slow;
+    j["rope_llama3_low_freq_factor"] = node.rope_llama3_low_freq_factor;
+    j["rope_llama3_high_freq_factor"] = node.rope_llama3_high_freq_factor;
+    j["rope_long_rope_short_factors"] = node.rope_long_rope_short_factors;
+    j["rope_long_rope_long_factors"] = node.rope_long_rope_long_factors;
     j["rope_allow_in_place_materialization"] = node.rope_allow_in_place_materialization;
     j["rms_norm_normalized_feature_count"] = node.rms_norm_normalized_feature_count;
     j["rms_norm_epsilon"] = node.rms_norm_epsilon;
@@ -525,6 +533,13 @@ ExprNode exprNodeFromJson(const json& j) {
     node.rope_scaling_kind = static_cast<RotaryScalingKind>(j.value("rope_scaling_kind", static_cast<int>(RotaryScalingKind::None)));
     node.rope_scaling_factor = j.value("rope_scaling_factor", 1.0);
     node.rope_original_max_position_embeddings = j.value("rope_original_max_position_embeddings", uint64_t{0});
+    node.rope_attention_factor = j.value("rope_attention_factor", 1.0);
+    node.rope_yarn_beta_fast = j.value("rope_yarn_beta_fast", 32.0);
+    node.rope_yarn_beta_slow = j.value("rope_yarn_beta_slow", 1.0);
+    node.rope_llama3_low_freq_factor = j.value("rope_llama3_low_freq_factor", 1.0);
+    node.rope_llama3_high_freq_factor = j.value("rope_llama3_high_freq_factor", 4.0);
+    node.rope_long_rope_short_factors = j.value("rope_long_rope_short_factors", std::vector<double>{});
+    node.rope_long_rope_long_factors = j.value("rope_long_rope_long_factors", std::vector<double>{});
     node.rope_allow_in_place_materialization = j.value("rope_allow_in_place_materialization", false);
     node.rms_norm_normalized_feature_count = j.value("rms_norm_normalized_feature_count", uint64_t{0});
     node.rms_norm_epsilon = j.value("rms_norm_epsilon", 1.0e-5);
@@ -708,6 +723,18 @@ static std::string formatUIntVectorCanonical(const std::vector<uint64_t>& values
     return ss.str();
 }
 
+static std::string formatDoubleVectorCanonical(const std::vector<double>& values) {
+    std::ostringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0)
+            ss << ",";
+        ss << formatFloatCanonical(values[i]);
+    }
+    ss << "]";
+    return ss.str();
+}
+
 static std::string formatOptionalDTypeCanonical(const std::optional<DataType>& dtype) {
     if (!dtype.has_value()) {
         return "none";
@@ -782,7 +809,14 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                   ";interleaved=" + std::to_string(n.rope_interleaved ? 1 : 0) + ";inverse=" + std::to_string(n.rope_inverse ? 1 : 0) +
                   ";scaling=" + std::to_string(static_cast<int>(n.rope_scaling_kind)) +
                   ";factor=" + formatFloatCanonical(n.rope_scaling_factor) +
-                  ";originalMax=" + std::to_string(n.rope_original_max_position_embeddings) + ")";
+                  ";originalMax=" + std::to_string(n.rope_original_max_position_embeddings) +
+                  ";attentionFactor=" + formatFloatCanonical(n.rope_attention_factor) +
+                  ";yarnBetaFast=" + formatFloatCanonical(n.rope_yarn_beta_fast) +
+                  ";yarnBetaSlow=" + formatFloatCanonical(n.rope_yarn_beta_slow) +
+                  ";llama3LowFreqFactor=" + formatFloatCanonical(n.rope_llama3_low_freq_factor) +
+                  ";llama3HighFreqFactor=" + formatFloatCanonical(n.rope_llama3_high_freq_factor) +
+                  ";longRopeShortFactors=" + formatDoubleVectorCanonical(n.rope_long_rope_short_factors) +
+                  ";longRopeLongFactors=" + formatDoubleVectorCanonical(n.rope_long_rope_long_factors) + ")";
             break;
         case ExprOp::SOFTMAX:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
@@ -2423,11 +2457,46 @@ Expression Expression::rotaryPositionEmbedding(RotaryPositionEmbeddingOptions op
     if (options.scaling_factor <= 0.0) {
         throw std::runtime_error("RoPE scaling factor must be positive.");
     }
+    if (options.attention_factor.has_value() && options.attention_factor.value() <= 0.0) {
+        throw std::runtime_error("RoPE attention_factor must be positive.");
+    }
     if (options.rotary_dim != 0 && ((options.rotary_dim & 1ULL) != 0ULL)) {
         throw std::runtime_error("RoPE rotary_dim must be even.");
     }
     if (options.scaling_kind == RotaryScalingKind::DynamicNTK && options.original_max_position_embeddings == 0) {
         throw std::runtime_error("Dynamic-NTK RoPE scaling requires original_max_position_embeddings.");
+    }
+    if ((options.scaling_kind == RotaryScalingKind::Yarn || options.scaling_kind == RotaryScalingKind::LongRope ||
+         options.scaling_kind == RotaryScalingKind::Llama3) &&
+        options.original_max_position_embeddings == 0) {
+        throw std::runtime_error("This RoPE scaling kind requires original_max_position_embeddings.");
+    }
+    if (options.scaling_kind == RotaryScalingKind::Yarn && (options.yarn_beta_fast <= 0.0 || options.yarn_beta_slow <= 0.0)) {
+        throw std::runtime_error("YaRN RoPE scaling requires positive beta parameters.");
+    }
+    if (options.scaling_kind == RotaryScalingKind::Llama3 &&
+        (options.llama3_low_freq_factor <= 0.0 || options.llama3_high_freq_factor <= 0.0 ||
+         options.llama3_high_freq_factor <= options.llama3_low_freq_factor)) {
+        throw std::runtime_error("Llama3 RoPE scaling requires 0 < low_freq_factor < high_freq_factor.");
+    }
+    if (options.scaling_kind == RotaryScalingKind::LongRope) {
+        if (options.rotary_dim == 0) {
+            throw std::runtime_error("LongRoPE scaling requires an explicit rotary_dim.");
+        }
+        const uint64_t expected = options.rotary_dim / 2;
+        if (options.long_rope_short_factors.size() != expected || options.long_rope_long_factors.size() != expected) {
+            throw std::runtime_error("LongRoPE scaling requires short/long factor lists of length rotary_dim / 2.");
+        }
+        for (double factor : options.long_rope_short_factors) {
+            if (factor <= 0.0) {
+                throw std::runtime_error("LongRoPE short factors must be positive.");
+            }
+        }
+        for (double factor : options.long_rope_long_factors) {
+            if (factor <= 0.0) {
+                throw std::runtime_error("LongRoPE long factors must be positive.");
+            }
+        }
     }
 
     Expression out = unaryOp(*this, ExprOp::ROPE);
@@ -2442,6 +2511,27 @@ Expression Expression::rotaryPositionEmbedding(RotaryPositionEmbeddingOptions op
     node.rope_scaling_kind = options.scaling_kind;
     node.rope_scaling_factor = options.scaling_factor;
     node.rope_original_max_position_embeddings = options.original_max_position_embeddings;
+    node.rope_attention_factor = [&]() -> double {
+        if (options.attention_factor.has_value()) {
+            return options.attention_factor.value();
+        }
+        if (options.scaling_kind == RotaryScalingKind::Yarn) {
+            return options.scaling_factor <= 1.0 ? 1.0 : 0.1 * std::log(options.scaling_factor) + 1.0;
+        }
+        if (options.scaling_kind == RotaryScalingKind::LongRope) {
+            return options.scaling_factor <= 1.0
+                       ? 1.0
+                       : std::sqrt(1.0 + std::log(options.scaling_factor) /
+                                             std::log(static_cast<double>(options.original_max_position_embeddings)));
+        }
+        return 1.0;
+    }();
+    node.rope_yarn_beta_fast = options.yarn_beta_fast;
+    node.rope_yarn_beta_slow = options.yarn_beta_slow;
+    node.rope_llama3_low_freq_factor = options.llama3_low_freq_factor;
+    node.rope_llama3_high_freq_factor = options.llama3_high_freq_factor;
+    node.rope_long_rope_short_factors = options.long_rope_short_factors;
+    node.rope_long_rope_long_factors = options.long_rope_long_factors;
     node.rope_allow_in_place_materialization = options.allow_in_place_materialization;
     if (options.output_dtype.has_value()) {
         node.output_dtype = options.output_dtype.value();

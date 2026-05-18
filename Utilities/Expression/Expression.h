@@ -93,6 +93,9 @@ enum class RotaryScalingKind : uint8_t {
     None = 0,
     Linear = 1,
     DynamicNTK = 2,
+    Yarn = 3,
+    LongRope = 4,
+    Llama3 = 5,
 };
 
 enum class MatmulEpilogue : uint8_t {
@@ -118,6 +121,13 @@ struct RotaryPositionEmbeddingOptions {
     RotaryScalingKind scaling_kind = RotaryScalingKind::None;
     double scaling_factor = 1.0;
     uint64_t original_max_position_embeddings = 0;
+    std::optional<double> attention_factor = std::nullopt;
+    double yarn_beta_fast = 32.0;
+    double yarn_beta_slow = 1.0;
+    double llama3_low_freq_factor = 1.0;
+    double llama3_high_freq_factor = 4.0;
+    std::vector<double> long_rope_short_factors;
+    std::vector<double> long_rope_long_factors;
     std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt;
     std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt;
     // Allows planner/runtime to rotate a private projection output in-place instead of materializing a separate RoPE output.
@@ -217,6 +227,13 @@ struct ExprNode {
     RotaryScalingKind rope_scaling_kind = RotaryScalingKind::None;
     double rope_scaling_factor = 1.0;
     uint64_t rope_original_max_position_embeddings = 0;
+    double rope_attention_factor = 1.0;
+    double rope_yarn_beta_fast = 32.0;
+    double rope_yarn_beta_slow = 1.0;
+    double rope_llama3_low_freq_factor = 1.0;
+    double rope_llama3_high_freq_factor = 4.0;
+    std::vector<double> rope_long_rope_short_factors;
+    std::vector<double> rope_long_rope_long_factors;
     bool rope_allow_in_place_materialization = false;
 
     uint64_t rms_norm_normalized_feature_count = 0;

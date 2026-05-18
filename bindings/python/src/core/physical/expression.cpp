@@ -96,7 +96,10 @@ void bind_physical_expression(nb::module_& physical) {
     auto rotary_scaling_kind = nb::enum_<RotaryScalingKind>(physical, "RotaryScalingKind")
                                    .value("none", RotaryScalingKind::None)
                                    .value("linear", RotaryScalingKind::Linear)
-                                   .value("dynamic_ntk", RotaryScalingKind::DynamicNTK);
+                                   .value("dynamic_ntk", RotaryScalingKind::DynamicNTK)
+                                   .value("yarn", RotaryScalingKind::Yarn)
+                                   .value("longrope", RotaryScalingKind::LongRope)
+                                   .value("llama3", RotaryScalingKind::Llama3);
     rotary_scaling_kind.attr("__module__") = "thor.physical";
 
     physical.def(
@@ -625,6 +628,13 @@ Shorthand for ``self.transpose()``.
                                RotaryScalingKind scaling_kind,
                                double scaling_factor,
                                uint64_t original_max_position_embeddings,
+                               std::optional<double> attention_factor,
+                               double yarn_beta_fast,
+                               double yarn_beta_slow,
+                               double llama3_low_freq_factor,
+                               double llama3_high_freq_factor,
+                               std::vector<double> long_rope_short_factors,
+                               std::vector<double> long_rope_long_factors,
                                nb::object output_dtype_obj,
                                nb::object compute_dtype_obj,
                                bool allow_in_place_materialization) {
@@ -639,6 +649,13 @@ Shorthand for ``self.transpose()``.
             options.scaling_kind = scaling_kind;
             options.scaling_factor = scaling_factor;
             options.original_max_position_embeddings = original_max_position_embeddings;
+            options.attention_factor = attention_factor;
+            options.yarn_beta_fast = yarn_beta_fast;
+            options.yarn_beta_slow = yarn_beta_slow;
+            options.llama3_low_freq_factor = llama3_low_freq_factor;
+            options.llama3_high_freq_factor = llama3_high_freq_factor;
+            options.long_rope_short_factors = std::move(long_rope_short_factors);
+            options.long_rope_long_factors = std::move(long_rope_long_factors);
             options.allow_in_place_materialization = allow_in_place_materialization;
             options.output_dtype = parse_optional_dtype(output_dtype_obj);
             options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
@@ -655,6 +672,13 @@ Shorthand for ``self.transpose()``.
         "scaling_kind"_a = RotaryScalingKind::None,
         "scaling_factor"_a = 1.0,
         "original_max_position_embeddings"_a = 0,
+        "attention_factor"_a.none() = nb::none(),
+        "yarn_beta_fast"_a = 32.0,
+        "yarn_beta_slow"_a = 1.0,
+        "llama3_low_freq_factor"_a = 1.0,
+        "llama3_high_freq_factor"_a = 4.0,
+        "long_rope_short_factors"_a = std::vector<double>{},
+        "long_rope_long_factors"_a = std::vector<double>{},
         "output_dtype"_a.none() = nb::none(),
         "compute_dtype"_a.none() = nb::none(),
         "allow_in_place_materialization"_a = false,
@@ -680,6 +704,13 @@ which is used by autodiff.
                                RotaryScalingKind scaling_kind,
                                double scaling_factor,
                                uint64_t original_max_position_embeddings,
+                               std::optional<double> attention_factor,
+                               double yarn_beta_fast,
+                               double yarn_beta_slow,
+                               double llama3_low_freq_factor,
+                               double llama3_high_freq_factor,
+                               std::vector<double> long_rope_short_factors,
+                               std::vector<double> long_rope_long_factors,
                                nb::object output_dtype_obj,
                                nb::object compute_dtype_obj,
                                bool allow_in_place_materialization) {
@@ -694,6 +725,13 @@ which is used by autodiff.
             options.scaling_kind = scaling_kind;
             options.scaling_factor = scaling_factor;
             options.original_max_position_embeddings = original_max_position_embeddings;
+            options.attention_factor = attention_factor;
+            options.yarn_beta_fast = yarn_beta_fast;
+            options.yarn_beta_slow = yarn_beta_slow;
+            options.llama3_low_freq_factor = llama3_low_freq_factor;
+            options.llama3_high_freq_factor = llama3_high_freq_factor;
+            options.long_rope_short_factors = std::move(long_rope_short_factors);
+            options.long_rope_long_factors = std::move(long_rope_long_factors);
             options.allow_in_place_materialization = allow_in_place_materialization;
             options.output_dtype = parse_optional_dtype(output_dtype_obj);
             options.compute_dtype = parse_optional_dtype(compute_dtype_obj);
@@ -710,6 +748,13 @@ which is used by autodiff.
         "scaling_kind"_a = RotaryScalingKind::None,
         "scaling_factor"_a = 1.0,
         "original_max_position_embeddings"_a = 0,
+        "attention_factor"_a.none() = nb::none(),
+        "yarn_beta_fast"_a = 32.0,
+        "yarn_beta_slow"_a = 1.0,
+        "llama3_low_freq_factor"_a = 1.0,
+        "llama3_high_freq_factor"_a = 4.0,
+        "long_rope_short_factors"_a = std::vector<double>{},
+        "long_rope_long_factors"_a = std::vector<double>{},
         "output_dtype"_a.none() = nb::none(),
         "compute_dtype"_a.none() = nb::none(),
         "allow_in_place_materialization"_a = false,

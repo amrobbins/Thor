@@ -666,23 +666,6 @@ def _build_public_attention_layer_case(
             pytest.skip("thor.layers.Attention is not exposed in this build")
 
         effective_rope_rotary_dim = rope_rotary_dim if rope_rotary_dim != 0 else qk_dim
-        if use_rope:
-            # The public Attention layer currently exposes only its default RoPE configuration.
-            # Keep this helper accepting the same metadata knobs as the expression builders so
-            # benchmark/test call sites stay uniform, but fail loudly if a case asks the public
-            # API to exercise a non-default RoPE variant it cannot actually configure yet.
-            if effective_rope_rotary_dim != qk_dim:
-                raise AssertionError(
-                    "thor.layers.Attention benchmark helper cannot configure a non-default RoPE rotary_dim yet.")
-            if rope_interleaved:
-                raise AssertionError("thor.layers.Attention benchmark helper cannot configure interleaved RoPE yet.")
-            if rope_scaling_kind != RotaryScalingKind.none:
-                raise AssertionError("thor.layers.Attention benchmark helper cannot configure RoPE scaling yet.")
-            if rope_scaling_factor != 1.0:
-                raise AssertionError("thor.layers.Attention benchmark helper cannot configure a RoPE scaling factor yet.")
-            if rope_original_max_position_embeddings != 0:
-                raise AssertionError(
-                    "thor.layers.Attention benchmark helper cannot configure original_max_position_embeddings yet.")
 
         if mask_kind == AttentionMaskKind.none:
             mask_kind_name = "none"
@@ -716,6 +699,11 @@ def _build_public_attention_layer_case(
             mask_kind=mask_kind_name,
             attention_scale=1.0 / math.sqrt(float(qk_dim)),
             use_rope=use_rope,
+            rope_rotary_dim=rope_rotary_dim,
+            rope_interleaved=rope_interleaved,
+            rope_scaling_kind=_rotary_scaling_kind_name(rope_scaling_kind),
+            rope_scaling_factor=rope_scaling_factor,
+            rope_original_max_position_embeddings=rope_original_max_position_embeddings,
             rope_in_place=rope_in_place,
             weights_data_type=dtype,
             compute_data_type=thor.DataType.fp32,
