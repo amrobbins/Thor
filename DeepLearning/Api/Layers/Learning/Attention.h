@@ -86,6 +86,13 @@ class Attention : public CustomLayer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Attention>(*this); }
     std::string getLayerType() const override { return "Attention"; }
 
+    nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
+                             Stream stream,
+                             bool saveOptimizerState,
+                             ThorImplementation::StampedNetwork& stampedNetwork) const override;
+    static void deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader, const nlohmann::json& j, Network* network);
+    nlohmann::json architectureJson() const override;
+
     uint32_t getNumHeads() const { return numHeads; }
     uint32_t getNumKeyValueHeads() const { return numKeyValueHeads; }
     uint32_t getHeadDim() const { return headDim; }
