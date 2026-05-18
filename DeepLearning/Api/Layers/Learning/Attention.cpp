@@ -16,6 +16,12 @@ using json = nlohmann::json;
 
 namespace {
 
+constexpr const char* kAttentionFeatureInputName = "feature_input";
+constexpr const char* kAttentionSequenceLengthsInputName = "sequence_lengths";
+constexpr const char* kAttentionRaggedOffsetsInputName = "ragged_offsets";
+constexpr const char* kAttentionDropoutSeedInputName = "__attention_dropout_seed";
+constexpr const char* kAttentionDropoutOffsetInputName = "__attention_dropout_offset";
+
 std::string dtypeName(DataType dtype) {
     switch (dtype) {
         case DataType::FP16:
@@ -54,6 +60,54 @@ void requireRank2FeatureInput(const Thor::Tensor& tensor) {
     if (dims[0] == 0 || dims[1] == 0) {
         throw std::invalid_argument("Attention feature input dimensions must be non-zero.");
     }
+}
+
+void requireSequenceLengthsInput(const Thor::Tensor& tensor) {
+    if (!tensor.isInitialized()) {
+        throw std::invalid_argument("Attention sequence lengths tensor is not initialized.");
+    }
+    if (tensor.getDataType() != DataType::INT32) {
+        throw std::invalid_argument("Attention sequenceLengthsInput must have dtype int32.");
+    }
+    if (tensor.getDimensions() != std::vector<uint64_t>{1}) {
+        throw std::invalid_argument("Attention sequenceLengthsInput must have logical shape [1].");
+    }
+}
+
+void requireRaggedOffsetsInput(const Thor::Tensor& tensor) {
+    if (!tensor.isInitialized()) {
+        throw std::invalid_argument("Attention ragged offsets tensor is not initialized.");
+    }
+    if (tensor.getDataType() != DataType::INT32) {
+        throw std::invalid_argument("Attention raggedOffsetsInput must have dtype int32.");
+    }
+    if (tensor.getDimensions() != std::vector<uint64_t>{2}) {
+        throw std::invalid_argument("Attention raggedOffsetsInput must have logical shape [2].");
+    }
+}
+
+std::vector<std::string> publicAttentionInputNames(bool useSequenceLengths, bool useRaggedOffsets) {
+    std::vector<std::string> names{kAttentionFeatureInputName};
+    if (useSequenceLengths) {
+        names.push_back(kAttentionSequenceLengthsInputName);
+    }
+    if (useRaggedOffsets) {
+        names.push_back(kAttentionRaggedOffsetsInputName);
+    }
+    return names;
+}
+
+Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& featureInput,
+                                             const std::optional<Thor::Tensor>& sequenceLengthsInput,
+                                             const std::optional<Thor::Tensor>& raggedOffsetsInput) {
+    Thor::CustomLayer::TensorMap inputInterface{{kAttentionFeatureInputName, featureInput}};
+    if (sequenceLengthsInput.has_value()) {
+        inputInterface[kAttentionSequenceLengthsInputName] = sequenceLengthsInput.value();
+    }
+    if (raggedOffsetsInput.has_value()) {
+        inputInterface[kAttentionRaggedOffsetsInputName] = raggedOffsetsInput.value();
+    }
+    return inputInterface;
 }
 
 std::shared_ptr<Thor::ParameterSpecification> makeParameter(const std::string& name,
@@ -233,6 +287,11 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                                                               int64_t diagonalRightBound,
                                                               bool useAlibiMask,
                                                               std::optional<double> attentionScale,
+                                                              float dropoutProbability,
+                                                              int64_t dropoutSeed,
+                                                              int64_t dropoutOffset,
+                                                              bool useSequenceLengths,
+                                                              bool useRaggedOffsets,
                                                               DataType inputDType,
                                                               DataType weightsDType,
                                                               DataType computeDType,
@@ -244,17 +303,37 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
     using ThorImplementation::Expression;
     using ThorImplementation::FusedEquation;
     using ThorImplementation::Tensor;
+    using ThorImplementation::TensorDescriptor;
+    using ThorImplementation::TensorPlacement;
 
     const bool usePackedQkvProjection = usePackedQkvProjectionForLayer(useRope);
     std::vector<std::string> expectedInputs;
     if (usePackedQkvProjection) {
-        expectedInputs = {"feature_input", "qkv_weights", "output_weights"};
+        expectedInputs = {kAttentionFeatureInputName};
+        if (useSequenceLengths) {
+            expectedInputs.push_back(kAttentionSequenceLengthsInputName);
+        }
+        if (useRaggedOffsets) {
+            expectedInputs.push_back(kAttentionRaggedOffsetsInputName);
+        }
+        expectedInputs.push_back("qkv_weights");
+        expectedInputs.push_back("output_weights");
         if (hasBias) {
             expectedInputs.push_back("qkv_bias");
             expectedInputs.push_back("output_bias");
         }
     } else {
-        expectedInputs = {"feature_input", "query_weights", "key_weights", "value_weights", "output_weights"};
+        expectedInputs = {kAttentionFeatureInputName};
+        if (useSequenceLengths) {
+            expectedInputs.push_back(kAttentionSequenceLengthsInputName);
+        }
+        if (useRaggedOffsets) {
+            expectedInputs.push_back(kAttentionRaggedOffsetsInputName);
+        }
+        expectedInputs.push_back("query_weights");
+        expectedInputs.push_back("key_weights");
+        expectedInputs.push_back("value_weights");
+        expectedInputs.push_back("output_weights");
         if (hasBias) {
             expectedInputs.push_back("query_bias");
             expectedInputs.push_back("key_bias");
@@ -283,6 +362,11 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
          diagonalRightBound,
          useAlibiMask,
          attentionScale,
+         dropoutProbability,
+         dropoutSeed,
+         dropoutOffset,
+         useSequenceLengths,
+         useRaggedOffsets,
          inputDType,
          weightsDType,
          computeDType,
@@ -291,7 +375,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                       Stream& stream) -> DynamicExpressionBuild {
             (void)stream;
 
-            Tensor featureInput = inputs.at("feature_input");
+            Tensor featureInput = inputs.at(kAttentionFeatureInputName);
             const auto inputDims = featureInput.getDimensions();
             if (inputDims.size() != 3) {
                 throw std::runtime_error("Attention runtime feature input must be [batch, sequence, features].");
@@ -344,9 +428,36 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                 validateBias("output_bias", outputFeatures);
             }
 
+            std::optional<Tensor> sequenceLengths;
+            if (useSequenceLengths) {
+                Tensor seq = inputs.at(kAttentionSequenceLengthsInputName);
+                if (seq.getDataType() != DataType::INT32) {
+                    throw std::runtime_error("Attention sequence_lengths dtype must be INT32.");
+                }
+                const auto seqDims = seq.getDimensions();
+                if (seqDims == std::vector<uint64_t>{batch, 1}) {
+                    seq.reshape({batch});
+                } else if (seqDims != std::vector<uint64_t>{batch}) {
+                    throw std::runtime_error("Attention sequence_lengths shape must be [batch] or [batch, 1].");
+                }
+                sequenceLengths = std::move(seq);
+            }
+
+            std::optional<Tensor> raggedOffsets;
+            if (useRaggedOffsets) {
+                Tensor offsets = inputs.at(kAttentionRaggedOffsetsInputName);
+                if (offsets.getDataType() != DataType::INT32) {
+                    throw std::runtime_error("Attention ragged_offsets dtype must be INT32.");
+                }
+                if (offsets.getTotalNumElements() < batch + 1) {
+                    throw std::runtime_error("Attention ragged_offsets must contain at least batch+1 elements.");
+                }
+                raggedOffsets = offsets.aliasView({batch + 1}, {1}, 0);
+            }
+
             featureInput.reshape({batch * sequenceLength, inputFeatures});
 
-            Expression x = Expression::input("feature_input", inputDType, inputDType);
+            Expression x = Expression::input(kAttentionFeatureInputName, inputDType, inputDType);
             Expression ow = Expression::input("output_weights", weightsDType, weightsDType);
 
             struct ProjectedQkv {
@@ -441,11 +552,55 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
             options.use_alibi_mask = useAlibiMask;
             options.compute_dtype = computeDType;
             options.output_dtype = outputDType;
+            options.dropout_probability = dropoutProbability;
             if (attentionScale.has_value()) {
                 options.attention_scale = static_cast<float>(attentionScale.value());
             }
 
-            Expression attn = Expression::scaledDotProductAttention(q, k, v, options).withOutputDType(outputDType);
+            Expression attn = [&]() {
+                if (useRaggedOffsets) {
+                    Expression seqLenExpr = Expression::input(kAttentionSequenceLengthsInputName, DataType::INT32, DataType::INT32);
+                    Expression raggedOffsetsExpr = Expression::input(kAttentionRaggedOffsetsInputName, DataType::INT32, DataType::INT32);
+                    if (dropoutProbability > 0.0f) {
+                        Expression dropoutSeedExpr = Expression::input(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
+                        Expression dropoutOffsetExpr = Expression::input(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
+                        return Expression::scaledDotProductAttentionRagged(
+                                   q,
+                                   k,
+                                   v,
+                                   seqLenExpr,
+                                   seqLenExpr,
+                                   raggedOffsetsExpr,
+                                   raggedOffsetsExpr,
+                                   dropoutSeedExpr,
+                                   dropoutOffsetExpr,
+                                   options)
+                            .withOutputDType(outputDType);
+                    }
+                    return Expression::scaledDotProductAttentionRagged(
+                               q, k, v, seqLenExpr, seqLenExpr, raggedOffsetsExpr, raggedOffsetsExpr, options)
+                        .withOutputDType(outputDType);
+                }
+                if (useSequenceLengths) {
+                    Expression seqLenExpr = Expression::input(kAttentionSequenceLengthsInputName, DataType::INT32, DataType::INT32);
+                    if (dropoutProbability > 0.0f) {
+                        Expression dropoutSeedExpr = Expression::input(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
+                        Expression dropoutOffsetExpr = Expression::input(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
+                        return Expression::scaledDotProductAttention(
+                                   q, k, v, seqLenExpr, seqLenExpr, dropoutSeedExpr, dropoutOffsetExpr, options)
+                            .withOutputDType(outputDType);
+                    }
+                    return Expression::scaledDotProductAttention(q, k, v, seqLenExpr, seqLenExpr, options).withOutputDType(outputDType);
+                }
+                if (dropoutProbability > 0.0f) {
+                    Expression dropoutSeedExpr = Expression::input(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
+                    Expression dropoutOffsetExpr = Expression::input(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
+                    return Expression::scaledDotProductAttentionWithDropout(
+                               q, k, v, dropoutSeedExpr, dropoutOffsetExpr, options)
+                        .withOutputDType(outputDType);
+                }
+                return Expression::scaledDotProductAttention(q, k, v, options).withOutputDType(outputDType);
+            }();
             Expression merged = attn.reshape({batch * sequenceLength, checkedMul(numHeads, valueDim, "merged head width")});
             Expression out = Expression::matmul(merged, ow, false, false, computeDType, outputDType);
             if (hasBias) {
@@ -456,7 +611,26 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
             auto expressionOutputs = Expression::outputs({{"feature_output", out}});
 
             DynamicExpression::TensorMap stampInputs = inputs;
-            stampInputs["feature_input"] = featureInput;
+            stampInputs[kAttentionFeatureInputName] = featureInput;
+            if (useSequenceLengths) {
+                stampInputs[kAttentionSequenceLengthsInputName] = sequenceLengths.value();
+            }
+            if (useRaggedOffsets) {
+                stampInputs[kAttentionRaggedOffsetsInputName] = raggedOffsets.value();
+            }
+            if (dropoutProbability > 0.0f) {
+                auto makeInt64Scalar = [&](int64_t value) {
+                    Tensor scalar(featureInput.getPlacement(), TensorDescriptor(DataType::INT64, {1, 1, 1, 1}));
+                    Tensor host(TensorPlacement(TensorPlacement::MemDevices::CPU), TensorDescriptor(DataType::INT64, {1, 1, 1, 1}));
+                    host.setElement<int64_t>({0, 0, 0, 0}, value);
+                    scalar.copyFromAsync(host, stream);
+                    Event copyDone = stream.putEvent(false, true);
+                    copyDone.synchronize();
+                    return scalar;
+                };
+                stampInputs[kAttentionDropoutSeedInputName] = makeInt64Scalar(dropoutSeed);
+                stampInputs[kAttentionDropoutOffsetInputName] = makeInt64Scalar(dropoutOffset);
+            }
 
             return DynamicExpressionBuild{
                 std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum())),
@@ -483,6 +657,15 @@ void Attention::Builder::verifyConfig() const {
         throw std::invalid_argument("Attention::Builder requires numHeads().");
     }
     requireRank2FeatureInput(_featureInput.value());
+    if (_sequenceLengthsInput.has_value()) {
+        requireSequenceLengthsInput(_sequenceLengthsInput.value());
+    }
+    if (_raggedOffsetsInput.has_value()) {
+        requireRaggedOffsetsInput(_raggedOffsetsInput.value());
+        if (!_sequenceLengthsInput.has_value()) {
+            throw std::invalid_argument("Attention raggedOffsetsInput requires sequenceLengthsInput.");
+        }
+    }
     if (_numHeads.value() == 0) {
         throw std::invalid_argument("Attention numHeads must be non-zero.");
     }
@@ -533,6 +716,14 @@ void Attention::Builder::verifyConfig() const {
                      maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {
         throw std::invalid_argument("Attention ALiBi cannot currently be combined with bottom-right/decode masks in cuDNN SDPA.");
     }
+    const float dropoutProbability = _dropoutProbability.value_or(0.0f);
+    if (!std::isfinite(dropoutProbability) || dropoutProbability < 0.0f || dropoutProbability >= 1.0f) {
+        throw std::invalid_argument("Attention dropoutProbability must be finite and in [0, 1).");
+    }
+    if (dropoutProbability > 0.0f && (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
+                                      maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {
+        throw std::invalid_argument("Attention dropout cannot currently be combined with bottom-right/decode masks in cuDNN SDPA.");
+    }
     if (_ropeInPlace.value_or(false) && !_useRope.value_or(false)) {
         throw std::invalid_argument("Attention ropeInPlace requires useRope to be enabled.");
     }
@@ -575,6 +766,15 @@ Attention Attention::Builder::build() {
     }
     if (!_useAlibiMask.has_value()) {
         _useAlibiMask = false;
+    }
+    if (!_dropoutProbability.has_value()) {
+        _dropoutProbability = 0.0f;
+    }
+    if (!_dropoutSeed.has_value()) {
+        _dropoutSeed = 0;
+    }
+    if (!_dropoutOffset.has_value()) {
+        _dropoutOffset = 0;
     }
     if (!_useRope.has_value()) {
         _useRope = false;
@@ -657,11 +857,17 @@ Attention Attention::Builder::build() {
                                             _diagonalRightBound.value(),
                                             _useAlibiMask.value(),
                                             _attentionScale,
+                                            _dropoutProbability.value(),
+                                            _dropoutSeed.value(),
+                                            _dropoutOffset.value(),
+                                            _sequenceLengthsInput.has_value(),
+                                            _raggedOffsetsInput.has_value(),
                                             _featureInput->getDataType(),
                                             _weightsDataType.value(),
                                             _computeDataType.value(),
                                             _outputDataType.value()),
-                    {{{"feature_input", _featureInput.value()}}},
+                    publicAttentionInputNames(_sequenceLengthsInput.has_value(), _raggedOffsetsInput.has_value()),
+                    {publicAttentionInputInterface(_featureInput.value(), _sequenceLengthsInput, _raggedOffsetsInput)},
                     {{{"feature_output", output}}},
                     std::move(parameters),
                     _numHeads.value(),
@@ -678,6 +884,11 @@ Attention Attention::Builder::build() {
                     _diagonalRightBound.value(),
                     _useAlibiMask.value(),
                     _attentionScale,
+                    _dropoutProbability.value(),
+                    _dropoutSeed.value(),
+                    _dropoutOffset.value(),
+                    _sequenceLengthsInput,
+                    _raggedOffsetsInput,
                     _weightsDataType.value(),
                     _computeDataType.value(),
                     _outputDataType.value());
@@ -708,6 +919,11 @@ json Attention::architectureJson() const {
     j["diagonal_right_bound"] = diagonalRightBound;
     j["use_alibi_mask"] = useAlibiMask;
     j["attention_scale"] = attentionScale.has_value() ? json(attentionScale.value()) : json(nullptr);
+    j["dropout_probability"] = dropoutProbability;
+    j["dropout_seed"] = dropoutSeed;
+    j["dropout_offset"] = dropoutOffset;
+    j["use_sequence_lengths"] = sequenceLengthsInput.has_value();
+    j["use_ragged_offsets"] = raggedOffsetsInput.has_value();
     j["weights_data_type"] = weightsDataType;
     j["compute_data_type"] = computeDataType;
     j["output_data_type"] = outputDataType;
@@ -718,6 +934,12 @@ json Attention::architectureJson() const {
         throw std::runtime_error("Attention serialization requires one feature input and one feature output.");
     }
     j["feature_input"] = input.value().architectureJson();
+    if (sequenceLengthsInput.has_value()) {
+        j["sequence_lengths_input"] = sequenceLengthsInput.value().architectureJson();
+    }
+    if (raggedOffsetsInput.has_value()) {
+        j["ragged_offsets_input"] = raggedOffsetsInput.value().architectureJson();
+    }
     j["feature_output"] = output.value().architectureJson();
     j["parameters"] = getParametersArchitectureJson()["parameters"];
     return j;
@@ -744,6 +966,21 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     Tensor featureInput = network->getApiTensorByOriginalId(inputOriginalId);
     Tensor featureOutput = Tensor::deserialize(j.at("feature_output"), archiveReader.get());
 
+    std::optional<Tensor> sequenceLengthsInput = std::nullopt;
+    if (j.value("use_sequence_lengths", false) || j.contains("sequence_lengths_input")) {
+        if (!j.contains("sequence_lengths_input")) {
+            throw std::runtime_error("Attention deserialize missing sequence_lengths_input.");
+        }
+        sequenceLengthsInput = network->getApiTensorByOriginalId(j.at("sequence_lengths_input").at("id").get<uint64_t>());
+    }
+    std::optional<Tensor> raggedOffsetsInput = std::nullopt;
+    if (j.value("use_ragged_offsets", false) || j.contains("ragged_offsets_input")) {
+        if (!j.contains("ragged_offsets_input")) {
+            throw std::runtime_error("Attention deserialize missing ragged_offsets_input.");
+        }
+        raggedOffsetsInput = network->getApiTensorByOriginalId(j.at("ragged_offsets_input").at("id").get<uint64_t>());
+    }
+
     const std::vector<uint64_t> inputDims = featureInput.getDimensions();
     if (inputDims.size() != 2) {
         throw std::runtime_error("Attention deserialize expected rank-2 feature_input.");
@@ -768,6 +1005,9 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     if (j.contains("attention_scale") && !j.at("attention_scale").is_null()) {
         attentionScale = j.at("attention_scale").get<double>();
     }
+    const float dropoutProbability = j.value("dropout_probability", 0.0f);
+    const int64_t dropoutSeed = j.value("dropout_seed", int64_t{0});
+    const int64_t dropoutOffset = j.value("dropout_offset", int64_t{0});
     const DataType weightsDataType = j.at("weights_data_type").get<DataType>();
     const DataType computeDataType = j.at("compute_data_type").get<DataType>();
     const DataType outputDataType = j.at("output_data_type").get<DataType>();
@@ -829,11 +1069,17 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                                             diagonalRightBound,
                                             useAlibiMask,
                                             attentionScale,
+                                            dropoutProbability,
+                                            dropoutSeed,
+                                            dropoutOffset,
+                                            sequenceLengthsInput.has_value(),
+                                            raggedOffsetsInput.has_value(),
                                             featureInput.getDataType(),
                                             weightsDataType,
                                             computeDataType,
                                             outputDataType),
-                    {{{"feature_input", featureInput}}},
+                    publicAttentionInputNames(sequenceLengthsInput.has_value(), raggedOffsetsInput.has_value()),
+                    {publicAttentionInputInterface(featureInput, sequenceLengthsInput, raggedOffsetsInput)},
                     {{{"feature_output", featureOutput}}},
                     std::move(parameters),
                     numHeads,
@@ -850,6 +1096,11 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                     diagonalRightBound,
                     useAlibiMask,
                     attentionScale,
+                    dropoutProbability,
+                    dropoutSeed,
+                    dropoutOffset,
+                    sequenceLengthsInput,
+                    raggedOffsetsInput,
                     weightsDataType,
                     computeDataType,
                     outputDataType);

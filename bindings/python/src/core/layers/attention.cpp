@@ -4,6 +4,7 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -145,7 +146,12 @@ void bind_attention(nb::module_& layers) {
            std::shared_ptr<Initializer> weights_initializer,
            std::shared_ptr<Initializer> bias_initializer,
            std::shared_ptr<Optimizer> optimizer,
-           bool rope_in_place) {
+           bool rope_in_place,
+           float dropout_probability,
+           int64_t dropout_seed,
+           int64_t dropout_offset,
+           std::optional<Tensor> sequence_lengths,
+           std::optional<Tensor> ragged_offsets) {
             if (num_heads == 0) {
                 throw nb::value_error("Attention instance: num_heads must be > 0.");
             }
@@ -161,6 +167,9 @@ void bind_attention(nb::module_& layers) {
             if (output_features.has_value() && output_features.value() == 0) {
                 throw nb::value_error("Attention instance: output_features must be > 0.");
             }
+            if (!std::isfinite(dropout_probability) || dropout_probability < 0.0f || dropout_probability >= 1.0f) {
+                throw nb::value_error("Attention instance: dropout_probability must be finite and in [0, 1).");
+            }
 
             Attention::Builder builder;
             builder.network(network)
@@ -168,6 +177,13 @@ void bind_attention(nb::module_& layers) {
                 .numHeads(num_heads)
                 .hasBias(has_bias)
                 .maskKind(parseAttentionMaskKind(mask_kind));
+
+            if (sequence_lengths.has_value()) {
+                builder.sequenceLengthsInput(sequence_lengths.value());
+            }
+            if (ragged_offsets.has_value()) {
+                builder.raggedOffsetsInput(ragged_offsets.value());
+            }
 
             if (num_key_value_heads.has_value()) {
                 builder.numKeyValueHeads(num_key_value_heads.value());
@@ -192,6 +208,9 @@ void bind_attention(nb::module_& layers) {
             }
             if (attention_scale.has_value()) {
                 builder.attentionScale(attention_scale.value());
+            }
+            if (dropout_probability != 0.0f) {
+                builder.dropoutProbability(dropout_probability).dropoutSeed(dropout_seed).dropoutOffset(dropout_offset);
             }
             if (use_rope) {
                 ThorImplementation::RotaryPositionEmbeddingOptions rope_options;
@@ -268,6 +287,11 @@ void bind_attention(nb::module_& layers) {
         "bias_initializer"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "rope_in_place"_a = false,
+        "dropout_probability"_a = 0.0f,
+        "dropout_seed"_a = int64_t{0},
+        "dropout_offset"_a = int64_t{0},
+        "sequence_lengths"_a.none() = nb::none(),
+        "ragged_offsets"_a.none() = nb::none(),
         R"nbdoc(
 Public transformer attention layer.
 
@@ -293,6 +317,13 @@ hot path consumes ``[batch, sequence, input_features]``.
     attention.def("get_diagonal_right_bound", &Attention::getDiagonalRightBound);
     attention.def("get_use_alibi_mask", &Attention::getUseAlibiMask);
     attention.def("get_attention_scale", &Attention::getAttentionScale);
+    attention.def("get_dropout_probability", &Attention::getDropoutProbability);
+    attention.def("get_dropout_seed", &Attention::getDropoutSeed);
+    attention.def("get_dropout_offset", &Attention::getDropoutOffset);
+    attention.def("get_use_sequence_lengths", &Attention::getUseSequenceLengths);
+    attention.def("get_use_ragged_offsets", &Attention::getUseRaggedOffsets);
+    attention.def("get_sequence_lengths_input", [](Attention& self) { return self.getSequenceLengthsInput(); });
+    attention.def("get_ragged_offsets_input", [](Attention& self) { return self.getRaggedOffsetsInput(); });
     attention.def("get_weights_data_type", &Attention::getWeightsDataType);
     attention.def("get_compute_data_type", &Attention::getComputeDataType);
     attention.def("get_output_data_type", &Attention::getOutputDataType);

@@ -523,8 +523,8 @@ Shorthand for ``self.transpose()``.
         if (has_q_ragged_offsets && has_page_table_k) {
             throw std::runtime_error("ragged attention and paged KV cache cannot be combined.");
         }
-        if ((has_bias || uses_dropout) && has_q_ragged_offsets) {
-            throw std::runtime_error("ragged attention cannot currently be combined with additive bias or dropout.");
+        if (has_bias && has_q_ragged_offsets) {
+            throw std::runtime_error("ragged attention cannot currently be combined with additive bias.");
         }
         if (has_page_table_k && has_bias) {
             throw std::runtime_error("paged KV attention cannot currently be combined with additive bias.");
@@ -569,6 +569,12 @@ Shorthand for ``self.transpose()``.
             const Expression& kv_seq_len = nb::cast<Expression>(kv_seq_len_obj);
             const Expression& q_offsets = nb::cast<Expression>(q_ragged_offsets_obj);
             const Expression& kv_offsets = nb::cast<Expression>(kv_ragged_offsets_obj);
+            if (uses_dropout) {
+                const Expression& dropout_seed = nb::cast<Expression>(dropout_seed_obj);
+                const Expression& dropout_offset = nb::cast<Expression>(dropout_offset_obj);
+                return Expression::scaledDotProductAttentionRagged(
+                    q, k, v, q_seq_len, kv_seq_len, q_offsets, kv_offsets, dropout_seed, dropout_offset, std::move(options));
+            }
             return Expression::scaledDotProductAttentionRagged(q, k, v, q_seq_len, kv_seq_len, q_offsets, kv_offsets, std::move(options));
         }
 

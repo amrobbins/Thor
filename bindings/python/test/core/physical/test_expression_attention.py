@@ -1866,6 +1866,84 @@ def test_attention_forward_ragged_offsets_bshd_packed_matches_reference():
 
 
 @pytest.mark.cuda
+def test_attention_forward_ragged_offsets_with_dropout_is_deterministic():
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    dropout_seed = ex.input("dropout_seed")
+    dropout_offset = ex.input("dropout_offset")
+    scale = 0.58 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        dropout_probability=0.5,
+        dropout_seed=dropout_seed,
+        dropout_offset=dropout_offset,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
+    q_lengths = np.asarray([4, 2], dtype=np.int32)
+    kv_lengths = np.asarray([5, 3], dtype=np.int32)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(_pack_bshd_ragged_storage(q_np, q_lengths), dtype, stream),
+        "k": _host_to_gpu(_pack_bshd_ragged_storage(k_np, kv_lengths), dtype, stream),
+        "v": _host_to_gpu(_pack_bshd_ragged_storage(v_np, kv_lengths), dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "dropout_seed": _dropout_scalar_gpu(1234, stream),
+        "dropout_offset": _dropout_scalar_gpu(5678, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 6, 2, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+
+    stamped1 = eq.stamp(inputs_gpu, stream)
+    stamped1.run()
+    got1 = _copy_to_host(stamped1.output(), dtype, stream)
+
+    stamped2 = eq.stamp(inputs_gpu, stream)
+    stamped2.run()
+    got2 = _copy_to_host(stamped2.output(), dtype, stream)
+    np.testing.assert_array_equal(
+        _packed_bshd_ragged_valid_values(got1, q_lengths),
+        _packed_bshd_ragged_valid_values(got2, q_lengths),
+    )
+
+    inputs_gpu_different_offset = dict(inputs_gpu)
+    inputs_gpu_different_offset["dropout_offset"] = _dropout_scalar_gpu(5679, stream)
+    stamped3 = eq.stamp(inputs_gpu_different_offset, stream)
+    stamped3.run()
+    got3 = _copy_to_host(stamped3.output(), dtype, stream)
+    assert np.max(
+        np.abs(
+            _packed_bshd_ragged_valid_values(got1, q_lengths).astype(np.float32)
+            - _packed_bshd_ragged_valid_values(got3, q_lengths).astype(np.float32)
+        )
+    ) > 1.0e-3
+
+
+@pytest.mark.cuda
 def test_attention_forward_ragged_offsets_gqa_bshd_packed_matches_reference():
     dtype = thor.DataType.fp16
     q = ex.input("q")
@@ -2166,7 +2244,7 @@ def test_attention_ragged_offsets_reject_unsupported_combinations_early():
             compute_dtype=thor.DataType.fp32,
         )
 
-    with pytest.raises(RuntimeError, match="ragged attention cannot currently be combined"):
+    with pytest.raises(RuntimeError, match="ragged attention cannot currently be combined with additive bias"):
         ex.scaled_dot_product_attention(
             q,
             k,
@@ -2184,25 +2262,24 @@ def test_attention_ragged_offsets_reject_unsupported_combinations_early():
             compute_dtype=thor.DataType.fp32,
         )
 
-    with pytest.raises(RuntimeError, match="ragged attention cannot currently be combined"):
-        ex.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            q_seq_len=q_seq_len,
-            kv_seq_len=kv_seq_len,
-            q_ragged_offsets=q_offsets,
-            kv_ragged_offsets=kv_offsets,
-            q_layout=AttentionTensorLayout.bshd,
-            k_layout=AttentionTensorLayout.bshd,
-            v_layout=AttentionTensorLayout.bshd,
-            o_layout=AttentionTensorLayout.bshd,
-            dropout_probability=0.25,
-            dropout_seed=dropout_seed,
-            dropout_offset=dropout_offset,
-            output_dtype=dtype,
-            compute_dtype=thor.DataType.fp32,
-        )
+    ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        dropout_probability=0.25,
+        dropout_seed=dropout_seed,
+        dropout_offset=dropout_offset,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
 
 
 @pytest.mark.cuda
@@ -4510,6 +4587,66 @@ def test_public_attention_accepts_rope_scaling_parameterizations(scaling_kind, k
     )
     assert layer.get_feature_output().get_dimensions() == [7, 32]
     assert layer._debug_qkv_projection_mode() == "split"
+
+
+def test_public_attention_exposes_dropout_configuration():
+    if not hasattr(thor.layers, "Attention"):
+        pytest.skip("thor.layers.Attention is not exposed in this build")
+
+    dtype = thor.DataType.fp16
+    network = thor.Network("test_public_attention_exposes_dropout_configuration")
+    feature_input = thor.layers.NetworkInput(network, "feature_input", [7, 32], dtype).get_feature_output()
+    layer = thor.layers.Attention(
+        network,
+        feature_input,
+        num_heads=2,
+        num_key_value_heads=2,
+        head_dim=8,
+        value_dim=8,
+        output_features=32,
+        has_bias=False,
+        mask_kind="causal_top_left",
+        attention_scale=1.0 / math.sqrt(8.0),
+        dropout_probability=0.125,
+        dropout_seed=123456789,
+        dropout_offset=987654321,
+        weights_data_type=dtype,
+        compute_data_type=thor.DataType.fp32,
+        output_data_type=dtype,
+    )
+
+    assert layer.get_dropout_probability() == pytest.approx(0.125)
+    assert layer.get_dropout_seed() == 123456789
+    assert layer.get_dropout_offset() == 987654321
+
+
+def test_public_attention_rejects_invalid_dropout_configuration():
+    if not hasattr(thor.layers, "Attention"):
+        pytest.skip("thor.layers.Attention is not exposed in this build")
+
+    dtype = thor.DataType.fp16
+    network = thor.Network("test_public_attention_rejects_invalid_dropout_configuration")
+    feature_input = thor.layers.NetworkInput(network, "feature_input", [7, 32], dtype).get_feature_output()
+
+    with pytest.raises((RuntimeError, ValueError), match="dropout"):
+        thor.layers.Attention(
+            network,
+            feature_input,
+            num_heads=2,
+            dropout_probability=1.0,
+        )
+
+    with pytest.raises((RuntimeError, ValueError), match="dropout"):
+        thor.layers.Attention(
+            network,
+            feature_input,
+            num_heads=2,
+            mask_kind="sliding_window_bottom_right",
+            diagonal_left_bound=4,
+            dropout_probability=0.25,
+            dropout_seed=7,
+            dropout_offset=11,
+        )
 
 
 @pytest.mark.cuda

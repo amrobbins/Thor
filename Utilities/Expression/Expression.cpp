@@ -2593,9 +2593,9 @@ void validateAttentionOptions(const AttentionOptions& options, bool use_bias, bo
     if (use_ragged_offsets && options.use_paged_kv_cache) {
         throw std::runtime_error("Ragged attention and paged KV cache are separate variable-length modes and cannot be combined.");
     }
-    if (use_ragged_offsets && (use_bias || options.dropout_probability > 0.0f)) {
+    if (use_ragged_offsets && use_bias) {
         throw std::runtime_error(
-            "Ragged attention currently supports q/k/v plus q/kv sequence lengths and ragged offsets only; additive bias and dropout are disabled until their packed layouts are defined.");
+            "Ragged attention currently supports q/k/v plus q/kv sequence lengths and ragged offsets only; additive bias is disabled until its packed layout is defined.");
     }
     if (options.use_paged_kv_cache && options.paged_kv_max_sequence_length <= 0) {
         throw std::runtime_error("Paged KV attention requires paged_kv_max_sequence_length > 0.");
@@ -2794,6 +2794,32 @@ Expression Expression::scaledDotProductAttentionRagged(const Expression& q,
     options.use_padding_mask = true;
     return attentionWithOptionalMetadata(
         q, k, v, nullptr, &q_seq_len, &kv_seq_len, &q_offsets, &kv_offsets, nullptr, nullptr, nullptr, nullptr, std::move(options));
+}
+
+Expression Expression::scaledDotProductAttentionRagged(const Expression& q,
+                                                       const Expression& k,
+                                                       const Expression& v,
+                                                       const Expression& q_seq_len,
+                                                       const Expression& kv_seq_len,
+                                                       const Expression& q_offsets,
+                                                       const Expression& kv_offsets,
+                                                       const Expression& dropout_seed,
+                                                       const Expression& dropout_offset,
+                                                       AttentionOptions options) {
+    options.use_padding_mask = true;
+    return attentionWithOptionalMetadata(q,
+                                         k,
+                                         v,
+                                         nullptr,
+                                         &q_seq_len,
+                                         &kv_seq_len,
+                                         &q_offsets,
+                                         &kv_offsets,
+                                         nullptr,
+                                         nullptr,
+                                         &dropout_seed,
+                                         &dropout_offset,
+                                         std::move(options));
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q,

@@ -107,6 +107,42 @@ TEST(Tensor, Copies) {
     }
 }
 
+TEST(Tensor, CopiesSeeBackingMemorySwaps) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorDescriptor descriptor(TensorDescriptor::DataType::FP32, {4});
+
+    Tensor active(cpuPlacement, descriptor);
+    Tensor prefetch(cpuPlacement, descriptor);
+    Tensor stampedCopy = active;
+
+    const uint64_t activeId = active.getTensorId();
+    const uint64_t prefetchId = prefetch.getTensorId();
+
+    float *activeMemBefore = active.getMemPtr<float>();
+    float *prefetchMemBefore = prefetch.getMemPtr<float>();
+    ASSERT_NE(activeMemBefore, prefetchMemBefore);
+
+    for (uint32_t i = 0; i < 4; ++i) {
+        activeMemBefore[i] = 10.0f + static_cast<float>(i);
+        prefetchMemBefore[i] = 20.0f + static_cast<float>(i);
+    }
+
+    active.swapBackingMemoryWith(prefetch);
+
+    ASSERT_EQ(active.getTensorId(), activeId);
+    ASSERT_EQ(prefetch.getTensorId(), prefetchId);
+    ASSERT_EQ(stampedCopy.getTensorId(), activeId);
+
+    ASSERT_EQ(active.getMemPtr<float>(), prefetchMemBefore);
+    ASSERT_EQ(stampedCopy.getMemPtr<float>(), prefetchMemBefore);
+    ASSERT_EQ(prefetch.getMemPtr<float>(), activeMemBefore);
+
+    for (uint32_t i = 0; i < 4; ++i) {
+        ASSERT_EQ(stampedCopy.getMemPtr<float>()[i], 20.0f + static_cast<float>(i));
+        ASSERT_EQ(prefetch.getMemPtr<float>()[i], 10.0f + static_cast<float>(i));
+    }
+}
+
 // Reshape keeps contents unchanged
 TEST(Tensor, PreservingCpuToCpuDowncastStaysCpuOnly) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);

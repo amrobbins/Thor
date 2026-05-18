@@ -1,6 +1,9 @@
 #pragma once
 
+#include <memory>
 #include <optional>
+#include <utility>
+#include <vector>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -214,6 +217,8 @@ class Concatenate : public MultiConnectionLayer {
         for (unsigned int i = 1; i < featureInputs.size(); ++i)
             streams[0].waitEvent(streams[i].putEvent());
 
+        refreshFeatureInputMemoryArray(streams[0]);
+
         launchConcatenate((half *)featureOutputs[0].value().getMemPtr(),
                           splitTensorFeatureInputMemoriesArray_d,
                           featureOutputs[0].value().getDescriptor().getTotalNumElements(),
@@ -308,6 +313,32 @@ class Concatenate : public MultiConnectionLayer {
     }
 
    private:
+    struct FeatureInputMemoryArrayRefreshArgs : public HostFunctionArgsBase {
+        std::vector<half *> splitTensorFeatureInputMemories;
+    };
+
+    static void releaseFeatureInputMemoryArrayRefresh(void *) {}
+
+    void refreshFeatureInputMemoryArray(Stream stream) {
+        THOR_THROW_IF_FALSE(splitTensorFeatureInputMemoriesArray_d != nullptr);
+
+        const int numSplitTensors = featureInputs.size();
+        auto refreshArgs = std::make_unique<FeatureInputMemoryArrayRefreshArgs>();
+        refreshArgs->splitTensorFeatureInputMemories.resize(numSplitTensors);
+        for (int i = 0; i < numSplitTensors; ++i) {
+            THOR_THROW_IF_FALSE(featureInputs[i].has_value());
+            refreshArgs->splitTensorFeatureInputMemories[i] = (half *)featureInputs[i].value().getMemPtr();
+        }
+
+        cudaError_t cudaStatus = cudaMemcpyAsync(splitTensorFeatureInputMemoriesArray_d,
+                                                 refreshArgs->splitTensorFeatureInputMemories.data(),
+                                                 numSplitTensors * sizeof(half *),
+                                                 cudaMemcpyHostToDevice,
+                                                 stream);
+        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+        stream.enqueueHostFunction(&releaseFeatureInputMemoryArrayRefresh, std::move(refreshArgs));
+    }
+
     unsigned int axis;
 
     half **splitTensorFeatureInputMemoriesArray_d;

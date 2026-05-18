@@ -29,17 +29,11 @@ struct AttentionTensorSpec {
     TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP16;
     bool ragged = false;
 
-    static AttentionTensorSpec bhsd(int64_t batch,
-                                    int64_t heads,
-                                    int64_t sequenceLength,
-                                    int64_t headDim,
-                                    TensorDescriptor::DataType dataType);
+    static AttentionTensorSpec bhsd(
+        int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, TensorDescriptor::DataType dataType);
 
-    static AttentionTensorSpec bshd(int64_t batch,
-                                    int64_t heads,
-                                    int64_t sequenceLength,
-                                    int64_t headDim,
-                                    TensorDescriptor::DataType dataType);
+    static AttentionTensorSpec bshd(
+        int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, TensorDescriptor::DataType dataType);
 
     static AttentionTensorSpec fromLayout(AttentionTensorLayout layout,
                                           int64_t batch,
