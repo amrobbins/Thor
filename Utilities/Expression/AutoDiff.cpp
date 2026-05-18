@@ -1042,6 +1042,13 @@ class BackwardGraphBuilder {
         node.rope_scaling_kind = forward_rope.rope_scaling_kind;
         node.rope_scaling_factor = forward_rope.rope_scaling_factor;
         node.rope_original_max_position_embeddings = forward_rope.rope_original_max_position_embeddings;
+        node.rope_attention_factor = forward_rope.rope_attention_factor;
+        node.rope_yarn_beta_fast = forward_rope.rope_yarn_beta_fast;
+        node.rope_yarn_beta_slow = forward_rope.rope_yarn_beta_slow;
+        node.rope_llama3_low_freq_factor = forward_rope.rope_llama3_low_freq_factor;
+        node.rope_llama3_high_freq_factor = forward_rope.rope_llama3_high_freq_factor;
+        node.rope_long_rope_short_factors = forward_rope.rope_long_rope_short_factors;
+        node.rope_long_rope_long_factors = forward_rope.rope_long_rope_long_factors;
         node.rope_allow_in_place_materialization = false;
         if (output_dtype.has_value()) {
             node.output_dtype = output_dtype.value();

@@ -68,7 +68,12 @@ __device__ void rotateOneTensorPair(T* ptr,
                                     bool inverse,
                                     uint32_t scaling_kind,
                                     float scaling_factor,
-                                    uint32_t original_max_position_embeddings) {
+                                    uint32_t original_max_position_embeddings,
+                                    float attention_factor,
+                                    float yarn_beta_fast,
+                                    float yarn_beta_slow,
+                                    float llama3_low_freq_factor,
+                                    float llama3_high_freq_factor) {
     const uint32_t half_dim = rotary_dim >> 1U;
     const uint32_t pair_index = pair_linear % half_dim;
     uint32_t tmp = pair_linear / half_dim;
@@ -87,6 +92,7 @@ __device__ void rotateOneTensorPair(T* ptr,
     }
 
     float rope_base = rope_base_in;
+    float freq = 0.0f;
     if (scaling_kind == 2U) {  // RotaryScalingKind::DynamicNTK
         const int32_t positive_offset = position_offset > 0 ? position_offset : 0;
         const float seq_len = fmaxf(static_cast<float>(sequence_length) + static_cast<float>(positive_offset), 1.0f);
@@ -95,13 +101,48 @@ __device__ void rotateOneTensorPair(T* ptr,
             const float ntk_ratio = (scaling_factor * seq_len / original_max) - (scaling_factor - 1.0f);
             rope_base = rope_base * powf(ntk_ratio, static_cast<float>(rotary_dim) / static_cast<float>(rotary_dim - 2U));
         }
+        freq = powf(rope_base, -2.0f * static_cast<float>(pair_index) / static_cast<float>(rotary_dim));
+    } else if (scaling_kind == 3U) {  // RotaryScalingKind::Yarn
+        const float pos_freq = powf(rope_base, 2.0f * static_cast<float>(pair_index) / static_cast<float>(rotary_dim));
+        const float inv_freq_extrap = 1.0f / pos_freq;
+        const float inv_freq_interp = 1.0f / (scaling_factor * pos_freq);
+        const float original_max = static_cast<float>(original_max_position_embeddings);
+        const float log_base = logf(rope_base);
+        float low = (static_cast<float>(rotary_dim) * logf(original_max / (yarn_beta_fast * 6.2831853071795864769f))) /
+                    (2.0f * log_base);
+        float high = (static_cast<float>(rotary_dim) * logf(original_max / (yarn_beta_slow * 6.2831853071795864769f))) /
+                     (2.0f * log_base);
+        low = fmaxf(floorf(low), 0.0f);
+        high = fminf(ceilf(high), static_cast<float>(rotary_dim - 1U));
+        if (low == high) {
+            high += 0.001f;
+        }
+        const float ramp = fminf(fmaxf((static_cast<float>(pair_index) - low) / (high - low), 0.0f), 1.0f);
+        freq = inv_freq_interp * ramp + inv_freq_extrap * (1.0f - ramp);
+    } else if (scaling_kind == 5U) {  // RotaryScalingKind::Llama3
+        const float inv_freq = powf(rope_base, -2.0f * static_cast<float>(pair_index) / static_cast<float>(rotary_dim));
+        const float wavelen = 6.2831853071795864769f / inv_freq;
+        const float original_max = static_cast<float>(original_max_position_embeddings);
+        const float low_freq_wavelen = original_max / llama3_low_freq_factor;
+        const float high_freq_wavelen = original_max / llama3_high_freq_factor;
+        if (wavelen > low_freq_wavelen) {
+            freq = inv_freq / scaling_factor;
+        } else if (wavelen < high_freq_wavelen) {
+            freq = inv_freq;
+        } else {
+            const float smooth = (original_max / wavelen - llama3_low_freq_factor) / (llama3_high_freq_factor - llama3_low_freq_factor);
+            freq = (1.0f - smooth) * (inv_freq / scaling_factor) + smooth * inv_freq;
+        }
+    } else {
+        freq = powf(rope_base, -2.0f * static_cast<float>(pair_index) / static_cast<float>(rotary_dim));
     }
 
-    const float freq = powf(rope_base, -2.0f * static_cast<float>(pair_index) / static_cast<float>(rotary_dim));
     const float theta = position * freq;
     float s;
     float c;
     sincosf(theta, &s, &c);
+    s *= attention_factor;
+    c *= attention_factor;
     if (inverse) {
         s = -s;
     }
@@ -128,7 +169,12 @@ __device__ void rotateTensorChunk(T* ptr,
                                   bool inverse,
                                   uint32_t scaling_kind,
                                   float scaling_factor,
-                                  uint32_t original_max_position_embeddings) {
+                                  uint32_t original_max_position_embeddings,
+                                  float attention_factor,
+                                  float yarn_beta_fast,
+                                  float yarn_beta_slow,
+                                  float llama3_low_freq_factor,
+                                  float llama3_high_freq_factor) {
     for (uint32_t i = 0; i < RopePairsPerThread<T>::value; ++i) {
         const uint32_t pair = pair_begin + i;
         if (pair < pair_count) {
@@ -144,7 +190,12 @@ __device__ void rotateTensorChunk(T* ptr,
                                 inverse,
                                 scaling_kind,
                                 scaling_factor,
-                                original_max_position_embeddings);
+                                original_max_position_embeddings,
+                                attention_factor,
+                                yarn_beta_fast,
+                                yarn_beta_slow,
+                                llama3_low_freq_factor,
+                                llama3_high_freq_factor);
         }
     }
 }
@@ -167,7 +218,12 @@ __global__ void groupedInPlaceRopeKernel(T* q,
                                          bool inverse,
                                          uint32_t scaling_kind,
                                          float scaling_factor,
-                                         uint32_t original_max_position_embeddings) {
+                                         uint32_t original_max_position_embeddings,
+                                         float attention_factor,
+                                         float yarn_beta_fast,
+                                         float yarn_beta_slow,
+                                         float llama3_low_freq_factor,
+                                         float llama3_high_freq_factor) {
     const uint32_t chunk = (blockIdx.x * blockDim.x + threadIdx.x) * RopePairsPerThread<T>::value;
     if (chunk < q_pairs) {
         rotateTensorChunk(q,
@@ -183,7 +239,12 @@ __global__ void groupedInPlaceRopeKernel(T* q,
                           inverse,
                           scaling_kind,
                           scaling_factor,
-                          original_max_position_embeddings);
+                          original_max_position_embeddings,
+                          attention_factor,
+                          yarn_beta_fast,
+                          yarn_beta_slow,
+                          llama3_low_freq_factor,
+                          llama3_high_freq_factor);
     }
     if (k != nullptr && chunk < k_pairs) {
         rotateTensorChunk(k,
@@ -199,7 +260,12 @@ __global__ void groupedInPlaceRopeKernel(T* q,
                           inverse,
                           scaling_kind,
                           scaling_factor,
-                          original_max_position_embeddings);
+                          original_max_position_embeddings,
+                          attention_factor,
+                          yarn_beta_fast,
+                          yarn_beta_slow,
+                          llama3_low_freq_factor,
+                          llama3_high_freq_factor);
     }
 }
 
@@ -270,11 +336,16 @@ void validateSharedOptions(const std::vector<RotaryPositionEmbeddingOptions>& op
     if (first.base <= 0.0 || first.scaling_factor <= 0.0) {
         throw std::runtime_error("In-place RoPE base/scaling_factor must be positive.");
     }
+    if (first.scaling_kind == RotaryScalingKind::LongRope) {
+        throw std::runtime_error("In-place RoPE does not support LongRoPE factor lists; use out-of-place RoPE materialization.");
+    }
     for (const RotaryPositionEmbeddingOptions& opt : options) {
         if (opt.sequence_axis != first.sequence_axis || opt.head_dim_axis != first.head_dim_axis || opt.rotary_dim != first.rotary_dim ||
             opt.base != first.base || opt.position_offset != first.position_offset || opt.interleaved != first.interleaved ||
             opt.inverse != first.inverse || opt.scaling_kind != first.scaling_kind || opt.scaling_factor != first.scaling_factor ||
-            opt.original_max_position_embeddings != first.original_max_position_embeddings) {
+            opt.original_max_position_embeddings != first.original_max_position_embeddings || opt.attention_factor != first.attention_factor ||
+            opt.yarn_beta_fast != first.yarn_beta_fast || opt.yarn_beta_slow != first.yarn_beta_slow ||
+            opt.llama3_low_freq_factor != first.llama3_low_freq_factor || opt.llama3_high_freq_factor != first.llama3_high_freq_factor) {
             throw std::runtime_error("Grouped in-place RoPE requires identical RoPE options for all tensors.");
         }
     }
@@ -322,7 +393,12 @@ void launchGroupedInPlaceRope(std::vector<Tensor>& tensors,
                                                                        static_cast<uint32_t>(opt.scaling_kind),
                                                                        static_cast<float>(opt.scaling_factor),
                                                                        checkedU32(opt.original_max_position_embeddings,
-                                                                                  "original_max_position_embeddings"));
+                                                                                  "original_max_position_embeddings"),
+                                                                       static_cast<float>(opt.attention_factor.value_or(1.0)),
+                                                                       static_cast<float>(opt.yarn_beta_fast),
+                                                                       static_cast<float>(opt.yarn_beta_slow),
+                                                                       static_cast<float>(opt.llama3_low_freq_factor),
+                                                                       static_cast<float>(opt.llama3_high_freq_factor));
     CUDA_CHECK(cudaGetLastError());
 }
 

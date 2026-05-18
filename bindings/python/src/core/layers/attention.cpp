@@ -24,6 +24,7 @@ using namespace Thor;
 
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 using AttentionMaskKind = ThorImplementation::AttentionMaskKind;
+using RotaryScalingKind = ThorImplementation::RotaryScalingKind;
 
 namespace {
 
@@ -59,6 +60,40 @@ std::string attentionMaskKindName(AttentionMaskKind value) {
     return "unknown";
 }
 
+RotaryScalingKind parseRotaryScalingKind(const std::string& value) {
+    if (value == "none")
+        return RotaryScalingKind::None;
+    if (value == "linear")
+        return RotaryScalingKind::Linear;
+    if (value == "dynamic_ntk" || value == "dynamic")
+        return RotaryScalingKind::DynamicNTK;
+    if (value == "yarn")
+        return RotaryScalingKind::Yarn;
+    if (value == "longrope" || value == "long_rope")
+        return RotaryScalingKind::LongRope;
+    if (value == "llama3")
+        return RotaryScalingKind::Llama3;
+    throw nb::value_error("Attention rope_scaling_kind must be one of: none, linear, dynamic_ntk, yarn, longrope, llama3.");
+}
+
+std::string rotaryScalingKindName(RotaryScalingKind value) {
+    switch (value) {
+        case RotaryScalingKind::None:
+            return "none";
+        case RotaryScalingKind::Linear:
+            return "linear";
+        case RotaryScalingKind::DynamicNTK:
+            return "dynamic_ntk";
+        case RotaryScalingKind::Yarn:
+            return "yarn";
+        case RotaryScalingKind::LongRope:
+            return "longrope";
+        case RotaryScalingKind::Llama3:
+            return "llama3";
+    }
+    return "unknown";
+}
+
 bool attentionUsesPackedQkvProjection(const Attention& self) {
     if constexpr (!Attention::USE_PACKED_QKV_PROJECTION) {
         return false;
@@ -90,6 +125,20 @@ void bind_attention(nb::module_& layers) {
            bool use_alibi_mask,
            std::optional<double> attention_scale,
            bool use_rope,
+           uint64_t rope_rotary_dim,
+           double rope_base,
+           int64_t rope_position_offset,
+           bool rope_interleaved,
+           std::string rope_scaling_kind,
+           double rope_scaling_factor,
+           uint64_t rope_original_max_position_embeddings,
+           std::optional<double> rope_attention_factor,
+           double rope_yarn_beta_fast,
+           double rope_yarn_beta_slow,
+           double rope_llama3_low_freq_factor,
+           double rope_llama3_high_freq_factor,
+           std::vector<double> rope_long_rope_short_factors,
+           std::vector<double> rope_long_rope_long_factors,
            std::optional<DataType> weights_data_type,
            DataType compute_data_type,
            std::optional<DataType> output_data_type,
@@ -145,7 +194,22 @@ void bind_attention(nb::module_& layers) {
                 builder.attentionScale(attention_scale.value());
             }
             if (use_rope) {
-                builder.useRope(true);
+                ThorImplementation::RotaryPositionEmbeddingOptions rope_options;
+                rope_options.rotary_dim = rope_rotary_dim;
+                rope_options.base = rope_base;
+                rope_options.position_offset = rope_position_offset;
+                rope_options.interleaved = rope_interleaved;
+                rope_options.scaling_kind = parseRotaryScalingKind(rope_scaling_kind);
+                rope_options.scaling_factor = rope_scaling_factor;
+                rope_options.original_max_position_embeddings = rope_original_max_position_embeddings;
+                rope_options.attention_factor = rope_attention_factor;
+                rope_options.yarn_beta_fast = rope_yarn_beta_fast;
+                rope_options.yarn_beta_slow = rope_yarn_beta_slow;
+                rope_options.llama3_low_freq_factor = rope_llama3_low_freq_factor;
+                rope_options.llama3_high_freq_factor = rope_llama3_high_freq_factor;
+                rope_options.long_rope_short_factors = std::move(rope_long_rope_short_factors);
+                rope_options.long_rope_long_factors = std::move(rope_long_rope_long_factors);
+                builder.ropeOptions(std::move(rope_options));
             }
             if (rope_in_place) {
                 builder.ropeInPlace(true);
@@ -183,6 +247,20 @@ void bind_attention(nb::module_& layers) {
         "use_alibi_mask"_a = false,
         "attention_scale"_a.none() = nb::none(),
         "use_rope"_a = false,
+        "rope_rotary_dim"_a = 0,
+        "rope_base"_a = 10000.0,
+        "rope_position_offset"_a = 0,
+        "rope_interleaved"_a = false,
+        "rope_scaling_kind"_a = "none",
+        "rope_scaling_factor"_a = 1.0,
+        "rope_original_max_position_embeddings"_a = 0,
+        "rope_attention_factor"_a.none() = nb::none(),
+        "rope_yarn_beta_fast"_a = 32.0,
+        "rope_yarn_beta_slow"_a = 1.0,
+        "rope_llama3_low_freq_factor"_a = 1.0,
+        "rope_llama3_high_freq_factor"_a = 4.0,
+        "rope_long_rope_short_factors"_a = std::vector<double>{},
+        "rope_long_rope_long_factors"_a = std::vector<double>{},
         "weights_data_type"_a.none() = nb::none(),
         "compute_data_type"_a = DataType::FP32,
         "output_data_type"_a.none() = nb::none(),
@@ -206,6 +284,10 @@ hot path consumes ``[batch, sequence, input_features]``.
     attention.def("get_has_bias", &Attention::getHasBias);
     attention.def("get_use_rope", &Attention::getUseRope);
     attention.def("get_rope_in_place", &Attention::getRopeInPlace);
+    attention.def("get_rope_scaling_kind", [](Attention& self) { return rotaryScalingKindName(self.getRopeOptions().scaling_kind); });
+    attention.def("get_rope_scaling_factor", [](Attention& self) { return self.getRopeOptions().scaling_factor; });
+    attention.def("get_rope_original_max_position_embeddings",
+                  [](Attention& self) { return self.getRopeOptions().original_max_position_embeddings; });
     attention.def("get_mask_kind", [](Attention& self) { return attentionMaskKindName(self.getMaskKind()); });
     attention.def("get_diagonal_left_bound", &Attention::getDiagonalLeftBound);
     attention.def("get_diagonal_right_bound", &Attention::getDiagonalRightBound);

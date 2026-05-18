@@ -3872,6 +3872,13 @@ def _rope_reference(
     scaling_kind: RotaryScalingKind = RotaryScalingKind.none,
     scaling_factor: float = 1.0,
     original_max_position_embeddings: int = 0,
+    attention_factor: float | None = None,
+    yarn_beta_fast: float = 32.0,
+    yarn_beta_slow: float = 1.0,
+    llama3_low_freq_factor: float = 1.0,
+    llama3_high_freq_factor: float = 4.0,
+    long_rope_short_factors: list[float] | None = None,
+    long_rope_long_factors: list[float] | None = None,
 ) -> np.ndarray:
     x32 = x.astype(np.float32)
     if x32.ndim != 4 or sequence_axis != 2 or head_dim_axis != 3:
@@ -3884,24 +3891,77 @@ def _rope_reference(
     if effective_rotary_dim <= 0 or effective_rotary_dim > head_dim or effective_rotary_dim % 2 != 0:
         raise ValueError("invalid rotary_dim")
 
+    half = effective_rotary_dim // 2
+    pair_indices = np.arange(half, dtype=np.float32)
+    positions = np.arange(seq_len, dtype=np.float32) + np.float32(position_offset)
     rope_base = np.float32(base)
-    if scaling_kind == RotaryScalingKind.dynamic_ntk:
+
+    if scaling_kind == RotaryScalingKind.linear:
+        positions = positions / np.float32(scaling_factor)
+        inv_freq = rope_base ** (-2.0 * pair_indices / np.float32(effective_rotary_dim))
+        effective_attention_factor = 1.0 if attention_factor is None else attention_factor
+    elif scaling_kind == RotaryScalingKind.dynamic_ntk:
         if original_max_position_embeddings <= 0:
             raise ValueError("dynamic_ntk requires original_max_position_embeddings")
         seq_for_ntk = max(float(seq_len + max(0, position_offset)), 1.0)
         if seq_for_ntk > float(original_max_position_embeddings) and effective_rotary_dim > 2:
             ratio = (scaling_factor * seq_for_ntk / float(original_max_position_embeddings)) - (scaling_factor - 1.0)
             rope_base = np.float32(base * (ratio**(float(effective_rotary_dim) / float(effective_rotary_dim - 2))))
+        inv_freq = rope_base ** (-2.0 * pair_indices / np.float32(effective_rotary_dim))
+        effective_attention_factor = 1.0 if attention_factor is None else attention_factor
+    elif scaling_kind == RotaryScalingKind.yarn:
+        if original_max_position_embeddings <= 0:
+            raise ValueError("yarn requires original_max_position_embeddings")
+        pos_freqs = rope_base ** (2.0 * pair_indices / np.float32(effective_rotary_dim))
+        inv_freq_extrap = 1.0 / pos_freqs
+        inv_freq_interp = 1.0 / (np.float32(scaling_factor) * pos_freqs)
+        low = (effective_rotary_dim * math.log(original_max_position_embeddings / (yarn_beta_fast * 2.0 * math.pi))) / (2.0 * math.log(base))
+        high = (effective_rotary_dim * math.log(original_max_position_embeddings / (yarn_beta_slow * 2.0 * math.pi))) / (2.0 * math.log(base))
+        low = max(math.floor(low), 0)
+        high = min(math.ceil(high), effective_rotary_dim - 1)
+        if low == high:
+            high += 0.001
+        ramp = np.clip((pair_indices - np.float32(low)) / np.float32(high - low), 0.0, 1.0)
+        inv_freq = inv_freq_interp * ramp + inv_freq_extrap * (1.0 - ramp)
+        if attention_factor is None:
+            effective_attention_factor = 1.0 if scaling_factor <= 1.0 else 0.1 * math.log(scaling_factor) + 1.0
+        else:
+            effective_attention_factor = attention_factor
+    elif scaling_kind == RotaryScalingKind.longrope:
+        if original_max_position_embeddings <= 0:
+            raise ValueError("longrope requires original_max_position_embeddings")
+        if long_rope_short_factors is None or long_rope_long_factors is None:
+            raise ValueError("longrope requires short/long factors")
+        ext_factors = np.asarray(
+            long_rope_long_factors if seq_len + max(0, position_offset) > original_max_position_embeddings else long_rope_short_factors,
+            dtype=np.float32,
+        )
+        inv_freq = 1.0 / (ext_factors * (rope_base ** (2.0 * pair_indices / np.float32(effective_rotary_dim))))
+        if attention_factor is None:
+            effective_attention_factor = 1.0 if scaling_factor <= 1.0 else math.sqrt(1.0 + math.log(scaling_factor) / math.log(original_max_position_embeddings))
+        else:
+            effective_attention_factor = attention_factor
+    elif scaling_kind == RotaryScalingKind.llama3:
+        if original_max_position_embeddings <= 0:
+            raise ValueError("llama3 requires original_max_position_embeddings")
+        inv_freq_default = rope_base ** (-2.0 * pair_indices / np.float32(effective_rotary_dim))
+        wavelen = np.float32(2.0 * math.pi) / inv_freq_default
+        low_freq_wavelen = np.float32(original_max_position_embeddings / llama3_low_freq_factor)
+        high_freq_wavelen = np.float32(original_max_position_embeddings / llama3_high_freq_factor)
+        inv_freq = np.where(wavelen > low_freq_wavelen, inv_freq_default / np.float32(scaling_factor), inv_freq_default)
+        smooth = (np.float32(original_max_position_embeddings) / wavelen - np.float32(llama3_low_freq_factor)) / np.float32(
+            llama3_high_freq_factor - llama3_low_freq_factor)
+        smoothed = (1.0 - smooth) * (inv_freq_default / np.float32(scaling_factor)) + smooth * inv_freq_default
+        is_medium = np.logical_and(~(wavelen < high_freq_wavelen), ~(wavelen > low_freq_wavelen))
+        inv_freq = np.where(is_medium, smoothed, inv_freq)
+        effective_attention_factor = 1.0 if attention_factor is None else attention_factor
+    else:
+        inv_freq = rope_base ** (-2.0 * pair_indices / np.float32(effective_rotary_dim))
+        effective_attention_factor = 1.0 if attention_factor is None else attention_factor
 
-    half = effective_rotary_dim // 2
-    pair_indices = np.arange(half, dtype=np.float32)
-    inv_freq = rope_base**(-2.0 * pair_indices / np.float32(effective_rotary_dim))
-    positions = np.arange(seq_len, dtype=np.float32) + np.float32(position_offset)
-    if scaling_kind == RotaryScalingKind.linear:
-        positions = positions / np.float32(scaling_factor)
     theta = positions[:, None] * inv_freq[None, :]
-    sin = np.sin(theta).astype(np.float32)
-    cos = np.cos(theta).astype(np.float32)
+    sin = (np.sin(theta).astype(np.float32) * np.float32(effective_attention_factor))
+    cos = (np.cos(theta).astype(np.float32) * np.float32(effective_attention_factor))
     if inverse:
         sin = -sin
 
@@ -3919,35 +3979,155 @@ def _rope_reference(
     return out
 
 
-@pytest.mark.cuda
-def test_rope_forward_standard_and_linear_scaling_match_reference():
+
+ROPE_SCALING_FORWARD_CASES = [
+    pytest.param(
+        {
+            "scaling_kind": RotaryScalingKind.none,
+            "rope_kwargs": {
+                "rotary_dim": 8,
+                "position_offset": 2,
+            },
+        },
+        id="none_position_offset",
+    ),
+    pytest.param(
+        {
+            "scaling_kind": RotaryScalingKind.linear,
+            "rope_kwargs": {
+                "rotary_dim": 8,
+                "position_offset": 3,
+                "scaling_factor": 2.0,
+            },
+        },
+        id="linear",
+    ),
+    pytest.param(
+        {
+            "scaling_kind": RotaryScalingKind.dynamic_ntk,
+            "rope_kwargs": {
+                "rotary_dim": 8,
+                "interleaved": True,
+                "scaling_factor": 2.0,
+                "original_max_position_embeddings": 4,
+            },
+        },
+        id="dynamic_ntk_interleaved",
+    ),
+    pytest.param(
+        {
+            "scaling_kind": RotaryScalingKind.yarn,
+            "rope_kwargs": {
+                "rotary_dim": 8,
+                "scaling_factor": 4.0,
+                "original_max_position_embeddings": 16,
+                "yarn_beta_fast": 32.0,
+                "yarn_beta_slow": 1.0,
+            },
+        },
+        id="yarn_default_attention_factor",
+    ),
+    pytest.param(
+        {
+            "scaling_kind": RotaryScalingKind.yarn,
+            "rope_kwargs": {
+                "rotary_dim": 8,
+                "position_offset": 2,
+                "scaling_factor": 3.0,
+                "original_max_position_embeddings": 12,
+                "attention_factor": 1.25,
+                "yarn_beta_fast": 16.0,
+                "yarn_beta_slow": 2.0,
+            },
+        },
+        id="yarn_explicit_attention_factor_and_betas",
+    ),
+    pytest.param(
+        {
+            "scaling_kind": RotaryScalingKind.longrope,
+            "query_len": 3,
+            "rope_kwargs": {
+                "rotary_dim": 8,
+                "scaling_factor": 4.0,
+                "original_max_position_embeddings": 16,
+                "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
+                "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+            },
+        },
+        id="longrope_short_factors",
+    ),
+    pytest.param(
+        {
+            "scaling_kind": RotaryScalingKind.longrope,
+            "query_len": 7,
+            "rope_kwargs": {
+                "rotary_dim": 8,
+                "position_offset": 3,
+                "scaling_factor": 4.0,
+                "original_max_position_embeddings": 4,
+                "attention_factor": 1.4,
+                "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
+                "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+            },
+        },
+        id="longrope_long_factors_with_explicit_attention_factor",
+    ),
+    pytest.param(
+        {
+            "scaling_kind": RotaryScalingKind.llama3,
+            "rope_kwargs": {
+                "rotary_dim": 8,
+                "scaling_factor": 8.0,
+                "original_max_position_embeddings": 16,
+                "llama3_low_freq_factor": 1.0,
+                "llama3_high_freq_factor": 4.0,
+            },
+        },
+        id="llama3_default_band",
+    ),
+    pytest.param(
+        {
+            "scaling_kind": RotaryScalingKind.llama3,
+            "rope_kwargs": {
+                "rotary_dim": 8,
+                "position_offset": 1,
+                "scaling_factor": 6.0,
+                "original_max_position_embeddings": 12,
+                "attention_factor": 1.1,
+                "llama3_low_freq_factor": 1.0,
+                "llama3_high_freq_factor": 3.0,
+            },
+        },
+        id="llama3_custom_band_and_attention_factor",
+    ),
+]
+
+
+def _rope_forward_kwargs(case: dict) -> dict:
+    rope_kwargs = dict(case["rope_kwargs"])
+    rope_kwargs["scaling_kind"] = case["scaling_kind"]
+    return rope_kwargs
+
+
+def _run_rope_forward_match_reference(case: dict, *, use_alias: bool = False):
     dtype = thor.DataType.fp16
-    q_np, _, _ = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=6, kv_len=6, dtype=dtype)
+    query_len = case.get("query_len", 7)
+    q_np, _, _ = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=query_len, kv_len=query_len, dtype=dtype)
     q = ex.input("q")
-    out = ex.rope(
+    rope_kwargs = _rope_forward_kwargs(case)
+    rope_op = ex.rotary_position_embedding if use_alias else ex.rope
+    out = rope_op(
         q,
-        rotary_dim=8,
-        base=10000.0,
-        position_offset=3,
-        scaling_kind=RotaryScalingKind.linear,
-        scaling_factor=2.0,
         output_dtype=dtype,
         compute_dtype=thor.DataType.fp32,
+        **rope_kwargs,
     )
     eq = ex.compile(out, device_num=0)
-    expected = _rope_reference(
-        q_np,
-        rotary_dim=8,
-        position_offset=3,
-        scaling_kind=RotaryScalingKind.linear,
-        scaling_factor=2.0,
-    )
+    expected = _rope_reference(q_np, **rope_kwargs)
 
     stream = Stream(gpu_num=0)
-    inputs_gpu = {
-        "q": _host_to_gpu(q_np, dtype, stream)
-    }
-    assert eq.output_shape(inputs_gpu) == [1, 2, 6, 16]
+    inputs_gpu = {"q": _host_to_gpu(q_np, dtype, stream)}
+    assert eq.output_shape(inputs_gpu) == [1, 2, query_len, 16]
     assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
 
     stamped = eq.stamp(inputs_gpu, stream)
@@ -3957,39 +4137,170 @@ def test_rope_forward_standard_and_linear_scaling_match_reference():
 
 
 @pytest.mark.cuda
-def test_rope_forward_interleaved_dynamic_ntk_scaling_matches_reference():
+@pytest.mark.parametrize("case", ROPE_SCALING_FORWARD_CASES)
+def test_rope_forward_all_scaling_parameterizations_match_reference(case):
+    _run_rope_forward_match_reference(case)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.yarn,
+                "rope_kwargs": {
+                    "rotary_dim": 8,
+                    "scaling_factor": 3.0,
+                    "original_max_position_embeddings": 12,
+                    "attention_factor": 1.15,
+                    "yarn_beta_fast": 16.0,
+                    "yarn_beta_slow": 2.0,
+                },
+            },
+            id="yarn_alias",
+        ),
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.longrope,
+                "query_len": 7,
+                "rope_kwargs": {
+                    "rotary_dim": 8,
+                    "position_offset": 2,
+                    "scaling_factor": 4.0,
+                    "original_max_position_embeddings": 4,
+                    "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
+                    "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+                },
+            },
+            id="longrope_alias",
+        ),
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.llama3,
+                "rope_kwargs": {
+                    "rotary_dim": 8,
+                    "scaling_factor": 8.0,
+                    "original_max_position_embeddings": 16,
+                    "llama3_low_freq_factor": 1.0,
+                    "llama3_high_freq_factor": 4.0,
+                },
+            },
+            id="llama3_alias",
+        ),
+    ],
+)
+def test_rotary_position_embedding_alias_accepts_extended_scaling_parameterizations(case):
+    _run_rope_forward_match_reference(case, use_alias=True)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.linear,
+                "rope_kwargs": {
+                    "rotary_dim": 8,
+                    "position_offset": 2,
+                    "scaling_factor": 1.5,
+                },
+            },
+            id="linear_backward",
+        ),
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.dynamic_ntk,
+                "query_len": 7,
+                "rope_kwargs": {
+                    "rotary_dim": 8,
+                    "interleaved": True,
+                    "scaling_factor": 2.0,
+                    "original_max_position_embeddings": 4,
+                },
+            },
+            id="dynamic_ntk_backward",
+        ),
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.yarn,
+                "rope_kwargs": {
+                    "rotary_dim": 8,
+                    "position_offset": 1,
+                    "scaling_factor": 4.0,
+                    "original_max_position_embeddings": 16,
+                    "attention_factor": 1.2,
+                    "yarn_beta_fast": 32.0,
+                    "yarn_beta_slow": 1.0,
+                },
+            },
+            id="yarn_backward",
+        ),
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.longrope,
+                "query_len": 7,
+                "rope_kwargs": {
+                    "rotary_dim": 8,
+                    "position_offset": 3,
+                    "scaling_factor": 4.0,
+                    "original_max_position_embeddings": 4,
+                    "attention_factor": 1.3,
+                    "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
+                    "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+                },
+            },
+            id="longrope_backward",
+        ),
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.llama3,
+                "rope_kwargs": {
+                    "rotary_dim": 8,
+                    "position_offset": 1,
+                    "scaling_factor": 8.0,
+                    "original_max_position_embeddings": 16,
+                    "attention_factor": 1.1,
+                    "llama3_low_freq_factor": 1.0,
+                    "llama3_high_freq_factor": 4.0,
+                },
+            },
+            id="llama3_backward",
+        ),
+    ],
+)
+def test_rope_compile_backward_preserves_scaling_parameterizations(case):
     dtype = thor.DataType.fp16
-    q_np, _, _ = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=7, kv_len=7, dtype=dtype)
+    upstream_name = "__grad_output"
+    query_len = case.get("query_len", 5)
+    rope_kwargs = _rope_forward_kwargs(case)
     q = ex.input("q")
     out = ex.rope(
         q,
-        rotary_dim=8,
-        interleaved=True,
-        scaling_kind=RotaryScalingKind.dynamic_ntk,
-        scaling_factor=2.0,
-        original_max_position_embeddings=4,
         output_dtype=dtype,
         compute_dtype=thor.DataType.fp32,
+        **rope_kwargs,
     )
-    eq = ex.compile(out, device_num=0)
-    expected = _rope_reference(
-        q_np,
-        rotary_dim=8,
-        interleaved=True,
-        scaling_kind=RotaryScalingKind.dynamic_ntk,
-        scaling_factor=2.0,
-        original_max_position_embeddings=4,
-    )
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["q"], error_input_name=upstream_name)
+
+    q_np, _, _ = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=query_len, kv_len=query_len, dtype=dtype)
+    rng = np.random.default_rng(2468)
+    dO_np = rng.normal(0.0, 0.2, size=q_np.shape).astype(_numpy_storage_dtype(dtype))
+    expected = _rope_reference(dO_np, inverse=True, **rope_kwargs)
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
-        "q": _host_to_gpu(q_np, dtype, stream)
+        "q": _host_to_gpu(q_np, dtype, stream),
+        upstream_name: _host_to_gpu(dO_np, dtype, stream),
     }
-    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+    assert bwd_eq.output_shapes(inputs_gpu) == {"q_grad": [1, 2, query_len, 16]}
+    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
 
-    stamped = eq.stamp(inputs_gpu, stream)
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
-    got = _copy_to_host(stamped.output(), dtype, stream)
+    got = _copy_to_host(stamped.outputs()["q_grad"], dtype, stream)
     _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
 
 
@@ -3999,14 +4310,26 @@ def test_rope_qk_feed_single_attention_stage_and_match_reference():
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_rot = ex.rope(q, rotary_dim=16, output_dtype=dtype, compute_dtype=thor.DataType.fp32)
-    k_rot = ex.rope(k, rotary_dim=16, output_dtype=dtype, compute_dtype=thor.DataType.fp32)
+    rope_kwargs = {
+        "rotary_dim": 16,
+        "scaling_kind": RotaryScalingKind.yarn,
+        "scaling_factor": 4.0,
+        "original_max_position_embeddings": 16,
+        "attention_factor": 1.2,
+        "output_dtype": dtype,
+        "compute_dtype": thor.DataType.fp32,
+    }
+    q_rot = ex.rope(q, **rope_kwargs)
+    k_rot = ex.rope(k, **rope_kwargs)
     out = ex.scaled_dot_product_attention(q_rot, k_rot, v, output_dtype=dtype, compute_dtype=thor.DataType.fp32)
     eq = ex.compile(out, device_num=0)
 
     q_np, k_np, v_np = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=4, kv_len=4, dtype=dtype)
-    q_expected = _rope_reference(q_np, rotary_dim=16)
-    k_expected = _rope_reference(k_np, rotary_dim=16)
+    reference_rope_kwargs = dict(rope_kwargs)
+    reference_rope_kwargs.pop("output_dtype")
+    reference_rope_kwargs.pop("compute_dtype")
+    q_expected = _rope_reference(q_np, **reference_rope_kwargs)
+    k_expected = _rope_reference(k_np, **reference_rope_kwargs)
     expected = _attention_reference(q_expected, k_expected, v_np)
 
     stream = Stream(gpu_num=0)
@@ -4027,56 +4350,166 @@ def test_rope_qk_feed_single_attention_stage_and_match_reference():
 
 
 @pytest.mark.cuda
-def test_rope_compile_backward_is_inverse_rope_and_matches_reference():
-    dtype = thor.DataType.fp16
-    upstream_name = "__grad_output"
-    q = ex.input("q")
-    out = ex.rope(
-        q,
-        rotary_dim=8,
-        position_offset=2,
-        scaling_kind=RotaryScalingKind.linear,
-        scaling_factor=1.5,
-        output_dtype=dtype,
-        compute_dtype=thor.DataType.fp32,
-    )
-    fwd_eq = ex.compile(out, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["q"], error_input_name=upstream_name)
-
-    q_np, _, _ = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=5, kv_len=5, dtype=dtype)
-    rng = np.random.default_rng(2468)
-    dO_np = rng.normal(0.0, 0.2, size=q_np.shape).astype(_numpy_storage_dtype(dtype))
-    expected = _rope_reference(
-        dO_np,
-        rotary_dim=8,
-        position_offset=2,
-        inverse=True,
-        scaling_kind=RotaryScalingKind.linear,
-        scaling_factor=1.5,
-    )
-
-    stream = Stream(gpu_num=0)
-    inputs_gpu = {
-        "q": _host_to_gpu(q_np, dtype, stream),
-        upstream_name: _host_to_gpu(dO_np, dtype, stream),
-    }
-    assert bwd_eq.output_shapes(inputs_gpu) == {
-        "q_grad": [1, 2, 5, 16]
-    }
-    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
-
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = _copy_to_host(stamped.outputs()["q_grad"], dtype, stream)
-    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
-
-
-@pytest.mark.cuda
 def test_rope_invalid_rotary_dim_raises_during_expression_construction():
     dtype = thor.DataType.fp16
     q = ex.input("q")
     with pytest.raises(RuntimeError, match="rotary_dim"):
         ex.rope(q, rotary_dim=7, output_dtype=dtype, compute_dtype=thor.DataType.fp32)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        pytest.param(
+            {"scaling_kind": RotaryScalingKind.yarn, "scaling_factor": 2.0},
+            "original_max_position_embeddings",
+            id="yarn_requires_original_max",
+        ),
+        pytest.param(
+            {"scaling_kind": RotaryScalingKind.yarn, "scaling_factor": 2.0, "original_max_position_embeddings": 16, "yarn_beta_fast": 0.0},
+            "beta",
+            id="yarn_rejects_non_positive_beta",
+        ),
+        pytest.param(
+            {"scaling_kind": RotaryScalingKind.longrope, "rotary_dim": 8, "scaling_factor": 2.0},
+            "original_max_position_embeddings",
+            id="longrope_requires_original_max",
+        ),
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.longrope,
+                "scaling_factor": 2.0,
+                "original_max_position_embeddings": 16,
+                "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
+                "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+            },
+            "explicit rotary_dim",
+            id="longrope_requires_explicit_rotary_dim",
+        ),
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.longrope,
+                "rotary_dim": 8,
+                "scaling_factor": 2.0,
+                "original_max_position_embeddings": 16,
+                "long_rope_short_factors": [1.0, 1.1, 1.2],
+                "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+            },
+            "rotary_dim / 2",
+            id="longrope_rejects_wrong_factor_count",
+        ),
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.longrope,
+                "rotary_dim": 8,
+                "scaling_factor": 2.0,
+                "original_max_position_embeddings": 16,
+                "long_rope_short_factors": [1.0, -1.1, 1.2, 1.3],
+                "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+            },
+            "short factors",
+            id="longrope_rejects_non_positive_short_factor",
+        ),
+        pytest.param(
+            {"scaling_kind": RotaryScalingKind.llama3, "scaling_factor": 8.0},
+            "original_max_position_embeddings",
+            id="llama3_requires_original_max",
+        ),
+        pytest.param(
+            {
+                "scaling_kind": RotaryScalingKind.llama3,
+                "scaling_factor": 8.0,
+                "original_max_position_embeddings": 16,
+                "llama3_low_freq_factor": 4.0,
+                "llama3_high_freq_factor": 1.0,
+            },
+            "low_freq_factor < high_freq_factor",
+            id="llama3_rejects_bad_frequency_band",
+        ),
+    ],
+)
+def test_rope_scaling_parameterization_validation_errors(kwargs, match):
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    with pytest.raises(RuntimeError, match=match):
+        ex.rope(q, output_dtype=dtype, compute_dtype=thor.DataType.fp32, **kwargs)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "scaling_kind,kwargs",
+    [
+        pytest.param("linear", {"rope_scaling_factor": 2.0}, id="linear"),
+        pytest.param(
+            "dynamic_ntk",
+            {"rope_scaling_factor": 2.0, "rope_original_max_position_embeddings": 4},
+            id="dynamic_ntk",
+        ),
+        pytest.param(
+            "yarn",
+            {
+                "rope_scaling_factor": 4.0,
+                "rope_original_max_position_embeddings": 16,
+                "rope_attention_factor": 1.2,
+                "rope_yarn_beta_fast": 32.0,
+                "rope_yarn_beta_slow": 1.0,
+            },
+            id="yarn",
+        ),
+        pytest.param(
+            "longrope",
+            {
+                "rope_scaling_factor": 4.0,
+                "rope_original_max_position_embeddings": 4,
+                "rope_attention_factor": 1.3,
+                "rope_long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
+                "rope_long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+            },
+            id="longrope",
+        ),
+        pytest.param(
+            "llama3",
+            {
+                "rope_scaling_factor": 8.0,
+                "rope_original_max_position_embeddings": 16,
+                "rope_attention_factor": 1.1,
+                "rope_llama3_low_freq_factor": 1.0,
+                "rope_llama3_high_freq_factor": 4.0,
+            },
+            id="llama3",
+        ),
+    ],
+)
+def test_public_attention_accepts_rope_scaling_parameterizations(scaling_kind, kwargs):
+    if not hasattr(thor.layers, "Attention"):
+        pytest.skip("thor.layers.Attention is not exposed in this build")
+
+    dtype = thor.DataType.fp16
+    network = thor.Network(f"test_public_attention_rope_scaling_{scaling_kind}")
+    feature_input = thor.layers.NetworkInput(network, "feature_input", [7, 32], dtype).get_feature_output()
+    layer = thor.layers.Attention(
+        network,
+        feature_input,
+        num_heads=2,
+        num_key_value_heads=2,
+        head_dim=8,
+        value_dim=8,
+        output_features=32,
+        has_bias=False,
+        mask_kind="causal_top_left",
+        attention_scale=1.0 / math.sqrt(8.0),
+        use_rope=True,
+        rope_rotary_dim=8,
+        rope_position_offset=2,
+        rope_scaling_kind=scaling_kind,
+        weights_data_type=dtype,
+        compute_data_type=thor.DataType.fp32,
+        output_data_type=dtype,
+        **kwargs,
+    )
+    assert layer.get_feature_output().get_dimensions() == [7, 32]
+    assert layer._debug_qkv_projection_mode() == "split"
 
 
 @pytest.mark.cuda

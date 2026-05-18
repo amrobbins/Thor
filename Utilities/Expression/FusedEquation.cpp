@@ -1003,6 +1003,13 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 if (rotary_dim == 0 || (rotary_dim & 1ULL) != 0ULL || rotary_dim > head_dim) {
                     throw std::runtime_error("RoPE rotary_dim must be even, non-zero, and <= the head dimension.");
                 }
+                if (node.rope_scaling_kind == RotaryScalingKind::LongRope) {
+                    const uint64_t expected = rotary_dim / 2;
+                    if (node.rope_long_rope_short_factors.size() != expected ||
+                        node.rope_long_rope_long_factors.size() != expected) {
+                        throw std::runtime_error("LongRoPE short/long factor lists must have length rotary_dim / 2.");
+                    }
+                }
                 break;
             }
             case ExprOp::RMSNORM:
