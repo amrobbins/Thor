@@ -876,6 +876,113 @@ TEST(AttentionApi, BuildsComposedGqaAttentionWithExplicitDimsBiasAndRope) {
     EXPECT_DOUBLE_EQ(attention.getAttentionScale().value(), 0.25);
 }
 
+
+TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveReleaseCriticalOptions) {
+    Api::Network network("attention_api_architecture_json_and_deserialize_preserve_release_critical_options");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({12, 96}).dataType(DataType::BF16).build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = 16;
+    rope.base = 2048.0;
+    rope.position_offset = 7;
+    rope.interleaved = true;
+    rope.scaling_kind = Impl::RotaryScalingKind::LongRope;
+    rope.scaling_factor = 4.0;
+    rope.original_max_position_embeddings = 8;
+    rope.attention_factor = 1.125;
+    rope.long_rope_short_factors = {1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7};
+    rope.long_rope_long_factors = {2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7};
+    rope.output_dtype = DataType::BF16;
+    rope.compute_dtype = DataType::FP32;
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .numHeads(6)
+                                   .numKeyValueHeads(2)
+                                   .headDim(16)
+                                   .valueDim(12)
+                                   .outputFeatures(80)
+                                   .hasBias(true)
+                                   .ropeOptions(rope)
+                                   .maskKind(Impl::AttentionMaskKind::SlidingWindowTopLeft)
+                                   .diagonalLeftBound(3)
+                                   .useAlibiMask(true)
+                                   .attentionScale(0.25)
+                                   .weightsDataType(DataType::BF16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::BF16)
+                                   .build();
+
+    const nlohmann::json arch = attention.architectureJson();
+    EXPECT_EQ(arch.at("layer_type").get<string>(), "attention");
+    EXPECT_NE(arch.at("layer_type").get<string>(), "custom_layer");
+    EXPECT_EQ(arch.at("num_heads").get<uint32_t>(), 6U);
+    EXPECT_EQ(arch.at("num_key_value_heads").get<uint32_t>(), 2U);
+    EXPECT_EQ(arch.at("head_dim").get<uint32_t>(), 16U);
+    EXPECT_EQ(arch.at("value_dim").get<uint32_t>(), 12U);
+    EXPECT_EQ(arch.at("output_features").get<uint32_t>(), 80U);
+    EXPECT_TRUE(arch.at("has_bias").get<bool>());
+    EXPECT_TRUE(arch.at("use_rope").get<bool>());
+    EXPECT_FALSE(arch.at("rope_in_place").get<bool>());
+    EXPECT_EQ(arch.at("mask_kind").get<string>(), "sliding_window_top_left");
+    EXPECT_EQ(arch.at("diagonal_left_bound").get<int64_t>(), 3);
+    EXPECT_TRUE(arch.at("use_alibi_mask").get<bool>());
+    EXPECT_DOUBLE_EQ(arch.at("attention_scale").get<double>(), 0.25);
+    EXPECT_EQ(arch.at("parameters").size(), 8U);
+
+    const nlohmann::json ropeJson = arch.at("rope_options");
+    EXPECT_EQ(ropeJson.at("rotary_dim").get<uint64_t>(), 16U);
+    EXPECT_DOUBLE_EQ(ropeJson.at("base").get<double>(), 2048.0);
+    EXPECT_EQ(ropeJson.at("position_offset").get<int64_t>(), 7);
+    EXPECT_TRUE(ropeJson.at("interleaved").get<bool>());
+    EXPECT_EQ(ropeJson.at("scaling_kind").get<string>(), "longrope");
+    EXPECT_DOUBLE_EQ(ropeJson.at("scaling_factor").get<double>(), 4.0);
+    EXPECT_EQ(ropeJson.at("original_max_position_embeddings").get<uint64_t>(), 8U);
+    EXPECT_DOUBLE_EQ(ropeJson.at("attention_factor").get<double>(), 1.125);
+    EXPECT_EQ(ropeJson.at("long_rope_short_factors").get<vector<double>>(), rope.long_rope_short_factors);
+    EXPECT_EQ(ropeJson.at("long_rope_long_factors").get<vector<double>>(), rope.long_rope_long_factors);
+
+    const nlohmann::json networkArch = network.architectureJson();
+    ASSERT_EQ(networkArch.at("layers").size(), 2U);
+    EXPECT_EQ(networkArch.at("layers").at(1).at("layer_type").get<string>(), "attention");
+
+    const uint32_t previousTrainableLayerCount = network.getNumTrainableLayers();
+    shared_ptr<thor_file::TarReader> archiveReader;
+    Api::Attention::deserialize(archiveReader, arch, &network);
+    ASSERT_EQ(network.getNumTrainableLayers(), previousTrainableLayerCount + 1);
+    auto restored = dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(previousTrainableLayerCount));
+    ASSERT_NE(restored, nullptr);
+
+    EXPECT_EQ(restored->getNumHeads(), attention.getNumHeads());
+    EXPECT_EQ(restored->getNumKeyValueHeads(), attention.getNumKeyValueHeads());
+    EXPECT_EQ(restored->getHeadDim(), attention.getHeadDim());
+    EXPECT_EQ(restored->getValueDim(), attention.getValueDim());
+    EXPECT_EQ(restored->getOutputFeatures(), attention.getOutputFeatures());
+    EXPECT_EQ(restored->getHasBias(), attention.getHasBias());
+    EXPECT_EQ(restored->getUseRope(), attention.getUseRope());
+    EXPECT_EQ(restored->getMaskKind(), attention.getMaskKind());
+    EXPECT_EQ(restored->getDiagonalLeftBound(), attention.getDiagonalLeftBound());
+    EXPECT_EQ(restored->getDiagonalRightBound(), attention.getDiagonalRightBound());
+    EXPECT_EQ(restored->getUseAlibiMask(), attention.getUseAlibiMask());
+    ASSERT_TRUE(restored->getAttentionScale().has_value());
+    EXPECT_DOUBLE_EQ(restored->getAttentionScale().value(), 0.25);
+
+    const Impl::RotaryPositionEmbeddingOptions& restoredRope = restored->getRopeOptions();
+    EXPECT_EQ(restoredRope.rotary_dim, rope.rotary_dim);
+    EXPECT_DOUBLE_EQ(restoredRope.base, rope.base);
+    EXPECT_EQ(restoredRope.position_offset, rope.position_offset);
+    EXPECT_EQ(restoredRope.interleaved, rope.interleaved);
+    EXPECT_EQ(restoredRope.scaling_kind, rope.scaling_kind);
+    EXPECT_DOUBLE_EQ(restoredRope.scaling_factor, rope.scaling_factor);
+    EXPECT_EQ(restoredRope.original_max_position_embeddings, rope.original_max_position_embeddings);
+    ASSERT_TRUE(restoredRope.attention_factor.has_value());
+    EXPECT_DOUBLE_EQ(restoredRope.attention_factor.value(), rope.attention_factor.value());
+    EXPECT_EQ(restoredRope.long_rope_short_factors, rope.long_rope_short_factors);
+    EXPECT_EQ(restoredRope.long_rope_long_factors, rope.long_rope_long_factors);
+}
+
 TEST(AttentionApi, RejectsInvalidHeadConfiguration) {
     Api::Network network("attention_api_rejects_invalid_head_configuration");
     Api::NetworkInput input =

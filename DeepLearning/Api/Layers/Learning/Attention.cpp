@@ -12,6 +12,7 @@
 #include <utility>
 
 using DataType = ThorImplementation::TensorDescriptor::DataType;
+using json = nlohmann::json;
 
 namespace {
 
@@ -81,6 +82,139 @@ bool usePackedQkvProjectionForLayer(bool useRope) {
         // Keep RoPE layers on the legacy split projection path until a layout-aware RoPE materialization path lands.
         return !useRope;
     }
+}
+
+
+std::string attentionMaskKindToString(ThorImplementation::AttentionMaskKind value) {
+    switch (value) {
+        case ThorImplementation::AttentionMaskKind::None:
+            return "none";
+        case ThorImplementation::AttentionMaskKind::CausalTopLeft:
+            return "causal_top_left";
+        case ThorImplementation::AttentionMaskKind::CausalBottomRight:
+            return "causal_bottom_right";
+        case ThorImplementation::AttentionMaskKind::SlidingWindowTopLeft:
+            return "sliding_window_top_left";
+        case ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight:
+            return "sliding_window_bottom_right";
+    }
+    throw std::runtime_error("Unknown AttentionMaskKind value.");
+}
+
+ThorImplementation::AttentionMaskKind attentionMaskKindFromString(const std::string& value) {
+    if (value == "none")
+        return ThorImplementation::AttentionMaskKind::None;
+    if (value == "causal_top_left")
+        return ThorImplementation::AttentionMaskKind::CausalTopLeft;
+    if (value == "causal_bottom_right")
+        return ThorImplementation::AttentionMaskKind::CausalBottomRight;
+    if (value == "sliding_window_top_left")
+        return ThorImplementation::AttentionMaskKind::SlidingWindowTopLeft;
+    if (value == "sliding_window_bottom_right")
+        return ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight;
+    throw std::runtime_error("Unknown Attention mask kind: " + value);
+}
+
+std::string rotaryScalingKindToString(ThorImplementation::RotaryScalingKind value) {
+    switch (value) {
+        case ThorImplementation::RotaryScalingKind::None:
+            return "none";
+        case ThorImplementation::RotaryScalingKind::Linear:
+            return "linear";
+        case ThorImplementation::RotaryScalingKind::DynamicNTK:
+            return "dynamic_ntk";
+        case ThorImplementation::RotaryScalingKind::Yarn:
+            return "yarn";
+        case ThorImplementation::RotaryScalingKind::LongRope:
+            return "longrope";
+        case ThorImplementation::RotaryScalingKind::Llama3:
+            return "llama3";
+    }
+    throw std::runtime_error("Unknown RotaryScalingKind value.");
+}
+
+ThorImplementation::RotaryScalingKind rotaryScalingKindFromString(const std::string& value) {
+    if (value == "none")
+        return ThorImplementation::RotaryScalingKind::None;
+    if (value == "linear")
+        return ThorImplementation::RotaryScalingKind::Linear;
+    if (value == "dynamic_ntk")
+        return ThorImplementation::RotaryScalingKind::DynamicNTK;
+    if (value == "yarn")
+        return ThorImplementation::RotaryScalingKind::Yarn;
+    if (value == "longrope")
+        return ThorImplementation::RotaryScalingKind::LongRope;
+    if (value == "llama3")
+        return ThorImplementation::RotaryScalingKind::Llama3;
+    throw std::runtime_error("Unknown Attention RoPE scaling kind: " + value);
+}
+
+json optionalDataTypeToJson(std::optional<DataType> value) {
+    if (!value.has_value())
+        return nullptr;
+    return value.value();
+}
+
+std::optional<DataType> optionalDataTypeFromJson(const json& j) {
+    if (j.is_null())
+        return std::nullopt;
+    return j.get<DataType>();
+}
+
+json ropeOptionsToJson(const ThorImplementation::RotaryPositionEmbeddingOptions& opts) {
+    json j;
+    j["sequence_axis"] = opts.sequence_axis;
+    j["head_dim_axis"] = opts.head_dim_axis;
+    j["rotary_dim"] = opts.rotary_dim;
+    j["base"] = opts.base;
+    j["position_offset"] = opts.position_offset;
+    j["interleaved"] = opts.interleaved;
+    j["inverse"] = opts.inverse;
+    j["scaling_kind"] = rotaryScalingKindToString(opts.scaling_kind);
+    j["scaling_factor"] = opts.scaling_factor;
+    j["original_max_position_embeddings"] = opts.original_max_position_embeddings;
+    j["attention_factor"] = opts.attention_factor.has_value() ? json(opts.attention_factor.value()) : json(nullptr);
+    j["yarn_beta_fast"] = opts.yarn_beta_fast;
+    j["yarn_beta_slow"] = opts.yarn_beta_slow;
+    j["llama3_low_freq_factor"] = opts.llama3_low_freq_factor;
+    j["llama3_high_freq_factor"] = opts.llama3_high_freq_factor;
+    j["long_rope_short_factors"] = opts.long_rope_short_factors;
+    j["long_rope_long_factors"] = opts.long_rope_long_factors;
+    j["output_dtype"] = optionalDataTypeToJson(opts.output_dtype);
+    j["compute_dtype"] = optionalDataTypeToJson(opts.compute_dtype);
+    j["allow_in_place_materialization"] = opts.allow_in_place_materialization;
+    return j;
+}
+
+ThorImplementation::RotaryPositionEmbeddingOptions ropeOptionsFromJson(const json& j) {
+    ThorImplementation::RotaryPositionEmbeddingOptions opts;
+    opts.sequence_axis = j.value("sequence_axis", opts.sequence_axis);
+    opts.head_dim_axis = j.value("head_dim_axis", opts.head_dim_axis);
+    opts.rotary_dim = j.value("rotary_dim", opts.rotary_dim);
+    opts.base = j.value("base", opts.base);
+    opts.position_offset = j.value("position_offset", opts.position_offset);
+    opts.interleaved = j.value("interleaved", opts.interleaved);
+    opts.inverse = j.value("inverse", opts.inverse);
+    opts.scaling_kind = rotaryScalingKindFromString(j.value("scaling_kind", std::string("none")));
+    opts.scaling_factor = j.value("scaling_factor", opts.scaling_factor);
+    opts.original_max_position_embeddings = j.value("original_max_position_embeddings", opts.original_max_position_embeddings);
+    if (j.contains("attention_factor") && !j.at("attention_factor").is_null()) {
+        opts.attention_factor = j.at("attention_factor").get<double>();
+    }
+    opts.yarn_beta_fast = j.value("yarn_beta_fast", opts.yarn_beta_fast);
+    opts.yarn_beta_slow = j.value("yarn_beta_slow", opts.yarn_beta_slow);
+    opts.llama3_low_freq_factor = j.value("llama3_low_freq_factor", opts.llama3_low_freq_factor);
+    opts.llama3_high_freq_factor = j.value("llama3_high_freq_factor", opts.llama3_high_freq_factor);
+    opts.long_rope_short_factors = j.value("long_rope_short_factors", std::vector<double>{});
+    opts.long_rope_long_factors = j.value("long_rope_long_factors", std::vector<double>{});
+    if (j.contains("output_dtype")) {
+        opts.output_dtype = optionalDataTypeFromJson(j.at("output_dtype"));
+    }
+    if (j.contains("compute_dtype")) {
+        opts.compute_dtype = optionalDataTypeFromJson(j.at("compute_dtype"));
+    }
+    opts.allow_in_place_materialization = j.value("allow_in_place_materialization", opts.allow_in_place_materialization);
+    return opts;
 }
 
 ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceLength,
@@ -552,4 +686,182 @@ Attention Attention::Builder::build() {
     return layer;
 }
 
+
+json Attention::architectureJson() const {
+    json j;
+    j["factory"] = Layer::Factory::Learning.value();
+    j["version"] = "1.0.0";
+    j["layer_type"] = "attention";
+    j["layer_name"] = std::string("layer") + std::to_string(getId());
+
+    j["num_heads"] = numHeads;
+    j["num_key_value_heads"] = numKeyValueHeads;
+    j["head_dim"] = headDim;
+    j["value_dim"] = valueDim;
+    j["output_features"] = outputFeatures;
+    j["has_bias"] = hasBias;
+    j["use_rope"] = useRope;
+    j["rope_in_place"] = ropeInPlace;
+    j["rope_options"] = ropeOptionsToJson(ropeOptions);
+    j["mask_kind"] = attentionMaskKindToString(maskKind);
+    j["diagonal_left_bound"] = diagonalLeftBound;
+    j["diagonal_right_bound"] = diagonalRightBound;
+    j["use_alibi_mask"] = useAlibiMask;
+    j["attention_scale"] = attentionScale.has_value() ? json(attentionScale.value()) : json(nullptr);
+    j["weights_data_type"] = weightsDataType;
+    j["compute_data_type"] = computeDataType;
+    j["output_data_type"] = outputDataType;
+
+    const std::optional<Tensor> input = getFeatureInput();
+    const std::optional<Tensor> output = getFeatureOutput();
+    if (!input.has_value() || !output.has_value()) {
+        throw std::runtime_error("Attention serialization requires one feature input and one feature output.");
+    }
+    j["feature_input"] = input.value().architectureJson();
+    j["feature_output"] = output.value().architectureJson();
+    j["parameters"] = getParametersArchitectureJson()["parameters"];
+    return j;
+}
+
+json Attention::serialize(thor_file::TarWriter& archiveWriter,
+                          Stream stream,
+                          bool saveOptimizerState,
+                          ThorImplementation::StampedNetwork& stampedNetwork) const {
+    json j = architectureJson();
+    Parameterizable::serializeParameters(j["parameters"], archiveWriter, stream, saveOptimizerState, stampedNetwork, "layer" + std::to_string(getId()));
+    return j;
+}
+
+void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
+    if (j.at("version").get<std::string>() != "1.0.0") {
+        throw std::runtime_error("Unsupported version in Attention::deserialize: " + j.at("version").get<std::string>());
+    }
+    if (j.at("layer_type").get<std::string>() != "attention") {
+        throw std::runtime_error("Layer type mismatch in Attention::deserialize: " + j.at("layer_type").get<std::string>());
+    }
+
+    const uint64_t inputOriginalId = j.at("feature_input").at("id").get<uint64_t>();
+    Tensor featureInput = network->getApiTensorByOriginalId(inputOriginalId);
+    Tensor featureOutput = Tensor::deserialize(j.at("feature_output"), archiveReader.get());
+
+    const std::vector<uint64_t> inputDims = featureInput.getDimensions();
+    if (inputDims.size() != 2) {
+        throw std::runtime_error("Attention deserialize expected rank-2 feature_input.");
+    }
+    const uint64_t sequenceLength = inputDims.at(0);
+    const uint64_t inputFeatures = inputDims.at(1);
+
+    const uint32_t numHeads = j.at("num_heads").get<uint32_t>();
+    const uint32_t numKeyValueHeads = j.at("num_key_value_heads").get<uint32_t>();
+    const uint32_t headDim = j.at("head_dim").get<uint32_t>();
+    const uint32_t valueDim = j.at("value_dim").get<uint32_t>();
+    const uint32_t outputFeatures = j.at("output_features").get<uint32_t>();
+    const bool hasBias = j.at("has_bias").get<bool>();
+    const bool useRope = j.at("use_rope").get<bool>();
+    const bool ropeInPlace = j.value("rope_in_place", false);
+    ThorImplementation::RotaryPositionEmbeddingOptions ropeOptions = ropeOptionsFromJson(j.at("rope_options"));
+    const ThorImplementation::AttentionMaskKind maskKind = attentionMaskKindFromString(j.value("mask_kind", std::string("none")));
+    const int64_t diagonalLeftBound = j.value("diagonal_left_bound", int64_t{0});
+    const int64_t diagonalRightBound = j.value("diagonal_right_bound", int64_t{0});
+    const bool useAlibiMask = j.value("use_alibi_mask", false);
+    std::optional<double> attentionScale = std::nullopt;
+    if (j.contains("attention_scale") && !j.at("attention_scale").is_null()) {
+        attentionScale = j.at("attention_scale").get<double>();
+    }
+    const DataType weightsDataType = j.at("weights_data_type").get<DataType>();
+    const DataType computeDataType = j.at("compute_data_type").get<DataType>();
+    const DataType outputDataType = j.at("output_data_type").get<DataType>();
+
+    std::vector<std::shared_ptr<ParameterSpecification>> parameters;
+    if (j.contains("parameters")) {
+        const json& parametersJson = j.at("parameters");
+        if (!parametersJson.is_object()) {
+            throw std::runtime_error("Attention parameters must be an object keyed by parameter name.");
+        }
+        for (auto it = parametersJson.begin(); it != parametersJson.end(); ++it) {
+            ParameterSpecification parameter = ParameterSpecification::deserialize(it.value(), archiveReader);
+            parameters.push_back(std::make_shared<ParameterSpecification>(std::move(parameter)));
+        }
+    }
+
+    std::vector<std::string> requiredParameterNames;
+    if (usePackedQkvProjectionForLayer(useRope)) {
+        requiredParameterNames = {"qkv_weights", "output_weights"};
+        if (hasBias) {
+            requiredParameterNames.push_back("qkv_bias");
+            requiredParameterNames.push_back("output_bias");
+        }
+    } else {
+        requiredParameterNames = {"query_weights", "key_weights", "value_weights", "output_weights"};
+        if (hasBias) {
+            requiredParameterNames.push_back("query_bias");
+            requiredParameterNames.push_back("key_bias");
+            requiredParameterNames.push_back("value_bias");
+            requiredParameterNames.push_back("output_bias");
+        }
+    }
+    for (const std::string& requiredName : requiredParameterNames) {
+        bool found = false;
+        for (const auto& parameter : parameters) {
+            if (parameter != nullptr && parameter->getName() == requiredName) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw std::runtime_error("Attention deserialize did not find required parameter '" + requiredName + "'.");
+        }
+    }
+
+    Attention layer(makeAttentionExpression(sequenceLength,
+                                            inputFeatures,
+                                            outputFeatures,
+                                            numHeads,
+                                            numKeyValueHeads,
+                                            headDim,
+                                            valueDim,
+                                            hasBias,
+                                            useRope,
+                                            ropeInPlace,
+                                            ropeOptions,
+                                            maskKind,
+                                            diagonalLeftBound,
+                                            diagonalRightBound,
+                                            useAlibiMask,
+                                            attentionScale,
+                                            featureInput.getDataType(),
+                                            weightsDataType,
+                                            computeDataType,
+                                            outputDataType),
+                    {{{"feature_input", featureInput}}},
+                    {{{"feature_output", featureOutput}}},
+                    std::move(parameters),
+                    numHeads,
+                    numKeyValueHeads,
+                    headDim,
+                    valueDim,
+                    outputFeatures,
+                    hasBias,
+                    useRope,
+                    ropeInPlace,
+                    std::move(ropeOptions),
+                    maskKind,
+                    diagonalLeftBound,
+                    diagonalRightBound,
+                    useAlibiMask,
+                    attentionScale,
+                    weightsDataType,
+                    computeDataType,
+                    outputDataType);
+    layer.addToNetwork(network);
+}
+
 }  // namespace Thor
+
+
+namespace {
+static const bool registeredAttention = [] {
+    Thor::TrainableLayer::register_layer("attention", &Thor::Attention::deserialize);
+    return true;
+}();
+}  // namespace
