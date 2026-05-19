@@ -1001,11 +1001,7 @@ void CudnnAttentionDescriptor::validateBackward() const {
     if (useBias) {
         AttentionTensorSpec fallback;
         const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, computeDataType, fallback);
-        if (biasSpec.dimensions != denseScoreBiasDimensions(*this)) {
-            throwInvalidAttention(
-                "additive-bias backward currently requires full dense [B,Hq,Sq,Skv] bias; broadcast bias forward is supported, "
-                "but broadcast dBias reduction is not implemented yet");
-        }
+        validateScoreBiasSpec(biasSpec, *this, "bias", computeDataType, true);
 
         AttentionTensorSpec dBiasFallback;
         const AttentionTensorSpec& dBiasSpec = scoreDBiasSpecOrDefault(*this, dBiasFallback);
