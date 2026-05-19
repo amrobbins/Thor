@@ -1350,6 +1350,10 @@ std::optional<TensorDescriptor::DataType> attentionBackwardBiasOnlyDType(const B
         return node.output_dtype.value();
     }
 
+    if (node.op == ExprOp::REDUCE_SUM) {
+        return attentionBackwardBiasOnlyDType(builder, node.lhs);
+    }
+
     if (node.op != ExprOp::ADD) {
         return std::nullopt;
     }
@@ -1674,7 +1678,7 @@ static std::vector<uint64_t> inferAttentionBackwardOutputDims(ExprOp op,
         case ExprOp::ATTENTION_BACKWARD_V:
             return v_dims;
         case ExprOp::ATTENTION_BACKWARD_BIAS:
-            throw std::runtime_error("Autodiff attention-backward bias shape requires the explicit bias node shape.");
+            return {q_dims.at(0), q_dims.at(1), q_dims.at(2), k_dims.at(2)};
         default:
             throw std::runtime_error("Autodiff attention-backward shape inference received a non-attention-backward op.");
     }
@@ -1965,7 +1969,11 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 if (node.beta_node == UINT32_MAX) {
                     throw std::runtime_error("Autodiff attention-backward bias node is missing the forward bias input.");
                 }
-                node_dims[i] = node_dims[node.beta_node];
+                node_dims[i] = inferAttentionBackwardOutputDims(node.op,
+                                                                node_dims[node.lhs],
+                                                                node_dims[node.rhs],
+                                                                node_dims[node.aux],
+                                                                node_dims[node.alpha_node]);
                 break;
             case ExprOp::CONV2D:
             case ExprOp::CONV3D:
@@ -2272,7 +2280,10 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         builder.addContribution(forward_output.node_idx, output_seed);
     }
 
-    auto addContributionToChild = [&](uint32_t child_idx, uint32_t contrib, const std::vector<uint64_t>& contrib_dims) {
+    auto addContributionToChild = [&](uint32_t child_idx,
+                                      uint32_t contrib,
+                                      const std::vector<uint64_t>& contrib_dims,
+                                      std::optional<TensorDescriptor::DataType> target_grad_dtype = std::nullopt) {
         uint32_t adjusted_contrib = contrib;
         if (has_forward_dims) {
             const std::vector<uint64_t>& child_dims = forward_node_dims.at(child_idx);
@@ -2281,7 +2292,9 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                                               contrib,
                                               contrib_dims,
                                               child_dims,
-                                              preferredGradValueDType(forward_expr.nodes.at(child_idx)));
+                                              target_grad_dtype.has_value()
+                                                  ? target_grad_dtype
+                                                  : preferredGradValueDType(forward_expr.nodes.at(child_idx)));
             }
         }
         builder.addContribution(child_idx, adjusted_contrib);
@@ -3234,7 +3247,10 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     addContributionToChild(node.aux, dV, v_dims);
                 }
                 if (node.attention_use_bias && node.alpha_node != UINT32_MAX && node_reaches_requested_inputs.at(node.alpha_node)) {
-                    const std::vector<uint64_t> bias_dims = has_forward_dims ? forward_node_dims.at(node.alpha_node) : std::vector<uint64_t>{};
+                    const std::vector<uint64_t> dbias_dense_dims = has_forward_dims
+                        ? inferAttentionBackwardOutputDims(ExprOp::ATTENTION_BACKWARD_BIAS, q_dims, k_dims, v_dims, node_dims)
+                        : std::vector<uint64_t>{};
+                    const auto dbias_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
                     const uint32_t dBias = builder.attentionBackward(ExprOp::ATTENTION_BACKWARD_BIAS,
                                                                      q,
                                                                      k,
@@ -3242,9 +3258,9 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                                                                      grad_like_output,
                                                                      bias,
                                                                      attention_for_backward,
-                                                                     preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
+                                                                     dbias_dtype,
                                                                      node.compute_dtype);
-                    addContributionToChild(node.alpha_node, dBias, bias_dims);
+                    addContributionToChild(node.alpha_node, dBias, dbias_dense_dims, dbias_dtype);
                 }
                 break;
             }

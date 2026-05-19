@@ -1962,11 +1962,14 @@ static std::vector<uint64_t> resolveAttentionBackwardOutputDimsFromInputs(const 
             return stage_input_dims.at(1);
         case ExprOp::ATTENTION_BACKWARD_V:
             return stage_input_dims.at(2);
-        case ExprOp::ATTENTION_BACKWARD_BIAS:
+        case ExprOp::ATTENTION_BACKWARD_BIAS: {
             if (!compiled_stage.use_bias) {
                 throw std::runtime_error("Attention-backward dBias output requested for an unbiased attention stage.");
             }
-            return stage_input_dims.at(4);
+            const AttentionTensorLogicalDims qLogical = logicalAttentionDims(stage_input_dims.at(0), compiled_stage.q_layout, "q");
+            const AttentionTensorLogicalDims kLogical = logicalAttentionDims(stage_input_dims.at(1), compiled_stage.k_layout, "k");
+            return {qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length};
+        }
         default:
             throw std::runtime_error("Attention-backward output shape requested for non-attention-backward op.");
     }
@@ -6206,9 +6209,10 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     Tensor oScratch(adaptedQ.getPlacement(), TensorDescriptor(adaptedDO.getDataType(), o_dims));
     Tensor stats(adaptedQ.getPlacement(),
                  TensorDescriptor(TensorDescriptor::DataType::FP32, {qLogical.batch, qLogical.heads, qLogical.sequence_length, 1}));
+    const std::vector<uint64_t> denseBiasDims{qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length};
     std::optional<Tensor> dBiasScratch = std::nullopt;
     if (compiledStage->use_bias) {
-        dBiasScratch = make_or_validate_output(3, adaptedQ.getDataType(), adaptedBias->getDimensions(), "dBias");
+        dBiasScratch = make_or_validate_output(3, adaptedQ.getDataType(), denseBiasDims, "dBias");
     }
 
     if (compiledStage->use_padding_mask) {
@@ -6268,15 +6272,9 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
 
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, oScratch);
     if (compiledStage->use_bias && adaptedBias.has_value()) {
-        const std::vector<uint64_t> denseBiasDims{qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length};
         if (!isAllowedAttentionBiasDims(adaptedBias->getDimensions(), qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length)) {
             throw std::runtime_error("Attention-backward additive bias must have shape " +
                                      attentionBiasShapeDescription(qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length) + ".");
-        }
-        if (adaptedBias->getDimensions() != denseBiasDims) {
-            throw std::runtime_error(
-                "Attention-backward broadcast additive bias is not implemented yet; broadcast bias forward is supported, but dBias reduction "
-                "requires an explicit reduction stage.");
         }
         if (adaptedBias->getDataType() != compiledStage->compute_dtype) {
             throw std::runtime_error(
