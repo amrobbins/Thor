@@ -108,3 +108,149 @@ TEST(AttentionApi, SdpaRejectsBottomRightMaskWithAlibi) {
                      .build(),
                  std::invalid_argument);
 }
+
+TEST(AttentionApi, SdpaBuildsRaggedAttentionWithFullDenseAdditiveBias) {
+    Api::Network network("attention_api_sdpa_builds_ragged_attention_with_full_dense_additive_bias");
+    Api::NetworkInput q = Api::NetworkInput::Builder().network(network).name("q").dimensions({6, 2, 32}).dataType(DataType::FP16).build();
+    Api::NetworkInput k = Api::NetworkInput::Builder().network(network).name("k").dimensions({6, 2, 32}).dataType(DataType::FP16).build();
+    Api::NetworkInput v = Api::NetworkInput::Builder().network(network).name("v").dimensions({6, 2, 32}).dataType(DataType::FP16).build();
+    Api::NetworkInput bias =
+        Api::NetworkInput::Builder().network(network).name("bias").dimensions({1, 6, 6}).dataType(DataType::FP32).build();
+    Api::NetworkInput sequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput raggedOffsets =
+        Api::NetworkInput::Builder().network(network).name("ragged_offsets").dimensions({2}).dataType(DataType::INT32).build();
+
+    Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder()
+                                                   .network(network)
+                                                   .queryInput(q.getFeatureOutput().value())
+                                                   .keyInput(k.getFeatureOutput().value())
+                                                   .valueInput(v.getFeatureOutput().value())
+                                                   .biasInput(bias.getFeatureOutput().value())
+                                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                                   .bshdLayout()
+                                                   .build();
+
+    EXPECT_EQ(attention.getInputNames(),
+              (std::vector<std::string>{"query",
+                                        "key",
+                                        "value",
+                                        "bias",
+                                        "query_sequence_lengths",
+                                        "key_value_sequence_lengths",
+                                        "query_ragged_offsets",
+                                        "key_value_ragged_offsets"}));
+    EXPECT_TRUE(attention.getUseSequenceLengths());
+    EXPECT_TRUE(attention.getUseRaggedOffsets());
+    ASSERT_TRUE(attention.getQuerySequenceLengthsInput().has_value());
+    ASSERT_TRUE(attention.getKeyValueSequenceLengthsInput().has_value());
+    ASSERT_TRUE(attention.getQueryRaggedOffsetsInput().has_value());
+    ASSERT_TRUE(attention.getKeyValueRaggedOffsetsInput().has_value());
+    EXPECT_EQ(attention.getOutput("output").getDimensions(), (std::vector<uint64_t>{6, 2, 32}));
+}
+
+TEST(AttentionApi, SdpaBuildsCrossAttentionWithSeparateRaggedMetadata) {
+    Api::Network network("attention_api_sdpa_builds_cross_attention_with_separate_ragged_metadata");
+    Api::NetworkInput q = Api::NetworkInput::Builder().network(network).name("q").dimensions({4, 4, 16}).dataType(DataType::BF16).build();
+    Api::NetworkInput k = Api::NetworkInput::Builder().network(network).name("k").dimensions({5, 2, 16}).dataType(DataType::BF16).build();
+    Api::NetworkInput v = Api::NetworkInput::Builder().network(network).name("v").dimensions({5, 2, 16}).dataType(DataType::BF16).build();
+    Api::NetworkInput qSeq = Api::NetworkInput::Builder().network(network).name("q_seq").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput kvSeq =
+        Api::NetworkInput::Builder().network(network).name("kv_seq").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput qOffsets =
+        Api::NetworkInput::Builder().network(network).name("q_offsets").dimensions({2}).dataType(DataType::INT32).build();
+    Api::NetworkInput kvOffsets =
+        Api::NetworkInput::Builder().network(network).name("kv_offsets").dimensions({2}).dataType(DataType::INT32).build();
+
+    Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder()
+                                                   .network(network)
+                                                   .queryInput(q.getFeatureOutput().value())
+                                                   .keyInput(k.getFeatureOutput().value())
+                                                   .valueInput(v.getFeatureOutput().value())
+                                                   .querySequenceLengthsInput(qSeq.getFeatureOutput().value())
+                                                   .keyValueSequenceLengthsInput(kvSeq.getFeatureOutput().value())
+                                                   .queryRaggedOffsetsInput(qOffsets.getFeatureOutput().value())
+                                                   .keyValueRaggedOffsetsInput(kvOffsets.getFeatureOutput().value())
+                                                   .bshdLayout()
+                                                   .build();
+
+    EXPECT_EQ(attention.getOutput("output").getDimensions(), (std::vector<uint64_t>{4, 4, 16}));
+    EXPECT_TRUE(attention.getUseSequenceLengths());
+    EXPECT_TRUE(attention.getUseRaggedOffsets());
+}
+
+TEST(AttentionApi, SdpaRejectsRaggedOffsetsWithoutSequenceLengths) {
+    Api::Network network("attention_api_sdpa_rejects_ragged_offsets_without_sequence_lengths");
+    Api::NetworkInput q = Api::NetworkInput::Builder().network(network).name("q").dimensions({2, 8, 32}).dataType(DataType::FP16).build();
+    Api::NetworkInput offsets =
+        Api::NetworkInput::Builder().network(network).name("offsets").dimensions({2}).dataType(DataType::INT32).build();
+
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .selfInput(q.getFeatureOutput().value())
+                     .raggedOffsetsInput(offsets.getFeatureOutput().value())
+                     .build(),
+                 std::invalid_argument);
+}
+
+TEST(AttentionApi, SdpaRejectsRaggedOffsetsWhenValueDimDiffersFromQkDim) {
+    Api::Network network("attention_api_sdpa_rejects_ragged_offsets_value_dim_mismatch");
+    Api::NetworkInput q = Api::NetworkInput::Builder().network(network).name("q").dimensions({2, 8, 32}).dataType(DataType::FP16).build();
+    Api::NetworkInput k = Api::NetworkInput::Builder().network(network).name("k").dimensions({2, 8, 32}).dataType(DataType::FP16).build();
+    Api::NetworkInput v = Api::NetworkInput::Builder().network(network).name("v").dimensions({2, 8, 16}).dataType(DataType::FP16).build();
+    Api::NetworkInput seq = Api::NetworkInput::Builder().network(network).name("seq").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput offsets =
+        Api::NetworkInput::Builder().network(network).name("offsets").dimensions({2}).dataType(DataType::INT32).build();
+
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .queryInput(q.getFeatureOutput().value())
+                     .keyInput(k.getFeatureOutput().value())
+                     .valueInput(v.getFeatureOutput().value())
+                     .sequenceLengthsInput(seq.getFeatureOutput().value())
+                     .raggedOffsetsInput(offsets.getFeatureOutput().value())
+                     .build(),
+                 std::invalid_argument);
+}
+
+TEST(AttentionApi, SdpaRejectsInvalidVariableLengthMetadata) {
+    Api::Network network("attention_api_sdpa_rejects_invalid_variable_length_metadata");
+    Api::NetworkInput q = Api::NetworkInput::Builder().network(network).name("q").dimensions({2, 8, 32}).dataType(DataType::FP16).build();
+    Api::NetworkInput badSeqDtype =
+        Api::NetworkInput::Builder().network(network).name("bad_seq_dtype").dimensions({1}).dataType(DataType::FP16).build();
+    Api::NetworkInput badSeqShape =
+        Api::NetworkInput::Builder().network(network).name("bad_seq_shape").dimensions({2}).dataType(DataType::INT32).build();
+    Api::NetworkInput seq = Api::NetworkInput::Builder().network(network).name("seq").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput badOffsetsDtype =
+        Api::NetworkInput::Builder().network(network).name("bad_offsets_dtype").dimensions({2}).dataType(DataType::FP16).build();
+    Api::NetworkInput badOffsetsShape =
+        Api::NetworkInput::Builder().network(network).name("bad_offsets_shape").dimensions({1}).dataType(DataType::INT32).build();
+
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .selfInput(q.getFeatureOutput().value())
+                     .sequenceLengthsInput(badSeqDtype.getFeatureOutput().value())
+                     .build(),
+                 std::invalid_argument);
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .selfInput(q.getFeatureOutput().value())
+                     .sequenceLengthsInput(badSeqShape.getFeatureOutput().value())
+                     .build(),
+                 std::invalid_argument);
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .selfInput(q.getFeatureOutput().value())
+                     .sequenceLengthsInput(seq.getFeatureOutput().value())
+                     .raggedOffsetsInput(badOffsetsDtype.getFeatureOutput().value())
+                     .build(),
+                 std::invalid_argument);
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .selfInput(q.getFeatureOutput().value())
+                     .sequenceLengthsInput(seq.getFeatureOutput().value())
+                     .raggedOffsetsInput(badOffsetsShape.getFeatureOutput().value())
+                     .build(),
+                 std::invalid_argument);
+}

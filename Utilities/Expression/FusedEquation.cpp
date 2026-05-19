@@ -58,8 +58,12 @@ static size_t dataTypeSizeBytes(DataType dtype) {
             return 2;
         case DataType::UINT32:
             return 4;
+        case DataType::UINT64:
+            return 8;
         case DataType::INT32:
             return 4;
+        case DataType::INT64:
+            return 8;
         default:
             throw std::runtime_error("Unsupported dtype in dataTypeSizeBytes.");
     }
@@ -72,11 +76,42 @@ static const Tensor& runtimeInputTensor(const RuntimeInputValue& value) {
     return std::get<Tensor>(value);
 }
 
+static Tensor runtimeInputTensorScalarView(const RuntimeInputValue& value, const char* label) {
+    if (std::holds_alternative<Tensor>(value)) {
+        return std::get<Tensor>(value);
+    }
+    if (!std::holds_alternative<TensorScalarBinding>(value)) {
+        throw std::runtime_error(std::string("Expected tensor or tensor-runtime-scalar runtime input for ") + label + ".");
+    }
+
+    const TensorScalarBinding& binding = std::get<TensorScalarBinding>(value);
+    if (!binding.buffer.isInitialized()) {
+        throw std::runtime_error(std::string("Tensor-runtime-scalar buffer is not initialized for ") + label + ".");
+    }
+    if (binding.buffer.getDataType() != binding.sourceDType) {
+        throw std::runtime_error(std::string("Tensor-runtime-scalar binding for ") + label +
+                                 " must use a backing buffer with the same dtype as the scalar source dtype.");
+    }
+
+    const size_t elem_bytes = dataTypeSizeBytes(binding.sourceDType);
+    if (elem_bytes == 0 || binding.byteOffset % elem_bytes != 0) {
+        throw std::runtime_error(std::string("Tensor-runtime-scalar binding byte offset is not element-aligned for ") + label + ".");
+    }
+    if (binding.byteOffset + elem_bytes > binding.buffer.getArraySizeInBytes()) {
+        throw std::runtime_error(std::string("Tensor-runtime-scalar binding exceeds backing buffer size for ") + label + ".");
+    }
+
+    return binding.buffer.aliasView({1, 1, 1, 1}, {1, 1, 1, 1}, binding.byteOffset / elem_bytes);
+}
+
 static std::vector<uint64_t> runtimeInputDims(const RuntimeInputValue& value) {
     if (std::holds_alternative<Tensor>(value)) {
         return std::get<Tensor>(value).getDimensions();
     }
-    return {};
+    if (std::holds_alternative<TensorScalarBinding>(value)) {
+        return {1};
+    }
+    return {1};
 }
 
 static bool runtimeInputIsNonDenseTensorView(const RuntimeInputValue& value) {
@@ -902,6 +937,20 @@ static AttentionTensorLogicalDims logicalAttentionDims(const std::vector<uint64_
     }
 }
 
+static bool isAllowedAttentionBiasDims(const std::vector<uint64_t>& dims,
+                                           uint64_t batch,
+                                           uint64_t heads,
+                                           uint64_t query_len,
+                                           uint64_t kv_len) {
+    return dims.size() == 4 && (dims[0] == 1 || dims[0] == batch) && (dims[1] == 1 || dims[1] == heads) && dims[2] == query_len &&
+           dims[3] == kv_len;
+}
+
+static std::string attentionBiasShapeDescription(uint64_t batch, uint64_t heads, uint64_t query_len, uint64_t kv_len) {
+    return "[1|B,1|Hq,Sq,Skv] for B/Hq/Sq/Skv=[" + std::to_string(batch) + "," + std::to_string(heads) + "," +
+           std::to_string(query_len) + "," + std::to_string(kv_len) + "]";
+}
+
 static std::vector<uint64_t> thorAttentionDims(AttentionTensorLayout layout,
                                                uint64_t batch,
                                                uint64_t heads,
@@ -936,7 +985,7 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::RUNTIME_SCALAR:
             case ExprOp::TENSOR_RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
-                node_dims[i] = {};
+                node_dims[i] = {1};
                 break;
             case ExprOp::FILL:
                 node_dims[i] = node.fill_dims;
@@ -1792,9 +1841,9 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
         if (stage_input_dims.size() <= next_optional_idx) {
             throw std::runtime_error("Attention stage with additive bias expected a bias input shape.");
         }
-        const std::vector<uint64_t> expected_bias_dims{batch, query_heads, query_len, kv_len};
-        if (stage_input_dims.at(next_optional_idx) != expected_bias_dims) {
-            throw std::runtime_error("Attention additive bias must have shape [B, Hq, Sq, Skv].");
+        if (!isAllowedAttentionBiasDims(stage_input_dims.at(next_optional_idx), batch, query_heads, query_len, kv_len)) {
+            throw std::runtime_error("Attention additive bias must have shape " +
+                                     attentionBiasShapeDescription(batch, query_heads, query_len, kv_len) + ".");
         }
         ++next_optional_idx;
     }
@@ -2694,7 +2743,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::RUNTIME_SCALAR:
             case ExprOp::TENSOR_RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
-                node_dims[i] = {};
+                node_dims[i] = {1};
                 break;
             case ExprOp::FILL:
                 node_dims[i] = node.fill_dims;
@@ -3003,7 +3052,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::RUNTIME_SCALAR:
             case ExprOp::TENSOR_RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
-                node_dims[i] = {};
+                node_dims[i] = {1};
                 break;
             case ExprOp::FILL:
                 node_dims[i] = node.fill_dims;
@@ -4379,7 +4428,13 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
 
 std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputShapes(
     const std::unordered_map<std::string, Tensor>& inputs) const {
-    std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputsForCompilation(inputs);
+    return getOutputShapes(inputs, {});
+}
+
+std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputShapes(
+    const std::unordered_map<std::string, Tensor>& inputs,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) const {
+    std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputsForCompilation(inputs, {}, tensor_scalar_inputs);
     std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
 
     if (root_values.empty()) {
@@ -6019,9 +6074,9 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
     // Build and validate the cuDNN descriptor during stamping so shape/layout errors fail before execution.
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, output);
     if (compiledStage->use_bias && adaptedBias.has_value()) {
-        const std::vector<uint64_t> expected_bias_dims{qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length};
-        if (adaptedBias->getDimensions() != expected_bias_dims) {
-            throw std::runtime_error("Attention additive bias must have shape [B, Hq, Sq, Skv].");
+        if (!isAllowedAttentionBiasDims(adaptedBias->getDimensions(), qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length)) {
+            throw std::runtime_error("Attention additive bias must have shape " +
+                                     attentionBiasShapeDescription(qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length) + ".");
         }
         if (adaptedBias->getDataType() != compiledStage->compute_dtype) {
             throw std::runtime_error(
@@ -6213,9 +6268,15 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
 
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, oScratch);
     if (compiledStage->use_bias && adaptedBias.has_value()) {
-        const std::vector<uint64_t> expected_bias_dims{qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length};
-        if (adaptedBias->getDimensions() != expected_bias_dims) {
-            throw std::runtime_error("Attention-backward additive bias must have shape [B, Hq, Sq, Skv].");
+        const std::vector<uint64_t> denseBiasDims{qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length};
+        if (!isAllowedAttentionBiasDims(adaptedBias->getDimensions(), qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length)) {
+            throw std::runtime_error("Attention-backward additive bias must have shape " +
+                                     attentionBiasShapeDescription(qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length) + ".");
+        }
+        if (adaptedBias->getDimensions() != denseBiasDims) {
+            throw std::runtime_error(
+                "Attention-backward broadcast additive bias is not implemented yet; broadcast bias forward is supported, but dBias reduction "
+                "requires an explicit reduction stage.");
         }
         if (adaptedBias->getDataType() != compiledStage->compute_dtype) {
             throw std::runtime_error(
@@ -6967,8 +7028,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 std::optional<Tensor> dropoutSeedTensor = std::nullopt;
                 std::optional<Tensor> dropoutOffsetTensor = std::nullopt;
                 if (stage.attention->dropout_probability > 0.0f) {
-                    dropoutSeedTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
-                    dropoutOffsetTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    dropoutSeedTensor = runtimeInputTensorScalarView(stageInputs[next_attention_input++], "attention dropout seed");
+                    dropoutOffsetTensor = runtimeInputTensorScalarView(stageInputs[next_attention_input++], "attention dropout offset");
                 }
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
@@ -7043,8 +7104,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 std::optional<Tensor> dropoutSeedTensor = std::nullopt;
                 std::optional<Tensor> dropoutOffsetTensor = std::nullopt;
                 if (stage.attention_backward && stage.attention_backward->dropout_probability > 0.0f) {
-                    dropoutSeedTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
-                    dropoutOffsetTensor = runtimeInputTensor(stageInputs[next_attention_backward_input++]);
+                    dropoutSeedTensor =
+                        runtimeInputTensorScalarView(stageInputs[next_attention_backward_input++], "attention-backward dropout seed");
+                    dropoutOffsetTensor =
+                        runtimeInputTensorScalarView(stageInputs[next_attention_backward_input++], "attention-backward dropout offset");
                 }
 
                 std::vector<std::optional<Tensor>> preallocated(4, std::nullopt);

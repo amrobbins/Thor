@@ -25,6 +25,7 @@ void bind_fully_connected(nb::module_ &m);
 void bind_instance_norm(nb::module_ &m);
 void bind_layer_norm(nb::module_ &m);
 void bind_rms_norm(nb::module_ &m);
+void bind_scaled_dot_product_attention(nb::module_ &m);
 void bind_network_input(nb::module_ &m);
 void bind_network_output(nb::module_ &m);
 void bind_pooling(nb::module_ &layers);
@@ -55,6 +56,7 @@ void bind_layers(nb::module_ &layers) {
     bind_instance_norm(layers);
     bind_layer_norm(layers);
     bind_rms_norm(layers);
+    bind_scaled_dot_product_attention(layers);
     bind_network_input(layers);
     bind_network_output(layers);
     bind_pooling(layers);

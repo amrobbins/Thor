@@ -1567,7 +1567,7 @@ TEST(AttentionApi, ForwardWithRaggedOffsetsAndRopeMatchesPackedReference) {
                    1.5e-1f);
 }
 
-TEST(AttentionApi, ForwardWithRaggedOffsetsDropoutAndRopeIsDeterministic) {
+TEST(AttentionApi, ForwardWithRaggedOffsetsDropoutAndRopeAdvancesPhiloxOffset) {
     AttentionReferenceCase c;
     c.batchSize = 2;
     c.sequenceLength = 4;
@@ -1586,60 +1586,16 @@ TEST(AttentionApi, ForwardWithRaggedOffsetsDropoutAndRopeIsDeterministic) {
     c.sequenceLengths = {4, 2};
     c.dataType = DataType::FP16;
 
+    constexpr float dropoutProbability = 0.5f;
+    constexpr int64_t dropoutSeed = 1234;
+    constexpr int64_t initialDropoutOffset = 5678;
+    const int64_t expectedOffsetAdvance = static_cast<int64_t>(c.batchSize) * static_cast<int64_t>(c.numHeads) *
+                                          static_cast<int64_t>(c.sequenceLength) * static_cast<int64_t>(c.sequenceLength);
+    const int64_t advancedDropoutOffset = initialDropoutOffset + expectedOffsetAdvance;
+
     const AttentionReferenceInputs denseInputs = makeAttentionReferenceInputs(c);
     AttentionReferenceInputs packedInputs = denseInputs;
     packedInputs.featureInput = packBsfRaggedStorage(denseInputs.featureInput, c.sequenceLengths, c.batchSize, c.sequenceLength, c.inputFeatures);
-    const vector<float> expectedNoDropoutDense = attentionLayerReference(denseInputs, c);
-    const vector<float> expectedNoDropoutPacked =
-        packBsfRaggedStorage(expectedNoDropoutDense, c.sequenceLengths, c.batchSize, c.sequenceLength, c.outputFeatures);
-
-    Api::Network network("attention_api_forward_with_ragged_offsets_dropout_and_rope_is_deterministic");
-    Api::NetworkInput input = Api::NetworkInput::Builder()
-                                  .network(network)
-                                  .name("tokens")
-                                  .dimensions({c.sequenceLength, c.inputFeatures})
-                                  .dataType(c.dataType)
-                                  .build();
-    Api::NetworkInput sequenceLengths =
-        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
-    Api::NetworkInput raggedOffsets =
-        Api::NetworkInput::Builder().network(network).name("ragged_offsets").dimensions({2}).dataType(DataType::INT32).build();
-
-    Api::Attention attention = Api::Attention::Builder()
-                                   .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
-                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
-                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
-                                   .numHeads(c.numHeads)
-                                   .numKeyValueHeads(c.numKeyValueHeads)
-                                   .headDim(c.headDim)
-                                   .valueDim(c.valueDim)
-                                   .outputFeatures(c.outputFeatures)
-                                   .hasBias(c.hasBias)
-                                   .ropeOptions(c.ropeOptions)
-                                   .weightsDataType(c.dataType)
-                                   .computeDataType(DataType::FP32)
-                                   .outputDataType(c.dataType)
-                                   .attentionScale(c.attentionScale)
-                                   .dropout(0.5f, 1234, 5678)
-                                   .build();
-    Api::NetworkOutput output = Api::NetworkOutput::Builder()
-                                    .network(network)
-                                    .name("output")
-                                    .inputTensor(attention.getOutput("feature_output"))
-                                    .dataType(c.dataType)
-                                    .build();
-
-    PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, input, output, attention, c.batchSize, true);
-    auto physicalSequenceLengthsInput =
-        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(sequenceLengths.getId()));
-    auto physicalRaggedOffsetsInput =
-        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(raggedOffsets.getId()));
-    ASSERT_NE(physicalSequenceLengthsInput, nullptr);
-    ASSERT_NE(physicalRaggedOffsetsInput, nullptr);
-
-    Stream stream = fixture.physicalAttention->getStreams()[0];
-    setAttentionParameters(fixture.physicalAttention, denseInputs, c, stream);
 
     Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(c.dataType, {c.batchSize, c.sequenceLength, c.inputFeatures}));
     writeCpuTensor(featureInHost, packedInputs.featureInput);
@@ -1652,30 +1608,104 @@ TEST(AttentionApi, ForwardWithRaggedOffsetsDropoutAndRopeIsDeterministic) {
     Impl::Tensor raggedOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {c.batchSize, 2}));
     writeCpuInt32Tensor(raggedOffsetsHost, raggedHostValues);
 
-    const vector<float> actual1 = runForwardWithMetadata(*fixture.physicalInput,
-                                                         *physicalSequenceLengthsInput,
-                                                         *physicalRaggedOffsetsInput,
-                                                         *fixture.physicalOutput,
-                                                         featureInHost,
-                                                         sequenceLengthsHost,
-                                                         raggedOffsetsHost,
-                                                         c.batchSize);
-    const vector<float> actual2 = runForwardWithMetadata(*fixture.physicalInput,
-                                                         *physicalSequenceLengthsInput,
-                                                         *physicalRaggedOffsetsInput,
-                                                         *fixture.physicalOutput,
-                                                         featureInHost,
-                                                         sequenceLengthsHost,
-                                                         raggedOffsetsHost,
-                                                         c.batchSize);
+    auto runPublicLayer = [&](const std::string& networkName, int64_t dropoutOffset, uint32_t forwardCount) {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("tokens")
+                                      .dimensions({c.sequenceLength, c.inputFeatures})
+                                      .dataType(c.dataType)
+                                      .build();
+        Api::NetworkInput sequenceLengths = Api::NetworkInput::Builder()
+                                                .network(network)
+                                                .name("sequence_lengths")
+                                                .dimensions({1})
+                                                .dataType(DataType::INT32)
+                                                .build();
+        Api::NetworkInput raggedOffsets = Api::NetworkInput::Builder()
+                                              .network(network)
+                                              .name("ragged_offsets")
+                                              .dimensions({2})
+                                              .dataType(DataType::INT32)
+                                              .build();
 
-    const vector<float> validActual1 = packedBsfRaggedValidValues(actual1, c.sequenceLengths, c.outputFeatures);
-    const vector<float> validActual2 = packedBsfRaggedValidValues(actual2, c.sequenceLengths, c.outputFeatures);
-    expectAllClose(validActual1, validActual2, 0.0f, 0.0f);
-    expectNotAllClose(validActual1,
-                      packedBsfRaggedValidValues(expectedNoDropoutPacked, c.sequenceLengths, c.outputFeatures),
-                      1.0e-2f,
-                      1.0e-2f);
+        Api::Attention attention = Api::Attention::Builder()
+                                       .network(network)
+                                       .featureInput(input.getFeatureOutput().value())
+                                       .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                       .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                       .numHeads(c.numHeads)
+                                       .numKeyValueHeads(c.numKeyValueHeads)
+                                       .headDim(c.headDim)
+                                       .valueDim(c.valueDim)
+                                       .outputFeatures(c.outputFeatures)
+                                       .hasBias(c.hasBias)
+                                       .ropeOptions(c.ropeOptions)
+                                       .weightsDataType(c.dataType)
+                                       .computeDataType(DataType::FP32)
+                                       .outputDataType(c.dataType)
+                                       .attentionScale(c.attentionScale)
+                                       .dropout(dropoutProbability, dropoutSeed, dropoutOffset)
+                                       .build();
+        Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("output")
+                                        .inputTensor(attention.getOutput("feature_output"))
+                                        .dataType(c.dataType)
+                                        .build();
+
+        PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, input, output, attention, c.batchSize, true);
+        auto physicalSequenceLengthsInput =
+            dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(sequenceLengths.getId()));
+        auto physicalRaggedOffsetsInput =
+            dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(raggedOffsets.getId()));
+        EXPECT_NE(physicalSequenceLengthsInput, nullptr);
+        EXPECT_NE(physicalRaggedOffsetsInput, nullptr);
+        if (physicalSequenceLengthsInput == nullptr || physicalRaggedOffsetsInput == nullptr) {
+            return vector<vector<float>>{};
+        }
+
+        Stream stream = fixture.physicalAttention->getStreams()[0];
+        setAttentionParameters(fixture.physicalAttention, denseInputs, c, stream);
+
+        vector<vector<float>> validOutputs;
+        for (uint32_t i = 0; i < forwardCount; ++i) {
+            const vector<float> actual = runForwardWithMetadata(*fixture.physicalInput,
+                                                                *physicalSequenceLengthsInput,
+                                                                *physicalRaggedOffsetsInput,
+                                                                *fixture.physicalOutput,
+                                                                featureInHost,
+                                                                sequenceLengthsHost,
+                                                                raggedOffsetsHost,
+                                                                c.batchSize);
+            validOutputs.push_back(packedBsfRaggedValidValues(actual, c.sequenceLengths, c.outputFeatures));
+        }
+        return validOutputs;
+    };
+
+    const vector<vector<float>> managedRuns =
+        runPublicLayer("attention_api_ragged_dropout_rope_managed_offset", initialDropoutOffset, 2);
+    ASSERT_EQ(managedRuns.size(), 2u);
+
+    const vector<vector<float>> initialOffsetControl =
+        runPublicLayer("attention_api_ragged_dropout_rope_initial_offset_control", initialDropoutOffset, 1);
+    ASSERT_EQ(initialOffsetControl.size(), 1u);
+
+    const vector<vector<float>> advancedOffsetControl =
+        runPublicLayer("attention_api_ragged_dropout_rope_advanced_offset_control", advancedDropoutOffset, 1);
+    ASSERT_EQ(advancedOffsetControl.size(), 1u);
+
+    // Fixed Philox seed/offset is deterministic across independently placed public Attention layers.
+    expectAllClose(managedRuns[0], initialOffsetControl[0], 1.0e-3f, 1.0e-3f);
+
+    // The public layer must advance its managed Philox offset between forward executions.  The second managed
+    // execution should therefore match a fresh layer whose initial offset is exactly the first offset plus the
+    // public Attention layer's conservative per-forward score-count advance.
+    expectAllClose(managedRuns[1], advancedOffsetControl[0], 1.0e-3f, 1.0e-3f);
+
+    // Guard the test fixture: if these controls are numerically identical, the equality checks above would not
+    // prove that offset advancement is observable for this configuration.
+    expectNotAllClose(initialOffsetControl[0], advancedOffsetControl[0], 1.0e-3f, 1.0e-3f);
 }
 
 TEST(AttentionApi, ForwardUniformAttentionMatchesBshdProjectionLayoutReference) {

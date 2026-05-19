@@ -1866,6 +1866,75 @@ def test_attention_forward_ragged_offsets_bshd_packed_matches_reference():
 
 
 @pytest.mark.cuda
+@pytest.mark.parametrize("bias_shape", [(1, 1, 6, 7), (1, 2, 6, 7), (2, 1, 6, 7), (2, 2, 6, 7)])
+def test_attention_forward_ragged_offsets_with_additive_bias_broadcast_shapes_match_reference(bias_shape):
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    scale = 0.57 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
+    q_lengths = np.asarray([4, 2], dtype=np.int32)
+    kv_lengths = np.asarray([5, 3], dtype=np.int32)
+    rng = np.random.default_rng(6601)
+    bias_np = rng.normal(0.0, 0.45, size=bias_shape).astype(np.float32)
+    # Make the bias strongly asymmetric so an implementation that drops or misindexes it fails loudly.
+    bias_np += np.linspace(-0.7, 0.9, num=bias_np.size, dtype=np.float32).reshape(bias_np.shape)
+    expected = _attention_reference(q_np, k_np, v_np, scale=scale, bias=bias_np, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
+    expected_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected, dtype), q_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 6, 2, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got_storage = _copy_to_host(stamped.output(), dtype, stream)
+    got_valid = _packed_bshd_ragged_valid_values(got_storage, q_lengths).astype(np.float32)
+    expected_valid = _packed_bshd_ragged_valid_values(expected_storage, q_lengths).astype(np.float32)
+    np.testing.assert_allclose(got_valid, expected_valid, rtol=5e-2, atol=5e-2)
+
+
+@pytest.mark.cuda
 def test_attention_forward_ragged_offsets_with_dropout_is_deterministic():
     dtype = thor.DataType.fp16
     q = ex.input("q")
@@ -2244,28 +2313,47 @@ def test_attention_ragged_offsets_reject_unsupported_combinations_early():
             compute_dtype=thor.DataType.fp32,
         )
 
-    with pytest.raises(RuntimeError, match="ragged attention cannot currently be combined with additive bias"):
-        ex.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            bias=bias,
-            q_seq_len=q_seq_len,
-            kv_seq_len=kv_seq_len,
-            q_ragged_offsets=q_offsets,
-            kv_ragged_offsets=kv_offsets,
-            q_layout=AttentionTensorLayout.bshd,
-            k_layout=AttentionTensorLayout.bshd,
-            v_layout=AttentionTensorLayout.bshd,
-            o_layout=AttentionTensorLayout.bshd,
-            output_dtype=dtype,
-            compute_dtype=thor.DataType.fp32,
-        )
+    ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
 
     ex.scaled_dot_product_attention(
         q,
         k,
         v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        dropout_probability=0.25,
+        dropout_seed=dropout_seed,
+        dropout_offset=dropout_offset,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+
+    ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
         q_seq_len=q_seq_len,
         kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
@@ -4650,6 +4738,47 @@ def test_public_attention_rejects_invalid_dropout_configuration():
 
 
 @pytest.mark.cuda
+def test_attention_compile_backward_ragged_offsets_with_full_dense_additive_bias_rejects_cleanly():
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    scale = 0.53 / math.sqrt(64.0)
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+
+    # Forward ragged + additive bias is supported, but cuDNN primary SDPA currently does not expose
+    # a reliable ragged/THD backward path for additive bias/dBias. Keep this as a first-class
+    # Thor error instead of allowing a late opaque frontend engine-selection failure.
+    with pytest.raises(RuntimeError, match="ragged offsets with additive bias"):
+        fwd_eq.compile_backward(["q", "k", "v", "bias"], error_input_name=upstream_name)
+
+
+@pytest.mark.cuda
 def test_attention_forward_with_additive_bias_matches_reference_and_stays_single_attention_stage():
     dtype = thor.DataType.fp16
     q = ex.input("q")
@@ -4688,6 +4817,186 @@ def test_attention_forward_with_additive_bias_matches_reference_and_stays_single
     got = _copy_to_host(stamped.output(), dtype, stream)
     _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
 
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("bias_shape", [(1, 1, 4, 5), (1, 2, 4, 5), (2, 1, 4, 5), (2, 2, 4, 5)])
+def test_attention_forward_with_broadcast_additive_bias_shapes_match_reference(bias_shape):
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    scale = 0.67 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=4, kv_len=5, dtype=dtype)
+    rng = np.random.default_rng(778 + bias_shape[0] * 10 + bias_shape[1])
+    bias_np = rng.normal(0.0, 0.25, size=bias_shape).astype(np.float32)
+    expected = _attention_reference(q_np, k_np, v_np, scale=scale, bias=bias_np)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 2, 4, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("bias_shape", [(1, 1, 5, 6), (1, 4, 5, 6), (2, 1, 5, 6), (2, 4, 5, 6)])
+def test_attention_forward_gqa_cross_attention_with_broadcast_additive_bias_shapes_match_reference(bias_shape):
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    scale = 0.49 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=2,
+        query_heads=4,
+        kv_heads=2,
+        query_len=5,
+        kv_len=6,
+        qk_dim=16,
+        v_dim=16,
+        dtype=dtype,
+    )
+    rng = np.random.default_rng(8800 + bias_shape[0] * 100 + bias_shape[1] * 10)
+    bias_np = rng.normal(0.0, 0.28, size=bias_shape).astype(np.float32)
+    # Include a deterministic score-position ramp so a kernel that drops the bias or indexes it
+    # as [B,Hkv,Sq,Skv] instead of [B,Hq,Sq,Skv] fails with a large numerical mismatch.
+    bias_np += np.linspace(-0.55, 0.73, num=bias_np.size, dtype=np.float32).reshape(bias_np.shape)
+    expected = _attention_reference(q_np, k_np, v_np, scale=scale, bias=bias_np)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 4, 5, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("bias_shape", [(1, 1, 5, 6), (1, 4, 5, 6), (2, 1, 5, 6), (2, 4, 5, 6)])
+def test_attention_forward_ragged_gqa_cross_attention_with_broadcast_additive_bias_shapes_match_reference(bias_shape):
+    dtype = thor.DataType.fp16
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    scale = 0.51 / math.sqrt(16.0)
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    eq = ex.compile(out, device_num=0)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=2,
+        query_heads=4,
+        kv_heads=2,
+        query_len=5,
+        kv_len=6,
+        qk_dim=16,
+        v_dim=16,
+        dtype=dtype,
+    )
+    q_lengths = np.asarray([5, 3], dtype=np.int32)
+    kv_lengths = np.asarray([6, 4], dtype=np.int32)
+    rng = np.random.default_rng(8900 + bias_shape[0] * 100 + bias_shape[1] * 10)
+    bias_np = rng.normal(0.0, 0.31, size=bias_shape).astype(np.float32)
+    bias_np += np.linspace(-0.61, 0.69, num=bias_np.size, dtype=np.float32).reshape(bias_np.shape)
+    expected = _attention_reference(
+        q_np,
+        k_np,
+        v_np,
+        scale=scale,
+        bias=bias_np,
+        q_seq_len=q_lengths,
+        kv_seq_len=kv_lengths,
+    )
+
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
+    expected_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected, dtype), q_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=4, dim=16), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [2, 5, 4, 16]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got_storage = _copy_to_host(stamped.output(), dtype, stream)
+    got_valid = _packed_bshd_ragged_valid_values(got_storage, q_lengths).astype(np.float32)
+    expected_valid = _packed_bshd_ragged_valid_values(expected_storage, q_lengths).astype(np.float32)
+    np.testing.assert_allclose(got_valid, expected_valid, rtol=5e-2, atol=5e-2)
 
 @pytest.mark.cuda
 def test_attention_additive_bias_dtype_must_match_compute_dtype_without_hidden_conversion():

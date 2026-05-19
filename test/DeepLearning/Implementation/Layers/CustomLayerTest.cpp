@@ -399,6 +399,70 @@ TEST(CustomLayer, MultiInputMultiOutputWaitsForAllInputsAndRoutesByPortIndex) {
     cleanupLayers({&lhsIn, &rhsIn, &lhsBridge, &rhsBridge, &custom, &diffSink, &sumSink});
 }
 
+TEST(CustomLayer, MultiInputInferenceOnlyForwardCycleResetsStateWithoutBackward) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor lhsPass1_h(cpuPlacement, descriptor);
+    Tensor rhsPass1_h(cpuPlacement, descriptor);
+    Tensor lhsPass2_h(cpuPlacement, descriptor);
+    Tensor rhsPass2_h(cpuPlacement, descriptor);
+    writeCpuTensor(lhsPass1_h, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    writeCpuTensor(rhsPass1_h, {10.0f, 20.0f, 30.0f, 1.0f, 2.0f, 3.0f});
+    writeCpuTensor(lhsPass2_h, {-1.0f, -2.0f, -3.0f, 8.0f, 9.0f, 10.0f});
+    writeCpuTensor(rhsPass2_h, {5.0f, 4.0f, 3.0f, -2.0f, -4.0f, -6.0f});
+
+    NetworkInput lhsIn(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput rhsIn(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    CountingPassthrough lhsBridge;
+    CountingPassthrough rhsBridge;
+    CustomLayer custom(buildTwoInputTwoOutputExpression(gpuPlacement), {"lhs", "rhs"}, {"sum", "diff"}, gpuPlacement, {}, true);
+    CountingPassthrough sumSink;
+    CountingPassthrough diffSink;
+
+    lhsIn.connectToNextLayer(&lhsBridge);
+    rhsIn.connectToNextLayer(&rhsBridge);
+    lhsBridge.connectToNextLayer(&custom, 0, 0);
+    rhsBridge.connectToNextLayer(&custom, 0, 1);
+    custom.connectToNextLayer(&sumSink, 0, 0);
+    custom.connectToNextLayer(&diffSink, 1, 0);
+
+    compileAndInitialize({&lhsIn, &rhsIn, &lhsBridge, &rhsBridge, &custom, &sumSink, &diffSink});
+
+    auto runPass = [&](const Tensor& lhs_h,
+                       const Tensor& rhs_h,
+                       const std::vector<float>& expectedSum,
+                       const std::vector<float>& expectedDiff,
+                       int expectedCalls) {
+        lhsIn.forward(lhs_h, false, batchSize);
+        ASSERT_EQ(sumSink.forwardCalls, expectedCalls - 1);
+        ASSERT_EQ(diffSink.forwardCalls, expectedCalls - 1);
+
+        rhsIn.forward(rhs_h, false, batchSize);
+        ASSERT_EQ(sumSink.forwardCalls, expectedCalls);
+        ASSERT_EQ(diffSink.forwardCalls, expectedCalls);
+
+        Tensor sum_h = copyTensorToCpu(sumSink.getFeatureInput().value(), custom.getStreams()[0]);
+        Tensor diff_h = copyTensorToCpu(diffSink.getFeatureInput().value(), custom.getStreams()[0]);
+        expectAllClose(readCpuTensor(sum_h), expectedSum);
+        expectAllClose(readCpuTensor(diff_h), expectedDiff);
+    };
+
+    runPass(lhsPass1_h,
+            rhsPass1_h,
+            {11.0f, 22.0f, 33.0f, 5.0f, 7.0f, 9.0f},
+            {-9.0f, -18.0f, -27.0f, 3.0f, 3.0f, 3.0f},
+            1);
+    runPass(lhsPass2_h,
+            rhsPass2_h,
+            {4.0f, 2.0f, 0.0f, 6.0f, 5.0f, 4.0f},
+            {-6.0f, -6.0f, -6.0f, 10.0f, 13.0f, 16.0f},
+            2);
+
+    cleanupLayers({&lhsIn, &rhsIn, &lhsBridge, &rhsBridge, &custom, &sumSink, &diffSink});
+}
+
 TEST(CustomLayer, MultiInputMultiOutputBackwardWaitsForAllOutputGradients) {
     const uint64_t batchSize = 2;
     const uint64_t features = 3;

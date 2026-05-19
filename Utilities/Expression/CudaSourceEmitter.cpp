@@ -283,6 +283,14 @@ static std::string scalarStorageType(DataType dtype) {
             return "__nv_fp8_e4m3";
         case DataType::FP8_E5M2:
             return "__nv_fp8_e5m2";
+        case DataType::INT32:
+            return "int";
+        case DataType::UINT32:
+            return "unsigned int";
+        case DataType::INT64:
+            return "long long";
+        case DataType::UINT64:
+            return "unsigned long long";
         default:
             throw runtime_error("Unsupported scalar storage dtype in fused stage emitter: " + TensorDescriptor::getElementTypeName(dtype));
     }
@@ -291,6 +299,8 @@ static std::string scalarStorageType(DataType dtype) {
 static uint32_t scalarStorageTypeSizeBytes(DataType dtype) {
     switch (dtype) {
         case DataType::FP32:
+        case DataType::INT32:
+        case DataType::UINT32:
             return 4;
         case DataType::FP16:
         case DataType::BF16:
@@ -298,6 +308,9 @@ static uint32_t scalarStorageTypeSizeBytes(DataType dtype) {
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
             return 1;
+        case DataType::INT64:
+        case DataType::UINT64:
+            return 8;
         default:
             throw runtime_error("Unsupported scalar storage dtype size in transpose emitter: " +
                                 TensorDescriptor::getElementTypeName(dtype));
@@ -881,9 +894,14 @@ static uint32_t dataTypeStorageBytes(DataType dtype) {
         case DataType::BF16:
             return 2;
         case DataType::FP32:
+        case DataType::INT32:
+        case DataType::UINT32:
             return 4;
+        case DataType::INT64:
+        case DataType::UINT64:
+            return 8;
         default:
-            throw runtime_error("Unsupported dtype in dataTypeStorageBytes.");
+            throw runtime_error("Unsupported dtype in dataTypeStorageBytes: " + TensorDescriptor::getElementTypeName(dtype));
     }
 }
 

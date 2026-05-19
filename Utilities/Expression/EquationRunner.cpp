@@ -7,24 +7,25 @@ namespace ThorImplementation {
 
 static size_t runtimeInputScalarSizeBytes(TensorDescriptor::DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP32:
-            return 4;
-        case TensorDescriptor::DataType::FP16:
-            return 2;
-        case TensorDescriptor::DataType::BF16:
-            return 2;
+        case TensorDescriptor::DataType::BOOLEAN:
+        case TensorDescriptor::DataType::INT8:
+        case TensorDescriptor::DataType::UINT8:
         case TensorDescriptor::DataType::FP8_E4M3:
-            return 1;
         case TensorDescriptor::DataType::FP8_E5M2:
             return 1;
-        case TensorDescriptor::DataType::UINT8:
-            return 1;
+        case TensorDescriptor::DataType::FP16:
+        case TensorDescriptor::DataType::BF16:
+        case TensorDescriptor::DataType::INT16:
         case TensorDescriptor::DataType::UINT16:
             return 2;
+        case TensorDescriptor::DataType::FP32:
+        case TensorDescriptor::DataType::INT32:
         case TensorDescriptor::DataType::UINT32:
             return 4;
-        case TensorDescriptor::DataType::INT32:
-            return 4;
+        case TensorDescriptor::DataType::FP64:
+        case TensorDescriptor::DataType::INT64:
+        case TensorDescriptor::DataType::UINT64:
+            return 8;
         default:
             throw std::runtime_error("Unsupported dtype in runtimeInputScalarSizeBytes.");
     }

@@ -296,7 +296,8 @@ CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const
     Stream fakeStream(0, Stream::Priority::REGULAR);
     ThorImplementation::DynamicExpressionBuild build = expr.build(fakeAllInputs, {}, fakeStream);
 
-    std::unordered_map<std::string, std::vector<uint64_t>> fakeOutputShapes = build.equation->getOutputShapes(build.stamp_inputs);
+    std::unordered_map<std::string, std::vector<uint64_t>> fakeOutputShapes =
+        build.equation->getOutputShapes(build.stamp_inputs, build.tensor_scalar_inputs);
     std::shared_ptr<CompiledOutputs> compiledOutputs = build.equation->compileForInputs(build.stamp_inputs, {}, build.tensor_scalar_inputs);
 
     std::unordered_map<uint32_t, DataType> outputDTypeByValueId;

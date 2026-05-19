@@ -523,9 +523,6 @@ Shorthand for ``self.transpose()``.
         if (has_q_ragged_offsets && has_page_table_k) {
             throw std::runtime_error("ragged attention and paged KV cache cannot be combined.");
         }
-        if (has_bias && has_q_ragged_offsets) {
-            throw std::runtime_error("ragged attention cannot currently be combined with additive bias.");
-        }
         if (has_page_table_k && has_bias) {
             throw std::runtime_error("paged KV attention cannot currently be combined with additive bias.");
         }
@@ -572,8 +569,25 @@ Shorthand for ``self.transpose()``.
             if (uses_dropout) {
                 const Expression& dropout_seed = nb::cast<Expression>(dropout_seed_obj);
                 const Expression& dropout_offset = nb::cast<Expression>(dropout_offset_obj);
+                if (has_bias) {
+                    return Expression::scaledDotProductAttentionRagged(q,
+                                                                       k,
+                                                                       v,
+                                                                       nb::cast<Expression>(bias_obj),
+                                                                       q_seq_len,
+                                                                       kv_seq_len,
+                                                                       q_offsets,
+                                                                       kv_offsets,
+                                                                       dropout_seed,
+                                                                       dropout_offset,
+                                                                       std::move(options));
+                }
                 return Expression::scaledDotProductAttentionRagged(
                     q, k, v, q_seq_len, kv_seq_len, q_offsets, kv_offsets, dropout_seed, dropout_offset, std::move(options));
+            }
+            if (has_bias) {
+                return Expression::scaledDotProductAttentionRagged(
+                    q, k, v, nb::cast<Expression>(bias_obj), q_seq_len, kv_seq_len, q_offsets, kv_offsets, std::move(options));
             }
             return Expression::scaledDotProductAttentionRagged(q, k, v, q_seq_len, kv_seq_len, q_offsets, kv_offsets, std::move(options));
         }
@@ -856,6 +870,10 @@ path; compute_dtype should normally be thor.DataType.fp32.
 When q_ragged_offsets and kv_ragged_offsets are provided, they must be INT32 GPU
 tensors with shape [B + 1].  They enable cuDNN packed/ragged variable-length
 attention and are passed through as q/o and k/v ragged offsets respectively.
+Additive bias remains a score-space tensor when ragged offsets are used; supported
+forward shapes are [1,1,Sq,Skv], [1,Hq,Sq,Skv], [B,1,Sq,Skv], and
+[B,Hq,Sq,Skv]. It is indexed by each sequence's local q/kv positions, not by
+packed token offsets.
 
 When page_table_k and page_table_v are provided, they must be INT32 GPU tensors
 with shape [B, 1, ceil(Skv / block_size), 1], where block_size is the K/V
