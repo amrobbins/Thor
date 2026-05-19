@@ -38,6 +38,10 @@ class ScaledDotProductAttention : public CustomLayer {
                               int64_t diagonalRightBound,
                               bool useAlibiMask,
                               std::optional<double> attentionScale,
+                              std::optional<Tensor> querySequenceLengthsInput,
+                              std::optional<Tensor> keyValueSequenceLengthsInput,
+                              std::optional<Tensor> queryRaggedOffsetsInput,
+                              std::optional<Tensor> keyValueRaggedOffsetsInput,
                               Tensor::DataType computeDataType,
                               Tensor::DataType outputDataType)
         : CustomLayer(std::move(expression), std::move(inputNames), std::move(outputNames), inputInterfaces, outputInterfaces, {}, false),
@@ -47,6 +51,10 @@ class ScaledDotProductAttention : public CustomLayer {
           diagonalRightBound(diagonalRightBound),
           useAlibiMask(useAlibiMask),
           attentionScale(attentionScale),
+          querySequenceLengthsInput(std::move(querySequenceLengthsInput)),
+          keyValueSequenceLengthsInput(std::move(keyValueSequenceLengthsInput)),
+          queryRaggedOffsetsInput(std::move(queryRaggedOffsetsInput)),
+          keyValueRaggedOffsetsInput(std::move(keyValueRaggedOffsetsInput)),
           computeDataType(computeDataType),
           outputDataType(outputDataType) {}
 
@@ -62,6 +70,12 @@ class ScaledDotProductAttention : public CustomLayer {
     int64_t getDiagonalRightBound() const { return diagonalRightBound; }
     bool getUseAlibiMask() const { return useAlibiMask; }
     std::optional<double> getAttentionScale() const { return attentionScale; }
+    bool getUseSequenceLengths() const { return querySequenceLengthsInput.has_value(); }
+    bool getUseRaggedOffsets() const { return queryRaggedOffsetsInput.has_value(); }
+    std::optional<Tensor> getQuerySequenceLengthsInput() const { return querySequenceLengthsInput; }
+    std::optional<Tensor> getKeyValueSequenceLengthsInput() const { return keyValueSequenceLengthsInput; }
+    std::optional<Tensor> getQueryRaggedOffsetsInput() const { return queryRaggedOffsetsInput; }
+    std::optional<Tensor> getKeyValueRaggedOffsetsInput() const { return keyValueRaggedOffsetsInput; }
     Tensor::DataType getComputeDataType() const { return computeDataType; }
     Tensor::DataType getOutputDataType() const { return outputDataType; }
 
@@ -72,6 +86,10 @@ class ScaledDotProductAttention : public CustomLayer {
     int64_t diagonalRightBound;
     bool useAlibiMask;
     std::optional<double> attentionScale;
+    std::optional<Tensor> querySequenceLengthsInput;
+    std::optional<Tensor> keyValueSequenceLengthsInput;
+    std::optional<Tensor> queryRaggedOffsetsInput;
+    std::optional<Tensor> keyValueRaggedOffsetsInput;
     Tensor::DataType computeDataType;
     Tensor::DataType outputDataType;
 };
@@ -119,6 +137,48 @@ class ScaledDotProductAttention::Builder {
     virtual ScaledDotProductAttention::Builder& biasInput(Tensor input) {
         THOR_THROW_IF_FALSE(!this->_biasInput.has_value());
         this->_biasInput = input;
+        return *this;
+    }
+
+    // Convenience for self-attention: use the same logical sequence lengths for Q and K/V.
+    virtual ScaledDotProductAttention::Builder& sequenceLengthsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_querySequenceLengthsInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_keyValueSequenceLengthsInput.has_value());
+        this->_querySequenceLengthsInput = input;
+        this->_keyValueSequenceLengthsInput = input;
+        return *this;
+    }
+
+    virtual ScaledDotProductAttention::Builder& querySequenceLengthsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_querySequenceLengthsInput.has_value());
+        this->_querySequenceLengthsInput = input;
+        return *this;
+    }
+
+    virtual ScaledDotProductAttention::Builder& keyValueSequenceLengthsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_keyValueSequenceLengthsInput.has_value());
+        this->_keyValueSequenceLengthsInput = input;
+        return *this;
+    }
+
+    // Convenience for self-attention: use the same ragged element offsets for Q/O and K/V.
+    virtual ScaledDotProductAttention::Builder& raggedOffsetsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_queryRaggedOffsetsInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_keyValueRaggedOffsetsInput.has_value());
+        this->_queryRaggedOffsetsInput = input;
+        this->_keyValueRaggedOffsetsInput = input;
+        return *this;
+    }
+
+    virtual ScaledDotProductAttention::Builder& queryRaggedOffsetsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_queryRaggedOffsetsInput.has_value());
+        this->_queryRaggedOffsetsInput = input;
+        return *this;
+    }
+
+    virtual ScaledDotProductAttention::Builder& keyValueRaggedOffsetsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_keyValueRaggedOffsetsInput.has_value());
+        this->_keyValueRaggedOffsetsInput = input;
         return *this;
     }
 
@@ -187,6 +247,10 @@ class ScaledDotProductAttention::Builder {
     std::optional<Tensor> _keyInput;
     std::optional<Tensor> _valueInput;
     std::optional<Tensor> _biasInput;
+    std::optional<Tensor> _querySequenceLengthsInput;
+    std::optional<Tensor> _keyValueSequenceLengthsInput;
+    std::optional<Tensor> _queryRaggedOffsetsInput;
+    std::optional<Tensor> _keyValueRaggedOffsetsInput;
     std::optional<ThorImplementation::AttentionTensorLayout> _tensorLayout;
     std::optional<ThorImplementation::AttentionMaskKind> _maskKind;
     std::optional<int64_t> _diagonalLeftBound;

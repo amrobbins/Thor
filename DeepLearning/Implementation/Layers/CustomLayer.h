@@ -6,6 +6,7 @@
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
 
+#include <functional>
 #include <memory>
 #include <set>
 #include <string>
@@ -107,6 +108,7 @@ class CustomLayer : public TrainableLayer {
         std::unordered_map<std::string, Tensor> forwardOutputsByName;
         std::unordered_map<std::string, Tensor> backwardAdditionalInputsByName;
         std::unordered_map<std::string, Tensor> backwardInputGradOutputsByName;
+        std::function<void(Stream&)> forwardPreRunHook;
     };
 
     struct DecodedConnection {

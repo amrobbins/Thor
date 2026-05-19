@@ -23,6 +23,7 @@ struct DynamicExpressionBuild {
     std::unordered_map<std::string, TensorScalarBinding> tensor_scalar_inputs;
     std::unordered_map<std::string, Tensor> preallocated_outputs;
     std::unordered_map<std::string, std::vector<uint64_t>> requested_output_shapes;
+    std::function<void(Stream&)> pre_forward_hook;
 };
 
 class PreparedDynamicExpression {
@@ -149,6 +150,8 @@ class PreparedDynamicExpression {
     [[nodiscard]] const TensorMap& preallocatedOutputs() const { return build_.preallocated_outputs; }
 
     [[nodiscard]] const ShapeMap& requestedOutputShapes() const { return build_.requested_output_shapes; }
+
+    [[nodiscard]] const std::function<void(Stream&)>& preForwardHook() const { return build_.pre_forward_hook; }
 
     [[nodiscard]] FusedEquation::ParameterFanOverrideMap getParameterFanOverrides(
         const std::unordered_set<std::string>& parameter_names) const {

@@ -36,6 +36,18 @@ CudnnAttentionDescriptor makePagedDescriptor() {
     return descriptor;
 }
 
+AttentionTensorSpec scoreBiasSpec(std::vector<int64_t> dims) {
+    AttentionTensorSpec spec;
+    spec.dimensions = dims;
+    spec.strides.resize(spec.dimensions.size(), 1);
+    for (int64_t i = static_cast<int64_t>(spec.dimensions.size()) - 2; i >= 0; --i) {
+        spec.strides[static_cast<size_t>(i)] = spec.strides[static_cast<size_t>(i + 1)] * spec.dimensions[static_cast<size_t>(i + 1)];
+    }
+    spec.dataType = TensorDescriptor::DataType::FP32;
+    spec.ragged = false;
+    return spec;
+}
+
 }  // namespace
 
 TEST(CudnnAttentionDescriptor, AllowsPackedRaggedQOAndKVOffsetPairs) {
@@ -98,7 +110,25 @@ TEST(CudnnAttentionDescriptor, RejectsRaggedOffsetsWithoutPaddingMaskSequenceLen
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 }
 
-TEST(CudnnAttentionDescriptor, RejectsRaggedAttentionWithAdditiveBiasUntilPackedBiasLayoutIsDefined) {
+TEST(CudnnAttentionDescriptor, AllowsAdditiveBiasBroadcastSurface) {
+    const std::vector<std::vector<int64_t>> allowed{{1, 1, 64, 80}, {1, 4, 64, 80}, {3, 1, 64, 80}, {3, 4, 64, 80}};
+    for (const auto& dims : allowed) {
+        CudnnAttentionDescriptor descriptor = makeDescriptor();
+        descriptor.useBias = true;
+        descriptor.bias = scoreBiasSpec(dims);
+        EXPECT_NO_THROW(descriptor.validateForward()) << "bias dims " << testing::PrintToString(dims);
+    }
+}
+
+TEST(CudnnAttentionDescriptor, RejectsInvalidAdditiveBiasBroadcastShape) {
+    CudnnAttentionDescriptor descriptor = makeDescriptor();
+    descriptor.useBias = true;
+    descriptor.bias = scoreBiasSpec({3, 2, 64, 80});
+
+    EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
+}
+
+TEST(CudnnAttentionDescriptor, AllowsRaggedAttentionWithFullDenseAdditiveBias) {
     CudnnAttentionDescriptor descriptor = makePackedDescriptor();
     descriptor.q.ragged = true;
     descriptor.o.ragged = true;
@@ -107,7 +137,20 @@ TEST(CudnnAttentionDescriptor, RejectsRaggedAttentionWithAdditiveBiasUntilPacked
     descriptor.usePaddingMask = true;
     descriptor.useBias = true;
 
-    EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
+    EXPECT_NO_THROW(descriptor.validateForward());
+}
+
+TEST(CudnnAttentionDescriptor, RejectsRaggedAttentionBackwardWithFullDenseAdditiveBias) {
+    CudnnAttentionDescriptor descriptor = makePackedDescriptor();
+    descriptor.q.ragged = true;
+    descriptor.o.ragged = true;
+    descriptor.k.ragged = true;
+    descriptor.v.ragged = true;
+    descriptor.usePaddingMask = true;
+    descriptor.useBias = true;
+    descriptor.generateStats = true;
+
+    EXPECT_THROW(descriptor.validateBackward(), std::invalid_argument);
 }
 
 TEST(CudnnAttentionDescriptor, RejectsCombiningRaggedOffsetsWithPagedKvCache) {

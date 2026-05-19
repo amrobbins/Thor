@@ -635,6 +635,7 @@ void CustomLayer::compileImpl() {
 
         app.forwardPrepared = std::make_shared<PreparedDynamicExpression>(
             layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, computeStream(applicationIndex)));
+        app.forwardPreRunHook = app.forwardPrepared->preForwardHook();
         validatePreparedExpressionInputs(*app.forwardPrepared);
 
         if (!compiledParameterInitializers) {
@@ -991,6 +992,14 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
                 continue;
             nextLayers[flat].value()->forward(featureOutputs[flat], validationPass, batchSize);
         }
+
+        // In inference-only / forward-only topologies there is no backward pass to mark the end of an execution
+        // cycle. Reset this application as soon as its forward has been emitted so the next call can wait for a
+        // fresh set of input arrivals and re-run the stamped expression. Training applications keep the existing
+        // forward/backward cycle reset so gradients and parameter updates stay pass-scoped.
+        if (!applicationHasAnyDownstreamBackprop(applicationIndex)) {
+            clearForwardArrivalBookkeeping(applicationIndex);
+        }
     }
 }
 
@@ -1103,6 +1112,9 @@ void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {
     DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
     if (decoded.applicationIndex >= applications.size() || !applications[decoded.applicationIndex].forwardStamped) {
         throw runtime_error("CustomLayer::computeFeatureOut requires a stamped forward plan.");
+    }
+    if (applications[decoded.applicationIndex].forwardPreRunHook) {
+        applications[decoded.applicationIndex].forwardPreRunHook(computeStream(decoded.applicationIndex));
     }
     applications[decoded.applicationIndex].forwardStamped->run();
 }

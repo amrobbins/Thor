@@ -5,9 +5,12 @@
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/TensorOperations/Scalar/SetScalar.h"
 
 #include <cmath>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 
@@ -109,6 +112,72 @@ Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& f
     }
     return inputInterface;
 }
+
+uint64_t checkedDropoutOffsetAdvance(uint64_t batch, uint32_t numHeads, uint64_t sequenceLength) {
+    return checkedMul(checkedMul(batch, numHeads, "dropout offset batch-head count"),
+                      checkedMul(sequenceLength, sequenceLength, "dropout offset score count"),
+                      "dropout offset advance");
+}
+
+class AttentionDropoutRuntimeState {
+   public:
+    AttentionDropoutRuntimeState(int64_t seed, int64_t initialOffset) : seed(seed), nextOffset(initialOffset) {
+        if (initialOffset < 0) {
+            throw std::invalid_argument("Attention dropoutOffset must be non-negative when dropout is enabled.");
+        }
+    }
+
+    void setOffsetAdvance(uint64_t advance) {
+        if (advance == 0) {
+            advance = 1;
+        }
+        if (advance > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            throw std::overflow_error("Attention dropout offset advance exceeds int64_t range.");
+        }
+        offsetAdvance = advance;
+    }
+
+    ThorImplementation::TensorScalarBinding seedBinding(ThorImplementation::TensorPlacement placement) {
+        ensureBuffer(placement);
+        return ThorImplementation::TensorScalarBinding{seedOffsetBuffer, kSeedByteOffset, DataType::INT64};
+    }
+
+    ThorImplementation::TensorScalarBinding offsetBinding(ThorImplementation::TensorPlacement placement) {
+        ensureBuffer(placement);
+        return ThorImplementation::TensorScalarBinding{seedOffsetBuffer, kOffsetByteOffset, DataType::INT64};
+    }
+
+    void uploadForForward(Stream& stream) {
+        ThorImplementation::TensorPlacement placement(ThorImplementation::TensorPlacement::MemDevices::GPU, stream.getGpuNum());
+        ensureBuffer(placement);
+
+        ThorImplementation::launchSetInt64Pair(seedOffsetBuffer.getMemPtr<int64_t>(), seed, nextOffset, stream);
+
+        const uint64_t remaining = static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - nextOffset);
+        if (offsetAdvance > remaining) {
+            throw std::overflow_error("Attention automatic dropout offset advance would exceed int64_t range.");
+        }
+        nextOffset += static_cast<int64_t>(offsetAdvance);
+    }
+
+   private:
+    static constexpr uint64_t kSeedByteOffset = 0;
+    static constexpr uint64_t kOffsetByteOffset = sizeof(int64_t);
+
+    void ensureBuffer(ThorImplementation::TensorPlacement placement) {
+        if (seedOffsetBuffer.isInitialized() && seedOffsetBuffer.getPlacement() == placement) {
+            return;
+        }
+
+        ThorImplementation::TensorDescriptor descriptor(DataType::INT64, {2});
+        seedOffsetBuffer = ThorImplementation::Tensor(placement, descriptor);
+    }
+
+    int64_t seed;
+    int64_t nextOffset;
+    uint64_t offsetAdvance = 1;
+    ThorImplementation::Tensor seedOffsetBuffer;
+};
 
 std::shared_ptr<Thor::ParameterSpecification> makeParameter(const std::string& name,
                                                             const std::vector<uint64_t>& shape,
@@ -303,8 +372,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
     using ThorImplementation::Expression;
     using ThorImplementation::FusedEquation;
     using ThorImplementation::Tensor;
-    using ThorImplementation::TensorDescriptor;
-    using ThorImplementation::TensorPlacement;
+    using ThorImplementation::TensorScalarBinding;
 
     const bool usePackedQkvProjection = usePackedQkvProjectionForLayer(useRope);
     std::vector<std::string> expectedInputs;
@@ -562,8 +630,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                     Expression seqLenExpr = Expression::input(kAttentionSequenceLengthsInputName, DataType::INT32, DataType::INT32);
                     Expression raggedOffsetsExpr = Expression::input(kAttentionRaggedOffsetsInputName, DataType::INT32, DataType::INT32);
                     if (dropoutProbability > 0.0f) {
-                        Expression dropoutSeedExpr = Expression::input(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
-                        Expression dropoutOffsetExpr = Expression::input(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
+                        Expression dropoutSeedExpr = Expression::tensorRuntimeScalar(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
+                        Expression dropoutOffsetExpr = Expression::tensorRuntimeScalar(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
                         return Expression::scaledDotProductAttentionRagged(
                                    q,
                                    k,
@@ -584,8 +652,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                 if (useSequenceLengths) {
                     Expression seqLenExpr = Expression::input(kAttentionSequenceLengthsInputName, DataType::INT32, DataType::INT32);
                     if (dropoutProbability > 0.0f) {
-                        Expression dropoutSeedExpr = Expression::input(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
-                        Expression dropoutOffsetExpr = Expression::input(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
+                        Expression dropoutSeedExpr = Expression::tensorRuntimeScalar(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
+                        Expression dropoutOffsetExpr = Expression::tensorRuntimeScalar(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
                         return Expression::scaledDotProductAttention(
                                    q, k, v, seqLenExpr, seqLenExpr, dropoutSeedExpr, dropoutOffsetExpr, options)
                             .withOutputDType(outputDType);
@@ -593,8 +661,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
                     return Expression::scaledDotProductAttention(q, k, v, seqLenExpr, seqLenExpr, options).withOutputDType(outputDType);
                 }
                 if (dropoutProbability > 0.0f) {
-                    Expression dropoutSeedExpr = Expression::input(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
-                    Expression dropoutOffsetExpr = Expression::input(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
+                    Expression dropoutSeedExpr = Expression::tensorRuntimeScalar(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
+                    Expression dropoutOffsetExpr = Expression::tensorRuntimeScalar(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
                     return Expression::scaledDotProductAttentionWithDropout(
                                q, k, v, dropoutSeedExpr, dropoutOffsetExpr, options)
                         .withOutputDType(outputDType);
@@ -618,26 +686,23 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t sequenceL
             if (useRaggedOffsets) {
                 stampInputs[kAttentionRaggedOffsetsInputName] = raggedOffsets.value();
             }
+            std::unordered_map<std::string, TensorScalarBinding> tensorScalarInputs;
+            std::function<void(Stream&)> preForwardHook;
             if (dropoutProbability > 0.0f) {
-                auto makeInt64Scalar = [&](int64_t value) {
-                    Tensor scalar(featureInput.getPlacement(), TensorDescriptor(DataType::INT64, {1, 1, 1, 1}));
-                    Tensor host(TensorPlacement(TensorPlacement::MemDevices::CPU), TensorDescriptor(DataType::INT64, {1, 1, 1, 1}));
-                    host.setElement<int64_t>({0, 0, 0, 0}, value);
-                    scalar.copyFromAsync(host, stream);
-                    Event copyDone = stream.putEvent(false, true);
-                    copyDone.synchronize();
-                    return scalar;
-                };
-                stampInputs[kAttentionDropoutSeedInputName] = makeInt64Scalar(dropoutSeed);
-                stampInputs[kAttentionDropoutOffsetInputName] = makeInt64Scalar(dropoutOffset);
+                auto dropoutState = std::make_shared<AttentionDropoutRuntimeState>(dropoutSeed, dropoutOffset);
+                dropoutState->setOffsetAdvance(checkedDropoutOffsetAdvance(batch, numHeads, sequenceLength));
+                tensorScalarInputs[kAttentionDropoutSeedInputName] = dropoutState->seedBinding(featureInput.getPlacement());
+                tensorScalarInputs[kAttentionDropoutOffsetInputName] = dropoutState->offsetBinding(featureInput.getPlacement());
+                preForwardHook = [dropoutState](Stream& runStream) { dropoutState->uploadForForward(runStream); };
             }
 
             return DynamicExpressionBuild{
                 std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum())),
                 stampInputs,
-                {},
+                std::move(tensorScalarInputs),
                 outputs,
                 {},
+                std::move(preForwardHook),
             };
         });
 }
@@ -723,6 +788,9 @@ void Attention::Builder::verifyConfig() const {
     if (dropoutProbability > 0.0f && (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
                                       maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {
         throw std::invalid_argument("Attention dropout cannot currently be combined with bottom-right/decode masks in cuDNN SDPA.");
+    }
+    if (dropoutProbability > 0.0f && _dropoutOffset.value_or(0) < 0) {
+        throw std::invalid_argument("Attention dropoutOffset must be non-negative when dropout is enabled.");
     }
     if (_ropeInPlace.value_or(false) && !_useRope.value_or(false)) {
         throw std::invalid_argument("Attention ropeInPlace requires useRope to be enabled.");

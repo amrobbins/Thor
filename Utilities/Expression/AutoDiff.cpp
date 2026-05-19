@@ -1073,6 +1073,11 @@ class BackwardGraphBuilder {
         if (!isAttentionBackwardOp(op)) {
             throw std::runtime_error("attentionBackward builder called with non-attention-backward op.");
         }
+        if (forward_attention.attention_use_ragged_offsets && forward_attention.attention_use_bias) {
+            throw std::runtime_error(
+                "cuDNN primary SDPA backward does not support ragged offsets with additive bias; ragged additive bias is forward-only "
+                "until a supported dBias/backward path is implemented.");
+        }
 
         ExprNode node{};
         node.op = op;

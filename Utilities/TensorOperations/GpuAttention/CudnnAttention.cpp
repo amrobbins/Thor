@@ -151,32 +151,176 @@ void requireTensorMatchesSpec(const Tensor& tensor, const AttentionTensorSpec& s
     }
 }
 
+// Additive bias is a score-space tensor, not a packed/ragged tensor. Even when Q/K/V/O use ragged THD storage,
+// the bias is indexed by local logical sequence coordinates over the descriptor's max sequence domain.
+// cuDNN's primary SDPA forward path supports broadcasting the leading score dimensions, so Thor accepts:
+//   [1,1,Sq,Skv], [1,Hq,Sq,Skv], [B,1,Sq,Skv], and [B,Hq,Sq,Skv].
+vector<int64_t> denseScoreBiasDimensions(const CudnnAttentionDescriptor& descriptor) {
+    return {descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), descriptor.keyValueLength()};
+}
+
+vector<int64_t> contiguousStrides(const vector<int64_t>& dims) {
+    vector<int64_t> strides(dims.size(), 1);
+    for (int64_t i = static_cast<int64_t>(dims.size()) - 2; i >= 0; --i) {
+        strides[static_cast<size_t>(i)] = strides[static_cast<size_t>(i + 1)] * dims[static_cast<size_t>(i + 1)];
+    }
+    return strides;
+}
+
+vector<int64_t> denseScoreBiasStrides(const CudnnAttentionDescriptor& descriptor) { return contiguousStrides(denseScoreBiasDimensions(descriptor)); }
+
+AttentionTensorSpec fullDenseScoreBiasSpec(const CudnnAttentionDescriptor& descriptor, TensorDescriptor::DataType dataType) {
+    AttentionTensorSpec spec;
+    spec.dimensions = denseScoreBiasDimensions(descriptor);
+    spec.strides = denseScoreBiasStrides(descriptor);
+    spec.dataType = dataType;
+    spec.ragged = false;
+    return spec;
+}
+
+AttentionTensorSpec tensorSpecForBiasTensor(const Tensor& tensor) {
+    AttentionTensorSpec spec;
+    spec.dimensions = asInt64(tensor.getDimensions());
+    spec.strides = asInt64(tensor.getStridesElements());
+    spec.dataType = tensor.getDataType();
+    spec.ragged = false;
+    return spec;
+}
+
+const AttentionTensorSpec& scoreBiasSpecOrDefault(const CudnnAttentionDescriptor& descriptor,
+                                                  TensorDescriptor::DataType dataType,
+                                                  AttentionTensorSpec& fallbackStorage) {
+    if (descriptor.bias.has_value()) {
+        return descriptor.bias.value();
+    }
+    fallbackStorage = fullDenseScoreBiasSpec(descriptor, dataType);
+    return fallbackStorage;
+}
+
+const AttentionTensorSpec& scoreDBiasSpecOrDefault(const CudnnAttentionDescriptor& descriptor, AttentionTensorSpec& fallbackStorage) {
+    if (descriptor.dBias.has_value()) {
+        return descriptor.dBias.value();
+    }
+    fallbackStorage = fullDenseScoreBiasSpec(descriptor, descriptor.q.dataType);
+    return fallbackStorage;
+}
+
+bool isSupportedAttentionDBiasDataType(TensorDescriptor::DataType dtype, const CudnnAttentionDescriptor& descriptor) {
+    return dtype == descriptor.q.dataType || dtype == descriptor.computeDataType;
+}
+
+void validateScoreBiasSpec(const AttentionTensorSpec& spec,
+                           const CudnnAttentionDescriptor& descriptor,
+                           string_view name,
+                           TensorDescriptor::DataType expectedDataType,
+                           bool allowBroadcast) {
+    if (spec.dataType != expectedDataType) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected " +
+                               TensorDescriptor::getElementTypeName(expectedDataType) + ", got " +
+                               TensorDescriptor::getElementTypeName(spec.dataType));
+    }
+    if (spec.dimensions.size() != 4 || spec.strides.size() != 4) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) +
+                               "' must be a rank-4 score-space tensor in [B,Hq,Sq,Skv] semantic order");
+    }
+
+    const vector<int64_t> full = denseScoreBiasDimensions(descriptor);
+    const bool batchOk = spec.dimensions[0] == full[0] || (allowBroadcast && spec.dimensions[0] == 1);
+    const bool headsOk = spec.dimensions[1] == full[1] || (allowBroadcast && spec.dimensions[1] == 1);
+    const bool seqOk = spec.dimensions[2] == full[2] && spec.dimensions[3] == full[3];
+    if (!batchOk || !headsOk || !seqOk) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) +
+                               "' dimension mismatch. Expected additive-bias shape [1|B,1|Hq,Sq,Skv] for B/Hq/Sq/Skv " +
+                               joinInts(full) + ", got " + joinInts(spec.dimensions));
+    }
+
+    const vector<int64_t> expectedStrides = contiguousStrides(spec.dimensions);
+    if (spec.strides != expectedStrides) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) +
+                               "' stride mismatch. Expected contiguous additive-bias strides " + joinInts(expectedStrides) +
+                               ", got " + joinInts(spec.strides));
+    }
+}
+
 void requireBiasMatchesDescriptor(const Tensor& bias,
                                   const CudnnAttentionDescriptor& descriptor,
                                   string_view name,
-                                  TensorDescriptor::DataType expectedDataType) {
+                                  TensorDescriptor::DataType expectedDataType,
+                                  bool allowBroadcast) {
     requireInitialized(bias, name);
-    if (bias.getDataType() != expectedDataType) {
+    const AttentionTensorSpec actual = tensorSpecForBiasTensor(bias);
+    AttentionTensorSpec fallback;
+    const AttentionTensorSpec& expected = scoreBiasSpecOrDefault(descriptor, expectedDataType, fallback);
+    validateScoreBiasSpec(expected, descriptor, name, expectedDataType, allowBroadcast);
+    if (actual.dataType != expected.dataType) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected " +
-                               TensorDescriptor::getElementTypeName(expectedDataType) + ", got " +
-                               TensorDescriptor::getElementTypeName(bias.getDataType()));
+                               TensorDescriptor::getElementTypeName(expected.dataType) + ", got " +
+                               TensorDescriptor::getElementTypeName(actual.dataType));
     }
-    const vector<int64_t> expected{descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), descriptor.keyValueLength()};
-    const vector<int64_t> dims = asInt64(bias.getDimensions());
-    if (dims != expected) {
+    if (actual.dimensions != expected.dimensions) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
-                               joinInts(expected) + ", got " + joinInts(dims));
+                               joinInts(expected.dimensions) + ", got " + joinInts(actual.dimensions));
+    }
+    if (actual.strides != expected.strides) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' stride mismatch. Expected " +
+                               joinInts(expected.strides) + ", got " + joinInts(actual.strides));
     }
 }
 
 void requireAttentionBiasMatchesDescriptor(const Tensor& bias, const CudnnAttentionDescriptor& descriptor, string_view name) {
-    requireBiasMatchesDescriptor(bias, descriptor, name, descriptor.computeDataType);
+    requireBiasMatchesDescriptor(bias, descriptor, name, descriptor.computeDataType, true);
 }
 
 void requireAttentionDBiasMatchesDescriptor(const Tensor& bias, const CudnnAttentionDescriptor& descriptor, string_view name) {
-    // cuDNN primary flash bprop engines require the bias-gradient reduction output to use
-    // the IO dtype (FP16/BF16), even when the additive bias input itself is FP32.
-    requireBiasMatchesDescriptor(bias, descriptor, name, descriptor.q.dataType);
+    // Thor currently exposes dBias only for the full dense score tensor; broadcast dBias reduction
+    // should be added as a separate explicit reduction stage.  The dtype is part of the runtime
+    // backward graph signature because some expression plans materialize native dBias in the IO dtype
+    // while others route it through an FP32 terminal gradient path.
+    requireInitialized(bias, name);
+    const AttentionTensorSpec actual = tensorSpecForBiasTensor(bias);
+    AttentionTensorSpec fallback;
+    const AttentionTensorSpec& expected = scoreDBiasSpecOrDefault(descriptor, fallback);
+    validateScoreBiasSpec(expected, descriptor, name, expected.dataType, false);
+    if (!isSupportedAttentionDBiasDataType(expected.dataType, descriptor)) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) +
+                               "' dtype mismatch. Expected dBias dtype to be either the q tensor dtype (" +
+                               TensorDescriptor::getElementTypeName(descriptor.q.dataType) + ") or compute dtype (" +
+                               TensorDescriptor::getElementTypeName(descriptor.computeDataType) + "), got " +
+                               TensorDescriptor::getElementTypeName(expected.dataType));
+    }
+    if (actual.dataType != expected.dataType) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected " +
+                               TensorDescriptor::getElementTypeName(expected.dataType) + ", got " +
+                               TensorDescriptor::getElementTypeName(actual.dataType));
+    }
+    if (actual.dimensions != expected.dimensions) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
+                               joinInts(expected.dimensions) + ", got " + joinInts(actual.dimensions));
+    }
+    if (actual.strides != expected.strides) {
+        throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' stride mismatch. Expected " +
+                               joinInts(expected.strides) + ", got " + joinInts(actual.strides));
+    }
+}
+
+CudnnAttentionDescriptor descriptorWithRuntimeBiasSpec(const CudnnAttentionDescriptor& descriptor,
+                                                       const optional<Tensor>& bias,
+                                                       TensorDescriptor::DataType expectedDataType) {
+    CudnnAttentionDescriptor withBiasSpec = descriptor;
+    if (withBiasSpec.useBias && !withBiasSpec.bias.has_value() && bias.has_value()) {
+        withBiasSpec.bias = tensorSpecForBiasTensor(bias.value());
+        validateScoreBiasSpec(withBiasSpec.bias.value(), withBiasSpec, "bias", expectedDataType, true);
+    }
+    return withBiasSpec;
+}
+
+CudnnAttentionDescriptor descriptorWithRuntimeDBiasSpec(const CudnnAttentionDescriptor& descriptor, const optional<Tensor>& dBias) {
+    CudnnAttentionDescriptor withDBiasSpec = descriptor;
+    if (withDBiasSpec.useBias && !withDBiasSpec.dBias.has_value() && dBias.has_value()) {
+        withDBiasSpec.dBias = tensorSpecForBiasTensor(dBias.value());
+        validateScoreBiasSpec(withDBiasSpec.dBias.value(), withDBiasSpec, "dBias", withDBiasSpec.dBias->dataType, false);
+    }
+    return withDBiasSpec;
 }
 
 void requireSeqLenMatchesDescriptor(const Tensor& seq_len, const CudnnAttentionDescriptor& descriptor, string_view name) {
@@ -489,17 +633,11 @@ class AttentionGraphCache {
                     .set_seq_len_q(seqLen(built.graph, "seq_len_q", UID_SEQ_Q, descriptor.batchSize()))
                     .set_seq_len_kv(seqLen(built.graph, "seq_len_kv", UID_SEQ_KV, descriptor.batchSize()));
             }
-            if (descriptor.useBias)
-                attrs.set_bias(
-                    tensor(built.graph,
-                           "bias",
-                           UID_BIAS,
-                           {descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), descriptor.keyValueLength()},
-                           {descriptor.queryHeads() * descriptor.queryLength() * descriptor.keyValueLength(),
-                            descriptor.queryLength() * descriptor.keyValueLength(),
-                            descriptor.keyValueLength(),
-                            1},
-                           descriptor.computeDataType));
+            if (descriptor.useBias) {
+                AttentionTensorSpec fallback;
+                const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(descriptor, descriptor.computeDataType, fallback);
+                attrs.set_bias(tensor(built.graph, "bias", UID_BIAS, biasSpec.dimensions, biasSpec.strides, descriptor.computeDataType));
+            }
             if (descriptor.usePagedKvCache) {
                 const int64_t k_pages = pagedKvPageCountForTable(descriptor, "page_table_k");
                 const int64_t v_pages = pagedKvPageCountForTable(descriptor, "page_table_v");
@@ -637,13 +775,12 @@ class AttentionGraphCache {
                 .set_seq_len_kv(seqLen(built.graph, "seq_len_kv", UID_SEQ_KV, descriptor.batchSize()));
         }
         if (descriptor.useBias) {
-            const vector<int64_t> bias_dim{descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), descriptor.keyValueLength()};
-            const vector<int64_t> bias_stride{descriptor.queryHeads() * descriptor.queryLength() * descriptor.keyValueLength(),
-                                              descriptor.queryLength() * descriptor.keyValueLength(),
-                                              descriptor.keyValueLength(),
-                                              1};
-            attrs.set_bias(tensor(built.graph, "bias", UID_BIAS, bias_dim, bias_stride, descriptor.computeDataType));
-            attrs.set_dbias(tensor(built.graph, "dBias", UID_DBIA, bias_dim, bias_stride, descriptor.q.dataType));
+            AttentionTensorSpec fallback;
+            const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(descriptor, descriptor.computeDataType, fallback);
+            attrs.set_bias(tensor(built.graph, "bias", UID_BIAS, biasSpec.dimensions, biasSpec.strides, descriptor.computeDataType));
+            AttentionTensorSpec dBiasFallback;
+            const AttentionTensorSpec& dBiasSpec = scoreDBiasSpecOrDefault(descriptor, dBiasFallback);
+            attrs.set_dbias(tensor(built.graph, "dBias", UID_DBIA, dBiasSpec.dimensions, dBiasSpec.strides, dBiasSpec.dataType));
         }
         if (descriptor.dropout.probability > 0.0f) {
             if (!descriptor.dropout.usePhilox) {
@@ -813,13 +950,17 @@ void CudnnAttentionDescriptor::validateForward() const {
             throwInvalidAttention("ragged attention requires q and o to either both use ragged offsets or both be dense");
         if (k.ragged != v.ragged)
             throwInvalidAttention("ragged attention requires k and v to either both use ragged offsets or both be dense");
-        if (useBias)
-            throwInvalidAttention("ragged attention with additive bias is not enabled until the packed bias layout is explicitly defined");
         if (usePagedKvCache)
             throwInvalidAttention("ragged attention and paged KV cache are separate variable-length modes and cannot be combined");
         if (useFp8)
             throwInvalidAttention("ragged FP8 attention is not enabled until FP8 forward is validated for packed variable-length layouts");
     }
+    if (useBias) {
+        AttentionTensorSpec fallback;
+        const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, computeDataType, fallback);
+        validateScoreBiasSpec(biasSpec, *this, "bias", computeDataType, true);
+    }
+
     if (useAlibiMask) {
         const bool usesCausalDiagonal = maskKind == AttentionMaskKind::CausalTopLeft ||
                                         maskKind == AttentionMaskKind::CausalBottomRight ||
@@ -851,7 +992,28 @@ void CudnnAttentionDescriptor::validateForward() const {
 void CudnnAttentionDescriptor::validateBackward() const {
     validateForward();
     if (usePagedKvCache)
-        throwInvalidAttention("paged KV attention backward is not enabled; the paged KV cache path is inference-only until training semantics are defined");
+        throwInvalidAttention("paged KV attention backward is not enabled; the paged KV path is inference-only until training semantics are defined");
+    const bool anyRagged = q.ragged || k.ragged || v.ragged || o.ragged;
+    if (anyRagged && useBias)
+        throwInvalidAttention(
+            "cuDNN primary SDPA backward does not support ragged offsets with additive bias; ragged additive bias is forward-only "
+            "until a supported dBias/backward path is implemented");
+    if (useBias) {
+        AttentionTensorSpec fallback;
+        const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, computeDataType, fallback);
+        if (biasSpec.dimensions != denseScoreBiasDimensions(*this)) {
+            throwInvalidAttention(
+                "additive-bias backward currently requires full dense [B,Hq,Sq,Skv] bias; broadcast bias forward is supported, "
+                "but broadcast dBias reduction is not implemented yet");
+        }
+
+        AttentionTensorSpec dBiasFallback;
+        const AttentionTensorSpec& dBiasSpec = scoreDBiasSpecOrDefault(*this, dBiasFallback);
+        validateScoreBiasSpec(dBiasSpec, *this, "dBias", dBiasSpec.dataType, false);
+        if (!isSupportedAttentionDBiasDataType(dBiasSpec.dataType, *this)) {
+            throwInvalidAttention("additive-bias backward dBias dtype must be either the q tensor dtype or the attention compute dtype");
+        }
+    }
     if (!generateStats)
         throwInvalidAttention("backward requires descriptor.generateStats=true in the corresponding forward pass");
 }
@@ -869,6 +1031,14 @@ string CudnnAttentionDescriptor::cacheKey(string_view passName, int gpuNum) cons
     out << "mask=" << static_cast<int>(maskKind) << ";left=" << diagonalLeftBound << ";right=" << diagonalRightBound << ';';
     out << "stats=" << generateStats << ";detBwd=" << deterministicBackward << ";pad=" << usePaddingMask << ";alibi=" << useAlibiMask
         << ";bias=" << useBias << ";paged=" << usePagedKvCache << ";fp8=" << useFp8 << ';';
+    if (useBias) {
+        AttentionTensorSpec fallback;
+        const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, computeDataType, fallback);
+        appendSpec(out, "bias", biasSpec);
+        AttentionTensorSpec dBiasFallback;
+        const AttentionTensorSpec& dBiasSpec = scoreDBiasSpecOrDefault(*this, dBiasFallback);
+        appendSpec(out, "dBias", dBiasSpec);
+    }
     out << "dropP=" << dropout.probability << ";dropPhilox=" << dropout.usePhilox << ';';
     out << "pagedMax=" << pagedKv.maxSequenceLengthKv << ';';
     return out.str();
@@ -882,62 +1052,63 @@ CudnnScaledDotProductAttention& CudnnScaledDotProductAttention::instance() {
 void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& descriptor,
                                              const CudnnAttentionForwardArgs& args,
                                              Stream stream) {
-    descriptor.validateForward();
+    CudnnAttentionDescriptor runtimeDescriptor = descriptorWithRuntimeBiasSpec(descriptor, args.bias, descriptor.computeDataType);
+    runtimeDescriptor.validateForward();
     const int gpuNum = stream.getGpuNum();
     requireGpuTensor(args.q, "q", gpuNum);
     requireGpuTensor(args.k, "k", gpuNum);
     requireGpuTensor(args.v, "v", gpuNum);
     requireGpuTensor(args.o, "o", gpuNum);
-    requireTensorMatchesSpec(args.q, descriptor.q, "q");
-    requireTensorMatchesSpec(args.k, descriptor.k, "k");
-    requireTensorMatchesSpec(args.v, descriptor.v, "v");
-    requireTensorMatchesSpec(args.o, descriptor.o, "o");
+    requireTensorMatchesSpec(args.q, runtimeDescriptor.q, "q");
+    requireTensorMatchesSpec(args.k, runtimeDescriptor.k, "k");
+    requireTensorMatchesSpec(args.v, runtimeDescriptor.v, "v");
+    requireTensorMatchesSpec(args.o, runtimeDescriptor.o, "o");
 
-    BuiltGraph& graph = cache().getOrBuildForward(descriptor, gpuNum);
+    BuiltGraph& graph = cache().getOrBuildForward(runtimeDescriptor, gpuNum);
     unordered_map<int64_t, void*> pack;
     insertTensor(pack, UID_Q, args.q);
     insertTensor(pack, UID_K, args.k);
     insertTensor(pack, UID_V, args.v);
     insertTensor(pack, UID_O, args.o);
 
-    if (descriptor.generateStats) {
+    if (runtimeDescriptor.generateStats) {
         requireOptionalGpuTensor(args.stats, "stats", gpuNum);
         insertTensor(pack, UID_STATS, args.stats.value());
     }
-    if (descriptor.useBias) {
+    if (runtimeDescriptor.useBias) {
         requireOptionalGpuTensor(args.bias, "bias", gpuNum);
-        requireAttentionBiasMatchesDescriptor(args.bias.value(), descriptor, "bias");
+        requireAttentionBiasMatchesDescriptor(args.bias.value(), runtimeDescriptor, "bias");
         insertTensor(pack, UID_BIAS, args.bias.value());
     }
-    if (descriptor.usePaddingMask) {
+    if (runtimeDescriptor.usePaddingMask) {
         requireOptionalGpuTensor(args.seqLenQ, "seqLenQ", gpuNum);
         requireOptionalGpuTensor(args.seqLenKv, "seqLenKv", gpuNum);
-        requireSeqLenMatchesDescriptor(args.seqLenQ.value(), descriptor, "seqLenQ");
-        requireSeqLenMatchesDescriptor(args.seqLenKv.value(), descriptor, "seqLenKv");
+        requireSeqLenMatchesDescriptor(args.seqLenQ.value(), runtimeDescriptor, "seqLenQ");
+        requireSeqLenMatchesDescriptor(args.seqLenKv.value(), runtimeDescriptor, "seqLenKv");
         insertTensor(pack, UID_SEQ_Q, args.seqLenQ.value());
         insertTensor(pack, UID_SEQ_KV, args.seqLenKv.value());
     }
-    if (descriptor.q.ragged) {
+    if (runtimeDescriptor.q.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetQ, "raggedOffsetQ", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetQ.value(), descriptor, "raggedOffsetQ");
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetQ.value(), runtimeDescriptor, "raggedOffsetQ");
         insertTensor(pack, UID_RAGGED_Q, args.raggedOffsetQ.value());
     }
-    if (descriptor.k.ragged) {
+    if (runtimeDescriptor.k.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetK, "raggedOffsetK", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetK.value(), descriptor, "raggedOffsetK");
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetK.value(), runtimeDescriptor, "raggedOffsetK");
         insertTensor(pack, UID_RAGGED_K, args.raggedOffsetK.value());
     }
-    if (descriptor.v.ragged) {
+    if (runtimeDescriptor.v.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetV, "raggedOffsetV", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetV.value(), descriptor, "raggedOffsetV");
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetV.value(), runtimeDescriptor, "raggedOffsetV");
         insertTensor(pack, UID_RAGGED_V, args.raggedOffsetV.value());
     }
-    if (descriptor.o.ragged) {
+    if (runtimeDescriptor.o.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetO, "raggedOffsetO", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetO.value(), descriptor, "raggedOffsetO");
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetO.value(), runtimeDescriptor, "raggedOffsetO");
         insertTensor(pack, UID_RAGGED_O, args.raggedOffsetO.value());
     }
-    if (descriptor.dropout.probability > 0.0f) {
+    if (runtimeDescriptor.dropout.probability > 0.0f) {
         if (descriptor.dropout.usePhilox) {
             requireOptionalGpuTensor(args.dropoutSeed, "dropoutSeed", gpuNum);
             requireOptionalGpuTensor(args.dropoutOffset, "dropoutOffset", gpuNum);
@@ -952,11 +1123,11 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
             insertTensor(pack, UID_DROPOUT_SCALE, args.dropoutScale.value());
         }
     }
-    if (descriptor.usePagedKvCache) {
+    if (runtimeDescriptor.usePagedKvCache) {
         requireOptionalGpuTensor(args.pageTableK, "pageTableK", gpuNum);
         requireOptionalGpuTensor(args.pageTableV, "pageTableV", gpuNum);
-        requirePagedKvTableMatchesDescriptor(args.pageTableK.value(), descriptor, "pageTableK");
-        requirePagedKvTableMatchesDescriptor(args.pageTableV.value(), descriptor, "pageTableV");
+        requirePagedKvTableMatchesDescriptor(args.pageTableK.value(), runtimeDescriptor, "pageTableK");
+        requirePagedKvTableMatchesDescriptor(args.pageTableV.value(), runtimeDescriptor, "pageTableV");
         insertTensor(pack, UID_PAGE_TABLE_K, args.pageTableK.value());
         insertTensor(pack, UID_PAGE_TABLE_V, args.pageTableV.value());
     }
@@ -985,7 +1156,9 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
 void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& descriptor,
                                               const CudnnAttentionBackwardArgs& args,
                                               Stream stream) {
-    descriptor.validateBackward();
+    CudnnAttentionDescriptor runtimeDescriptor = descriptorWithRuntimeBiasSpec(descriptor, args.bias, descriptor.computeDataType);
+    runtimeDescriptor = descriptorWithRuntimeDBiasSpec(runtimeDescriptor, args.dBias);
+    runtimeDescriptor.validateBackward();
     const int gpuNum = stream.getGpuNum();
     requireGpuTensor(args.q, "q", gpuNum);
     requireGpuTensor(args.k, "k", gpuNum);
@@ -997,7 +1170,7 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
     requireGpuTensor(args.dK, "dK", gpuNum);
     requireGpuTensor(args.dV, "dV", gpuNum);
 
-    BuiltGraph& graph = cache().getOrBuildBackward(descriptor, gpuNum);
+    BuiltGraph& graph = cache().getOrBuildBackward(runtimeDescriptor, gpuNum);
     unordered_map<int64_t, void*> pack;
     insertTensor(pack, UID_Q, args.q);
     insertTensor(pack, UID_K, args.k);
@@ -1009,40 +1182,40 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
     insertTensor(pack, UID_DK, args.dK);
     insertTensor(pack, UID_DV, args.dV);
 
-    if (descriptor.useBias) {
+    if (runtimeDescriptor.useBias) {
         requireOptionalGpuTensor(args.bias, "bias", gpuNum);
-        requireAttentionBiasMatchesDescriptor(args.bias.value(), descriptor, "bias");
+        requireAttentionBiasMatchesDescriptor(args.bias.value(), runtimeDescriptor, "bias");
         requireOptionalGpuTensor(args.dBias, "dBias", gpuNum);
-        requireAttentionDBiasMatchesDescriptor(args.dBias.value(), descriptor, "dBias");
+        requireAttentionDBiasMatchesDescriptor(args.dBias.value(), runtimeDescriptor, "dBias");
         insertTensor(pack, UID_BIAS, args.bias.value());
         insertTensor(pack, UID_DBIA, args.dBias.value());
     }
-    if (descriptor.usePaddingMask) {
+    if (runtimeDescriptor.usePaddingMask) {
         requireOptionalGpuTensor(args.seqLenQ, "seqLenQ", gpuNum);
         requireOptionalGpuTensor(args.seqLenKv, "seqLenKv", gpuNum);
-        requireSeqLenMatchesDescriptor(args.seqLenQ.value(), descriptor, "seqLenQ");
-        requireSeqLenMatchesDescriptor(args.seqLenKv.value(), descriptor, "seqLenKv");
+        requireSeqLenMatchesDescriptor(args.seqLenQ.value(), runtimeDescriptor, "seqLenQ");
+        requireSeqLenMatchesDescriptor(args.seqLenKv.value(), runtimeDescriptor, "seqLenKv");
         insertTensor(pack, UID_SEQ_Q, args.seqLenQ.value());
         insertTensor(pack, UID_SEQ_KV, args.seqLenKv.value());
     }
-    if (descriptor.q.ragged) {
+    if (runtimeDescriptor.q.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetQ, "raggedOffsetQ", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetQ.value(), descriptor, "raggedOffsetQ");
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetQ.value(), runtimeDescriptor, "raggedOffsetQ");
         insertTensor(pack, UID_RAGGED_Q, args.raggedOffsetQ.value());
     }
-    if (descriptor.k.ragged) {
+    if (runtimeDescriptor.k.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetK, "raggedOffsetK", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetK.value(), descriptor, "raggedOffsetK");
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetK.value(), runtimeDescriptor, "raggedOffsetK");
         insertTensor(pack, UID_RAGGED_K, args.raggedOffsetK.value());
     }
-    if (descriptor.v.ragged) {
+    if (runtimeDescriptor.v.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetV, "raggedOffsetV", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetV.value(), descriptor, "raggedOffsetV");
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetV.value(), runtimeDescriptor, "raggedOffsetV");
         insertTensor(pack, UID_RAGGED_V, args.raggedOffsetV.value());
     }
-    if (descriptor.o.ragged) {
+    if (runtimeDescriptor.o.ragged) {
         requireOptionalGpuTensor(args.raggedOffsetO, "raggedOffsetO", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetO.value(), descriptor, "raggedOffsetO");
+        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetO.value(), runtimeDescriptor, "raggedOffsetO");
         insertTensor(pack, UID_RAGGED_O, args.raggedOffsetO.value());
     }
     if (descriptor.dropout.probability > 0.0f && descriptor.dropout.usePhilox) {

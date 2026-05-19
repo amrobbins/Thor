@@ -1807,6 +1807,22 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
         return input_node;
     };
 
+    auto validate_local_dropout_scalar = [&](uint32_t local_idx, const char* label) -> DataType {
+        if (local_idx >= expr.nodes.size()) {
+            throw std::runtime_error(std::string("Attention stage ") + label + " input index is out of range.");
+        }
+        const ExprNode& input_node = expr.nodes[local_idx];
+        if (input_node.op != ExprOp::INPUT && input_node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+            throw std::runtime_error(std::string("Attention stage ") + label +
+                                     " input must be a local INPUT or TENSOR_RUNTIME_SCALAR node.");
+        }
+        std::optional<DataType> dtype = input_node.op == ExprOp::INPUT ? input_node.input_tensor_dtype : input_node.output_dtype;
+        if (!dtype.has_value()) {
+            throw std::runtime_error(std::string("Attention stage ") + label + " input missing resolved dtype.");
+        }
+        return dtype.value();
+    };
+
     (void)validate_local_input(node.lhs, "q");
     (void)validate_local_input(node.rhs, "k");
     (void)validate_local_input(node.aux, "v");
@@ -1850,9 +1866,9 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
         if (node.attention_dropout_seed_node == UINT32_MAX || node.attention_dropout_offset_node == UINT32_MAX) {
             throw std::runtime_error("Attention node marked as using dropout but is missing seed/offset inputs.");
         }
-        const ExprNode& seed = validate_local_input(node.attention_dropout_seed_node, "dropout_seed");
-        const ExprNode& offset = validate_local_input(node.attention_dropout_offset_node, "dropout_offset");
-        if (seed.input_tensor_dtype.value() != DataType::INT64 || offset.input_tensor_dtype.value() != DataType::INT64) {
+        const DataType seed_dtype = validate_local_dropout_scalar(node.attention_dropout_seed_node, "dropout_seed");
+        const DataType offset_dtype = validate_local_dropout_scalar(node.attention_dropout_offset_node, "dropout_offset");
+        if (seed_dtype != DataType::INT64 || offset_dtype != DataType::INT64) {
             throw std::runtime_error("Attention dropout seed/offset inputs must be INT64 tensors.");
         }
     }
@@ -1917,6 +1933,11 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     if (node.op == ExprOp::ATTENTION_BACKWARD_BIAS && !node.attention_use_bias) {
         throw std::runtime_error("Attention-backward dBias output requested for an unbiased attention node.");
     }
+    if (node.attention_use_ragged_offsets && node.attention_use_bias) {
+        throw std::runtime_error(
+            "cuDNN primary SDPA backward does not support ragged offsets with additive bias; ragged additive bias is forward-only "
+            "until a supported dBias/backward path is implemented.");
+    }
 
     auto validate_local_input = [&](uint32_t local_idx, const char* label) -> const ExprNode& {
         if (local_idx >= expr.nodes.size()) {
@@ -1930,6 +1951,22 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
             throw std::runtime_error(std::string("Attention-backward stage ") + label + " input missing resolved input_tensor_dtype.");
         }
         return input_node;
+    };
+
+    auto validate_local_dropout_scalar = [&](uint32_t local_idx, const char* label) -> DataType {
+        if (local_idx >= expr.nodes.size()) {
+            throw std::runtime_error(std::string("Attention-backward stage ") + label + " input index is out of range.");
+        }
+        const ExprNode& input_node = expr.nodes[local_idx];
+        if (input_node.op != ExprOp::INPUT && input_node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+            throw std::runtime_error(std::string("Attention-backward stage ") + label +
+                                     " input must be a local INPUT or TENSOR_RUNTIME_SCALAR node.");
+        }
+        std::optional<DataType> dtype = input_node.op == ExprOp::INPUT ? input_node.input_tensor_dtype : input_node.output_dtype;
+        if (!dtype.has_value()) {
+            throw std::runtime_error(std::string("Attention-backward stage ") + label + " input missing resolved dtype.");
+        }
+        return dtype.value();
     };
 
     const ExprNode& q = validate_local_input(node.lhs, "q");
@@ -1971,9 +2008,9 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
         if (node.attention_dropout_seed_node == UINT32_MAX || node.attention_dropout_offset_node == UINT32_MAX) {
             throw std::runtime_error("Attention-backward node marked as using dropout but is missing seed/offset inputs.");
         }
-        const ExprNode& seed = validate_local_input(node.attention_dropout_seed_node, "dropout_seed");
-        const ExprNode& offset = validate_local_input(node.attention_dropout_offset_node, "dropout_offset");
-        if (seed.input_tensor_dtype.value() != DataType::INT64 || offset.input_tensor_dtype.value() != DataType::INT64) {
+        const DataType seed_dtype = validate_local_dropout_scalar(node.attention_dropout_seed_node, "dropout_seed");
+        const DataType offset_dtype = validate_local_dropout_scalar(node.attention_dropout_offset_node, "dropout_offset");
+        if (seed_dtype != DataType::INT64 || offset_dtype != DataType::INT64) {
             throw std::runtime_error("Attention-backward dropout seed/offset inputs must be INT64 tensors.");
         }
     }
@@ -3037,13 +3074,15 @@ static void forceAttentionDropoutLocalInputDType(PhysicalExpression& stage_expr,
         throw std::runtime_error(std::string("Attention dropout local input index out of range for ") + label + ".");
     }
     ExprNode& input_node = stage_expr.nodes.at(local_idx);
-    if (input_node.op != ExprOp::INPUT) {
-        throw std::runtime_error(std::string("Attention dropout local node must be an INPUT for ") + label + ".");
+    if (input_node.op != ExprOp::INPUT && input_node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+        throw std::runtime_error(std::string("Attention dropout local node must be an INPUT or TENSOR_RUNTIME_SCALAR for ") + label + ".");
     }
 
     // cuDNN SDPA Philox dropout seed/offset are scalar INT64 metadata tensors, not floating expression values.
     // Pin local stage metadata so cloned/specialized backward graphs cannot inherit floating attention dtypes.
-    input_node.input_tensor_dtype = DataType::INT64;
+    if (input_node.op == ExprOp::INPUT) {
+        input_node.input_tensor_dtype = DataType::INT64;
+    }
     input_node.output_dtype = DataType::INT64;
     input_node.compute_dtype = DataType::INT64;
     input_node.backward_output_dtype = DataType::INT64;
@@ -3079,15 +3118,16 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
         const ExprNode& parent = expr.nodes[parent_idx];
         std::optional<DataType> actual_input_dtype = std::nullopt;
 
-        auto out_it = node_output_value_id.find(parent_idx);
-        if (out_it != node_output_value_id.end()) {
+        if (parent.op == ExprOp::INPUT || parent.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+            input_value_ids.push_back(parent.input_slot);
+            actual_input_dtype = parent.op == ExprOp::INPUT ? parent.input_tensor_dtype : parent.output_dtype;
+        } else {
+            auto out_it = node_output_value_id.find(parent_idx);
+            if (out_it == node_output_value_id.end()) {
+                throw std::runtime_error("Missing value id for attention input.");
+            }
             input_value_ids.push_back(out_it->second);
             actual_input_dtype = parent.output_dtype;
-        } else if (parent.op == ExprOp::INPUT) {
-            input_value_ids.push_back(parent.input_slot);
-            actual_input_dtype = parent.input_tensor_dtype;
-        } else {
-            throw std::runtime_error("Missing value id for attention input.");
         }
 
         if (!parent.output_dtype.has_value()) {
@@ -3097,12 +3137,18 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
             throw std::runtime_error("Attention parent node missing resolved actual input dtype.");
         }
 
-        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot), local_slot, NamedInput::Kind::Tensor});
+        const bool is_tensor_runtime_scalar = parent.op == ExprOp::TENSOR_RUNTIME_SCALAR;
+        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot),
+                                               local_slot,
+                                               is_tensor_runtime_scalar ? NamedInput::Kind::TensorRuntimeScalar
+                                                                        : NamedInput::Kind::Tensor});
 
         ExprNode input_node;
-        input_node.op = ExprOp::INPUT;
+        input_node.op = is_tensor_runtime_scalar ? ExprOp::TENSOR_RUNTIME_SCALAR : ExprOp::INPUT;
         input_node.input_slot = local_slot;
-        input_node.input_tensor_dtype = actual_input_dtype.value();
+        if (!is_tensor_runtime_scalar) {
+            input_node.input_tensor_dtype = actual_input_dtype.value();
+        }
         input_node.output_dtype = parent.output_dtype;
         input_node.compute_dtype = parent.compute_dtype;
         input_node.backward_output_dtype = parent.backward_output_dtype;
@@ -3215,6 +3261,11 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
     if (node.op == ExprOp::ATTENTION_BACKWARD_BIAS && !node.attention_use_bias) {
         throw std::runtime_error("Attention-backward dBias output requested for an unbiased attention node.");
     }
+    if (node.attention_use_ragged_offsets && node.attention_use_bias) {
+        throw std::runtime_error(
+            "cuDNN primary SDPA backward does not support ragged offsets with additive bias; ragged additive bias is forward-only "
+            "until a supported dBias/backward path is implemented.");
+    }
     if (node.attention_use_paged_kv_cache) {
         throw std::runtime_error(
             "Attention-backward with paged KV cache is not enabled; the paged KV path is inference-only until training semantics are "
@@ -3237,15 +3288,16 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
         const ExprNode& parent = expr.nodes[parent_idx];
         std::optional<DataType> actual_input_dtype = std::nullopt;
 
-        auto out_it = node_output_value_id.find(parent_idx);
-        if (out_it != node_output_value_id.end()) {
+        if (parent.op == ExprOp::INPUT || parent.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+            input_value_ids.push_back(parent.input_slot);
+            actual_input_dtype = parent.op == ExprOp::INPUT ? parent.input_tensor_dtype : parent.output_dtype;
+        } else {
+            auto out_it = node_output_value_id.find(parent_idx);
+            if (out_it == node_output_value_id.end()) {
+                throw std::runtime_error("Missing value id for attention-backward input.");
+            }
             input_value_ids.push_back(out_it->second);
             actual_input_dtype = parent.output_dtype;
-        } else if (parent.op == ExprOp::INPUT) {
-            input_value_ids.push_back(parent.input_slot);
-            actual_input_dtype = parent.input_tensor_dtype;
-        } else {
-            throw std::runtime_error("Missing value id for attention-backward input.");
         }
 
         if (!parent.output_dtype.has_value()) {
@@ -3255,12 +3307,18 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
             throw std::runtime_error("Attention-backward parent node missing resolved actual input dtype.");
         }
 
-        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot), local_slot, NamedInput::Kind::Tensor});
+        const bool is_tensor_runtime_scalar = parent.op == ExprOp::TENSOR_RUNTIME_SCALAR;
+        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot),
+                                               local_slot,
+                                               is_tensor_runtime_scalar ? NamedInput::Kind::TensorRuntimeScalar
+                                                                        : NamedInput::Kind::Tensor});
 
         ExprNode input_node;
-        input_node.op = ExprOp::INPUT;
+        input_node.op = is_tensor_runtime_scalar ? ExprOp::TENSOR_RUNTIME_SCALAR : ExprOp::INPUT;
         input_node.input_slot = local_slot;
-        input_node.input_tensor_dtype = actual_input_dtype.value();
+        if (!is_tensor_runtime_scalar) {
+            input_node.input_tensor_dtype = actual_input_dtype.value();
+        }
         input_node.output_dtype = parent.output_dtype;
         input_node.compute_dtype = parent.compute_dtype;
         input_node.backward_output_dtype = parent.backward_output_dtype;
@@ -3322,6 +3380,12 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
     route.aux = v_local;
     route.alpha_node = dO_local;
     route.beta_node = bias_local;
+    if (route.op == ExprOp::ATTENTION_BACKWARD_BIAS) {
+        // cuDNN writes dBias in the same native dtype as the Q path for Thor's attention stages.
+        // Keep the stage output dtype pinned to the local Q dtype even when the original additive-bias
+        // tensor is FP32, so merged backward stages do not hand an FP32 output tensor to cuDNN.
+        route.output_dtype = stage_expr.nodes.at(q_local).output_dtype;
+    }
     route.attention_seq_len_q_node = q_seq_len_local;
     route.attention_seq_len_kv_node = kv_seq_len_local;
     route.attention_ragged_offset_q_node = q_ragged_offset_local;
