@@ -4,8 +4,10 @@
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <functional>
 #include <sstream>
+#include <string_view>
 #include "DeepLearning/Implementation/ThorError.h"
 
 using DataType = ThorImplementation::TensorDescriptor::DataType;
@@ -2543,6 +2545,11 @@ Expression Expression::rotaryPositionEmbedding(RotaryPositionEmbeddingOptions op
 }
 
 namespace {
+bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
+    const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE");
+    return value != nullptr && std::string_view(value) == "1";
+}
+
 void applyAttentionOptions(ExprNode& node, const AttentionOptions& options, bool use_bias) {
     node.attention_q_layout = options.q_layout;
     node.attention_k_layout = options.k_layout;
@@ -2582,7 +2589,7 @@ void validateAttentionOptions(const AttentionOptions& options, bool use_bias, bo
                                           options.mask_kind == AttentionMaskKind::CausalBottomRight ||
                                           options.mask_kind == AttentionMaskKind::SlidingWindowTopLeft ||
                                           options.mask_kind == AttentionMaskKind::SlidingWindowBottomRight;
-        if (!uses_causal_diagonal || options.diagonal_right_bound != 0) {
+        if ((!uses_causal_diagonal || options.diagonal_right_bound != 0) && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
             throw std::runtime_error(
                 "AttentionOptions::use_alibi_mask requires causal diagonal masking with diagonal_right_bound == 0.");
         }
@@ -2590,7 +2597,7 @@ void validateAttentionOptions(const AttentionOptions& options, bool use_bias, bo
     if (options.dropout_probability < 0.0f || options.dropout_probability >= 1.0f) {
         throw std::runtime_error("AttentionOptions::dropout_probability must be in [0, 1).");
     }
-    if (use_ragged_offsets && options.use_paged_kv_cache) {
+    if (use_ragged_offsets && options.use_paged_kv_cache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
         throw std::runtime_error("Ragged attention and paged KV cache are separate variable-length modes and cannot be combined.");
     }
     if (options.use_paged_kv_cache && options.paged_kv_max_sequence_length <= 0) {
@@ -2599,15 +2606,16 @@ void validateAttentionOptions(const AttentionOptions& options, bool use_bias, bo
     if (options.use_paged_kv_cache && !options.use_padding_mask) {
         throw std::runtime_error("Paged KV attention requires q_seq_len and kv_seq_len padding-mask tensors.");
     }
-    if (options.use_paged_kv_cache && use_bias) {
+    if (options.use_paged_kv_cache && use_bias && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
         throw std::runtime_error("Paged KV attention with additive bias is disabled until the paged-bias layout is defined.");
     }
-    if (options.use_paged_kv_cache && options.dropout_probability > 0.0f) {
+    if (options.use_paged_kv_cache && options.dropout_probability > 0.0f && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
         throw std::runtime_error("Paged KV attention is inference-only and cannot currently be combined with dropout.");
     }
     if ((options.mask_kind == AttentionMaskKind::CausalBottomRight ||
          options.mask_kind == AttentionMaskKind::SlidingWindowBottomRight) &&
-        (use_bias || options.use_alibi_mask || options.dropout_probability > 0.0f)) {
+        (use_bias || options.use_alibi_mask || options.dropout_probability > 0.0f) &&
+        !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
         throw std::runtime_error(
             "AttentionMaskKind::CausalBottomRight/SlidingWindowBottomRight is currently supported only without additive bias, ALiBi, or dropout in the cuDNN primary SDPA path.");
     }
