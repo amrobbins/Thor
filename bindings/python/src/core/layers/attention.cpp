@@ -154,7 +154,8 @@ void bind_attention(nb::module_& layers) {
            std::optional<Tensor> key_value_sequence_lengths,
            std::optional<Tensor> query_ragged_offsets,
            std::optional<Tensor> key_value_ragged_offsets,
-           std::optional<Tensor> context_input) {
+           std::optional<Tensor> context_input,
+           std::optional<Tensor> score_bias_input) {
             if (num_heads == 0) {
                 throw nb::value_error("Attention instance: num_heads must be > 0.");
             }
@@ -191,6 +192,9 @@ void bind_attention(nb::module_& layers) {
 
             if (context_input.has_value()) {
                 builder.contextInput(context_input.value());
+            }
+            if (score_bias_input.has_value()) {
+                builder.scoreBiasInput(score_bias_input.value());
             }
 
             if (query_sequence_lengths.has_value()) {
@@ -312,6 +316,7 @@ void bind_attention(nb::module_& layers) {
         "query_ragged_offsets"_a.none() = nb::none(),
         "key_value_ragged_offsets"_a.none() = nb::none(),
         "context_input"_a.none() = nb::none(),
+        "score_bias_input"_a.none() = nb::none(),
         R"nbdoc(
 Public transformer attention layer.
 
@@ -342,6 +347,8 @@ hot path consumes ``[batch, sequence, input_features]``.
     attention.def("get_dropout_offset", &Attention::getDropoutOffset);
     attention.def("get_use_cross_attention", &Attention::getUseCrossAttention);
     attention.def("get_context_input", [](Attention& self) { return self.getContextInput(); });
+    attention.def("get_use_score_bias", &Attention::getUseScoreBias);
+    attention.def("get_score_bias_input", [](Attention& self) { return self.getScoreBiasInput(); });
     attention.def("get_use_sequence_lengths", &Attention::getUseSequenceLengths);
     attention.def("get_use_ragged_offsets", &Attention::getUseRaggedOffsets);
     attention.def("get_query_sequence_lengths_input", [](Attention& self) { return self.getQuerySequenceLengthsInput(); });

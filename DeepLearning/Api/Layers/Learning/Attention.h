@@ -55,6 +55,7 @@ class Attention : public CustomLayer {
               int64_t dropoutSeed,
               int64_t dropoutOffset,
               std::optional<Tensor> contextInput,
+              std::optional<Tensor> scoreBiasInput,
               std::optional<Tensor> querySequenceLengthsInput,
               std::optional<Tensor> keyValueSequenceLengthsInput,
               std::optional<Tensor> queryRaggedOffsetsInput,
@@ -87,6 +88,7 @@ class Attention : public CustomLayer {
           dropoutSeed(dropoutSeed),
           dropoutOffset(dropoutOffset),
           contextInput(std::move(contextInput)),
+          scoreBiasInput(std::move(scoreBiasInput)),
           querySequenceLengthsInput(std::move(querySequenceLengthsInput)),
           keyValueSequenceLengthsInput(std::move(keyValueSequenceLengthsInput)),
           queryRaggedOffsetsInput(std::move(queryRaggedOffsetsInput)),
@@ -133,6 +135,8 @@ class Attention : public CustomLayer {
     std::optional<Tensor> getFeatureInput() const override { return getInputInterface().at("feature_input"); }
     std::optional<Tensor> getContextInput() const { return contextInput; }
     bool getUseCrossAttention() const { return contextInput.has_value(); }
+    std::optional<Tensor> getScoreBiasInput() const { return scoreBiasInput; }
+    bool getUseScoreBias() const { return scoreBiasInput.has_value(); }
     std::optional<Tensor> getQuerySequenceLengthsInput() const { return querySequenceLengthsInput; }
     std::optional<Tensor> getKeyValueSequenceLengthsInput() const { return keyValueSequenceLengthsInput; }
     std::optional<Tensor> getQueryRaggedOffsetsInput() const { return queryRaggedOffsetsInput; }
@@ -162,6 +166,7 @@ class Attention : public CustomLayer {
     int64_t dropoutSeed;
     int64_t dropoutOffset;
     std::optional<Tensor> contextInput;
+    std::optional<Tensor> scoreBiasInput;
     std::optional<Tensor> querySequenceLengthsInput;
     std::optional<Tensor> keyValueSequenceLengthsInput;
     std::optional<Tensor> queryRaggedOffsetsInput;
@@ -192,6 +197,12 @@ class Attention::Builder {
     virtual Attention::Builder& contextInput(Tensor input) {
         THOR_THROW_IF_FALSE(!this->_contextInput.has_value());
         this->_contextInput = input;
+        return *this;
+    }
+
+    virtual Attention::Builder& scoreBiasInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_scoreBiasInput.has_value());
+        this->_scoreBiasInput = input;
         return *this;
     }
 
@@ -374,6 +385,7 @@ class Attention::Builder {
     std::optional<Network*> _network;
     std::optional<Tensor> _featureInput;
     std::optional<Tensor> _contextInput;
+    std::optional<Tensor> _scoreBiasInput;
     std::optional<uint32_t> _numHeads;
     std::optional<uint32_t> _numKeyValueHeads;
     std::optional<uint32_t> _headDim;
