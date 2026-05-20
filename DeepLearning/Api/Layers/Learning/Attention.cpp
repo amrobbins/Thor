@@ -21,6 +21,7 @@ namespace {
 
 constexpr const char* kAttentionFeatureInputName = "feature_input";
 constexpr const char* kAttentionContextInputName = "context_input";
+constexpr const char* kAttentionScoreBiasInputName = "score_bias_input";
 constexpr const char* kAttentionQuerySequenceLengthsInputName = "query_sequence_lengths";
 constexpr const char* kAttentionKeyValueSequenceLengthsInputName = "key_value_sequence_lengths";
 constexpr const char* kAttentionQueryRaggedOffsetsInputName = "query_ragged_offsets";
@@ -93,10 +94,32 @@ void requireRaggedOffsetsInput(const Thor::Tensor& tensor, const char* inputName
     }
 }
 
-std::vector<std::string> publicAttentionInputNames(bool useContextInput, bool useSequenceLengths, bool useRaggedOffsets) {
+void requireScoreBiasInput(const Thor::Tensor& tensor,
+                           uint32_t numHeads,
+                           uint64_t querySequenceLength,
+                           uint64_t keyValueSequenceLength,
+                           DataType computeDataType) {
+    if (!tensor.isInitialized()) {
+        throw std::invalid_argument("Attention scoreBiasInput tensor is not initialized.");
+    }
+    const std::vector<uint64_t> dims = tensor.getDimensions();
+    if (dims.size() != 3 || (dims[0] != 1 && dims[0] != numHeads) || dims[1] != querySequenceLength ||
+        dims[2] != keyValueSequenceLength) {
+        throw std::invalid_argument(
+            "Attention scoreBiasInput dimensions must be [1|num_heads, query_sequence, key_value_sequence] at the API level.");
+    }
+    if (tensor.getDataType() != computeDataType) {
+        throw std::invalid_argument("Attention scoreBiasInput dtype must match attention computeDataType.");
+    }
+}
+
+std::vector<std::string> publicAttentionInputNames(bool useContextInput, bool useScoreBias, bool useSequenceLengths, bool useRaggedOffsets) {
     std::vector<std::string> names{kAttentionFeatureInputName};
     if (useContextInput) {
         names.push_back(kAttentionContextInputName);
+    }
+    if (useScoreBias) {
+        names.push_back(kAttentionScoreBiasInputName);
     }
     if (useSequenceLengths) {
         names.push_back(kAttentionQuerySequenceLengthsInputName);
@@ -111,6 +134,7 @@ std::vector<std::string> publicAttentionInputNames(bool useContextInput, bool us
 
 Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& featureInput,
                                                            const std::optional<Thor::Tensor>& contextInput,
+                                                           const std::optional<Thor::Tensor>& scoreBiasInput,
                                                            const std::optional<Thor::Tensor>& querySequenceLengthsInput,
                                                            const std::optional<Thor::Tensor>& keyValueSequenceLengthsInput,
                                                            const std::optional<Thor::Tensor>& queryRaggedOffsetsInput,
@@ -118,6 +142,9 @@ Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& f
     Thor::CustomLayer::TensorMap inputInterface{{kAttentionFeatureInputName, featureInput}};
     if (contextInput.has_value()) {
         inputInterface[kAttentionContextInputName] = contextInput.value();
+    }
+    if (scoreBiasInput.has_value()) {
+        inputInterface[kAttentionScoreBiasInputName] = scoreBiasInput.value();
     }
     if (querySequenceLengthsInput.has_value()) {
         inputInterface[kAttentionQuerySequenceLengthsInputName] = querySequenceLengthsInput.value();
@@ -379,6 +406,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                                                               int64_t dropoutSeed,
                                                               int64_t dropoutOffset,
                                                               bool useContextInput,
+                                                              bool useScoreBias,
                                                               bool useSequenceLengths,
                                                               bool useRaggedOffsets,
                                                               DataType inputDType,
@@ -401,6 +429,9 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
         if (useContextInput) {
             expectedInputs.push_back(kAttentionContextInputName);
         }
+        if (useScoreBias) {
+            expectedInputs.push_back(kAttentionScoreBiasInputName);
+        }
         if (useSequenceLengths) {
             expectedInputs.push_back(kAttentionQuerySequenceLengthsInputName);
             expectedInputs.push_back(kAttentionKeyValueSequenceLengthsInputName);
@@ -419,6 +450,9 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
         expectedInputs = {kAttentionFeatureInputName};
         if (useContextInput) {
             expectedInputs.push_back(kAttentionContextInputName);
+        }
+        if (useScoreBias) {
+            expectedInputs.push_back(kAttentionScoreBiasInputName);
         }
         if (useSequenceLengths) {
             expectedInputs.push_back(kAttentionQuerySequenceLengthsInputName);
@@ -466,6 +500,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
          dropoutSeed,
          dropoutOffset,
          useContextInput,
+         useScoreBias,
          useSequenceLengths,
          useRaggedOffsets,
          inputDType,
@@ -497,6 +532,22 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             }
             if (contextInput.getDataType() != inputDType) {
                 throw std::runtime_error("Attention runtime context input dtype must match feature input dtype.");
+            }
+
+            std::optional<Tensor> scoreBiasInput;
+            if (useScoreBias) {
+                Tensor scoreBias = inputs.at(kAttentionScoreBiasInputName);
+                const auto scoreBiasDims = scoreBias.getDimensions();
+                if (scoreBiasDims.size() != 4 || scoreBiasDims[0] != batch ||
+                    (scoreBiasDims[1] != 1 && scoreBiasDims[1] != numHeads) ||
+                    scoreBiasDims[2] != querySequenceLength || scoreBiasDims[3] != keyValueSequenceLength) {
+                    throw std::runtime_error(
+                        "Attention runtime score_bias_input must be [batch, 1|num_heads, query_sequence, key_value_sequence].");
+                }
+                if (scoreBias.getDataType() != computeDType) {
+                    throw std::runtime_error("Attention runtime score_bias_input dtype must match attention compute dtype.");
+                }
+                scoreBiasInput = std::move(scoreBias);
             }
 
             const uint64_t queryWidth = checkedMul(numHeads, headDim, "query projection width");
@@ -588,6 +639,10 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
 
             Expression x = Expression::input(kAttentionFeatureInputName, inputDType, inputDType);
             Expression kvx = useContextInput ? Expression::input(kAttentionContextInputName, inputDType, inputDType) : x;
+            std::optional<Expression> scoreBiasExpr;
+            if (useScoreBias) {
+                scoreBiasExpr = Expression::input(kAttentionScoreBiasInputName, computeDType, computeDType);
+            }
             Expression ow = Expression::input("output_weights", weightsDType, weightsDType);
 
             struct ProjectedQkv {
@@ -696,6 +751,20 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                     if (dropoutProbability > 0.0f) {
                         Expression dropoutSeedExpr = Expression::tensorRuntimeScalar(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
                         Expression dropoutOffsetExpr = Expression::tensorRuntimeScalar(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
+                        if (scoreBiasExpr.has_value()) {
+                            return Expression::scaledDotProductAttentionRagged(q,
+                                                                               k,
+                                                                               v,
+                                                                               scoreBiasExpr.value(),
+                                                                               qSeqLenExpr,
+                                                                               kvSeqLenExpr,
+                                                                               qRaggedOffsetsExpr,
+                                                                               kvRaggedOffsetsExpr,
+                                                                               dropoutSeedExpr,
+                                                                               dropoutOffsetExpr,
+                                                                               options)
+                                .withOutputDType(outputDType);
+                        }
                         return Expression::scaledDotProductAttentionRagged(
                                    q,
                                    k,
@@ -709,6 +778,11 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                                    options)
                             .withOutputDType(outputDType);
                     }
+                    if (scoreBiasExpr.has_value()) {
+                        return Expression::scaledDotProductAttentionRagged(
+                                   q, k, v, scoreBiasExpr.value(), qSeqLenExpr, kvSeqLenExpr, qRaggedOffsetsExpr, kvRaggedOffsetsExpr, options)
+                            .withOutputDType(outputDType);
+                    }
                     return Expression::scaledDotProductAttentionRagged(
                                q, k, v, qSeqLenExpr, kvSeqLenExpr, qRaggedOffsetsExpr, kvRaggedOffsetsExpr, options)
                         .withOutputDType(outputDType);
@@ -719,8 +793,17 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                     if (dropoutProbability > 0.0f) {
                         Expression dropoutSeedExpr = Expression::tensorRuntimeScalar(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
                         Expression dropoutOffsetExpr = Expression::tensorRuntimeScalar(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
+                        if (scoreBiasExpr.has_value()) {
+                            return Expression::scaledDotProductAttention(
+                                       q, k, v, scoreBiasExpr.value(), qSeqLenExpr, kvSeqLenExpr, dropoutSeedExpr, dropoutOffsetExpr, options)
+                                .withOutputDType(outputDType);
+                        }
                         return Expression::scaledDotProductAttention(
                                    q, k, v, qSeqLenExpr, kvSeqLenExpr, dropoutSeedExpr, dropoutOffsetExpr, options)
+                            .withOutputDType(outputDType);
+                    }
+                    if (scoreBiasExpr.has_value()) {
+                        return Expression::scaledDotProductAttention(q, k, v, scoreBiasExpr.value(), qSeqLenExpr, kvSeqLenExpr, options)
                             .withOutputDType(outputDType);
                     }
                     return Expression::scaledDotProductAttention(q, k, v, qSeqLenExpr, kvSeqLenExpr, options).withOutputDType(outputDType);
@@ -728,9 +811,16 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 if (dropoutProbability > 0.0f) {
                     Expression dropoutSeedExpr = Expression::tensorRuntimeScalar(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
                     Expression dropoutOffsetExpr = Expression::tensorRuntimeScalar(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
+                    if (scoreBiasExpr.has_value()) {
+                        return Expression::scaledDotProductAttentionWithDropout(q, k, v, scoreBiasExpr.value(), dropoutSeedExpr, dropoutOffsetExpr, options)
+                            .withOutputDType(outputDType);
+                    }
                     return Expression::scaledDotProductAttentionWithDropout(
                                q, k, v, dropoutSeedExpr, dropoutOffsetExpr, options)
                         .withOutputDType(outputDType);
+                }
+                if (scoreBiasExpr.has_value()) {
+                    return Expression::scaledDotProductAttention(q, k, v, scoreBiasExpr.value(), options).withOutputDType(outputDType);
                 }
                 return Expression::scaledDotProductAttention(q, k, v, options).withOutputDType(outputDType);
             }();
@@ -747,6 +837,9 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             stampInputs[kAttentionFeatureInputName] = featureInput;
             if (useContextInput) {
                 stampInputs[kAttentionContextInputName] = contextInput;
+            }
+            if (useScoreBias) {
+                stampInputs[kAttentionScoreBiasInputName] = scoreBiasInput.value();
             }
             if (useSequenceLengths) {
                 stampInputs[kAttentionQuerySequenceLengthsInputName] = querySequenceLengths.value();
@@ -885,6 +978,16 @@ void Attention::Builder::verifyConfig() const {
     if (_attentionScale.has_value() && (!std::isfinite(_attentionScale.value()) || _attentionScale.value() <= 0.0)) {
         throw std::invalid_argument("Attention attentionScale must be finite and positive.");
     }
+    if (_scoreBiasInput.has_value()) {
+        const std::vector<uint64_t> queryDims = _featureInput->getDimensions();
+        const std::vector<uint64_t> contextDims = _contextInput.has_value() ? _contextInput->getDimensions() : queryDims;
+        requireScoreBiasInput(_scoreBiasInput.value(), _numHeads.value(), queryDims.at(0), contextDims.at(0), computeDType);
+        if (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
+            maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight) {
+            throw std::invalid_argument(
+                "Attention bottom-right/decode masks cannot currently be combined with scoreBiasInput in cuDNN SDPA.");
+        }
+    }
 }
 
 Attention Attention::Builder::build() {
@@ -970,6 +1073,7 @@ Attention Attention::Builder::build() {
     const uint64_t mergedWidth = checkedMul(_numHeads.value(), _valueDim.value(), "merged head width");
 
     const uint64_t qkvWidth = qWidth + kvKeyWidth + kvValueWidth;
+    const bool useScoreBias = _scoreBiasInput.has_value();
     const bool useSequenceLengths = _querySequenceLengthsInput.has_value();
     const bool useRaggedOffsets = _queryRaggedOffsetsInput.has_value();
     const bool usePackedQkvProjection = usePackedQkvProjectionForLayer(_useRope.value(), _contextInput.has_value());
@@ -1023,15 +1127,17 @@ Attention Attention::Builder::build() {
                                             _dropoutSeed.value(),
                                             _dropoutOffset.value(),
                                             _contextInput.has_value(),
+                                            useScoreBias,
                                             useSequenceLengths,
                                             useRaggedOffsets,
                                             _featureInput->getDataType(),
                                             _weightsDataType.value(),
                                             _computeDataType.value(),
                                             _outputDataType.value()),
-                    publicAttentionInputNames(_contextInput.has_value(), useSequenceLengths, useRaggedOffsets),
+                    publicAttentionInputNames(_contextInput.has_value(), useScoreBias, useSequenceLengths, useRaggedOffsets),
                     {publicAttentionInputInterface(_featureInput.value(),
                                                    _contextInput,
+                                                   _scoreBiasInput,
                                                    _querySequenceLengthsInput,
                                                    _keyValueSequenceLengthsInput,
                                                    _queryRaggedOffsetsInput,
@@ -1056,6 +1162,7 @@ Attention Attention::Builder::build() {
                     _dropoutSeed.value(),
                     _dropoutOffset.value(),
                     _contextInput,
+                    _scoreBiasInput,
                     _querySequenceLengthsInput,
                     _keyValueSequenceLengthsInput,
                     _queryRaggedOffsetsInput,
@@ -1094,6 +1201,7 @@ json Attention::architectureJson() const {
     j["dropout_seed"] = dropoutSeed;
     j["dropout_offset"] = dropoutOffset;
     j["use_cross_attention"] = contextInput.has_value();
+    j["use_score_bias"] = scoreBiasInput.has_value();
     j["use_sequence_lengths"] = querySequenceLengthsInput.has_value();
     j["use_ragged_offsets"] = queryRaggedOffsetsInput.has_value();
     j["weights_data_type"] = weightsDataType;
@@ -1108,6 +1216,9 @@ json Attention::architectureJson() const {
     j["feature_input"] = input.value().architectureJson();
     if (contextInput.has_value()) {
         j["context_input"] = contextInput.value().architectureJson();
+    }
+    if (scoreBiasInput.has_value()) {
+        j["score_bias_input"] = scoreBiasInput.value().architectureJson();
     }
     if (querySequenceLengthsInput.has_value()) {
         j["query_sequence_lengths_input"] = querySequenceLengthsInput.value().architectureJson();
@@ -1147,6 +1258,13 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
             throw std::runtime_error("Attention deserialize missing context_input.");
         }
         contextInput = network->getApiTensorByOriginalId(j.at("context_input").at("id").get<uint64_t>());
+    }
+    std::optional<Tensor> scoreBiasInput = std::nullopt;
+    if (j.value("use_score_bias", false) || j.contains("score_bias_input")) {
+        if (!j.contains("score_bias_input")) {
+            throw std::runtime_error("Attention deserialize missing score_bias_input.");
+        }
+        scoreBiasInput = network->getApiTensorByOriginalId(j.at("score_bias_input").at("id").get<uint64_t>());
     }
     Tensor featureOutput = Tensor::deserialize(j.at("feature_output"), archiveReader.get());
 
@@ -1217,6 +1335,14 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     const DataType weightsDataType = j.at("weights_data_type").get<DataType>();
     const DataType computeDataType = j.at("compute_data_type").get<DataType>();
     const DataType outputDataType = j.at("output_data_type").get<DataType>();
+    if (scoreBiasInput.has_value()) {
+        requireScoreBiasInput(scoreBiasInput.value(), numHeads, querySequenceLength, keyValueSequenceLength, computeDataType);
+        if (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
+            maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight) {
+            throw std::runtime_error(
+                "Attention deserialize bottom-right/decode masks cannot currently be combined with score_bias_input.");
+        }
+    }
 
     std::vector<std::shared_ptr<ParameterSpecification>> parameters;
     if (j.contains("parameters")) {
@@ -1259,6 +1385,7 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
         }
     }
 
+    const bool useScoreBias = scoreBiasInput.has_value();
     const bool useSequenceLengths = querySequenceLengthsInput.has_value();
     const bool useRaggedOffsets = queryRaggedOffsetsInput.has_value();
 
@@ -1284,15 +1411,17 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                                             dropoutSeed,
                                             dropoutOffset,
                                             contextInput.has_value(),
+                                            useScoreBias,
                                             useSequenceLengths,
                                             useRaggedOffsets,
                                             featureInput.getDataType(),
                                             weightsDataType,
                                             computeDataType,
                                             outputDataType),
-                    publicAttentionInputNames(contextInput.has_value(), useSequenceLengths, useRaggedOffsets),
+                    publicAttentionInputNames(contextInput.has_value(), useScoreBias, useSequenceLengths, useRaggedOffsets),
                     {publicAttentionInputInterface(featureInput,
                                                    contextInput,
+                                                   scoreBiasInput,
                                                    querySequenceLengthsInput,
                                                    keyValueSequenceLengthsInput,
                                                    queryRaggedOffsetsInput,
@@ -1317,6 +1446,7 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                     dropoutSeed,
                     dropoutOffset,
                     contextInput,
+                    scoreBiasInput,
                     querySequenceLengthsInput,
                     keyValueSequenceLengthsInput,
                     queryRaggedOffsetsInput,
