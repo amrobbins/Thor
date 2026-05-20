@@ -1,4 +1,5 @@
 import math
+import os
 
 import numpy as np
 import pytest
@@ -4751,7 +4752,8 @@ def test_public_attention_rejects_invalid_dropout_configuration():
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_ragged_offsets_with_full_dense_additive_bias_rejects_cleanly():
+def test_attention_compile_backward_ragged_offsets_with_full_dense_additive_bias_rejects_cleanly(monkeypatch):
+    monkeypatch.delenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD", raising=False)
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.53 / math.sqrt(64.0)
@@ -4790,6 +4792,170 @@ def test_attention_compile_backward_ragged_offsets_with_full_dense_additive_bias
     with pytest.raises(RuntimeError, match="ragged offsets with additive bias"):
         fwd_eq.compile_backward(["q", "k", "v", "bias"], error_input_name=upstream_name)
 
+
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "requested_gradients",
+    [
+        pytest.param(("bias",), id="dbias_only"),
+        pytest.param(("q", "k", "v"), id="qkv_only_with_forward_bias"),
+        pytest.param(("q", "k", "v", "bias"), id="qkv_and_dbias"),
+    ],
+)
+@pytest.mark.parametrize(
+    "bias_shape",
+    [
+        pytest.param((1, 1, 64, 64), id="bias_1_1"),
+        pytest.param((1, 4, 64, 64), id="bias_1_h"),
+        pytest.param((2, 1, 64, 64), id="bias_b_1"),
+        pytest.param((2, 4, 64, 64), id="bias_b_h"),
+    ],
+)
+def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(monkeypatch, bias_shape, requested_gradients):
+    if os.environ.get("THOR_RUN_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD_SURFACE") != "1":
+        pytest.skip(
+            "Set THOR_RUN_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD_SURFACE=1 to probe cuDNN ragged+additive-bias "
+            "backward support. The test sets THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD=1 internally."
+        )
+    monkeypatch.setenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD", "1")
+
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    batch = 2
+    query_heads = 4
+    kv_heads = 2
+    query_len = 64
+    kv_len = 64
+    qk_dim = 64
+    v_dim = 64
+    scale = 0.61 / math.sqrt(float(qk_dim))
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        bias=bias,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+
+    try:
+        bwd_eq = fwd_eq.compile_backward(list(requested_gradients), error_input_name=upstream_name)
+    except RuntimeError as exc:
+        pytest.xfail(f"Thor compile_backward rejected cuDNN ragged+bias backward probe: {exc}")
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=query_len,
+        kv_len=kv_len,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    q_lengths = np.asarray([64, 49], dtype=np.int32)
+    kv_lengths = np.asarray([64, 57], dtype=np.int32)
+    rng = np.random.default_rng(9300 + bias_shape[0] * 100 + bias_shape[1] * 10 + len(requested_gradients))
+    bias_np = rng.normal(0.0, 0.18, size=bias_shape).astype(np.float32)
+    bias_np += np.linspace(-0.42, 0.58, num=bias_np.size, dtype=np.float32).reshape(bias_np.shape)
+    dO_np = rng.normal(0.0, 0.22, size=(batch, query_heads, query_len, v_dim)).astype(_numpy_storage_dtype(dtype))
+
+    expected_dq, expected_dk, expected_dv, dense_expected_dbias = _attention_backward_reference(
+        q_np,
+        k_np,
+        v_np,
+        dO_np,
+        scale=scale,
+        bias=bias_np,
+        q_seq_len=q_lengths,
+        kv_seq_len=kv_lengths,
+        return_bias_grad=True,
+    )
+    expected_dbias = _reduce_attention_bias_grad_to_shape(dense_expected_dbias, bias_shape)
+
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
+    v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
+    dO_storage = _pack_bshd_ragged_storage(dO_np, q_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=query_heads, dim=qk_dim), thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=kv_heads, dim=qk_dim), thor.DataType.int32, stream),
+        upstream_name: _host_to_gpu(dO_storage, dtype, stream),
+    }
+
+    try:
+        output_shapes = bwd_eq.output_shapes(inputs_gpu)
+        stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+        stamped = bwd_eq.stamp(inputs_gpu, stream)
+        stamped.run()
+    except RuntimeError as exc:
+        pytest.xfail(
+            "cuDNN rejected ragged+additive-bias backward for "
+            f"bias_shape={bias_shape}, requested_gradients={requested_gradients}: {exc}"
+        )
+
+    print(
+        "SUPPORTED cuDNN ragged+additive-bias backward surface: "
+        f"bias_shape={bias_shape}, requested_gradients={requested_gradients}, "
+        f"output_shapes={output_shapes}, stage_kinds={stage_kinds}"
+    )
+
+    got = stamped.outputs()
+    if "q" in requested_gradients:
+        got_q_valid = _packed_bshd_ragged_valid_values(_copy_to_host(got["q_grad"], dtype, stream), q_lengths).astype(np.float32)
+        exp_q_valid = _packed_bshd_ragged_valid_values(
+            _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dq, dtype), q_lengths), q_lengths
+        ).astype(np.float32)
+        np.testing.assert_allclose(got_q_valid, exp_q_valid, rtol=8e-2, atol=8e-2)
+    if "k" in requested_gradients:
+        got_k_valid = _packed_bshd_ragged_valid_values(_copy_to_host(got["k_grad"], dtype, stream), kv_lengths).astype(np.float32)
+        exp_k_valid = _packed_bshd_ragged_valid_values(
+            _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dk, dtype), kv_lengths), kv_lengths
+        ).astype(np.float32)
+        np.testing.assert_allclose(got_k_valid, exp_k_valid, rtol=8e-2, atol=8e-2)
+    if "v" in requested_gradients:
+        got_v_valid = _packed_bshd_ragged_valid_values(_copy_to_host(got["v_grad"], dtype, stream), kv_lengths).astype(np.float32)
+        exp_v_valid = _packed_bshd_ragged_valid_values(
+            _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dv, dtype), kv_lengths), kv_lengths
+        ).astype(np.float32)
+        np.testing.assert_allclose(got_v_valid, exp_v_valid, rtol=8e-2, atol=8e-2)
+    if "bias" in requested_gradients:
+        assert list(got["bias_grad"].dimensions) == list(bias_shape)
+        assert got["bias_grad"].dtype == dtype
+        _assert_close(
+            _copy_to_host(got["bias_grad"], dtype, stream),
+            _cast_reference_to_storage_dtype(expected_dbias, dtype),
+            dtype,
+        )
 
 @pytest.mark.cuda
 def test_attention_forward_with_additive_bias_matches_reference_and_stays_single_attention_stage():

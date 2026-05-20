@@ -5,6 +5,7 @@
 #include "CudaSourceEmitter.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -12,10 +13,20 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <string_view>
 
 using namespace std;
 
 namespace ThorImplementation {
+
+namespace {
+
+bool experimentalCudnnRaggedBiasBackwardProbeEnabled() {
+    const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD");
+    return value != nullptr && std::string_view(value) == "1";
+}
+
+}  // namespace
 
 using DataType = TensorDescriptor::DataType;
 
@@ -1933,10 +1944,11 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
     if (node.op == ExprOp::ATTENTION_BACKWARD_BIAS && !node.attention_use_bias) {
         throw std::runtime_error("Attention-backward dBias output requested for an unbiased attention node.");
     }
-    if (node.attention_use_ragged_offsets && node.attention_use_bias) {
+    if (node.attention_use_ragged_offsets && node.attention_use_bias && !experimentalCudnnRaggedBiasBackwardProbeEnabled()) {
         throw std::runtime_error(
             "cuDNN primary SDPA backward does not support ragged offsets with additive bias; ragged additive bias is forward-only "
-            "until a supported dBias/backward path is implemented.");
+            "until a supported dBias/backward path is implemented. Set THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD=1 "
+            "to bypass this guard for cuDNN support-surface probing only.");
     }
 
     auto validate_local_input = [&](uint32_t local_idx, const char* label) -> const ExprNode& {
@@ -3261,10 +3273,11 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
     if (node.op == ExprOp::ATTENTION_BACKWARD_BIAS && !node.attention_use_bias) {
         throw std::runtime_error("Attention-backward dBias output requested for an unbiased attention node.");
     }
-    if (node.attention_use_ragged_offsets && node.attention_use_bias) {
+    if (node.attention_use_ragged_offsets && node.attention_use_bias && !experimentalCudnnRaggedBiasBackwardProbeEnabled()) {
         throw std::runtime_error(
             "cuDNN primary SDPA backward does not support ragged offsets with additive bias; ragged additive bias is forward-only "
-            "until a supported dBias/backward path is implemented.");
+            "until a supported dBias/backward path is implemented. Set THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD=1 "
+            "to bypass this guard for cuDNN support-surface probing only.");
     }
     if (node.attention_use_paged_kv_cache) {
         throw std::runtime_error(

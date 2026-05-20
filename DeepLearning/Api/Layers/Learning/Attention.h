@@ -20,8 +20,9 @@ namespace Thor {
 
 // Training-first transformer attention layer.
 //
-// Input API shape:  [sequence, input_features]
-// Output API shape: [sequence, output_features]
+// Query input API shape:   [query_sequence, query_features]
+// Context input API shape: [key_value_sequence, context_features] when contextInput() is provided.
+// Output API shape:        [query_sequence, output_features]
 //
 // Internally this layer performs per-token Q/K/V projections, optional RoPE on Q/K, cuDNN-backed SDPA, head merge,
 // and a per-token output projection.  It intentionally does not manage paged KV caches; that path remains frozen at
@@ -53,8 +54,13 @@ class Attention : public CustomLayer {
               float dropoutProbability,
               int64_t dropoutSeed,
               int64_t dropoutOffset,
+              std::optional<Tensor> contextInput,
               std::optional<Tensor> sequenceLengthsInput,
+              std::optional<Tensor> querySequenceLengthsInput,
+              std::optional<Tensor> keyValueSequenceLengthsInput,
               std::optional<Tensor> raggedOffsetsInput,
+              std::optional<Tensor> queryRaggedOffsetsInput,
+              std::optional<Tensor> keyValueRaggedOffsetsInput,
               Tensor::DataType weightsDataType,
               Tensor::DataType computeDataType,
               Tensor::DataType outputDataType)
@@ -82,8 +88,13 @@ class Attention : public CustomLayer {
           dropoutProbability(dropoutProbability),
           dropoutSeed(dropoutSeed),
           dropoutOffset(dropoutOffset),
+          contextInput(std::move(contextInput)),
           sequenceLengthsInput(std::move(sequenceLengthsInput)),
+          querySequenceLengthsInput(std::move(querySequenceLengthsInput)),
+          keyValueSequenceLengthsInput(std::move(keyValueSequenceLengthsInput)),
           raggedOffsetsInput(std::move(raggedOffsetsInput)),
+          queryRaggedOffsetsInput(std::move(queryRaggedOffsetsInput)),
+          keyValueRaggedOffsetsInput(std::move(keyValueRaggedOffsetsInput)),
           weightsDataType(weightsDataType),
           computeDataType(computeDataType),
           outputDataType(outputDataType) {}
@@ -124,10 +135,16 @@ class Attention : public CustomLayer {
     int64_t getDropoutSeed() const { return dropoutSeed; }
     int64_t getDropoutOffset() const { return dropoutOffset; }
     std::optional<Tensor> getFeatureInput() const override { return getInputInterface().at("feature_input"); }
+    std::optional<Tensor> getContextInput() const { return contextInput; }
+    bool getUseCrossAttention() const { return contextInput.has_value(); }
     std::optional<Tensor> getSequenceLengthsInput() const { return sequenceLengthsInput; }
+    std::optional<Tensor> getQuerySequenceLengthsInput() const { return querySequenceLengthsInput; }
+    std::optional<Tensor> getKeyValueSequenceLengthsInput() const { return keyValueSequenceLengthsInput; }
     std::optional<Tensor> getRaggedOffsetsInput() const { return raggedOffsetsInput; }
-    bool getUseSequenceLengths() const { return sequenceLengthsInput.has_value(); }
-    bool getUseRaggedOffsets() const { return raggedOffsetsInput.has_value(); }
+    std::optional<Tensor> getQueryRaggedOffsetsInput() const { return queryRaggedOffsetsInput; }
+    std::optional<Tensor> getKeyValueRaggedOffsetsInput() const { return keyValueRaggedOffsetsInput; }
+    bool getUseSequenceLengths() const { return querySequenceLengthsInput.has_value(); }
+    bool getUseRaggedOffsets() const { return queryRaggedOffsetsInput.has_value(); }
     Tensor::DataType getWeightsDataType() const { return weightsDataType; }
     Tensor::DataType getComputeDataType() const { return computeDataType; }
     Tensor::DataType getOutputDataType() const { return outputDataType; }
@@ -150,8 +167,13 @@ class Attention : public CustomLayer {
     float dropoutProbability;
     int64_t dropoutSeed;
     int64_t dropoutOffset;
+    std::optional<Tensor> contextInput;
     std::optional<Tensor> sequenceLengthsInput;
+    std::optional<Tensor> querySequenceLengthsInput;
+    std::optional<Tensor> keyValueSequenceLengthsInput;
     std::optional<Tensor> raggedOffsetsInput;
+    std::optional<Tensor> queryRaggedOffsetsInput;
+    std::optional<Tensor> keyValueRaggedOffsetsInput;
     Tensor::DataType weightsDataType;
     Tensor::DataType computeDataType;
     Tensor::DataType outputDataType;
@@ -172,6 +194,12 @@ class Attention::Builder {
     virtual Attention::Builder& featureInput(Tensor input) {
         THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
         this->_featureInput = input;
+        return *this;
+    }
+
+    virtual Attention::Builder& contextInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_contextInput.has_value());
+        this->_contextInput = input;
         return *this;
     }
 
@@ -269,19 +297,55 @@ class Attention::Builder {
         return dropoutProbability(probability).dropoutSeed(seed).dropoutOffset(offset);
     }
 
-    // Public dense variable-length self-attention input. Logical shape is [1] INT32; placement supplies [batch, 1],
-    // which the layer views as cuDNN's [batch] q/kv sequence-length vector.
+    // Public dense variable-length self-attention convenience input. Logical shape is [1] INT32; placement supplies
+    // [batch, 1], which the layer views as both cuDNN q and kv sequence-length vectors.
     virtual Attention::Builder& sequenceLengthsInput(Tensor input) {
         THOR_THROW_IF_FALSE(!this->_sequenceLengthsInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_querySequenceLengthsInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_keyValueSequenceLengthsInput.has_value());
         this->_sequenceLengthsInput = input;
+        this->_querySequenceLengthsInput = input;
+        this->_keyValueSequenceLengthsInput = input;
         return *this;
     }
 
-    // Public packed-ragged self-attention metadata. Logical shape is [2] INT32 so placement allocates at least
-    // 2*batch elements; the layer consumes the first batch+1 contiguous values as cuDNN ragged offsets.
+    virtual Attention::Builder& querySequenceLengthsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_sequenceLengthsInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_querySequenceLengthsInput.has_value());
+        this->_querySequenceLengthsInput = input;
+        return *this;
+    }
+
+    virtual Attention::Builder& keyValueSequenceLengthsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_sequenceLengthsInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_keyValueSequenceLengthsInput.has_value());
+        this->_keyValueSequenceLengthsInput = input;
+        return *this;
+    }
+
+    // Public packed-ragged self-attention convenience metadata. Logical shape is [2] INT32 so placement allocates at least
+    // 2*batch elements; the layer consumes the first batch+1 contiguous values as both cuDNN q and kv ragged offsets.
     virtual Attention::Builder& raggedOffsetsInput(Tensor input) {
         THOR_THROW_IF_FALSE(!this->_raggedOffsetsInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_queryRaggedOffsetsInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_keyValueRaggedOffsetsInput.has_value());
         this->_raggedOffsetsInput = input;
+        this->_queryRaggedOffsetsInput = input;
+        this->_keyValueRaggedOffsetsInput = input;
+        return *this;
+    }
+
+    virtual Attention::Builder& queryRaggedOffsetsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_raggedOffsetsInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_queryRaggedOffsetsInput.has_value());
+        this->_queryRaggedOffsetsInput = input;
+        return *this;
+    }
+
+    virtual Attention::Builder& keyValueRaggedOffsetsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_raggedOffsetsInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_keyValueRaggedOffsetsInput.has_value());
+        this->_keyValueRaggedOffsetsInput = input;
         return *this;
     }
 
@@ -345,6 +409,7 @@ class Attention::Builder {
 
     std::optional<Network*> _network;
     std::optional<Tensor> _featureInput;
+    std::optional<Tensor> _contextInput;
     std::optional<uint32_t> _numHeads;
     std::optional<uint32_t> _numKeyValueHeads;
     std::optional<uint32_t> _headDim;
@@ -360,7 +425,11 @@ class Attention::Builder {
     std::optional<int64_t> _dropoutSeed;
     std::optional<int64_t> _dropoutOffset;
     std::optional<Tensor> _sequenceLengthsInput;
+    std::optional<Tensor> _querySequenceLengthsInput;
+    std::optional<Tensor> _keyValueSequenceLengthsInput;
     std::optional<Tensor> _raggedOffsetsInput;
+    std::optional<Tensor> _queryRaggedOffsetsInput;
+    std::optional<Tensor> _keyValueRaggedOffsetsInput;
     std::optional<bool> _useRope;
     std::optional<bool> _ropeInPlace;
     std::optional<ThorImplementation::RotaryPositionEmbeddingOptions> _ropeOptions;
