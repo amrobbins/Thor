@@ -19,70 +19,138 @@ def _only_layer_architecture(n: thor.Network, layer_type: str):
     return layers[0]
 
 
-def test_attention_exposes_public_sequence_lengths_and_ragged_offsets():
+def test_attention_exposes_public_query_key_value_sequence_lengths_and_ragged_offsets():
     n = _net("test_net_attention_public_variable_lengths")
     x = _input_tensor(n, "tokens", [8, 64], thor.DataType.fp16)
-    sequence_lengths = _input_tensor(n, "sequence_lengths", [1], thor.DataType.int32)
-    ragged_offsets = _input_tensor(n, "ragged_offsets", [2], thor.DataType.int32)
+    q_lengths = _input_tensor(n, "query_sequence_lengths", [1], thor.DataType.int32)
+    kv_lengths = _input_tensor(n, "key_value_sequence_lengths", [1], thor.DataType.int32)
+    q_offsets = _input_tensor(n, "query_ragged_offsets", [2], thor.DataType.int32)
+    kv_offsets = _input_tensor(n, "key_value_ragged_offsets", [2], thor.DataType.int32)
 
     attention = thor.layers.Attention(
         n,
         x,
         4,
-        sequence_lengths=sequence_lengths,
-        ragged_offsets=ragged_offsets,
+        query_sequence_lengths=q_lengths,
+        key_value_sequence_lengths=kv_lengths,
+        query_ragged_offsets=q_offsets,
+        key_value_ragged_offsets=kv_offsets,
         head_dim=16,
     )
 
     assert attention.get_use_sequence_lengths()
     assert attention.get_use_ragged_offsets()
-    assert attention.get_sequence_lengths_input().get_dimensions() == [1]
-    assert attention.get_ragged_offsets_input().get_dimensions() == [2]
+    assert attention.get_query_sequence_lengths_input().get_dimensions() == [1]
+    assert attention.get_key_value_sequence_lengths_input().get_dimensions() == [1]
+    assert attention.get_query_ragged_offsets_input().get_dimensions() == [2]
+    assert attention.get_key_value_ragged_offsets_input().get_dimensions() == [2]
+    assert not hasattr(attention, "get_sequence_lengths_input")
+    assert not hasattr(attention, "get_ragged_offsets_input")
 
     arch = _only_layer_architecture(n, "attention")
     assert arch["use_sequence_lengths"] is True
     assert arch["use_ragged_offsets"] is True
-    assert arch["sequence_lengths_input"]["dimensions"] == [1]
-    assert arch["ragged_offsets_input"]["dimensions"] == [2]
+    assert "use_separate_sequence_lengths" not in arch
+    assert "use_separate_ragged_offsets" not in arch
+    assert "sequence_lengths_input" not in arch
+    assert "ragged_offsets_input" not in arch
+    assert arch["query_sequence_lengths_input"]["dimensions"] == [1]
+    assert arch["key_value_sequence_lengths_input"]["dimensions"] == [1]
+    assert arch["query_ragged_offsets_input"]["dimensions"] == [2]
+    assert arch["key_value_ragged_offsets_input"]["dimensions"] == [2]
 
 
 def test_attention_rejects_invalid_public_variable_length_inputs():
     n = _net("test_net_attention_rejects_invalid_public_variable_lengths")
     x = _input_tensor(n, "tokens", [8, 64], thor.DataType.fp16)
+    q_lengths = _input_tensor(n, "query_sequence_lengths", [1], thor.DataType.int32)
+    kv_lengths = _input_tensor(n, "key_value_sequence_lengths", [1], thor.DataType.int32)
+    bad_q_lengths_dtype = _input_tensor(n, "bad_query_sequence_lengths_dtype", [1], thor.DataType.fp16)
+    bad_q_lengths_shape = _input_tensor(n, "bad_query_sequence_lengths_shape", [2], thor.DataType.int32)
+    q_offsets = _input_tensor(n, "query_ragged_offsets", [2], thor.DataType.int32)
+    kv_offsets = _input_tensor(n, "key_value_ragged_offsets", [2], thor.DataType.int32)
+    bad_q_offsets_dtype = _input_tensor(n, "bad_query_ragged_offsets_dtype", [2], thor.DataType.fp16)
+    bad_q_offsets_shape = _input_tensor(n, "bad_query_ragged_offsets_shape", [1], thor.DataType.int32)
+
+    with pytest.raises((RuntimeError, ValueError), match="querySequenceLengthsInput"):
+        thor.layers.Attention(
+            n,
+            x,
+            4,
+            query_sequence_lengths=bad_q_lengths_dtype,
+            key_value_sequence_lengths=kv_lengths,
+        )
+
+    with pytest.raises((RuntimeError, ValueError), match="querySequenceLengthsInput"):
+        thor.layers.Attention(
+            n,
+            x,
+            4,
+            query_sequence_lengths=bad_q_lengths_shape,
+            key_value_sequence_lengths=kv_lengths,
+        )
+
+    with pytest.raises((RuntimeError, ValueError), match="requires querySequenceLengthsInput"):
+        thor.layers.Attention(
+            n,
+            x,
+            4,
+            query_ragged_offsets=q_offsets,
+            key_value_ragged_offsets=kv_offsets,
+        )
+
+    with pytest.raises((RuntimeError, ValueError), match="queryRaggedOffsetsInput"):
+        thor.layers.Attention(
+            n,
+            x,
+            4,
+            query_sequence_lengths=q_lengths,
+            key_value_sequence_lengths=kv_lengths,
+            query_ragged_offsets=bad_q_offsets_dtype,
+            key_value_ragged_offsets=kv_offsets,
+        )
+
+    with pytest.raises((RuntimeError, ValueError), match="queryRaggedOffsetsInput"):
+        thor.layers.Attention(
+            n,
+            x,
+            4,
+            query_sequence_lengths=q_lengths,
+            key_value_sequence_lengths=kv_lengths,
+            query_ragged_offsets=bad_q_offsets_shape,
+            key_value_ragged_offsets=kv_offsets,
+        )
+
+
+def test_attention_legacy_single_metadata_python_kwargs_are_removed():
+    n = _net("test_net_attention_legacy_single_metadata_kwargs_removed")
+    x = _input_tensor(n, "tokens", [8, 64], thor.DataType.fp16)
     sequence_lengths = _input_tensor(n, "sequence_lengths", [1], thor.DataType.int32)
-    bad_sequence_lengths_dtype = _input_tensor(n, "bad_sequence_lengths_dtype", [1], thor.DataType.fp16)
-    bad_sequence_lengths_shape = _input_tensor(n, "bad_sequence_lengths_shape", [2], thor.DataType.int32)
     ragged_offsets = _input_tensor(n, "ragged_offsets", [2], thor.DataType.int32)
-    bad_ragged_offsets_dtype = _input_tensor(n, "bad_ragged_offsets_dtype", [2], thor.DataType.fp16)
-    bad_ragged_offsets_shape = _input_tensor(n, "bad_ragged_offsets_shape", [1], thor.DataType.int32)
 
-    with pytest.raises((RuntimeError, ValueError), match="sequenceLengthsInput"):
-        thor.layers.Attention(n, x, 4, sequence_lengths=bad_sequence_lengths_dtype)
+    with pytest.raises(TypeError, match="sequence_lengths"):
+        thor.layers.Attention(n, x, 4, sequence_lengths=sequence_lengths)
 
-    with pytest.raises((RuntimeError, ValueError), match="sequenceLengthsInput"):
-        thor.layers.Attention(n, x, 4, sequence_lengths=bad_sequence_lengths_shape)
-
-    with pytest.raises((RuntimeError, ValueError), match="raggedOffsetsInput requires sequenceLengthsInput"):
+    with pytest.raises(TypeError, match="ragged_offsets"):
         thor.layers.Attention(n, x, 4, ragged_offsets=ragged_offsets)
 
-    with pytest.raises((RuntimeError, ValueError), match="raggedOffsetsInput"):
-        thor.layers.Attention(n, x, 4, sequence_lengths=sequence_lengths, ragged_offsets=bad_ragged_offsets_dtype)
-
-    with pytest.raises((RuntimeError, ValueError), match="raggedOffsetsInput"):
-        thor.layers.Attention(n, x, 4, sequence_lengths=sequence_lengths, ragged_offsets=bad_ragged_offsets_shape)
 
 def test_attention_allows_ragged_offsets_with_dropout_and_rope():
     n = _net("test_net_attention_ragged_offsets_with_dropout_and_rope")
     x = _input_tensor(n, "tokens", [8, 64], thor.DataType.fp16)
-    sequence_lengths = _input_tensor(n, "sequence_lengths", [1], thor.DataType.int32)
-    ragged_offsets = _input_tensor(n, "ragged_offsets", [2], thor.DataType.int32)
+    q_lengths = _input_tensor(n, "query_sequence_lengths", [1], thor.DataType.int32)
+    kv_lengths = _input_tensor(n, "key_value_sequence_lengths", [1], thor.DataType.int32)
+    q_offsets = _input_tensor(n, "query_ragged_offsets", [2], thor.DataType.int32)
+    kv_offsets = _input_tensor(n, "key_value_ragged_offsets", [2], thor.DataType.int32)
 
     attention = thor.layers.Attention(
         n,
         x,
         4,
-        sequence_lengths=sequence_lengths,
-        ragged_offsets=ragged_offsets,
+        query_sequence_lengths=q_lengths,
+        key_value_sequence_lengths=kv_lengths,
+        query_ragged_offsets=q_offsets,
+        key_value_ragged_offsets=kv_offsets,
         head_dim=16,
         use_rope=True,
         dropout_probability=0.1,
@@ -168,17 +236,13 @@ def test_attention_context_input_rejects_invalid_current_scope_inputs():
     n = _net("test_net_attention_context_input_validation")
     decoder = _input_tensor(n, "decoder_tokens", [5, 32], thor.DataType.fp16)
     encoder_bf16 = _input_tensor(n, "encoder_tokens_bf16", [7, 48], thor.DataType.bf16)
-    sequence_lengths = _input_tensor(n, "sequence_lengths", [1], thor.DataType.int32)
 
     with pytest.raises((RuntimeError, ValueError), match="context input dtype"):
         thor.layers.Attention(n, decoder, 4, context_input=encoder_bf16, head_dim=8)
 
-    with pytest.raises((RuntimeError, ValueError), match="requires querySequenceLengthsInput"):
-        thor.layers.Attention(n, decoder, 4, context_input=decoder, sequence_lengths=sequence_lengths, head_dim=8)
 
-
-def test_attention_cross_attention_accepts_separate_query_key_value_sequence_lengths():
-    n = _net("test_net_attention_cross_attention_separate_sequence_lengths")
+def test_attention_cross_attention_accepts_query_key_value_sequence_lengths():
+    n = _net("test_net_attention_cross_attention_sequence_lengths")
     decoder = _input_tensor(n, "decoder_tokens", [5, 32], thor.DataType.fp16)
     encoder = _input_tensor(n, "encoder_tokens", [7, 48], thor.DataType.fp16)
     q_lengths = _input_tensor(n, "query_sequence_lengths", [1], thor.DataType.int32)
@@ -199,7 +263,6 @@ def test_attention_cross_attention_accepts_separate_query_key_value_sequence_len
 
     assert attention.get_use_cross_attention()
     assert attention.get_use_sequence_lengths()
-    assert attention.get_sequence_lengths_input() is None
     assert attention.get_query_sequence_lengths_input().get_dimensions() == [1]
     assert attention.get_key_value_sequence_lengths_input().get_dimensions() == [1]
     assert attention.get_feature_output().get_dimensions() == [5, 40]
@@ -207,7 +270,7 @@ def test_attention_cross_attention_accepts_separate_query_key_value_sequence_len
     arch = _only_layer_architecture(n, "attention")
     assert arch["use_cross_attention"] is True
     assert arch["use_sequence_lengths"] is True
-    assert arch["use_separate_sequence_lengths"] is True
+    assert "use_separate_sequence_lengths" not in arch
     assert "sequence_lengths_input" not in arch
     assert arch["query_sequence_lengths_input"]["dimensions"] == [1]
     assert arch["key_value_sequence_lengths_input"]["dimensions"] == [1]
@@ -221,25 +284,13 @@ def test_attention_cross_attention_accepts_separate_query_key_value_sequence_len
     _assert_parameter_shape(arch, "output_weights", [24, 40])
 
 
-def test_attention_rejects_mixed_or_incomplete_separate_sequence_lengths():
-    n = _net("test_net_attention_rejects_mixed_separate_sequence_lengths")
+def test_attention_rejects_incomplete_query_key_value_sequence_lengths():
+    n = _net("test_net_attention_rejects_incomplete_sequence_lengths")
     decoder = _input_tensor(n, "decoder_tokens", [5, 32], thor.DataType.fp16)
     encoder = _input_tensor(n, "encoder_tokens", [7, 48], thor.DataType.fp16)
-    sequence_lengths = _input_tensor(n, "sequence_lengths", [1], thor.DataType.int32)
     q_lengths = _input_tensor(n, "query_sequence_lengths", [1], thor.DataType.int32)
     kv_lengths = _input_tensor(n, "key_value_sequence_lengths", [1], thor.DataType.int32)
     bad_q_lengths = _input_tensor(n, "bad_query_sequence_lengths", [2], thor.DataType.int32)
-
-    with pytest.raises((RuntimeError, ValueError), match="sequence_lengths or query_sequence_lengths"):
-        thor.layers.Attention(
-            n,
-            decoder,
-            4,
-            sequence_lengths=sequence_lengths,
-            query_sequence_lengths=q_lengths,
-            key_value_sequence_lengths=kv_lengths,
-            head_dim=8,
-        )
 
     with pytest.raises((RuntimeError, ValueError), match="query_sequence_lengths and key_value_sequence_lengths"):
         thor.layers.Attention(n, decoder, 4, query_sequence_lengths=q_lengths, head_dim=8)
@@ -259,8 +310,8 @@ def test_attention_rejects_mixed_or_incomplete_separate_sequence_lengths():
         )
 
 
-def test_attention_cross_attention_accepts_separate_query_key_value_ragged_metadata():
-    n = _net("test_net_attention_cross_attention_separate_ragged_metadata")
+def test_attention_cross_attention_accepts_query_key_value_ragged_metadata():
+    n = _net("test_net_attention_cross_attention_ragged_metadata")
     decoder = _input_tensor(n, "decoder_tokens", [5, 32], thor.DataType.fp16)
     encoder = _input_tensor(n, "encoder_tokens", [7, 48], thor.DataType.fp16)
     q_lengths = _input_tensor(n, "query_sequence_lengths", [1], thor.DataType.int32)
@@ -289,7 +340,6 @@ def test_attention_cross_attention_accepts_separate_query_key_value_ragged_metad
     assert attention.get_use_cross_attention()
     assert attention.get_use_sequence_lengths()
     assert attention.get_use_ragged_offsets()
-    assert attention.get_ragged_offsets_input() is None
     assert attention.get_query_ragged_offsets_input().get_dimensions() == [2]
     assert attention.get_key_value_ragged_offsets_input().get_dimensions() == [2]
     assert attention.get_feature_output().get_dimensions() == [5, 40]
@@ -297,9 +347,9 @@ def test_attention_cross_attention_accepts_separate_query_key_value_ragged_metad
     arch = _only_layer_architecture(n, "attention")
     assert arch["use_cross_attention"] is True
     assert arch["use_sequence_lengths"] is True
-    assert arch["use_separate_sequence_lengths"] is True
     assert arch["use_ragged_offsets"] is True
-    assert arch["use_separate_ragged_offsets"] is True
+    assert "use_separate_sequence_lengths" not in arch
+    assert "use_separate_ragged_offsets" not in arch
     assert "ragged_offsets_input" not in arch
     assert arch["query_ragged_offsets_input"]["dimensions"] == [2]
     assert arch["key_value_ragged_offsets_input"]["dimensions"] == [2]
@@ -318,29 +368,14 @@ def test_attention_cross_attention_accepts_separate_query_key_value_ragged_metad
     _assert_parameter_shape(arch, "output_weights", [32, 40])
 
 
-def test_attention_rejects_mixed_or_incomplete_separate_ragged_metadata():
-    n = _net("test_net_attention_rejects_mixed_separate_ragged_metadata")
+def test_attention_rejects_incomplete_query_key_value_ragged_metadata():
+    n = _net("test_net_attention_rejects_incomplete_ragged_metadata")
     decoder = _input_tensor(n, "decoder_tokens", [5, 32], thor.DataType.fp16)
-    encoder = _input_tensor(n, "encoder_tokens", [7, 48], thor.DataType.fp16)
-    sequence_lengths = _input_tensor(n, "sequence_lengths", [1], thor.DataType.int32)
     q_lengths = _input_tensor(n, "query_sequence_lengths", [1], thor.DataType.int32)
     kv_lengths = _input_tensor(n, "key_value_sequence_lengths", [1], thor.DataType.int32)
-    ragged_offsets = _input_tensor(n, "ragged_offsets", [2], thor.DataType.int32)
     q_offsets = _input_tensor(n, "query_ragged_offsets", [2], thor.DataType.int32)
     kv_offsets = _input_tensor(n, "key_value_ragged_offsets", [2], thor.DataType.int32)
     bad_q_offsets = _input_tensor(n, "bad_query_ragged_offsets", [1], thor.DataType.int32)
-
-    with pytest.raises((RuntimeError, ValueError), match="ragged_offsets or query_ragged_offsets"):
-        thor.layers.Attention(
-            n,
-            decoder,
-            4,
-            sequence_lengths=sequence_lengths,
-            ragged_offsets=ragged_offsets,
-            query_ragged_offsets=q_offsets,
-            key_value_ragged_offsets=kv_offsets,
-            head_dim=8,
-        )
 
     with pytest.raises((RuntimeError, ValueError), match="query_ragged_offsets and key_value_ragged_offsets"):
         thor.layers.Attention(
@@ -372,17 +407,5 @@ def test_attention_rejects_mixed_or_incomplete_separate_ragged_metadata():
             key_value_sequence_lengths=kv_lengths,
             query_ragged_offsets=bad_q_offsets,
             key_value_ragged_offsets=kv_offsets,
-            head_dim=8,
-        )
-
-    with pytest.raises((RuntimeError, ValueError), match="requires queryRaggedOffsetsInput"):
-        thor.layers.Attention(
-            n,
-            decoder,
-            4,
-            context_input=encoder,
-            query_sequence_lengths=q_lengths,
-            key_value_sequence_lengths=kv_lengths,
-            ragged_offsets=ragged_offsets,
             head_dim=8,
         )

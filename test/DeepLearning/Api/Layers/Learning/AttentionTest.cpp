@@ -1170,19 +1170,25 @@ TEST(AttentionApi, BuildsComposedAttentionWithPublicVariableLengthInputs) {
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
                                    .featureInput(input.getFeatureOutput().value())
-                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
-                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .queryRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                     .keyValueRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
                                    .numHeads(4)
                                    .headDim(16)
                                    .build();
 
-    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"feature_input", "sequence_lengths", "ragged_offsets"}));
+    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"feature_input",
+                                         "query_sequence_lengths",
+                                         "key_value_sequence_lengths",
+                                         "query_ragged_offsets",
+                                         "key_value_ragged_offsets"}));
     EXPECT_TRUE(attention.getUseSequenceLengths());
     EXPECT_TRUE(attention.getUseRaggedOffsets());
-    ASSERT_TRUE(attention.getSequenceLengthsInput().has_value());
-    ASSERT_TRUE(attention.getRaggedOffsetsInput().has_value());
-    EXPECT_EQ(attention.getSequenceLengthsInput()->getDimensions(), (std::vector<uint64_t>{1}));
-    EXPECT_EQ(attention.getRaggedOffsetsInput()->getDimensions(), (std::vector<uint64_t>{2}));
+    ASSERT_TRUE(attention.getQuerySequenceLengthsInput().has_value());
+    ASSERT_TRUE(attention.getQueryRaggedOffsetsInput().has_value());
+    EXPECT_EQ(attention.getQuerySequenceLengthsInput()->getDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(attention.getQueryRaggedOffsetsInput()->getDimensions(), (std::vector<uint64_t>{2}));
 }
 
 TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveVariableLengthInputs) {
@@ -1197,8 +1203,10 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveVariableLengthInputs) {
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
                                    .featureInput(input.getFeatureOutput().value())
-                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
-                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .queryRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                     .keyValueRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
                                    .numHeads(4)
                                    .headDim(16)
                                    .attentionScale(0.25)
@@ -1207,8 +1215,12 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveVariableLengthInputs) {
     const nlohmann::json arch = attention.architectureJson();
     EXPECT_TRUE(arch.at("use_sequence_lengths").get<bool>());
     EXPECT_TRUE(arch.at("use_ragged_offsets").get<bool>());
-    ASSERT_TRUE(arch.contains("sequence_lengths_input"));
-    ASSERT_TRUE(arch.contains("ragged_offsets_input"));
+    ASSERT_TRUE(arch.contains("query_sequence_lengths_input"));
+    ASSERT_TRUE(arch.contains("key_value_sequence_lengths_input"));
+    EXPECT_FALSE(arch.contains("sequence_lengths_input"));
+    ASSERT_TRUE(arch.contains("query_ragged_offsets_input"));
+    ASSERT_TRUE(arch.contains("key_value_ragged_offsets_input"));
+    EXPECT_FALSE(arch.contains("ragged_offsets_input"));
 
     const uint32_t previousTrainableLayerCount = network.getNumTrainableLayers();
     shared_ptr<thor_file::TarReader> archiveReader;
@@ -1218,7 +1230,55 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveVariableLengthInputs) {
     ASSERT_NE(restored, nullptr);
     EXPECT_TRUE(restored->getUseSequenceLengths());
     EXPECT_TRUE(restored->getUseRaggedOffsets());
-    EXPECT_EQ(restored->getInputNames(), (std::vector<std::string>{"feature_input", "sequence_lengths", "ragged_offsets"}));
+    EXPECT_EQ(restored->getInputNames(), (std::vector<std::string>{"feature_input",
+                                         "query_sequence_lengths",
+                                         "key_value_sequence_lengths",
+                                         "query_ragged_offsets",
+                                         "key_value_ragged_offsets"}));
+}
+
+TEST(AttentionApi, DeserializeRejectsLegacySingleMetadataFields) {
+    Api::Network network("attention_api_deserialize_rejects_legacy_single_metadata_fields");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 64}).dataType(DataType::FP16).build();
+    Api::NetworkInput sequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput raggedOffsets =
+        Api::NetworkInput::Builder().network(network).name("ragged_offsets").dimensions({2}).dataType(DataType::INT32).build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .queryRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .keyValueRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .numHeads(4)
+                                   .headDim(16)
+                                   .build();
+
+    const nlohmann::json arch = attention.architectureJson();
+    shared_ptr<thor_file::TarReader> archiveReader;
+
+    nlohmann::json legacySequenceLengthsArch = arch;
+    legacySequenceLengthsArch["sequence_lengths_input"] = arch.at("query_sequence_lengths_input");
+    legacySequenceLengthsArch.erase("query_sequence_lengths_input");
+    legacySequenceLengthsArch.erase("key_value_sequence_lengths_input");
+    EXPECT_THROW(Api::Attention::deserialize(archiveReader, legacySequenceLengthsArch, &network), std::runtime_error);
+
+    nlohmann::json legacyRaggedOffsetsArch = arch;
+    legacyRaggedOffsetsArch["ragged_offsets_input"] = arch.at("query_ragged_offsets_input");
+    legacyRaggedOffsetsArch.erase("query_ragged_offsets_input");
+    legacyRaggedOffsetsArch.erase("key_value_ragged_offsets_input");
+    EXPECT_THROW(Api::Attention::deserialize(archiveReader, legacyRaggedOffsetsArch, &network), std::runtime_error);
+
+    nlohmann::json transitionalSequenceFlagArch = arch;
+    transitionalSequenceFlagArch["use_separate_sequence_lengths"] = true;
+    EXPECT_THROW(Api::Attention::deserialize(archiveReader, transitionalSequenceFlagArch, &network), std::runtime_error);
+
+    nlohmann::json transitionalRaggedFlagArch = arch;
+    transitionalRaggedFlagArch["use_separate_ragged_offsets"] = true;
+    EXPECT_THROW(Api::Attention::deserialize(archiveReader, transitionalRaggedFlagArch, &network), std::runtime_error);
 }
 
 TEST(AttentionApi, BuildsCrossAttentionWithSeparateRaggedMetadata) {
@@ -1263,7 +1323,6 @@ TEST(AttentionApi, BuildsCrossAttentionWithSeparateRaggedMetadata) {
     EXPECT_TRUE(attention.getUseCrossAttention());
     EXPECT_TRUE(attention.getUseSequenceLengths());
     EXPECT_TRUE(attention.getUseRaggedOffsets());
-    EXPECT_FALSE(attention.getRaggedOffsetsInput().has_value());
     ASSERT_TRUE(attention.getQueryRaggedOffsetsInput().has_value());
     ASSERT_TRUE(attention.getKeyValueRaggedOffsetsInput().has_value());
     EXPECT_EQ(attention.getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{5, 40}));
@@ -1278,9 +1337,9 @@ TEST(AttentionApi, BuildsCrossAttentionWithSeparateRaggedMetadata) {
     const nlohmann::json arch = attention.architectureJson();
     EXPECT_TRUE(arch.at("use_cross_attention").get<bool>());
     EXPECT_TRUE(arch.at("use_sequence_lengths").get<bool>());
-    EXPECT_TRUE(arch.at("use_separate_sequence_lengths").get<bool>());
+    EXPECT_FALSE(arch.contains("use_separate_sequence_lengths"));
     EXPECT_TRUE(arch.at("use_ragged_offsets").get<bool>());
-    EXPECT_TRUE(arch.at("use_separate_ragged_offsets").get<bool>());
+    EXPECT_FALSE(arch.contains("use_separate_ragged_offsets"));
     EXPECT_FALSE(arch.contains("ragged_offsets_input"));
     ASSERT_TRUE(arch.contains("query_ragged_offsets_input"));
     ASSERT_TRUE(arch.contains("key_value_ragged_offsets_input"));
@@ -1306,37 +1365,44 @@ TEST(AttentionApi, RejectsInvalidVariableLengthInputs) {
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
                      .featureInput(input.getFeatureOutput().value())
-                     .sequenceLengthsInput(badSequenceLengthsDtype.getFeatureOutput().value())
+                     .querySequenceLengthsInput(badSequenceLengthsDtype.getFeatureOutput().value())
+                     .keyValueSequenceLengthsInput(badSequenceLengthsDtype.getFeatureOutput().value())
                      .numHeads(4)
                      .build(),
                  std::invalid_argument);
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
                      .featureInput(input.getFeatureOutput().value())
-                     .sequenceLengthsInput(badSequenceLengthsShape.getFeatureOutput().value())
+                     .querySequenceLengthsInput(badSequenceLengthsShape.getFeatureOutput().value())
+                     .keyValueSequenceLengthsInput(badSequenceLengthsShape.getFeatureOutput().value())
                      .numHeads(4)
                      .build(),
                  std::invalid_argument);
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
                      .featureInput(input.getFeatureOutput().value())
-                     .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                     .queryRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                     .keyValueRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
                      .numHeads(4)
                      .build(),
                  std::invalid_argument);
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
                      .featureInput(input.getFeatureOutput().value())
-                     .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
-                     .raggedOffsetsInput(badRaggedOffsetsDtype.getFeatureOutput().value())
+                     .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .queryRaggedOffsetsInput(badRaggedOffsetsDtype.getFeatureOutput().value())
+                     .keyValueRaggedOffsetsInput(badRaggedOffsetsDtype.getFeatureOutput().value())
                      .numHeads(4)
                      .build(),
                  std::invalid_argument);
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
                      .featureInput(input.getFeatureOutput().value())
-                     .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
-                     .raggedOffsetsInput(badRaggedOffsetsShape.getFeatureOutput().value())
+                     .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .queryRaggedOffsetsInput(badRaggedOffsetsShape.getFeatureOutput().value())
+                     .keyValueRaggedOffsetsInput(badRaggedOffsetsShape.getFeatureOutput().value())
                      .numHeads(4)
                      .build(),
                  std::invalid_argument);
@@ -1358,8 +1424,10 @@ TEST(AttentionApi, BuildsRaggedOffsetsWithDropoutAndRope) {
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
                                    .featureInput(input.getFeatureOutput().value())
-                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
-                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .queryRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                     .keyValueRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
                                    .numHeads(4)
                                    .headDim(16)
                                    .ropeOptions(rope)
@@ -1404,7 +1472,8 @@ TEST(AttentionApi, ForwardWithSequenceLengthsMatchesPaddingMaskReference) {
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
                                    .featureInput(input.getFeatureOutput().value())
-                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
                                    .numHeads(c.numHeads)
                                    .numKeyValueHeads(c.numKeyValueHeads)
                                    .headDim(c.headDim)
@@ -1479,8 +1548,10 @@ TEST(AttentionApi, ForwardWithRaggedOffsetsMatchesPackedReference) {
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
                                    .featureInput(input.getFeatureOutput().value())
-                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
-                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .queryRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                     .keyValueRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
                                    .numHeads(c.numHeads)
                                    .numKeyValueHeads(c.numKeyValueHeads)
                                    .headDim(c.headDim)
@@ -1575,8 +1646,10 @@ TEST(AttentionApi, ForwardWithRaggedOffsetsAndRopeMatchesPackedReference) {
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
                                    .featureInput(input.getFeatureOutput().value())
-                                   .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
-                                   .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                   .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .queryRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                     .keyValueRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
                                    .numHeads(c.numHeads)
                                    .numKeyValueHeads(c.numKeyValueHeads)
                                    .headDim(c.headDim)
@@ -1697,8 +1770,10 @@ TEST(AttentionApi, ForwardWithRaggedOffsetsDropoutAndRopeAdvancesPhiloxOffset) {
         Api::Attention attention = Api::Attention::Builder()
                                        .network(network)
                                        .featureInput(input.getFeatureOutput().value())
-                                       .sequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
-                                       .raggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                                       .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                     .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                       .queryRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
+                     .keyValueRaggedOffsetsInput(raggedOffsets.getFeatureOutput().value())
                                        .numHeads(c.numHeads)
                                        .numKeyValueHeads(c.numKeyValueHeads)
                                        .headDim(c.headDim)

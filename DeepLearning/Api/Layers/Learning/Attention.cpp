@@ -21,10 +21,8 @@ namespace {
 
 constexpr const char* kAttentionFeatureInputName = "feature_input";
 constexpr const char* kAttentionContextInputName = "context_input";
-constexpr const char* kAttentionSequenceLengthsInputName = "sequence_lengths";
 constexpr const char* kAttentionQuerySequenceLengthsInputName = "query_sequence_lengths";
 constexpr const char* kAttentionKeyValueSequenceLengthsInputName = "key_value_sequence_lengths";
-constexpr const char* kAttentionRaggedOffsetsInputName = "ragged_offsets";
 constexpr const char* kAttentionQueryRaggedOffsetsInputName = "query_ragged_offsets";
 constexpr const char* kAttentionKeyValueRaggedOffsetsInputName = "key_value_ragged_offsets";
 constexpr const char* kAttentionDropoutSeedInputName = "__attention_dropout_seed";
@@ -95,55 +93,37 @@ void requireRaggedOffsetsInput(const Thor::Tensor& tensor, const char* inputName
     }
 }
 
-std::vector<std::string> publicAttentionInputNames(bool useContextInput,
-                                                    bool useSequenceLengths,
-                                                    bool useSeparateSequenceLengths,
-                                                    bool useRaggedOffsets,
-                                                    bool useSeparateRaggedOffsets) {
+std::vector<std::string> publicAttentionInputNames(bool useContextInput, bool useSequenceLengths, bool useRaggedOffsets) {
     std::vector<std::string> names{kAttentionFeatureInputName};
     if (useContextInput) {
         names.push_back(kAttentionContextInputName);
     }
     if (useSequenceLengths) {
-        if (useSeparateSequenceLengths) {
-            names.push_back(kAttentionQuerySequenceLengthsInputName);
-            names.push_back(kAttentionKeyValueSequenceLengthsInputName);
-        } else {
-            names.push_back(kAttentionSequenceLengthsInputName);
-        }
+        names.push_back(kAttentionQuerySequenceLengthsInputName);
+        names.push_back(kAttentionKeyValueSequenceLengthsInputName);
     }
     if (useRaggedOffsets) {
-        if (useSeparateRaggedOffsets) {
-            names.push_back(kAttentionQueryRaggedOffsetsInputName);
-            names.push_back(kAttentionKeyValueRaggedOffsetsInputName);
-        } else {
-            names.push_back(kAttentionRaggedOffsetsInputName);
-        }
+        names.push_back(kAttentionQueryRaggedOffsetsInputName);
+        names.push_back(kAttentionKeyValueRaggedOffsetsInputName);
     }
     return names;
 }
 
 Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& featureInput,
                                                            const std::optional<Thor::Tensor>& contextInput,
-                                                           const std::optional<Thor::Tensor>& sequenceLengthsInput,
                                                            const std::optional<Thor::Tensor>& querySequenceLengthsInput,
                                                            const std::optional<Thor::Tensor>& keyValueSequenceLengthsInput,
-                                                           const std::optional<Thor::Tensor>& raggedOffsetsInput,
                                                            const std::optional<Thor::Tensor>& queryRaggedOffsetsInput,
                                                            const std::optional<Thor::Tensor>& keyValueRaggedOffsetsInput) {
     Thor::CustomLayer::TensorMap inputInterface{{kAttentionFeatureInputName, featureInput}};
     if (contextInput.has_value()) {
         inputInterface[kAttentionContextInputName] = contextInput.value();
     }
-    if (sequenceLengthsInput.has_value()) {
-        inputInterface[kAttentionSequenceLengthsInputName] = sequenceLengthsInput.value();
-    } else if (querySequenceLengthsInput.has_value()) {
+    if (querySequenceLengthsInput.has_value()) {
         inputInterface[kAttentionQuerySequenceLengthsInputName] = querySequenceLengthsInput.value();
         inputInterface[kAttentionKeyValueSequenceLengthsInputName] = keyValueSequenceLengthsInput.value();
     }
-    if (raggedOffsetsInput.has_value()) {
-        inputInterface[kAttentionRaggedOffsetsInputName] = raggedOffsetsInput.value();
-    } else if (queryRaggedOffsetsInput.has_value()) {
+    if (queryRaggedOffsetsInput.has_value()) {
         inputInterface[kAttentionQueryRaggedOffsetsInputName] = queryRaggedOffsetsInput.value();
         inputInterface[kAttentionKeyValueRaggedOffsetsInputName] = keyValueRaggedOffsetsInput.value();
     }
@@ -400,9 +380,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                                                               int64_t dropoutOffset,
                                                               bool useContextInput,
                                                               bool useSequenceLengths,
-                                                              bool useSeparateSequenceLengths,
                                                               bool useRaggedOffsets,
-                                                              bool useSeparateRaggedOffsets,
                                                               DataType inputDType,
                                                               DataType weightsDType,
                                                               DataType computeDType,
@@ -424,20 +402,12 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             expectedInputs.push_back(kAttentionContextInputName);
         }
         if (useSequenceLengths) {
-            if (useSeparateSequenceLengths) {
-                expectedInputs.push_back(kAttentionQuerySequenceLengthsInputName);
-                expectedInputs.push_back(kAttentionKeyValueSequenceLengthsInputName);
-            } else {
-                expectedInputs.push_back(kAttentionSequenceLengthsInputName);
-            }
+            expectedInputs.push_back(kAttentionQuerySequenceLengthsInputName);
+            expectedInputs.push_back(kAttentionKeyValueSequenceLengthsInputName);
         }
         if (useRaggedOffsets) {
-            if (useSeparateRaggedOffsets) {
-                expectedInputs.push_back(kAttentionQueryRaggedOffsetsInputName);
-                expectedInputs.push_back(kAttentionKeyValueRaggedOffsetsInputName);
-            } else {
-                expectedInputs.push_back(kAttentionRaggedOffsetsInputName);
-            }
+            expectedInputs.push_back(kAttentionQueryRaggedOffsetsInputName);
+            expectedInputs.push_back(kAttentionKeyValueRaggedOffsetsInputName);
         }
         expectedInputs.push_back("qkv_weights");
         expectedInputs.push_back("output_weights");
@@ -451,20 +421,12 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             expectedInputs.push_back(kAttentionContextInputName);
         }
         if (useSequenceLengths) {
-            if (useSeparateSequenceLengths) {
-                expectedInputs.push_back(kAttentionQuerySequenceLengthsInputName);
-                expectedInputs.push_back(kAttentionKeyValueSequenceLengthsInputName);
-            } else {
-                expectedInputs.push_back(kAttentionSequenceLengthsInputName);
-            }
+            expectedInputs.push_back(kAttentionQuerySequenceLengthsInputName);
+            expectedInputs.push_back(kAttentionKeyValueSequenceLengthsInputName);
         }
         if (useRaggedOffsets) {
-            if (useSeparateRaggedOffsets) {
-                expectedInputs.push_back(kAttentionQueryRaggedOffsetsInputName);
-                expectedInputs.push_back(kAttentionKeyValueRaggedOffsetsInputName);
-            } else {
-                expectedInputs.push_back(kAttentionRaggedOffsetsInputName);
-            }
+            expectedInputs.push_back(kAttentionQueryRaggedOffsetsInputName);
+            expectedInputs.push_back(kAttentionKeyValueRaggedOffsetsInputName);
         }
         expectedInputs.push_back("query_weights");
         expectedInputs.push_back("key_weights");
@@ -505,9 +467,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
          dropoutOffset,
          useContextInput,
          useSequenceLengths,
-         useSeparateSequenceLengths,
          useRaggedOffsets,
-         useSeparateRaggedOffsets,
          inputDType,
          weightsDType,
          computeDType,
@@ -599,14 +559,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             std::optional<Tensor> querySequenceLengths;
             std::optional<Tensor> keyValueSequenceLengths;
             if (useSequenceLengths) {
-                if (useSeparateSequenceLengths) {
-                    querySequenceLengths = normalizeSequenceLengths(kAttentionQuerySequenceLengthsInputName);
-                    keyValueSequenceLengths = normalizeSequenceLengths(kAttentionKeyValueSequenceLengthsInputName);
-                } else {
-                    Tensor seq = normalizeSequenceLengths(kAttentionSequenceLengthsInputName);
-                    querySequenceLengths = seq;
-                    keyValueSequenceLengths = std::move(seq);
-                }
+                querySequenceLengths = normalizeSequenceLengths(kAttentionQuerySequenceLengthsInputName);
+                keyValueSequenceLengths = normalizeSequenceLengths(kAttentionKeyValueSequenceLengthsInputName);
             }
 
             auto normalizeRaggedOffsets = [&](const char* inputName) -> Tensor {
@@ -623,14 +577,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             std::optional<Tensor> queryRaggedOffsets;
             std::optional<Tensor> keyValueRaggedOffsets;
             if (useRaggedOffsets) {
-                if (useSeparateRaggedOffsets) {
-                    queryRaggedOffsets = normalizeRaggedOffsets(kAttentionQueryRaggedOffsetsInputName);
-                    keyValueRaggedOffsets = normalizeRaggedOffsets(kAttentionKeyValueRaggedOffsetsInputName);
-                } else {
-                    Tensor offsets = normalizeRaggedOffsets(kAttentionRaggedOffsetsInputName);
-                    queryRaggedOffsets = offsets;
-                    keyValueRaggedOffsets = std::move(offsets);
-                }
+                queryRaggedOffsets = normalizeRaggedOffsets(kAttentionQueryRaggedOffsetsInputName);
+                keyValueRaggedOffsets = normalizeRaggedOffsets(kAttentionKeyValueRaggedOffsetsInputName);
             }
 
             featureInput.reshape({batch * querySequenceLength, queryInputFeatures});
@@ -741,20 +689,10 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
 
             Expression attn = [&]() {
                 if (useRaggedOffsets) {
-                    Expression qSeqLenExpr = Expression::input(useSeparateSequenceLengths ? kAttentionQuerySequenceLengthsInputName
-                                                                                          : kAttentionSequenceLengthsInputName,
-                                                               DataType::INT32,
-                                                               DataType::INT32);
-                    Expression kvSeqLenExpr = useSeparateSequenceLengths
-                                                  ? Expression::input(kAttentionKeyValueSequenceLengthsInputName, DataType::INT32, DataType::INT32)
-                                                  : qSeqLenExpr;
-                    Expression qRaggedOffsetsExpr = Expression::input(useSeparateRaggedOffsets ? kAttentionQueryRaggedOffsetsInputName
-                                                                                               : kAttentionRaggedOffsetsInputName,
-                                                                      DataType::INT32,
-                                                                      DataType::INT32);
-                    Expression kvRaggedOffsetsExpr = useSeparateRaggedOffsets
-                                                         ? Expression::input(kAttentionKeyValueRaggedOffsetsInputName, DataType::INT32, DataType::INT32)
-                                                         : qRaggedOffsetsExpr;
+                    Expression qSeqLenExpr = Expression::input(kAttentionQuerySequenceLengthsInputName, DataType::INT32, DataType::INT32);
+                    Expression kvSeqLenExpr = Expression::input(kAttentionKeyValueSequenceLengthsInputName, DataType::INT32, DataType::INT32);
+                    Expression qRaggedOffsetsExpr = Expression::input(kAttentionQueryRaggedOffsetsInputName, DataType::INT32, DataType::INT32);
+                    Expression kvRaggedOffsetsExpr = Expression::input(kAttentionKeyValueRaggedOffsetsInputName, DataType::INT32, DataType::INT32);
                     if (dropoutProbability > 0.0f) {
                         Expression dropoutSeedExpr = Expression::tensorRuntimeScalar(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
                         Expression dropoutOffsetExpr = Expression::tensorRuntimeScalar(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
@@ -776,13 +714,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                         .withOutputDType(outputDType);
                 }
                 if (useSequenceLengths) {
-                    Expression qSeqLenExpr = Expression::input(useSeparateSequenceLengths ? kAttentionQuerySequenceLengthsInputName
-                                                                                          : kAttentionSequenceLengthsInputName,
-                                                               DataType::INT32,
-                                                               DataType::INT32);
-                    Expression kvSeqLenExpr = useSeparateSequenceLengths
-                                                  ? Expression::input(kAttentionKeyValueSequenceLengthsInputName, DataType::INT32, DataType::INT32)
-                                                  : qSeqLenExpr;
+                    Expression qSeqLenExpr = Expression::input(kAttentionQuerySequenceLengthsInputName, DataType::INT32, DataType::INT32);
+                    Expression kvSeqLenExpr = Expression::input(kAttentionKeyValueSequenceLengthsInputName, DataType::INT32, DataType::INT32);
                     if (dropoutProbability > 0.0f) {
                         Expression dropoutSeedExpr = Expression::tensorRuntimeScalar(kAttentionDropoutSeedInputName, DataType::INT64, DataType::INT64);
                         Expression dropoutOffsetExpr = Expression::tensorRuntimeScalar(kAttentionDropoutOffsetInputName, DataType::INT64, DataType::INT64);
@@ -816,20 +749,12 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 stampInputs[kAttentionContextInputName] = contextInput;
             }
             if (useSequenceLengths) {
-                if (useSeparateSequenceLengths) {
-                    stampInputs[kAttentionQuerySequenceLengthsInputName] = querySequenceLengths.value();
-                    stampInputs[kAttentionKeyValueSequenceLengthsInputName] = keyValueSequenceLengths.value();
-                } else {
-                    stampInputs[kAttentionSequenceLengthsInputName] = querySequenceLengths.value();
-                }
+                stampInputs[kAttentionQuerySequenceLengthsInputName] = querySequenceLengths.value();
+                stampInputs[kAttentionKeyValueSequenceLengthsInputName] = keyValueSequenceLengths.value();
             }
             if (useRaggedOffsets) {
-                if (useSeparateRaggedOffsets) {
-                    stampInputs[kAttentionQueryRaggedOffsetsInputName] = queryRaggedOffsets.value();
-                    stampInputs[kAttentionKeyValueRaggedOffsetsInputName] = keyValueRaggedOffsets.value();
-                } else {
-                    stampInputs[kAttentionRaggedOffsetsInputName] = queryRaggedOffsets.value();
-                }
+                stampInputs[kAttentionQueryRaggedOffsetsInputName] = queryRaggedOffsets.value();
+                stampInputs[kAttentionKeyValueRaggedOffsetsInputName] = keyValueRaggedOffsets.value();
             }
             std::unordered_map<std::string, TensorScalarBinding> tensorScalarInputs;
             std::function<void(Stream&)> preForwardHook;
@@ -872,36 +797,20 @@ void Attention::Builder::verifyConfig() const {
         if (_contextInput->getDataType() != _featureInput->getDataType()) {
             throw std::invalid_argument("Attention context input dtype must match feature input dtype for the current training path.");
         }
-        if (_sequenceLengthsInput.has_value()) {
-            throw std::invalid_argument(
-                "Attention contextInput requires querySequenceLengthsInput and keyValueSequenceLengthsInput instead of sequenceLengthsInput.");
-        }
-        if (_raggedOffsetsInput.has_value()) {
-            throw std::invalid_argument(
-                "Attention contextInput requires queryRaggedOffsetsInput and keyValueRaggedOffsetsInput instead of raggedOffsetsInput.");
-        }
     }
     if (_querySequenceLengthsInput.has_value() != _keyValueSequenceLengthsInput.has_value()) {
         throw std::invalid_argument(
-            "Attention requires both querySequenceLengthsInput and keyValueSequenceLengthsInput, or the sequenceLengthsInput convenience API.");
+            "Attention requires both querySequenceLengthsInput and keyValueSequenceLengthsInput.");
     }
     if (_queryRaggedOffsetsInput.has_value() != _keyValueRaggedOffsetsInput.has_value()) {
         throw std::invalid_argument(
-            "Attention requires both queryRaggedOffsetsInput and keyValueRaggedOffsetsInput, or the raggedOffsetsInput convenience API.");
-    }
-    if (_sequenceLengthsInput.has_value()) {
-        requireSequenceLengthsInput(_sequenceLengthsInput.value(), "sequenceLengthsInput");
+            "Attention requires both queryRaggedOffsetsInput and keyValueRaggedOffsetsInput.");
     }
     if (_querySequenceLengthsInput.has_value()) {
         requireSequenceLengthsInput(_querySequenceLengthsInput.value(), "querySequenceLengthsInput");
         requireSequenceLengthsInput(_keyValueSequenceLengthsInput.value(), "keyValueSequenceLengthsInput");
     }
-    if (_raggedOffsetsInput.has_value()) {
-        requireRaggedOffsetsInput(_raggedOffsetsInput.value(), "raggedOffsetsInput");
-        if (!_sequenceLengthsInput.has_value()) {
-            throw std::invalid_argument("Attention raggedOffsetsInput requires sequenceLengthsInput.");
-        }
-    } else if (_queryRaggedOffsetsInput.has_value()) {
+    if (_queryRaggedOffsetsInput.has_value()) {
         requireRaggedOffsetsInput(_queryRaggedOffsetsInput.value(), "queryRaggedOffsetsInput");
         requireRaggedOffsetsInput(_keyValueRaggedOffsetsInput.value(), "keyValueRaggedOffsetsInput");
         if (!_querySequenceLengthsInput.has_value()) {
@@ -1062,9 +971,7 @@ Attention Attention::Builder::build() {
 
     const uint64_t qkvWidth = qWidth + kvKeyWidth + kvValueWidth;
     const bool useSequenceLengths = _querySequenceLengthsInput.has_value();
-    const bool useSeparateSequenceLengths = useSequenceLengths && !_sequenceLengthsInput.has_value();
     const bool useRaggedOffsets = _queryRaggedOffsetsInput.has_value();
-    const bool useSeparateRaggedOffsets = useRaggedOffsets && !_raggedOffsetsInput.has_value();
     const bool usePackedQkvProjection = usePackedQkvProjectionForLayer(_useRope.value(), _contextInput.has_value());
 
     std::vector<std::shared_ptr<ParameterSpecification>> parameters;
@@ -1117,20 +1024,16 @@ Attention Attention::Builder::build() {
                                             _dropoutOffset.value(),
                                             _contextInput.has_value(),
                                             useSequenceLengths,
-                                            useSeparateSequenceLengths,
                                             useRaggedOffsets,
-                                            useSeparateRaggedOffsets,
                                             _featureInput->getDataType(),
                                             _weightsDataType.value(),
                                             _computeDataType.value(),
                                             _outputDataType.value()),
-                    publicAttentionInputNames(_contextInput.has_value(), useSequenceLengths, useSeparateSequenceLengths, useRaggedOffsets, useSeparateRaggedOffsets),
+                    publicAttentionInputNames(_contextInput.has_value(), useSequenceLengths, useRaggedOffsets),
                     {publicAttentionInputInterface(_featureInput.value(),
                                                    _contextInput,
-                                                   _sequenceLengthsInput,
                                                    _querySequenceLengthsInput,
                                                    _keyValueSequenceLengthsInput,
-                                                   _raggedOffsetsInput,
                                                    _queryRaggedOffsetsInput,
                                                    _keyValueRaggedOffsetsInput)},
                     {{{"feature_output", output}}},
@@ -1153,10 +1056,8 @@ Attention Attention::Builder::build() {
                     _dropoutSeed.value(),
                     _dropoutOffset.value(),
                     _contextInput,
-                    _sequenceLengthsInput,
                     _querySequenceLengthsInput,
                     _keyValueSequenceLengthsInput,
-                    _raggedOffsetsInput,
                     _queryRaggedOffsetsInput,
                     _keyValueRaggedOffsetsInput,
                     _weightsDataType.value(),
@@ -1193,12 +1094,8 @@ json Attention::architectureJson() const {
     j["dropout_seed"] = dropoutSeed;
     j["dropout_offset"] = dropoutOffset;
     j["use_cross_attention"] = contextInput.has_value();
-    const bool useSeparateSequenceLengths = querySequenceLengthsInput.has_value() && !sequenceLengthsInput.has_value();
-    const bool useSeparateRaggedOffsets = queryRaggedOffsetsInput.has_value() && !raggedOffsetsInput.has_value();
     j["use_sequence_lengths"] = querySequenceLengthsInput.has_value();
-    j["use_separate_sequence_lengths"] = useSeparateSequenceLengths;
     j["use_ragged_offsets"] = queryRaggedOffsetsInput.has_value();
-    j["use_separate_ragged_offsets"] = useSeparateRaggedOffsets;
     j["weights_data_type"] = weightsDataType;
     j["compute_data_type"] = computeDataType;
     j["output_data_type"] = outputDataType;
@@ -1212,15 +1109,11 @@ json Attention::architectureJson() const {
     if (contextInput.has_value()) {
         j["context_input"] = contextInput.value().architectureJson();
     }
-    if (sequenceLengthsInput.has_value()) {
-        j["sequence_lengths_input"] = sequenceLengthsInput.value().architectureJson();
-    } else if (querySequenceLengthsInput.has_value()) {
+    if (querySequenceLengthsInput.has_value()) {
         j["query_sequence_lengths_input"] = querySequenceLengthsInput.value().architectureJson();
         j["key_value_sequence_lengths_input"] = keyValueSequenceLengthsInput.value().architectureJson();
     }
-    if (raggedOffsetsInput.has_value()) {
-        j["ragged_offsets_input"] = raggedOffsetsInput.value().architectureJson();
-    } else if (queryRaggedOffsetsInput.has_value()) {
+    if (queryRaggedOffsetsInput.has_value()) {
         j["query_ragged_offsets_input"] = queryRaggedOffsetsInput.value().architectureJson();
         j["key_value_ragged_offsets_input"] = keyValueRaggedOffsetsInput.value().architectureJson();
     }
@@ -1257,15 +1150,16 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     }
     Tensor featureOutput = Tensor::deserialize(j.at("feature_output"), archiveReader.get());
 
-    std::optional<Tensor> sequenceLengthsInput = std::nullopt;
+    if (j.contains("sequence_lengths_input") || j.contains("ragged_offsets_input") ||
+        j.contains("use_separate_sequence_lengths") || j.contains("use_separate_ragged_offsets")) {
+        throw std::runtime_error(
+            "Attention deserialize does not support legacy single-metadata fields; use query/key-value sequence lengths and ragged offsets.");
+    }
+
     std::optional<Tensor> querySequenceLengthsInput = std::nullopt;
     std::optional<Tensor> keyValueSequenceLengthsInput = std::nullopt;
-    if (j.contains("sequence_lengths_input")) {
-        sequenceLengthsInput = network->getApiTensorByOriginalId(j.at("sequence_lengths_input").at("id").get<uint64_t>());
-        querySequenceLengthsInput = sequenceLengthsInput;
-        keyValueSequenceLengthsInput = sequenceLengthsInput;
-    } else if (j.value("use_sequence_lengths", false) || j.contains("query_sequence_lengths_input") ||
-               j.contains("key_value_sequence_lengths_input")) {
+    if (j.value("use_sequence_lengths", false) || j.contains("query_sequence_lengths_input") ||
+        j.contains("key_value_sequence_lengths_input")) {
         if (!j.contains("query_sequence_lengths_input") || !j.contains("key_value_sequence_lengths_input")) {
             throw std::runtime_error(
                 "Attention deserialize missing query_sequence_lengths_input/key_value_sequence_lengths_input.");
@@ -1275,15 +1169,10 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
         keyValueSequenceLengthsInput =
             network->getApiTensorByOriginalId(j.at("key_value_sequence_lengths_input").at("id").get<uint64_t>());
     }
-    std::optional<Tensor> raggedOffsetsInput = std::nullopt;
     std::optional<Tensor> queryRaggedOffsetsInput = std::nullopt;
     std::optional<Tensor> keyValueRaggedOffsetsInput = std::nullopt;
-    if (j.contains("ragged_offsets_input")) {
-        raggedOffsetsInput = network->getApiTensorByOriginalId(j.at("ragged_offsets_input").at("id").get<uint64_t>());
-        queryRaggedOffsetsInput = raggedOffsetsInput;
-        keyValueRaggedOffsetsInput = raggedOffsetsInput;
-    } else if (j.value("use_ragged_offsets", false) || j.contains("query_ragged_offsets_input") ||
-               j.contains("key_value_ragged_offsets_input")) {
+    if (j.value("use_ragged_offsets", false) || j.contains("query_ragged_offsets_input") ||
+        j.contains("key_value_ragged_offsets_input")) {
         if (!j.contains("query_ragged_offsets_input") || !j.contains("key_value_ragged_offsets_input")) {
             throw std::runtime_error("Attention deserialize missing query_ragged_offsets_input/key_value_ragged_offsets_input.");
         }
@@ -1371,9 +1260,7 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     }
 
     const bool useSequenceLengths = querySequenceLengthsInput.has_value();
-    const bool useSeparateSequenceLengths = useSequenceLengths && !sequenceLengthsInput.has_value();
     const bool useRaggedOffsets = queryRaggedOffsetsInput.has_value();
-    const bool useSeparateRaggedOffsets = useRaggedOffsets && !raggedOffsetsInput.has_value();
 
     Attention layer(makeAttentionExpression(querySequenceLength,
                                             keyValueSequenceLength,
@@ -1398,20 +1285,16 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                                             dropoutOffset,
                                             contextInput.has_value(),
                                             useSequenceLengths,
-                                            useSeparateSequenceLengths,
                                             useRaggedOffsets,
-                                            useSeparateRaggedOffsets,
                                             featureInput.getDataType(),
                                             weightsDataType,
                                             computeDataType,
                                             outputDataType),
-                    publicAttentionInputNames(contextInput.has_value(), useSequenceLengths, useSeparateSequenceLengths, useRaggedOffsets, useSeparateRaggedOffsets),
+                    publicAttentionInputNames(contextInput.has_value(), useSequenceLengths, useRaggedOffsets),
                     {publicAttentionInputInterface(featureInput,
                                                    contextInput,
-                                                   sequenceLengthsInput,
                                                    querySequenceLengthsInput,
                                                    keyValueSequenceLengthsInput,
-                                                   raggedOffsetsInput,
                                                    queryRaggedOffsetsInput,
                                                    keyValueRaggedOffsetsInput)},
                     {{{"feature_output", featureOutput}}},
@@ -1434,10 +1317,8 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                     dropoutSeed,
                     dropoutOffset,
                     contextInput,
-                    sequenceLengthsInput,
                     querySequenceLengthsInput,
                     keyValueSequenceLengthsInput,
-                    raggedOffsetsInput,
                     queryRaggedOffsetsInput,
                     keyValueRaggedOffsetsInput,
                     weightsDataType,
