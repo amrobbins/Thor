@@ -426,6 +426,7 @@ json exprNodeToJson(const ExprNode& node) {
     j["attention_use_paged_kv_cache"] = node.attention_use_paged_kv_cache;
     j["attention_paged_kv_max_sequence_length"] = node.attention_paged_kv_max_sequence_length;
     j["attention_dropout_probability"] = node.attention_dropout_probability;
+    j["attention_use_fp8_forward_scaling"] = node.attention_use_fp8_forward_scaling;
     j["attention_seq_len_q_node"] = node.attention_seq_len_q_node;
     j["attention_seq_len_kv_node"] = node.attention_seq_len_kv_node;
     j["attention_ragged_offset_q_node"] = node.attention_ragged_offset_q_node;
@@ -434,6 +435,14 @@ json exprNodeToJson(const ExprNode& node) {
     j["attention_page_table_v_node"] = node.attention_page_table_v_node;
     j["attention_dropout_seed_node"] = node.attention_dropout_seed_node;
     j["attention_dropout_offset_node"] = node.attention_dropout_offset_node;
+    j["attention_descale_q_node"] = node.attention_descale_q_node;
+    j["attention_descale_k_node"] = node.attention_descale_k_node;
+    j["attention_descale_v_node"] = node.attention_descale_v_node;
+    j["attention_descale_s_node"] = node.attention_descale_s_node;
+    j["attention_scale_s_node"] = node.attention_scale_s_node;
+    j["attention_scale_o_node"] = node.attention_scale_o_node;
+    j["attention_amax_s_node"] = node.attention_amax_s_node;
+    j["attention_amax_o_node"] = node.attention_amax_o_node;
     j["rope_sequence_axis"] = node.rope_sequence_axis;
     j["rope_head_dim_axis"] = node.rope_head_dim_axis;
     j["rope_rotary_dim"] = node.rope_rotary_dim;
@@ -517,6 +526,7 @@ ExprNode exprNodeFromJson(const json& j) {
     node.attention_use_paged_kv_cache = j.value("attention_use_paged_kv_cache", false);
     node.attention_paged_kv_max_sequence_length = j.value("attention_paged_kv_max_sequence_length", int64_t{0});
     node.attention_dropout_probability = j.value("attention_dropout_probability", 0.0f);
+    node.attention_use_fp8_forward_scaling = j.value("attention_use_fp8_forward_scaling", false);
     node.attention_seq_len_q_node = j.value("attention_seq_len_q_node", UINT32_MAX);
     node.attention_seq_len_kv_node = j.value("attention_seq_len_kv_node", UINT32_MAX);
     node.attention_ragged_offset_q_node = j.value("attention_ragged_offset_q_node", UINT32_MAX);
@@ -525,6 +535,14 @@ ExprNode exprNodeFromJson(const json& j) {
     node.attention_page_table_v_node = j.value("attention_page_table_v_node", UINT32_MAX);
     node.attention_dropout_seed_node = j.value("attention_dropout_seed_node", UINT32_MAX);
     node.attention_dropout_offset_node = j.value("attention_dropout_offset_node", UINT32_MAX);
+    node.attention_descale_q_node = j.value("attention_descale_q_node", UINT32_MAX);
+    node.attention_descale_k_node = j.value("attention_descale_k_node", UINT32_MAX);
+    node.attention_descale_v_node = j.value("attention_descale_v_node", UINT32_MAX);
+    node.attention_descale_s_node = j.value("attention_descale_s_node", UINT32_MAX);
+    node.attention_scale_s_node = j.value("attention_scale_s_node", UINT32_MAX);
+    node.attention_scale_o_node = j.value("attention_scale_o_node", UINT32_MAX);
+    node.attention_amax_s_node = j.value("attention_amax_s_node", UINT32_MAX);
+    node.attention_amax_o_node = j.value("attention_amax_o_node", UINT32_MAX);
     node.rope_sequence_axis = j.value("rope_sequence_axis", uint32_t{2});
     node.rope_head_dim_axis = j.value("rope_head_dim_axis", uint32_t{3});
     node.rope_rotary_dim = j.value("rope_rotary_dim", uint64_t{0});
@@ -989,6 +1007,16 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                     out += ",dropoutOffset=" + canonicalizeNode(expr, n.attention_dropout_offset_node, memo, memoReady);
                 }
             }
+            if (n.attention_use_fp8_forward_scaling) {
+                out += ",descaleQ=" + canonicalizeNode(expr, n.attention_descale_q_node, memo, memoReady);
+                out += ",descaleK=" + canonicalizeNode(expr, n.attention_descale_k_node, memo, memoReady);
+                out += ",descaleV=" + canonicalizeNode(expr, n.attention_descale_v_node, memo, memoReady);
+                out += ",descaleS=" + canonicalizeNode(expr, n.attention_descale_s_node, memo, memoReady);
+                out += ",scaleS=" + canonicalizeNode(expr, n.attention_scale_s_node, memo, memoReady);
+                out += ",scaleO=" + canonicalizeNode(expr, n.attention_scale_o_node, memo, memoReady);
+                out += ",amaxS=" + canonicalizeNode(expr, n.attention_amax_s_node, memo, memoReady);
+                out += ",amaxO=" + canonicalizeNode(expr, n.attention_amax_o_node, memo, memoReady);
+            }
             out += ")";
             break;
         }
@@ -1273,6 +1301,22 @@ void ExpressionDefinition::validate() const {
             validateNodeIndex(node.attention_dropout_offset_node, "attention dropout offset");
             if (node.attention_dropout_seed_node >= node_index_u32 || node.attention_dropout_offset_node >= node_index_u32) {
                 throw std::runtime_error("ExpressionDefinition ATTENTION dropout seed/offset nodes must reference earlier nodes.");
+            }
+        }
+        if (node.op == ExprOp::ATTENTION && node.attention_use_fp8_forward_scaling) {
+            validateNodeIndex(node.attention_descale_q_node, "attention descale_q");
+            validateNodeIndex(node.attention_descale_k_node, "attention descale_k");
+            validateNodeIndex(node.attention_descale_v_node, "attention descale_v");
+            validateNodeIndex(node.attention_descale_s_node, "attention descale_s");
+            validateNodeIndex(node.attention_scale_s_node, "attention scale_s");
+            validateNodeIndex(node.attention_scale_o_node, "attention scale_o");
+            validateNodeIndex(node.attention_amax_s_node, "attention amax_s");
+            validateNodeIndex(node.attention_amax_o_node, "attention amax_o");
+            if (node.attention_descale_q_node >= node_index_u32 || node.attention_descale_k_node >= node_index_u32 ||
+                node.attention_descale_v_node >= node_index_u32 || node.attention_descale_s_node >= node_index_u32 ||
+                node.attention_scale_s_node >= node_index_u32 || node.attention_scale_o_node >= node_index_u32 ||
+                node.attention_amax_s_node >= node_index_u32 || node.attention_amax_o_node >= node_index_u32) {
+                throw std::runtime_error("ExpressionDefinition ATTENTION FP8 scale/descale/amax nodes must reference earlier nodes.");
             }
         }
         if ((node.op == ExprOp::ATTENTION_BACKWARD_Q || node.op == ExprOp::ATTENTION_BACKWARD_K ||
@@ -1573,6 +1617,22 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
             newNode.attention_dropout_seed_node = cloneSubtree(src, srcNode.attention_dropout_seed_node, dst, oldToNew);
             newNode.attention_dropout_offset_node = cloneSubtree(src, srcNode.attention_dropout_offset_node, dst, oldToNew);
         }
+        if (srcNode.attention_use_fp8_forward_scaling) {
+            if (srcNode.attention_descale_q_node == UINT32_MAX || srcNode.attention_descale_k_node == UINT32_MAX ||
+                srcNode.attention_descale_v_node == UINT32_MAX || srcNode.attention_descale_s_node == UINT32_MAX ||
+                srcNode.attention_scale_s_node == UINT32_MAX || srcNode.attention_scale_o_node == UINT32_MAX ||
+                srcNode.attention_amax_s_node == UINT32_MAX || srcNode.attention_amax_o_node == UINT32_MAX) {
+                throw std::runtime_error("Malformed attention expression: missing FP8 scale/descale/amax node while cloning.");
+            }
+            newNode.attention_descale_q_node = cloneSubtree(src, srcNode.attention_descale_q_node, dst, oldToNew);
+            newNode.attention_descale_k_node = cloneSubtree(src, srcNode.attention_descale_k_node, dst, oldToNew);
+            newNode.attention_descale_v_node = cloneSubtree(src, srcNode.attention_descale_v_node, dst, oldToNew);
+            newNode.attention_descale_s_node = cloneSubtree(src, srcNode.attention_descale_s_node, dst, oldToNew);
+            newNode.attention_scale_s_node = cloneSubtree(src, srcNode.attention_scale_s_node, dst, oldToNew);
+            newNode.attention_scale_o_node = cloneSubtree(src, srcNode.attention_scale_o_node, dst, oldToNew);
+            newNode.attention_amax_s_node = cloneSubtree(src, srcNode.attention_amax_s_node, dst, oldToNew);
+            newNode.attention_amax_o_node = cloneSubtree(src, srcNode.attention_amax_o_node, dst, oldToNew);
+        }
     } else if (Expression::isLeafOp(srcNode.op)) {
         // nothing to recurse into
     } else {
@@ -1695,6 +1755,30 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
             newNode.attention_dropout_offset_node =
                 cloneSubtreeWithMergedInputs(src, srcNode.attention_dropout_offset_node, dst, oldToNew, dstInputSlotsByName);
         }
+        if (srcNode.attention_use_fp8_forward_scaling) {
+            if (srcNode.attention_descale_q_node == UINT32_MAX || srcNode.attention_descale_k_node == UINT32_MAX ||
+                srcNode.attention_descale_v_node == UINT32_MAX || srcNode.attention_descale_s_node == UINT32_MAX ||
+                srcNode.attention_scale_s_node == UINT32_MAX || srcNode.attention_scale_o_node == UINT32_MAX ||
+                srcNode.attention_amax_s_node == UINT32_MAX || srcNode.attention_amax_o_node == UINT32_MAX) {
+                throw std::runtime_error("Malformed attention expression: missing FP8 scale/descale/amax node while merging outputs.");
+            }
+            newNode.attention_descale_q_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_descale_q_node, dst, oldToNew, dstInputSlotsByName);
+            newNode.attention_descale_k_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_descale_k_node, dst, oldToNew, dstInputSlotsByName);
+            newNode.attention_descale_v_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_descale_v_node, dst, oldToNew, dstInputSlotsByName);
+            newNode.attention_descale_s_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_descale_s_node, dst, oldToNew, dstInputSlotsByName);
+            newNode.attention_scale_s_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_scale_s_node, dst, oldToNew, dstInputSlotsByName);
+            newNode.attention_scale_o_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_scale_o_node, dst, oldToNew, dstInputSlotsByName);
+            newNode.attention_amax_s_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_amax_s_node, dst, oldToNew, dstInputSlotsByName);
+            newNode.attention_amax_o_node =
+                cloneSubtreeWithMergedInputs(src, srcNode.attention_amax_o_node, dst, oldToNew, dstInputSlotsByName);
+        }
     } else if (srcNode.op == ExprOp::SCALAR_FP || srcNode.op == ExprOp::FILL) {
         // nothing to recurse into
     } else {
@@ -1795,6 +1879,48 @@ uint32_t cloneSubtreeWithInputSubstitution(const PhysicalExpression& src,
                 src, srcNode.attention_dropout_seed_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
             newNode.attention_dropout_offset_node = cloneSubtreeWithInputSubstitution(
                 src, srcNode.attention_dropout_offset_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        }
+        if (srcNode.attention_use_ragged_offsets) {
+            if (srcNode.attention_ragged_offset_q_node == UINT32_MAX || srcNode.attention_ragged_offset_kv_node == UINT32_MAX) {
+                throw std::runtime_error("Malformed attention expression: missing ragged offset node while substituting input.");
+            }
+            newNode.attention_ragged_offset_q_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_ragged_offset_q_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+            newNode.attention_ragged_offset_kv_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_ragged_offset_kv_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        }
+        if (srcNode.attention_use_paged_kv_cache) {
+            if (srcNode.attention_page_table_k_node == UINT32_MAX || srcNode.attention_page_table_v_node == UINT32_MAX) {
+                throw std::runtime_error("Malformed attention expression: missing paged KV page-table nodes while substituting input.");
+            }
+            newNode.attention_page_table_k_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_page_table_k_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+            newNode.attention_page_table_v_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_page_table_v_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+        }
+        if (srcNode.attention_use_fp8_forward_scaling) {
+            if (srcNode.attention_descale_q_node == UINT32_MAX || srcNode.attention_descale_k_node == UINT32_MAX ||
+                srcNode.attention_descale_v_node == UINT32_MAX || srcNode.attention_descale_s_node == UINT32_MAX ||
+                srcNode.attention_scale_s_node == UINT32_MAX || srcNode.attention_scale_o_node == UINT32_MAX ||
+                srcNode.attention_amax_s_node == UINT32_MAX || srcNode.attention_amax_o_node == UINT32_MAX) {
+                throw std::runtime_error("Malformed attention expression: missing FP8 scale/descale/amax node while substituting input.");
+            }
+            newNode.attention_descale_q_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_descale_q_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+            newNode.attention_descale_k_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_descale_k_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+            newNode.attention_descale_v_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_descale_v_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+            newNode.attention_descale_s_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_descale_s_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+            newNode.attention_scale_s_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_scale_s_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+            newNode.attention_scale_o_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_scale_o_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+            newNode.attention_amax_s_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_amax_s_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+            newNode.attention_amax_o_node = cloneSubtreeWithInputSubstitution(
+                src, srcNode.attention_amax_o_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
         }
     } else if (Expression::isLeafOp(srcNode.op)) {
         // constants/fill nodes have no children and can be copied directly.
@@ -2545,9 +2671,15 @@ Expression Expression::rotaryPositionEmbedding(RotaryPositionEmbeddingOptions op
 }
 
 namespace {
-bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
-    const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE");
+bool envFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
     return value != nullptr && std::string_view(value) == "1";
+}
+
+bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
+    return envFlagEnabled("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE") ||
+           envFlagEnabled("THOR_RUN_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE") ||
+           envFlagEnabled("THOR_RUN_EXPERIMENTAL_CUDNN_FP8_ATTENTION_SUPPORT_SURFACE");
 }
 
 void applyAttentionOptions(ExprNode& node, const AttentionOptions& options, bool use_bias) {
@@ -2566,6 +2698,7 @@ void applyAttentionOptions(ExprNode& node, const AttentionOptions& options, bool
     node.attention_use_paged_kv_cache = options.use_paged_kv_cache;
     node.attention_paged_kv_max_sequence_length = options.paged_kv_max_sequence_length;
     node.attention_dropout_probability = options.dropout_probability;
+    node.attention_use_fp8_forward_scaling = options.use_fp8_forward_scaling;
     if (options.compute_dtype.has_value()) {
         node.compute_dtype = options.compute_dtype.value();
     }
@@ -2634,12 +2767,23 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
                                                      const Expression* page_table_v,
                                                      const Expression* dropout_seed,
                                                      const Expression* dropout_offset,
-                                                     AttentionOptions options) {
+                                                     AttentionOptions options,
+                                                     const Expression* descale_q,
+                                                     const Expression* descale_k,
+                                                     const Expression* descale_v,
+                                                     const Expression* descale_s,
+                                                     const Expression* scale_s,
+                                                     const Expression* scale_o,
+                                                     const Expression* amax_s,
+                                                     const Expression* amax_o) {
     if (!q.expr || !k.expr || !v.expr || (bias != nullptr && !bias->expr) || (q_seq_len != nullptr && !q_seq_len->expr) ||
         (kv_seq_len != nullptr && !kv_seq_len->expr) || (q_ragged_offsets != nullptr && !q_ragged_offsets->expr) ||
         (kv_ragged_offsets != nullptr && !kv_ragged_offsets->expr) || (page_table_k != nullptr && !page_table_k->expr) ||
         (page_table_v != nullptr && !page_table_v->expr) || (dropout_seed != nullptr && !dropout_seed->expr) ||
-        (dropout_offset != nullptr && !dropout_offset->expr)) {
+        (dropout_offset != nullptr && !dropout_offset->expr) || (descale_q != nullptr && !descale_q->expr) ||
+        (descale_k != nullptr && !descale_k->expr) || (descale_v != nullptr && !descale_v->expr) ||
+        (descale_s != nullptr && !descale_s->expr) || (scale_s != nullptr && !scale_s->expr) ||
+        (scale_o != nullptr && !scale_o->expr) || (amax_s != nullptr && !amax_s->expr) || (amax_o != nullptr && !amax_o->expr)) {
         throw std::runtime_error("Cannot build attention from empty expressions.");
     }
     const bool use_ragged_offsets = q_ragged_offsets != nullptr || kv_ragged_offsets != nullptr;
@@ -2676,6 +2820,35 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
     if ((dropout_seed == nullptr) != (dropout_offset == nullptr)) {
         throw std::runtime_error("dropout_seed and dropout_offset must be provided together for attention dropout.");
     }
+    const bool use_fp8_forward_scaling = descale_q != nullptr || descale_k != nullptr || descale_v != nullptr || descale_s != nullptr ||
+                                         scale_s != nullptr || scale_o != nullptr || amax_s != nullptr || amax_o != nullptr ||
+                                         options.use_fp8_forward_scaling;
+    if (use_fp8_forward_scaling) {
+        if (descale_q == nullptr || descale_k == nullptr || descale_v == nullptr || descale_s == nullptr || scale_s == nullptr ||
+            scale_o == nullptr || amax_s == nullptr || amax_o == nullptr) {
+            throw std::runtime_error("FP8 attention forward requires all descale_q/descale_k/descale_v/descale_s/scale_s/scale_o/amax_s/amax_o expressions.");
+        }
+        if (bias != nullptr) {
+            throw std::runtime_error("FP8 attention forward does not support additive bias on the validated cuDNN support surface.");
+        }
+        if (dropout_seed != nullptr || dropout_offset != nullptr || options.dropout_probability > 0.0f) {
+            throw std::runtime_error("FP8 attention forward does not support dropout on the validated cuDNN support surface.");
+        }
+        if (q_ragged_offsets != nullptr || kv_ragged_offsets != nullptr) {
+            throw std::runtime_error("FP8 attention forward is not enabled for ragged offsets on the validated cuDNN support surface.");
+        }
+        if (page_table_k != nullptr || page_table_v != nullptr || options.use_paged_kv_cache) {
+            throw std::runtime_error("FP8 attention forward is not enabled for paged KV on the validated cuDNN support surface.");
+        }
+        if (options.use_alibi_mask) {
+            throw std::runtime_error("FP8 attention forward is not enabled for ALiBi on the validated cuDNN support surface.");
+        }
+        if (options.mask_kind == AttentionMaskKind::CausalBottomRight || options.mask_kind == AttentionMaskKind::SlidingWindowTopLeft ||
+            options.mask_kind == AttentionMaskKind::SlidingWindowBottomRight) {
+            throw std::runtime_error("FP8 attention forward is enabled only for no-mask or causal-top-left mask semantics.");
+        }
+        options.use_fp8_forward_scaling = true;
+    }
 
     auto out = std::make_shared<PhysicalExpression>();
     std::unordered_map<std::string, uint32_t> merged_by_name;
@@ -2697,6 +2870,14 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
     const uint32_t page_table_v_node = page_table_v != nullptr ? clone_root(*page_table_v) : UINT32_MAX;
     const uint32_t dropout_seed_node = dropout_seed != nullptr ? clone_root(*dropout_seed) : UINT32_MAX;
     const uint32_t dropout_offset_node = dropout_offset != nullptr ? clone_root(*dropout_offset) : UINT32_MAX;
+    const uint32_t descale_q_node = descale_q != nullptr ? clone_root(*descale_q) : UINT32_MAX;
+    const uint32_t descale_k_node = descale_k != nullptr ? clone_root(*descale_k) : UINT32_MAX;
+    const uint32_t descale_v_node = descale_v != nullptr ? clone_root(*descale_v) : UINT32_MAX;
+    const uint32_t descale_s_node = descale_s != nullptr ? clone_root(*descale_s) : UINT32_MAX;
+    const uint32_t scale_s_node = scale_s != nullptr ? clone_root(*scale_s) : UINT32_MAX;
+    const uint32_t scale_o_node = scale_o != nullptr ? clone_root(*scale_o) : UINT32_MAX;
+    const uint32_t amax_s_node = amax_s != nullptr ? clone_root(*amax_s) : UINT32_MAX;
+    const uint32_t amax_o_node = amax_o != nullptr ? clone_root(*amax_o) : UINT32_MAX;
 
     ExprNode node{};
     node.op = ExprOp::ATTENTION;
@@ -2715,6 +2896,14 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
     node.attention_page_table_v_node = page_table_v_node;
     node.attention_dropout_seed_node = dropout_seed_node;
     node.attention_dropout_offset_node = dropout_offset_node;
+    node.attention_descale_q_node = descale_q_node;
+    node.attention_descale_k_node = descale_k_node;
+    node.attention_descale_v_node = descale_v_node;
+    node.attention_descale_s_node = descale_s_node;
+    node.attention_scale_s_node = scale_s_node;
+    node.attention_scale_o_node = scale_o_node;
+    node.attention_amax_s_node = amax_s_node;
+    node.attention_amax_o_node = amax_o_node;
     applyAttentionOptions(node, options, bias != nullptr);
 
     const uint32_t new_index = static_cast<uint32_t>(out->nodes.size());
@@ -2759,6 +2948,82 @@ Expression Expression::scaledDotProductAttention(const Expression& q,
                                                  AttentionOptions options) {
     options.use_padding_mask = true;
     return attentionWithOptionalMetadata(q, k, v, nullptr, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
+}
+
+
+Expression Expression::scaledDotProductAttentionFp8Forward(const Expression& q,
+                                                           const Expression& k,
+                                                           const Expression& v,
+                                                           const Expression& descale_q,
+                                                           const Expression& descale_k,
+                                                           const Expression& descale_v,
+                                                           const Expression& descale_s,
+                                                           const Expression& scale_s,
+                                                           const Expression& scale_o,
+                                                           const Expression& amax_s,
+                                                           const Expression& amax_o,
+                                                           AttentionOptions options) {
+    options.use_fp8_forward_scaling = true;
+    return attentionWithOptionalMetadata(q,
+                                         k,
+                                         v,
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         std::move(options),
+                                         &descale_q,
+                                         &descale_k,
+                                         &descale_v,
+                                         &descale_s,
+                                         &scale_s,
+                                         &scale_o,
+                                         &amax_s,
+                                         &amax_o);
+}
+
+Expression Expression::scaledDotProductAttentionFp8Forward(const Expression& q,
+                                                           const Expression& k,
+                                                           const Expression& v,
+                                                           const Expression& q_seq_len,
+                                                           const Expression& kv_seq_len,
+                                                           const Expression& descale_q,
+                                                           const Expression& descale_k,
+                                                           const Expression& descale_v,
+                                                           const Expression& descale_s,
+                                                           const Expression& scale_s,
+                                                           const Expression& scale_o,
+                                                           const Expression& amax_s,
+                                                           const Expression& amax_o,
+                                                           AttentionOptions options) {
+    options.use_padding_mask = true;
+    options.use_fp8_forward_scaling = true;
+    return attentionWithOptionalMetadata(q,
+                                         k,
+                                         v,
+                                         nullptr,
+                                         &q_seq_len,
+                                         &kv_seq_len,
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         std::move(options),
+                                         &descale_q,
+                                         &descale_k,
+                                         &descale_v,
+                                         &descale_s,
+                                         &scale_s,
+                                         &scale_o,
+                                         &amax_s,
+                                         &amax_o);
 }
 
 

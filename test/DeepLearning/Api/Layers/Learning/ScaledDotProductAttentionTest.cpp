@@ -180,6 +180,70 @@ TEST(AttentionApi, SdpaBuildsCrossAttentionWithSeparateRaggedMetadata) {
     EXPECT_TRUE(attention.getUseRaggedOffsets());
 }
 
+TEST(AttentionApi, SdpaBuildsPhiloxDropoutAndSerializesPublicSurface) {
+    Api::Network network("attention_api_sdpa_builds_philox_dropout_and_serializes_public_surface");
+    Api::NetworkInput q = Api::NetworkInput::Builder().network(network).name("q").dimensions({4, 8, 32}).dataType(DataType::FP16).build();
+    Api::NetworkInput seq = Api::NetworkInput::Builder().network(network).name("seq").dimensions({1}).dataType(DataType::INT32).build();
+
+    Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder()
+                                                   .network(network)
+                                                   .selfInput(q.getFeatureOutput().value())
+                                                   .sequenceLengthsInput(seq.getFeatureOutput().value())
+                                                   .dropout(0.125f, 1234, 5678)
+                                                   .build();
+
+    EXPECT_FLOAT_EQ(attention.getDropoutProbability(), 0.125f);
+    EXPECT_EQ(attention.getDropoutSeed(), 1234);
+    EXPECT_EQ(attention.getDropoutOffset(), 5678);
+
+    nlohmann::json arch = attention.architectureJson();
+    EXPECT_EQ(arch.at("layer_type").get<std::string>(), "scaled_dot_product_attention");
+    EXPECT_EQ(arch.at("tensor_layout").get<std::string>(), "bhsd");
+    EXPECT_EQ(arch.at("mask_kind").get<std::string>(), "none");
+    EXPECT_TRUE(arch.at("attention_scale").is_null());
+    EXPECT_FLOAT_EQ(arch.at("dropout_probability").get<float>(), 0.125f);
+    EXPECT_EQ(arch.at("dropout_seed").get<int64_t>(), 1234);
+    EXPECT_EQ(arch.at("dropout_offset").get<int64_t>(), 5678);
+    EXPECT_FALSE(arch.at("use_bias").get<bool>());
+    EXPECT_TRUE(arch.at("use_sequence_lengths").get<bool>());
+    EXPECT_FALSE(arch.at("use_ragged_offsets").get<bool>());
+    EXPECT_EQ(arch.at("query_sequence_lengths_input").at("id").get<uint64_t>(), seq.getFeatureOutput().value().getId());
+    EXPECT_EQ(arch.at("key_value_sequence_lengths_input").at("id").get<uint64_t>(), seq.getFeatureOutput().value().getId());
+    std::vector<uint64_t> outputDims = arch.at("output").at("dimensions").get<std::vector<uint64_t>>();
+    EXPECT_EQ(outputDims, (std::vector<uint64_t>{4, 8, 32}));
+}
+
+TEST(AttentionApi, SdpaRejectsInvalidDropoutConfiguration) {
+    Api::Network network("attention_api_sdpa_rejects_invalid_dropout_configuration");
+    Api::NetworkInput q = Api::NetworkInput::Builder().network(network).name("q").dimensions({2, 8, 32}).dataType(DataType::FP16).build();
+
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .selfInput(q.getFeatureOutput().value())
+                     .dropoutProbability(-0.01f)
+                     .build(),
+                 std::invalid_argument);
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .selfInput(q.getFeatureOutput().value())
+                     .dropoutProbability(1.0f)
+                     .build(),
+                 std::invalid_argument);
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .selfInput(q.getFeatureOutput().value())
+                     .dropout(0.1f, 7, -1)
+                     .build(),
+                 std::invalid_argument);
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .selfInput(q.getFeatureOutput().value())
+                     .maskKind(Impl::AttentionMaskKind::CausalBottomRight)
+                     .dropout(0.1f, 7, 11)
+                     .build(),
+                 std::invalid_argument);
+}
+
 TEST(AttentionApi, SdpaRejectsRaggedOffsetsWithoutSequenceLengths) {
     Api::Network network("attention_api_sdpa_rejects_ragged_offsets_without_sequence_lengths");
     Api::NetworkInput q = Api::NetworkInput::Builder().network(network).name("q").dimensions({2, 8, 32}).dataType(DataType::FP16).build();

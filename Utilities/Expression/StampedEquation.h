@@ -238,6 +238,7 @@ struct CompiledAttention {
     bool use_paged_kv_cache = false;
     int64_t paged_kv_max_sequence_length = 0;
     float dropout_probability = 0.0f;
+    bool use_fp8_forward_scaling = false;
     TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
     TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP16;
     std::string debug_name = "thor_expr_attention";
@@ -573,6 +574,14 @@ class StampedAttention {
                      const std::optional<Tensor>& page_table_v,
                      const std::optional<Tensor>& dropout_seed,
                      const std::optional<Tensor>& dropout_offset,
+                     const std::optional<Tensor>& descale_q,
+                     const std::optional<Tensor>& descale_k,
+                     const std::optional<Tensor>& descale_v,
+                     const std::optional<Tensor>& descale_s,
+                     const std::optional<Tensor>& scale_s,
+                     const std::optional<Tensor>& scale_o,
+                     const std::optional<Tensor>& amax_s,
+                     const std::optional<Tensor>& amax_o,
                      const Tensor& output,
                      const Stream& stream,
                      std::shared_ptr<AttentionForwardState> forward_state = nullptr);
@@ -591,6 +600,14 @@ class StampedAttention {
     const std::optional<Tensor> page_table_v;
     const std::optional<Tensor> dropout_seed;
     const std::optional<Tensor> dropout_offset;
+    const std::optional<Tensor> descale_q;
+    const std::optional<Tensor> descale_k;
+    const std::optional<Tensor> descale_v;
+    const std::optional<Tensor> descale_s;
+    const std::optional<Tensor> scale_s;
+    const std::optional<Tensor> scale_o;
+    const std::optional<Tensor> amax_s;
+    const std::optional<Tensor> amax_o;
     Tensor output;
     Stream stream;
     std::shared_ptr<AttentionForwardState> forward_state;

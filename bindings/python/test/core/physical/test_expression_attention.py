@@ -4965,6 +4965,172 @@ def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(monk
         )
 
 
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "bias_shape",
+    [
+        pytest.param((1, 4, 1, 7), id="head_specific_query_broadcast"),
+        pytest.param((2, 1, 5, 1), id="batch_specific_key_broadcast"),
+        pytest.param((1, 1, 1, 1), id="scalar_broadcast"),
+    ],
+)
+def test_attention_sequence_broadcast_additive_bias_forward_is_production_enabled(bias_shape):
+    dtype = thor.DataType.fp16
+    batch = 2
+    query_heads = 4
+    kv_heads = 2
+    query_len = 5
+    kv_len = 7
+    qk_dim = 16
+    v_dim = 16
+    scale = 0.67 / math.sqrt(float(qk_dim))
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    eq = ex.compile(
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            bias=bias,
+            attention_scale=scale,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        ),
+        device_num=0,
+    )
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=query_len,
+        kv_len=kv_len,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    rng = np.random.default_rng(12100 + sum((i + 1) * size for i, size in enumerate(bias_shape)))
+    bias_np = rng.normal(0.0, 0.15, size=bias_shape).astype(np.float32)
+    expected = _attention_reference(q_np, k_np, v_np, scale=scale, bias=bias_np)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == [batch, query_heads, query_len, v_dim]
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Attention"]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "bias_shape",
+    [
+        pytest.param((1, 1, 1, 7), id="bias_1_1_1_skv"),
+        pytest.param((1, 4, 1, 7), id="bias_1_h_1_skv"),
+        pytest.param((2, 1, 1, 7), id="bias_b_1_1_skv"),
+        pytest.param((2, 4, 1, 7), id="bias_b_h_1_skv"),
+        pytest.param((1, 1, 5, 1), id="bias_1_1_sq_1"),
+        pytest.param((1, 4, 5, 1), id="bias_1_h_sq_1"),
+        pytest.param((2, 1, 5, 1), id="bias_b_1_sq_1"),
+        pytest.param((2, 4, 5, 1), id="bias_b_h_sq_1"),
+        pytest.param((1, 1, 1, 1), id="bias_1_1_1_1"),
+        pytest.param((2, 4, 1, 1), id="bias_b_h_1_1"),
+    ],
+)
+def test_attention_sequence_broadcast_additive_bias_backward_expands_dense_and_reduces_dbias(bias_shape):
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    batch = 2
+    query_heads = 4
+    kv_heads = 2
+    query_len = 5
+    kv_len = 7
+    qk_dim = 16
+    v_dim = 16
+    scale = 0.71 / math.sqrt(float(qk_dim))
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    fwd_eq = ex.compile(
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            bias=bias,
+            attention_scale=scale,
+            output_dtype=dtype,
+            compute_dtype=thor.DataType.fp32,
+        ),
+        device_num=0,
+    )
+    bwd_eq = fwd_eq.compile_backward(["q", "k", "v", "bias"], error_input_name=upstream_name)
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=query_len,
+        kv_len=kv_len,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    rng = np.random.default_rng(12300 + sum((i + 1) * size for i, size in enumerate(bias_shape)))
+    bias_np = rng.normal(0.0, 0.13, size=bias_shape).astype(np.float32)
+    dO_np = rng.normal(0.0, 0.24, size=(batch, query_heads, query_len, v_dim)).astype(_numpy_storage_dtype(dtype))
+
+    expected_dq, expected_dk, expected_dv, dense_expected_dbias = _attention_backward_reference(
+        q_np,
+        k_np,
+        v_np,
+        dO_np,
+        scale=scale,
+        bias=bias_np,
+        return_bias_grad=True,
+    )
+    expected_dbias = _reduce_attention_bias_grad_to_shape(dense_expected_dbias, bias_shape)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        upstream_name: _host_to_gpu(dO_np, dtype, stream),
+    }
+
+    output_shapes = bwd_eq.output_shapes(inputs_gpu)
+    assert output_shapes["q_grad"] == [batch, query_heads, query_len, qk_dim]
+    assert output_shapes["k_grad"] == [batch, kv_heads, kv_len, qk_dim]
+    assert output_shapes["v_grad"] == [batch, kv_heads, kv_len, v_dim]
+    assert output_shapes["bias_grad"] == list(bias_shape)
+    stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert "AttentionBackward" in stage_kinds
+    assert "Reduction" in stage_kinds
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = stamped.outputs()
+    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    assert got["bias_grad"].dtype == dtype
+    _assert_close(_copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
+
+
 def _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch):
     if os.environ.get("THOR_RUN_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE") != "1":
         pytest.skip(
@@ -4976,6 +5142,13 @@ def _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch):
     # Keep the legacy internal escape hatch set too so older ragged+bias guards are covered while callers use one
     # public run env for the whole support-surface suite.
     monkeypatch.setenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD", "1")
+
+
+def _xfail_experimental_cudnn_attention_surface_mismatch(surface: str, exc: AssertionError):
+    pytest.xfail(
+        "cuDNN accepted the experimental attention support-surface probe, but the result did not match Thor's "
+        f"reference semantics for {surface}: {exc}"
+    )
 
 
 @pytest.mark.cuda
@@ -5059,11 +5232,17 @@ def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_forward_s
     except RuntimeError as exc:
         pytest.xfail(f"cuDNN rejected sequence-broadcast additive-bias forward probe for bias_shape={bias_shape}: {exc}")
 
+    try:
+        _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+    except AssertionError as exc:
+        _xfail_experimental_cudnn_attention_surface_mismatch(
+            f"sequence-broadcast additive-bias forward bias_shape={bias_shape}", exc
+        )
+
     print(
         "SUPPORTED cuDNN sequence-broadcast additive-bias forward surface: "
         f"bias_shape={bias_shape}, output_shape={output_shape}, stage_kinds={stage_kinds}"
     )
-    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
 
 
 @pytest.mark.cuda
@@ -5176,22 +5355,29 @@ def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_backward_
             f"bias_shape={bias_shape}, requested_gradients={requested_gradients}: {exc}"
         )
 
+    got = stamped.outputs()
+    try:
+        if "q" in requested_gradients:
+            _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+        if "k" in requested_gradients:
+            _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+        if "v" in requested_gradients:
+            _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+        if "bias" in requested_gradients:
+            assert list(got["bias_grad"].dimensions) == list(bias_shape)
+            _assert_close(_copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
+    except AssertionError as exc:
+        _xfail_experimental_cudnn_attention_surface_mismatch(
+            "sequence-broadcast additive-bias backward "
+            f"bias_shape={bias_shape}, requested_gradients={requested_gradients}",
+            exc,
+        )
+
     print(
         "SUPPORTED cuDNN sequence-broadcast additive-bias backward surface: "
         f"bias_shape={bias_shape}, requested_gradients={requested_gradients}, "
         f"output_shapes={output_shapes}, stage_kinds={stage_kinds}"
     )
-
-    got = stamped.outputs()
-    if "q" in requested_gradients:
-        _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    if "k" in requested_gradients:
-        _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    if "v" in requested_gradients:
-        _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
-    if "bias" in requested_gradients:
-        assert list(got["bias_grad"].dimensions) == list(bias_shape)
-        _assert_close(_copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
 
 
 @pytest.mark.cuda

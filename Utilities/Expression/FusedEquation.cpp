@@ -949,16 +949,13 @@ static bool isAllowedAttentionBiasDims(const std::vector<uint64_t>& dims,
                                            uint64_t heads,
                                            uint64_t query_len,
                                            uint64_t kv_len) {
-    const bool allowSequenceBroadcast = experimentalCudnnAttentionSupportSurfaceProbeEnabled();
     return dims.size() == 4 && (dims[0] == 1 || dims[0] == batch) && (dims[1] == 1 || dims[1] == heads) &&
-           (dims[2] == query_len || (allowSequenceBroadcast && dims[2] == 1)) &&
-           (dims[3] == kv_len || (allowSequenceBroadcast && dims[3] == 1));
+           (dims[2] == query_len || dims[2] == 1) && (dims[3] == kv_len || dims[3] == 1);
 }
 
 static std::string attentionBiasShapeDescription(uint64_t batch, uint64_t heads, uint64_t query_len, uint64_t kv_len) {
-    const std::string shape = experimentalCudnnAttentionSupportSurfaceProbeEnabled() ? "[1|B,1|Hq,1|Sq,1|Skv]" : "[1|B,1|Hq,Sq,Skv]";
-    return shape + " for B/Hq/Sq/Skv=[" + std::to_string(batch) + "," + std::to_string(heads) + "," +
-           std::to_string(query_len) + "," + std::to_string(kv_len) + "]";
+    return "[1|B,1|Hq,1|Sq,1|Skv] for B/Hq/Sq/Skv=[" + std::to_string(batch) + "," + std::to_string(heads) +
+           "," + std::to_string(query_len) + "," + std::to_string(kv_len) + "]";
 }
 
 static std::vector<uint64_t> thorAttentionDims(AttentionTensorLayout layout,
@@ -5932,6 +5929,14 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
                                                                 const std::optional<Tensor>& page_table_v,
                                                                 const std::optional<Tensor>& dropout_seed,
                                                                 const std::optional<Tensor>& dropout_offset,
+                                                                const std::optional<Tensor>& descale_q,
+                                                                const std::optional<Tensor>& descale_k,
+                                                                const std::optional<Tensor>& descale_v,
+                                                                const std::optional<Tensor>& descale_s,
+                                                                const std::optional<Tensor>& scale_s,
+                                                                const std::optional<Tensor>& scale_o,
+                                                                const std::optional<Tensor>& amax_s,
+                                                                const std::optional<Tensor>& amax_o,
                                                                 std::optional<Tensor> preallocatedOutput,
                                                                 const Stream& stream,
                                                                 std::shared_ptr<AttentionForwardState> forward_state) const {
@@ -5981,6 +5986,20 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         }
         stage_input_dims.push_back(dropout_seed->getDimensions());
         stage_input_dims.push_back(dropout_offset->getDimensions());
+    }
+    if (compiledStage->use_fp8_forward_scaling) {
+        if (!descale_q.has_value() || !descale_k.has_value() || !descale_v.has_value() || !descale_s.has_value() || !scale_s.has_value() ||
+            !scale_o.has_value() || !amax_s.has_value() || !amax_o.has_value()) {
+            throw std::runtime_error("stampAttention requires FP8 descale/scale/amax tensors for this compiled stage.");
+        }
+        stage_input_dims.push_back(descale_q->getDimensions());
+        stage_input_dims.push_back(descale_k->getDimensions());
+        stage_input_dims.push_back(descale_v->getDimensions());
+        stage_input_dims.push_back(descale_s->getDimensions());
+        stage_input_dims.push_back(scale_s->getDimensions());
+        stage_input_dims.push_back(scale_o->getDimensions());
+        stage_input_dims.push_back(amax_s->getDimensions());
+        stage_input_dims.push_back(amax_o->getDimensions());
     }
     const std::vector<uint64_t> output_dims = resolveAttentionOutputDimsFromInputs(*compiledStage, stage_input_dims);
     const AttentionTensorLogicalDims qLogical = logicalAttentionDims(adaptedQ.getDimensions(), compiledStage->q_layout, "q");
@@ -6083,6 +6102,30 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         validate_dropout_scalar(dropout_seed, "seed");
         validate_dropout_scalar(dropout_offset, "offset");
     }
+    if (compiledStage->use_fp8_forward_scaling) {
+        auto validate_fp8_scalar = [&](const std::optional<Tensor>& tensor, const char* label) {
+            if (!tensor.has_value()) {
+                throw std::runtime_error(std::string("Attention FP8 missing ") + label + " tensor.");
+            }
+            if (tensor->getPlacement() != adaptedQ.getPlacement()) {
+                throw std::runtime_error(std::string("Attention FP8 ") + label + " placement must match q.");
+            }
+            if (tensor->getDataType() != TensorDescriptor::DataType::FP32) {
+                throw std::runtime_error(std::string("Attention FP8 ") + label + " dtype must be FP32.");
+            }
+            if (tensor->getDimensions() != std::vector<uint64_t>{1, 1, 1, 1}) {
+                throw std::runtime_error(std::string("Attention FP8 ") + label + " shape must be [1,1,1,1].");
+            }
+        };
+        validate_fp8_scalar(descale_q, "descale_q");
+        validate_fp8_scalar(descale_k, "descale_k");
+        validate_fp8_scalar(descale_v, "descale_v");
+        validate_fp8_scalar(descale_s, "descale_s");
+        validate_fp8_scalar(scale_s, "scale_s");
+        validate_fp8_scalar(scale_o, "scale_o");
+        validate_fp8_scalar(amax_s, "amax_s");
+        validate_fp8_scalar(amax_o, "amax_o");
+    }
 
     // Build and validate the cuDNN descriptor during stamping so shape/layout errors fail before execution.
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, output);
@@ -6116,6 +6159,14 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
                                          page_table_v,
                                          dropout_seed,
                                          dropout_offset,
+                                         descale_q,
+                                         descale_k,
+                                         descale_v,
+                                         descale_s,
+                                         scale_s,
+                                         scale_o,
+                                         amax_s,
+                                         amax_o,
                                          output,
                                          stream,
                                          std::move(forward_state));
@@ -6282,9 +6333,16 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
 
     (void)compiledStage->descriptorFor(adaptedQ, adaptedK, adaptedV, oScratch);
     if (compiledStage->use_bias && adaptedBias.has_value()) {
-        if (!isAllowedAttentionBiasDims(adaptedBias->getDimensions(), qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length)) {
-            throw std::runtime_error("Attention-backward additive bias must have shape " +
-                                     attentionBiasShapeDescription(qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length) + ".");
+        if (!isAllowedAttentionBiasDims(adaptedBias->getDimensions(),
+                                        qLogical.batch,
+                                        qLogical.heads,
+                                        qLogical.sequence_length,
+                                        kLogical.sequence_length)) {
+            throw std::runtime_error(
+                "Attention-backward additive bias must have shape " +
+                attentionBiasShapeDescription(qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length) +
+                "; sequence-broadcast bias is materialized to dense by production autodiff before cuDNN backward, and dense "
+                "dBias is explicitly reduced afterward.");
         }
         if (adaptedBias->getDataType() != compiledStage->compute_dtype) {
             throw std::runtime_error(
@@ -6998,11 +7056,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 const size_t expected_attention_stage_inputs =
                     3 + (stage.attention->use_bias ? 1 : 0) + (stage.attention->use_padding_mask ? 2 : 0) +
                     (stage.attention->use_ragged_offsets ? 2 : 0) + (stage.attention->use_paged_kv_cache ? 2 : 0) +
-                    (stage.attention->dropout_probability > 0.0f ? 2 : 0);
+                    (stage.attention->dropout_probability > 0.0f ? 2 : 0) + (stage.attention->use_fp8_forward_scaling ? 8 : 0);
                 if (stageInputs.size() != expected_attention_stage_inputs) {
                     throw std::runtime_error(
                         "Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional "
-                        "ragged offsets, optional paged-KV page tables, and optional dropout seed/offset.");
+                        "ragged offsets, optional paged-KV page tables, optional dropout seed/offset, and optional FP8 scale/descale/amax tensors.");
                 }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Attention stage expects exactly one output.");
@@ -7039,6 +7097,24 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     dropoutSeedTensor = runtimeInputTensorScalarView(stageInputs[next_attention_input++], "attention dropout seed");
                     dropoutOffsetTensor = runtimeInputTensorScalarView(stageInputs[next_attention_input++], "attention dropout offset");
                 }
+                std::optional<Tensor> descaleQTensor = std::nullopt;
+                std::optional<Tensor> descaleKTensor = std::nullopt;
+                std::optional<Tensor> descaleVTensor = std::nullopt;
+                std::optional<Tensor> descaleSTensor = std::nullopt;
+                std::optional<Tensor> scaleSTensor = std::nullopt;
+                std::optional<Tensor> scaleOTensor = std::nullopt;
+                std::optional<Tensor> amaxSTensor = std::nullopt;
+                std::optional<Tensor> amaxOTensor = std::nullopt;
+                if (stage.attention->use_fp8_forward_scaling) {
+                    descaleQTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    descaleKTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    descaleVTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    descaleSTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    scaleSTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    scaleOTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    amaxSTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                    amaxOTensor = runtimeInputTensor(stageInputs[next_attention_input++]);
+                }
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
                 auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
@@ -7060,6 +7136,14 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                                                     pageTableVTensor,
                                                                                     dropoutSeedTensor,
                                                                                     dropoutOffsetTensor,
+                                                                                    descaleQTensor,
+                                                                                    descaleKTensor,
+                                                                                    descaleVTensor,
+                                                                                    descaleSTensor,
+                                                                                    scaleSTensor,
+                                                                                    scaleOTensor,
+                                                                                    amaxSTensor,
+                                                                                    amaxOTensor,
                                                                                     preallocated,
                                                                                     stream,
                                                                                     forwardState);
