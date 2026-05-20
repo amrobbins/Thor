@@ -1,8 +1,10 @@
 #include "Utilities/Expression/AutoDiff.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -10,6 +12,12 @@
 
 namespace ThorImplementation {
 namespace {
+
+bool experimentalCudnnRaggedBiasBackwardProbeEnabled() {
+    const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD");
+    return value != nullptr && std::string_view(value) == "1";
+}
+
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims);
 
 uint32_t cloneForwardSubtree(const PhysicalExpression& src,
@@ -1073,10 +1081,12 @@ class BackwardGraphBuilder {
         if (!isAttentionBackwardOp(op)) {
             throw std::runtime_error("attentionBackward builder called with non-attention-backward op.");
         }
-        if (forward_attention.attention_use_ragged_offsets && forward_attention.attention_use_bias) {
+        if (forward_attention.attention_use_ragged_offsets && forward_attention.attention_use_bias &&
+            !experimentalCudnnRaggedBiasBackwardProbeEnabled()) {
             throw std::runtime_error(
                 "cuDNN primary SDPA backward does not support ragged offsets with additive bias; ragged additive bias is forward-only "
-                "until a supported dBias/backward path is implemented.");
+                "until a supported dBias/backward path is implemented. Set THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD=1 "
+                "to bypass this guard for cuDNN support-surface probing only.");
         }
 
         ExprNode node{};

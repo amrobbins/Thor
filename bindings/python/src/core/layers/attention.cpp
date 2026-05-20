@@ -99,7 +99,7 @@ bool attentionUsesPackedQkvProjection(const Attention& self) {
     if constexpr (!Attention::USE_PACKED_QKV_PROJECTION) {
         return false;
     } else {
-        return !self.getUseRope();
+        return !self.getUseRope() && !self.getUseCrossAttention();
     }
 }
 
@@ -151,7 +151,12 @@ void bind_attention(nb::module_& layers) {
            int64_t dropout_seed,
            int64_t dropout_offset,
            std::optional<Tensor> sequence_lengths,
-           std::optional<Tensor> ragged_offsets) {
+           std::optional<Tensor> query_sequence_lengths,
+           std::optional<Tensor> key_value_sequence_lengths,
+           std::optional<Tensor> ragged_offsets,
+           std::optional<Tensor> query_ragged_offsets,
+           std::optional<Tensor> key_value_ragged_offsets,
+           std::optional<Tensor> context_input) {
             if (num_heads == 0) {
                 throw nb::value_error("Attention instance: num_heads must be > 0.");
             }
@@ -170,6 +175,22 @@ void bind_attention(nb::module_& layers) {
             if (!std::isfinite(dropout_probability) || dropout_probability < 0.0f || dropout_probability >= 1.0f) {
                 throw nb::value_error("Attention instance: dropout_probability must be finite and in [0, 1).");
             }
+            if (sequence_lengths.has_value() && (query_sequence_lengths.has_value() || key_value_sequence_lengths.has_value())) {
+                throw nb::value_error(
+                    "Attention instance: use either sequence_lengths or query_sequence_lengths/key_value_sequence_lengths, not both.");
+            }
+            if (query_sequence_lengths.has_value() != key_value_sequence_lengths.has_value()) {
+                throw nb::value_error(
+                    "Attention instance: query_sequence_lengths and key_value_sequence_lengths must be provided together.");
+            }
+            if (ragged_offsets.has_value() && (query_ragged_offsets.has_value() || key_value_ragged_offsets.has_value())) {
+                throw nb::value_error(
+                    "Attention instance: use either ragged_offsets or query_ragged_offsets/key_value_ragged_offsets, not both.");
+            }
+            if (query_ragged_offsets.has_value() != key_value_ragged_offsets.has_value()) {
+                throw nb::value_error(
+                    "Attention instance: query_ragged_offsets and key_value_ragged_offsets must be provided together.");
+            }
 
             Attention::Builder builder;
             builder.network(network)
@@ -178,11 +199,23 @@ void bind_attention(nb::module_& layers) {
                 .hasBias(has_bias)
                 .maskKind(parseAttentionMaskKind(mask_kind));
 
+            if (context_input.has_value()) {
+                builder.contextInput(context_input.value());
+            }
+
             if (sequence_lengths.has_value()) {
                 builder.sequenceLengthsInput(sequence_lengths.value());
             }
+            if (query_sequence_lengths.has_value()) {
+                builder.querySequenceLengthsInput(query_sequence_lengths.value());
+                builder.keyValueSequenceLengthsInput(key_value_sequence_lengths.value());
+            }
             if (ragged_offsets.has_value()) {
                 builder.raggedOffsetsInput(ragged_offsets.value());
+            }
+            if (query_ragged_offsets.has_value()) {
+                builder.queryRaggedOffsetsInput(query_ragged_offsets.value());
+                builder.keyValueRaggedOffsetsInput(key_value_ragged_offsets.value());
             }
 
             if (num_key_value_heads.has_value()) {
@@ -291,7 +324,12 @@ void bind_attention(nb::module_& layers) {
         "dropout_seed"_a = int64_t{0},
         "dropout_offset"_a = int64_t{0},
         "sequence_lengths"_a.none() = nb::none(),
+        "query_sequence_lengths"_a.none() = nb::none(),
+        "key_value_sequence_lengths"_a.none() = nb::none(),
         "ragged_offsets"_a.none() = nb::none(),
+        "query_ragged_offsets"_a.none() = nb::none(),
+        "key_value_ragged_offsets"_a.none() = nb::none(),
+        "context_input"_a.none() = nb::none(),
         R"nbdoc(
 Public transformer attention layer.
 
@@ -320,10 +358,16 @@ hot path consumes ``[batch, sequence, input_features]``.
     attention.def("get_dropout_probability", &Attention::getDropoutProbability);
     attention.def("get_dropout_seed", &Attention::getDropoutSeed);
     attention.def("get_dropout_offset", &Attention::getDropoutOffset);
+    attention.def("get_use_cross_attention", &Attention::getUseCrossAttention);
+    attention.def("get_context_input", [](Attention& self) { return self.getContextInput(); });
     attention.def("get_use_sequence_lengths", &Attention::getUseSequenceLengths);
     attention.def("get_use_ragged_offsets", &Attention::getUseRaggedOffsets);
     attention.def("get_sequence_lengths_input", [](Attention& self) { return self.getSequenceLengthsInput(); });
+    attention.def("get_query_sequence_lengths_input", [](Attention& self) { return self.getQuerySequenceLengthsInput(); });
+    attention.def("get_key_value_sequence_lengths_input", [](Attention& self) { return self.getKeyValueSequenceLengthsInput(); });
     attention.def("get_ragged_offsets_input", [](Attention& self) { return self.getRaggedOffsetsInput(); });
+    attention.def("get_query_ragged_offsets_input", [](Attention& self) { return self.getQueryRaggedOffsetsInput(); });
+    attention.def("get_key_value_ragged_offsets_input", [](Attention& self) { return self.getKeyValueRaggedOffsetsInput(); });
     attention.def("get_weights_data_type", &Attention::getWeightsDataType);
     attention.def("get_compute_data_type", &Attention::getComputeDataType);
     attention.def("get_output_data_type", &Attention::getOutputDataType);

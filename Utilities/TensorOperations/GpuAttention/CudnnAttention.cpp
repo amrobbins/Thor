@@ -4,6 +4,7 @@
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstddef>
 #include <limits>
 #include <mutex>
@@ -68,6 +69,11 @@ constexpr int64_t UID_AMAX_DV = 64;
 constexpr int64_t UID_AMAX_DP = 65;
 
 void throwInvalidAttention(const string& message) { throw invalid_argument("Invalid cuDNN attention descriptor: " + message); }
+
+bool experimentalCudnnRaggedBiasBackwardProbeEnabled() {
+    const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD");
+    return value != nullptr && std::string_view(value) == "1";
+}
 
 vector<int64_t> asInt64(const vector<uint64_t>& values) {
     vector<int64_t> converted;
@@ -994,10 +1000,11 @@ void CudnnAttentionDescriptor::validateBackward() const {
     if (usePagedKvCache)
         throwInvalidAttention("paged KV attention backward is not enabled; the paged KV path is inference-only until training semantics are defined");
     const bool anyRagged = q.ragged || k.ragged || v.ragged || o.ragged;
-    if (anyRagged && useBias)
+    if (anyRagged && useBias && !experimentalCudnnRaggedBiasBackwardProbeEnabled())
         throwInvalidAttention(
             "cuDNN primary SDPA backward does not support ragged offsets with additive bias; ragged additive bias is forward-only "
-            "until a supported dBias/backward path is implemented");
+            "until a supported dBias/backward path is implemented. Set THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD=1 "
+            "to bypass this guard for cuDNN support-surface probing only.");
     if (useBias) {
         AttentionTensorSpec fallback;
         const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, computeDataType, fallback);

@@ -1221,6 +1221,71 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveVariableLengthInputs) {
     EXPECT_EQ(restored->getInputNames(), (std::vector<std::string>{"feature_input", "sequence_lengths", "ragged_offsets"}));
 }
 
+TEST(AttentionApi, BuildsCrossAttentionWithSeparateRaggedMetadata) {
+    Api::Network network("attention_api_builds_cross_attention_with_separate_ragged_metadata");
+    Api::NetworkInput decoder =
+        Api::NetworkInput::Builder().network(network).name("decoder_tokens").dimensions({5, 32}).dataType(DataType::FP16).build();
+    Api::NetworkInput encoder =
+        Api::NetworkInput::Builder().network(network).name("encoder_tokens").dimensions({7, 48}).dataType(DataType::FP16).build();
+    Api::NetworkInput querySequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("query_sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput keyValueSequenceLengths = Api::NetworkInput::Builder()
+                                                    .network(network)
+                                                    .name("key_value_sequence_lengths")
+                                                    .dimensions({1})
+                                                    .dataType(DataType::INT32)
+                                                    .build();
+    Api::NetworkInput queryRaggedOffsets =
+        Api::NetworkInput::Builder().network(network).name("query_ragged_offsets").dimensions({2}).dataType(DataType::INT32).build();
+    Api::NetworkInput keyValueRaggedOffsets = Api::NetworkInput::Builder()
+                                                 .network(network)
+                                                 .name("key_value_ragged_offsets")
+                                                 .dimensions({2})
+                                                 .dataType(DataType::INT32)
+                                                 .build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(decoder.getFeatureOutput().value())
+                                   .contextInput(encoder.getFeatureOutput().value())
+                                   .querySequenceLengthsInput(querySequenceLengths.getFeatureOutput().value())
+                                   .keyValueSequenceLengthsInput(keyValueSequenceLengths.getFeatureOutput().value())
+                                   .queryRaggedOffsetsInput(queryRaggedOffsets.getFeatureOutput().value())
+                                   .keyValueRaggedOffsetsInput(keyValueRaggedOffsets.getFeatureOutput().value())
+                                   .numHeads(4)
+                                   .numKeyValueHeads(2)
+                                   .headDim(8)
+                                   .valueDim(8)
+                                   .outputFeatures(40)
+                                   .dropout(0.125f, 17, 23)
+                                   .build();
+
+    EXPECT_TRUE(attention.getUseCrossAttention());
+    EXPECT_TRUE(attention.getUseSequenceLengths());
+    EXPECT_TRUE(attention.getUseRaggedOffsets());
+    EXPECT_FALSE(attention.getRaggedOffsetsInput().has_value());
+    ASSERT_TRUE(attention.getQueryRaggedOffsetsInput().has_value());
+    ASSERT_TRUE(attention.getKeyValueRaggedOffsetsInput().has_value());
+    EXPECT_EQ(attention.getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{5, 40}));
+    EXPECT_EQ(attention.getInputNames(),
+              (std::vector<std::string>{"feature_input",
+                                        "context_input",
+                                        "query_sequence_lengths",
+                                        "key_value_sequence_lengths",
+                                        "query_ragged_offsets",
+                                        "key_value_ragged_offsets"}));
+
+    const nlohmann::json arch = attention.architectureJson();
+    EXPECT_TRUE(arch.at("use_cross_attention").get<bool>());
+    EXPECT_TRUE(arch.at("use_sequence_lengths").get<bool>());
+    EXPECT_TRUE(arch.at("use_separate_sequence_lengths").get<bool>());
+    EXPECT_TRUE(arch.at("use_ragged_offsets").get<bool>());
+    EXPECT_TRUE(arch.at("use_separate_ragged_offsets").get<bool>());
+    EXPECT_FALSE(arch.contains("ragged_offsets_input"));
+    ASSERT_TRUE(arch.contains("query_ragged_offsets_input"));
+    ASSERT_TRUE(arch.contains("key_value_ragged_offsets_input"));
+}
+
 TEST(AttentionApi, RejectsInvalidVariableLengthInputs) {
     Api::Network network("attention_api_rejects_invalid_variable_length_inputs");
     Api::NetworkInput input =
