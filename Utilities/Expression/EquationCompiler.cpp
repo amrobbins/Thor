@@ -21,9 +21,14 @@ namespace ThorImplementation {
 
 namespace {
 
+bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
+    const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE");
+    return value != nullptr && std::string_view(value) == "1";
+}
+
 bool experimentalCudnnRaggedBiasBackwardProbeEnabled() {
     const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD");
-    return value != nullptr && std::string_view(value) == "1";
+    return (value != nullptr && std::string_view(value) == "1") || experimentalCudnnAttentionSupportSurfaceProbeEnabled();
 }
 
 }  // namespace
@@ -2011,7 +2016,7 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
             throw std::runtime_error("Attention-backward ragged offset inputs must be INT32 tensors.");
         }
     }
-    if (node.attention_use_paged_kv_cache) {
+    if (node.attention_use_paged_kv_cache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
         throw std::runtime_error(
             "Attention-backward with paged KV cache is not enabled; the paged KV path is inference-only until training semantics are "
             "defined.");
@@ -3279,7 +3284,7 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
             "until a supported dBias/backward path is implemented. Set THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD=1 "
             "to bypass this guard for cuDNN support-surface probing only.");
     }
-    if (node.attention_use_paged_kv_cache) {
+    if (node.attention_use_paged_kv_cache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
         throw std::runtime_error(
             "Attention-backward with paged KV cache is not enabled; the paged KV path is inference-only until training semantics are "
             "defined.");

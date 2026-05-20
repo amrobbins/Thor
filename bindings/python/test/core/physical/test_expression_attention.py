@@ -3001,10 +3001,14 @@ def _attention_backward_reference(
 def _reduce_attention_bias_grad_to_shape(dense_dbias: np.ndarray, bias_shape: tuple[int, int, int, int]) -> np.ndarray:
     if dense_dbias.ndim != 4 or len(bias_shape) != 4:
         raise AssertionError("attention dBias reduction helper expects rank-4 tensors")
-    if dense_dbias.shape[2:] != bias_shape[2:]:
-        raise AssertionError("attention dBias reduction helper requires matching score sequence dimensions")
+    for axis, size in enumerate(bias_shape):
+        if size not in (1, dense_dbias.shape[axis]):
+            raise AssertionError(
+                "attention dBias reduction helper requires each requested bias dimension to either match the dense "
+                f"score dimension or be 1; got dense={dense_dbias.shape}, bias_shape={bias_shape}"
+            )
 
-    axes = [axis for axis in (0, 1) if bias_shape[axis] == 1 and dense_dbias.shape[axis] != 1]
+    axes = [axis for axis in range(4) if bias_shape[axis] == 1 and dense_dbias.shape[axis] != 1]
     reduced = dense_dbias
     if axes:
         reduced = np.sum(reduced, axis=tuple(axes), keepdims=True)
@@ -4814,11 +4818,14 @@ def test_attention_compile_backward_ragged_offsets_with_full_dense_additive_bias
     ],
 )
 def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(monkeypatch, bias_shape, requested_gradients):
-    if os.environ.get("THOR_RUN_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD_SURFACE") != "1":
+    if (os.environ.get("THOR_RUN_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE") != "1" and
+            os.environ.get("THOR_RUN_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD_SURFACE") != "1"):
         pytest.skip(
-            "Set THOR_RUN_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD_SURFACE=1 to probe cuDNN ragged+additive-bias "
-            "backward support. The test sets THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD=1 internally."
+            "Set THOR_RUN_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE=1 to probe all experimental cuDNN attention "
+            "support-surface combinations. The legacy THOR_RUN_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD_SURFACE=1 "
+            "also still runs this specific probe."
         )
+    monkeypatch.setenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE", "1")
     monkeypatch.setenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD", "1")
 
     dtype = thor.DataType.fp16
@@ -4956,6 +4963,802 @@ def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(monk
             _cast_reference_to_storage_dtype(expected_dbias, dtype),
             dtype,
         )
+
+
+def _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch):
+    if os.environ.get("THOR_RUN_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE") != "1":
+        pytest.skip(
+            "Set THOR_RUN_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE=1 to probe currently guarded cuDNN "
+            "attention support-surface combinations. The test sets "
+            "THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE=1 internally."
+        )
+    monkeypatch.setenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE", "1")
+    # Keep the legacy internal escape hatch set too so older ragged+bias guards are covered while callers use one
+    # public run env for the whole support-surface suite.
+    monkeypatch.setenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD", "1")
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "bias_shape",
+    [
+        pytest.param((1, 1, 1, 7), id="bias_1_1_1_skv"),
+        pytest.param((1, 4, 1, 7), id="bias_1_h_1_skv"),
+        pytest.param((2, 1, 1, 7), id="bias_b_1_1_skv"),
+        pytest.param((2, 4, 1, 7), id="bias_b_h_1_skv"),
+        pytest.param((1, 1, 5, 1), id="bias_1_1_sq_1"),
+        pytest.param((1, 4, 5, 1), id="bias_1_h_sq_1"),
+        pytest.param((2, 1, 5, 1), id="bias_b_1_sq_1"),
+        pytest.param((2, 4, 5, 1), id="bias_b_h_sq_1"),
+        pytest.param((1, 1, 1, 1), id="bias_1_1_1_1"),
+        pytest.param((2, 4, 1, 1), id="bias_b_h_1_1"),
+    ],
+)
+def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_forward_surface(monkeypatch, bias_shape):
+    _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch)
+
+    dtype = thor.DataType.fp16
+    batch = 2
+    query_heads = 4
+    kv_heads = 2
+    query_len = 5
+    kv_len = 7
+    qk_dim = 16
+    v_dim = 16
+    scale = 0.67 / math.sqrt(float(qk_dim))
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+
+    try:
+        eq = ex.compile(
+            ex.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                bias=bias,
+                attention_scale=scale,
+                output_dtype=dtype,
+                compute_dtype=thor.DataType.fp32,
+            ),
+            device_num=0,
+        )
+    except RuntimeError as exc:
+        pytest.xfail(f"Thor rejected sequence-broadcast additive-bias forward probe during expression construction: {exc}")
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=query_len,
+        kv_len=kv_len,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    rng = np.random.default_rng(11100 + sum((i + 1) * size for i, size in enumerate(bias_shape)))
+    bias_np = rng.normal(0.0, 0.15, size=bias_shape).astype(np.float32)
+    expected = _attention_reference(q_np, k_np, v_np, scale=scale, bias=bias_np)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+    }
+
+    try:
+        output_shape = eq.output_shape(inputs_gpu)
+        stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+        stamped = eq.stamp(inputs_gpu, stream)
+        stamped.run()
+        got = _copy_to_host(stamped.output(), dtype, stream)
+    except RuntimeError as exc:
+        pytest.xfail(f"cuDNN rejected sequence-broadcast additive-bias forward probe for bias_shape={bias_shape}: {exc}")
+
+    print(
+        "SUPPORTED cuDNN sequence-broadcast additive-bias forward surface: "
+        f"bias_shape={bias_shape}, output_shape={output_shape}, stage_kinds={stage_kinds}"
+    )
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "requested_gradients",
+    [
+        pytest.param(("bias",), id="dbias_only"),
+        pytest.param(("q", "k", "v"), id="qkv_only_with_forward_bias"),
+        pytest.param(("q", "k", "v", "bias"), id="qkv_and_dbias"),
+    ],
+)
+@pytest.mark.parametrize(
+    "bias_shape",
+    [
+        pytest.param((1, 1, 1, 7), id="bias_1_1_1_skv"),
+        pytest.param((1, 4, 1, 7), id="bias_1_h_1_skv"),
+        pytest.param((2, 1, 1, 7), id="bias_b_1_1_skv"),
+        pytest.param((2, 4, 1, 7), id="bias_b_h_1_skv"),
+        pytest.param((1, 1, 5, 1), id="bias_1_1_sq_1"),
+        pytest.param((1, 4, 5, 1), id="bias_1_h_sq_1"),
+        pytest.param((2, 1, 5, 1), id="bias_b_1_sq_1"),
+        pytest.param((2, 4, 5, 1), id="bias_b_h_sq_1"),
+        pytest.param((1, 1, 1, 1), id="bias_1_1_1_1"),
+        pytest.param((2, 4, 1, 1), id="bias_b_h_1_1"),
+    ],
+)
+def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_backward_surface(
+    monkeypatch, bias_shape, requested_gradients
+):
+    _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch)
+
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    batch = 2
+    query_heads = 4
+    kv_heads = 2
+    query_len = 5
+    kv_len = 7
+    qk_dim = 16
+    v_dim = 16
+    scale = 0.71 / math.sqrt(float(qk_dim))
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    try:
+        fwd_eq = ex.compile(
+            ex.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                bias=bias,
+                attention_scale=scale,
+                output_dtype=dtype,
+                compute_dtype=thor.DataType.fp32,
+            ),
+            device_num=0,
+        )
+    except RuntimeError as exc:
+        pytest.xfail(f"Thor rejected sequence-broadcast additive-bias backward probe during expression construction: {exc}")
+
+    try:
+        bwd_eq = fwd_eq.compile_backward(list(requested_gradients), error_input_name=upstream_name)
+    except RuntimeError as exc:
+        pytest.xfail(f"Thor compile_backward rejected sequence-broadcast additive-bias probe: {exc}")
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=query_len,
+        kv_len=kv_len,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    rng = np.random.default_rng(11300 + sum((i + 1) * size for i, size in enumerate(bias_shape)) + len(requested_gradients))
+    bias_np = rng.normal(0.0, 0.13, size=bias_shape).astype(np.float32)
+    dO_np = rng.normal(0.0, 0.24, size=(batch, query_heads, query_len, v_dim)).astype(_numpy_storage_dtype(dtype))
+
+    expected_dq, expected_dk, expected_dv, dense_expected_dbias = _attention_backward_reference(
+        q_np,
+        k_np,
+        v_np,
+        dO_np,
+        scale=scale,
+        bias=bias_np,
+        return_bias_grad=True,
+    )
+    expected_dbias = _reduce_attention_bias_grad_to_shape(dense_expected_dbias, bias_shape)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        upstream_name: _host_to_gpu(dO_np, dtype, stream),
+    }
+
+    try:
+        output_shapes = bwd_eq.output_shapes(inputs_gpu)
+        stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+        stamped = bwd_eq.stamp(inputs_gpu, stream)
+        stamped.run()
+    except RuntimeError as exc:
+        pytest.xfail(
+            "cuDNN rejected sequence-broadcast additive-bias backward probe: "
+            f"bias_shape={bias_shape}, requested_gradients={requested_gradients}: {exc}"
+        )
+
+    print(
+        "SUPPORTED cuDNN sequence-broadcast additive-bias backward surface: "
+        f"bias_shape={bias_shape}, requested_gradients={requested_gradients}, "
+        f"output_shapes={output_shapes}, stage_kinds={stage_kinds}"
+    )
+
+    got = stamped.outputs()
+    if "q" in requested_gradients:
+        _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    if "k" in requested_gradients:
+        _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    if "v" in requested_gradients:
+        _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    if "bias" in requested_gradients:
+        assert list(got["bias_grad"].dimensions) == list(bias_shape)
+        _assert_close(_copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "case_name,mask_kind,diagonal_left_bound,diagonal_right_bound,use_padding_mask",
+    [
+        pytest.param("no_mask", AttentionMaskKind.none, 0, 0, False, id="no_mask"),
+        pytest.param("padding_only", AttentionMaskKind.none, 0, 0, True, id="padding_only"),
+        pytest.param("causal_top_left_right_bound", AttentionMaskKind.causal_top_left, 0, 1, False, id="causal_top_left_right_bound"),
+        pytest.param(
+            "sliding_top_left_right_bound",
+            AttentionMaskKind.sliding_window_top_left,
+            3,
+            1,
+            False,
+            id="sliding_top_left_right_bound",
+        ),
+    ],
+)
+def test_attention_experimental_cudnn_alibi_nonstandard_mask_support_surface(
+    monkeypatch, case_name, mask_kind, diagonal_left_bound, diagonal_right_bound, use_padding_mask
+):
+    _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch)
+
+    dtype = thor.DataType.fp16
+    batch = 2
+    query_heads = 4
+    kv_heads = 2
+    query_len = 5
+    kv_len = 7
+    qk_dim = 16
+    v_dim = 16
+    scale = 0.63 / math.sqrt(float(qk_dim))
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    kwargs = {
+        "mask_kind": mask_kind,
+        "diagonal_left_bound": diagonal_left_bound,
+        "diagonal_right_bound": diagonal_right_bound,
+        "use_alibi_mask": True,
+        "attention_scale": scale,
+        "output_dtype": dtype,
+        "compute_dtype": thor.DataType.fp32,
+    }
+    if use_padding_mask:
+        kwargs["q_seq_len"] = q_seq_len
+        kwargs["kv_seq_len"] = kv_seq_len
+
+    try:
+        eq = ex.compile(ex.scaled_dot_product_attention(q, k, v, **kwargs), device_num=0)
+    except RuntimeError as exc:
+        pytest.xfail(f"Thor rejected nonstandard ALiBi probe during expression construction: case={case_name}: {exc}")
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=query_len,
+        kv_len=kv_len,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    q_lengths = np.asarray([5, 3], dtype=np.int32) if use_padding_mask else None
+    kv_lengths = np.asarray([7, 4], dtype=np.int32) if use_padding_mask else None
+    expected = _attention_reference(
+        q_np,
+        k_np,
+        v_np,
+        scale=scale,
+        mask_kind=mask_kind,
+        diagonal_left_bound=diagonal_left_bound,
+        diagonal_right_bound=diagonal_right_bound,
+        use_alibi_mask=True,
+        q_seq_len=q_lengths,
+        kv_seq_len=kv_lengths,
+    )
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+    }
+    if use_padding_mask:
+        inputs_gpu["q_seq_len"] = _host_to_gpu(q_lengths, thor.DataType.int32, stream)
+        inputs_gpu["kv_seq_len"] = _host_to_gpu(kv_lengths, thor.DataType.int32, stream)
+
+    try:
+        output_shape = eq.output_shape(inputs_gpu)
+        stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+        stamped = eq.stamp(inputs_gpu, stream)
+        stamped.run()
+        got = _copy_to_host(stamped.output(), dtype, stream)
+    except RuntimeError as exc:
+        pytest.xfail(f"cuDNN rejected nonstandard ALiBi support-surface probe: case={case_name}: {exc}")
+
+    print(
+        "SUPPORTED cuDNN nonstandard ALiBi attention surface: "
+        f"case={case_name}, output_shape={output_shape}, stage_kinds={stage_kinds}"
+    )
+    _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_attention_experimental_cudnn_ragged_paged_kv_forward_support_surface(monkeypatch):
+    _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch)
+
+    dtype = thor.DataType.fp16
+    batch = 2
+    query_heads = 2
+    kv_heads = 2
+    query_len = 1
+    kv_len = 8
+    block_size = 4
+    qk_dim = 16
+    v_dim = 16
+    scale = 0.57 / math.sqrt(float(qk_dim))
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    q_offsets = ex.input("q_offsets")
+    kv_offsets = ex.input("kv_offsets")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+
+    try:
+        eq = ex.compile(
+            ex.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                q_seq_len=q_seq_len,
+                kv_seq_len=kv_seq_len,
+                q_ragged_offsets=q_offsets,
+                kv_ragged_offsets=kv_offsets,
+                page_table_k=page_table_k,
+                page_table_v=page_table_v,
+                paged_kv_max_sequence_length=kv_len,
+                q_layout=AttentionTensorLayout.bshd,
+                k_layout=AttentionTensorLayout.bshd,
+                v_layout=AttentionTensorLayout.bshd,
+                o_layout=AttentionTensorLayout.bshd,
+                attention_scale=scale,
+                output_dtype=dtype,
+                compute_dtype=thor.DataType.fp32,
+            ),
+            device_num=0,
+        )
+    except RuntimeError as exc:
+        pytest.xfail(f"Thor rejected ragged+paged-KV forward probe during expression construction: {exc}")
+
+    q_np, k_ref, v_ref = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=query_len,
+        kv_len=kv_len,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    q_lengths = np.asarray([1, 1], dtype=np.int32)
+    kv_lengths = np.asarray([8, 5], dtype=np.int32)
+    page_table = _page_table(batch, kv_len, block_size)
+    # The existing paged-KV helpers return semantic BHSD storage [pages,H,block,D].  The ragged path requires BSHD
+    # physical layouts, so transpose the page containers into Thor-side [pages,block,H,D] storage for this probe.
+    k_container_bshd = np.ascontiguousarray(_paged_kv_container_from_page_table(k_ref, block_size, page_table).transpose(0, 2, 1, 3))
+    v_container_bshd = np.ascontiguousarray(_paged_kv_container_from_page_table(v_ref, block_size, page_table).transpose(0, 2, 1, 3))
+    q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
+    expected = _attention_reference(q_np, k_ref, v_ref, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_container_bshd, dtype, stream),
+        "v": _host_to_gpu(v_container_bshd, dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=query_heads, dim=qk_dim), thor.DataType.int32, stream),
+        # cuDNN may ultimately reject this combination, but if it grows support this keeps the K/V offset tensor in the
+        # same batch-indexed form as the existing ragged attention API while page tables identify the physical pages.
+        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=kv_heads, dim=qk_dim), thor.DataType.int32, stream),
+        "page_table_k": _host_to_gpu(page_table, thor.DataType.int32, stream),
+        "page_table_v": _host_to_gpu(page_table, thor.DataType.int32, stream),
+    }
+
+    try:
+        output_shape = eq.output_shape(inputs_gpu)
+        stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+        stamped = eq.stamp(inputs_gpu, stream)
+        stamped.run()
+        got_storage = _copy_to_host(stamped.output(), dtype, stream)
+    except RuntimeError as exc:
+        pytest.xfail(f"cuDNN rejected ragged+paged-KV forward support-surface probe: {exc}")
+
+    print(
+        "SUPPORTED cuDNN ragged+paged-KV forward attention surface: "
+        f"output_shape={output_shape}, stage_kinds={stage_kinds}"
+    )
+    got_valid = _packed_bshd_ragged_valid_values(got_storage, q_lengths).astype(np.float32)
+    expected_valid = _packed_bshd_ragged_valid_values(
+        _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected, dtype), q_lengths), q_lengths
+    ).astype(np.float32)
+    np.testing.assert_allclose(got_valid, expected_valid, rtol=8e-2, atol=8e-2)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "mask_kind,diagonal_left_bound,diagonal_right_bound",
+    [
+        pytest.param(AttentionMaskKind.causal_bottom_right, 0, 0, id="causal_bottom_right"),
+        pytest.param(AttentionMaskKind.sliding_window_bottom_right, 8, 0, id="sliding_window_bottom_right"),
+    ],
+)
+@pytest.mark.parametrize(
+    "guarded_feature",
+    [
+        pytest.param("additive_bias", id="additive_bias"),
+        pytest.param("alibi", id="alibi"),
+        pytest.param("dropout", id="dropout"),
+    ],
+)
+def test_attention_experimental_cudnn_bottom_right_decode_support_surface(
+    monkeypatch, mask_kind, diagonal_left_bound, diagonal_right_bound, guarded_feature
+):
+    _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch)
+
+    dtype = thor.DataType.fp16
+    batch = 1
+    query_heads = 4
+    kv_heads = 4
+    query_len = 32
+    kv_len = 64
+    qk_dim = 64
+    v_dim = 64
+    scale = 0.47 / math.sqrt(float(qk_dim))
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    dropout_seed = ex.input("dropout_seed")
+    dropout_offset = ex.input("dropout_offset")
+
+    kwargs = {
+        "mask_kind": mask_kind,
+        "diagonal_left_bound": diagonal_left_bound,
+        "diagonal_right_bound": diagonal_right_bound,
+        "attention_scale": scale,
+        "output_dtype": dtype,
+        "compute_dtype": thor.DataType.fp32,
+    }
+    if guarded_feature == "additive_bias":
+        kwargs["bias"] = bias
+    elif guarded_feature == "alibi":
+        kwargs["use_alibi_mask"] = True
+    elif guarded_feature == "dropout":
+        kwargs["dropout_probability"] = 0.25
+        kwargs["dropout_seed"] = dropout_seed
+        kwargs["dropout_offset"] = dropout_offset
+    else:
+        raise AssertionError(f"Unhandled guarded feature: {guarded_feature}")
+
+    try:
+        eq = ex.compile(ex.scaled_dot_product_attention(q, k, v, **kwargs), device_num=0)
+    except RuntimeError as exc:
+        pytest.xfail(
+            "Thor rejected bottom-right/decode cuDNN support-surface probe during expression construction: "
+            f"mask_kind={mask_kind}, guarded_feature={guarded_feature}: {exc}"
+        )
+
+    q_np, k_np, v_np = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=query_len,
+        kv_len=kv_len,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    rng = np.random.default_rng(10400 + sum(ord(ch) for ch in str(mask_kind)) * 17 + len(guarded_feature))
+    bias_np = rng.normal(0.0, 0.16, size=(batch, query_heads, query_len, kv_len)).astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(k_np, dtype, stream),
+        "v": _host_to_gpu(v_np, dtype, stream),
+    }
+    if guarded_feature == "additive_bias":
+        inputs_gpu["bias"] = _host_to_gpu(bias_np, thor.DataType.fp32, stream)
+    if guarded_feature == "dropout":
+        inputs_gpu["dropout_seed"] = _dropout_scalar_gpu(2222, stream)
+        inputs_gpu["dropout_offset"] = _dropout_scalar_gpu(3333, stream)
+
+    try:
+        output_shape = eq.output_shape(inputs_gpu)
+        stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+        stamped = eq.stamp(inputs_gpu, stream)
+        stamped.run()
+        got = _copy_to_host(stamped.output(), dtype, stream)
+    except RuntimeError as exc:
+        pytest.xfail(
+            "cuDNN rejected bottom-right/decode support-surface probe: "
+            f"mask_kind={mask_kind}, guarded_feature={guarded_feature}: {exc}"
+        )
+
+    print(
+        "SUPPORTED cuDNN bottom-right/decode attention surface: "
+        f"mask_kind={mask_kind}, guarded_feature={guarded_feature}, "
+        f"output_shape={output_shape}, stage_kinds={stage_kinds}"
+    )
+
+    if guarded_feature == "dropout":
+        assert np.all(np.isfinite(got.astype(np.float32)))
+        stamped2 = eq.stamp(inputs_gpu, stream)
+        stamped2.run()
+        got2 = _copy_to_host(stamped2.output(), dtype, stream)
+        np.testing.assert_array_equal(got, got2)
+    else:
+        expected = _attention_reference(
+            q_np,
+            k_np,
+            v_np,
+            scale=scale,
+            mask_kind=mask_kind,
+            diagonal_left_bound=diagonal_left_bound,
+            diagonal_right_bound=diagonal_right_bound,
+            bias=bias_np if guarded_feature == "additive_bias" else None,
+            use_alibi_mask=guarded_feature == "alibi",
+        )
+        _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "guarded_feature",
+    [
+        pytest.param("additive_bias", id="additive_bias"),
+        pytest.param("dropout", id="dropout"),
+    ],
+)
+def test_attention_experimental_cudnn_paged_kv_forward_support_surface(monkeypatch, guarded_feature):
+    _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch)
+
+    dtype = thor.DataType.fp16
+    batch = 2
+    query_heads = 2
+    kv_heads = 2
+    query_len = 1
+    kv_len = 8
+    block_size = 4
+    qk_dim = 16
+    v_dim = 16
+    scale = 0.59 / math.sqrt(float(qk_dim))
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    bias = ex.input("bias")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+    dropout_seed = ex.input("dropout_seed")
+    dropout_offset = ex.input("dropout_offset")
+
+    kwargs = {
+        "q_seq_len": q_seq_len,
+        "kv_seq_len": kv_seq_len,
+        "page_table_k": page_table_k,
+        "page_table_v": page_table_v,
+        "paged_kv_max_sequence_length": kv_len,
+        "attention_scale": scale,
+        "output_dtype": dtype,
+        "compute_dtype": thor.DataType.fp32,
+    }
+    if guarded_feature == "additive_bias":
+        kwargs["bias"] = bias
+    elif guarded_feature == "dropout":
+        kwargs["dropout_probability"] = 0.25
+        kwargs["dropout_seed"] = dropout_seed
+        kwargs["dropout_offset"] = dropout_offset
+    else:
+        raise AssertionError(f"Unhandled guarded feature: {guarded_feature}")
+
+    try:
+        eq = ex.compile(ex.scaled_dot_product_attention(q, k, v, **kwargs), device_num=0)
+    except RuntimeError as exc:
+        pytest.xfail(
+            "Thor rejected paged-KV cuDNN support-surface probe during expression construction: "
+            f"guarded_feature={guarded_feature}: {exc}"
+        )
+
+    q_np, k_ref, v_ref = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=query_len,
+        kv_len=kv_len,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    q_lengths = np.ones((batch,), dtype=np.int32)
+    kv_lengths = np.asarray([8, 5], dtype=np.int32)
+    rng = np.random.default_rng(10700 + len(guarded_feature))
+    bias_np = rng.normal(0.0, 0.17, size=(batch, query_heads, query_len, kv_len)).astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(_paged_kv_container(k_ref, block_size), dtype, stream),
+        "v": _host_to_gpu(_paged_kv_container(v_ref, block_size), dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "page_table_k": _host_to_gpu(_page_table(batch, kv_len, block_size), thor.DataType.int32, stream),
+        "page_table_v": _host_to_gpu(_page_table(batch, kv_len, block_size), thor.DataType.int32, stream),
+    }
+    if guarded_feature == "additive_bias":
+        inputs_gpu["bias"] = _host_to_gpu(bias_np, thor.DataType.fp32, stream)
+    if guarded_feature == "dropout":
+        inputs_gpu["dropout_seed"] = _dropout_scalar_gpu(4444, stream)
+        inputs_gpu["dropout_offset"] = _dropout_scalar_gpu(5555, stream)
+
+    try:
+        output_shape = eq.output_shape(inputs_gpu)
+        stage_kinds = eq._debug_stage_kinds(inputs_gpu)
+        stamped = eq.stamp(inputs_gpu, stream)
+        stamped.run()
+        got = _copy_to_host(stamped.output(), dtype, stream)
+    except RuntimeError as exc:
+        pytest.xfail(
+            "cuDNN rejected paged-KV support-surface probe: "
+            f"guarded_feature={guarded_feature}: {exc}"
+        )
+
+    print(
+        "SUPPORTED cuDNN paged-KV attention surface: "
+        f"guarded_feature={guarded_feature}, output_shape={output_shape}, stage_kinds={stage_kinds}"
+    )
+
+    if guarded_feature == "dropout":
+        assert np.all(np.isfinite(got.astype(np.float32)))
+        stamped2 = eq.stamp(inputs_gpu, stream)
+        stamped2.run()
+        got2 = _copy_to_host(stamped2.output(), dtype, stream)
+        np.testing.assert_array_equal(got, got2)
+    else:
+        expected = _attention_reference(
+            q_np,
+            k_ref,
+            v_ref,
+            scale=scale,
+            bias=bias_np,
+            q_seq_len=q_lengths,
+            kv_seq_len=kv_lengths,
+        )
+        _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "requested_gradients",
+    [
+        pytest.param(("q",), id="dq_only"),
+        pytest.param(("k", "v"), id="dk_dv_only"),
+        pytest.param(("q", "k", "v"), id="qkv"),
+    ],
+)
+def test_attention_experimental_cudnn_paged_kv_backward_support_surface(monkeypatch, requested_gradients):
+    _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch)
+
+    dtype = thor.DataType.fp16
+    upstream_name = "__grad_output"
+    batch = 2
+    query_heads = 2
+    kv_heads = 2
+    query_len = 1
+    kv_len = 8
+    block_size = 4
+    qk_dim = 16
+    v_dim = 16
+    scale = 0.41 / math.sqrt(float(qk_dim))
+
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+    q_seq_len = ex.input("q_seq_len")
+    kv_seq_len = ex.input("kv_seq_len")
+    page_table_k = ex.input("page_table_k")
+    page_table_v = ex.input("page_table_v")
+    out = ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+        page_table_k=page_table_k,
+        page_table_v=page_table_v,
+        paged_kv_max_sequence_length=kv_len,
+        attention_scale=scale,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+    fwd_eq = ex.compile(out, device_num=0)
+
+    try:
+        bwd_eq = fwd_eq.compile_backward(list(requested_gradients), error_input_name=upstream_name)
+    except RuntimeError as exc:
+        pytest.xfail(f"Thor compile_backward rejected cuDNN paged-KV backward probe: {exc}")
+
+    q_np, k_ref, v_ref = _attention_inputs(
+        batch=batch,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        query_len=query_len,
+        kv_len=kv_len,
+        qk_dim=qk_dim,
+        v_dim=v_dim,
+        dtype=dtype,
+    )
+    q_lengths = np.ones((batch,), dtype=np.int32)
+    kv_lengths = np.asarray([8, 5], dtype=np.int32)
+    rng = np.random.default_rng(10900 + len(requested_gradients))
+    dO_np = rng.normal(0.0, 0.21, size=(batch, query_heads, query_len, v_dim)).astype(_numpy_storage_dtype(dtype))
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream),
+        "k": _host_to_gpu(_paged_kv_container(k_ref, block_size), dtype, stream),
+        "v": _host_to_gpu(_paged_kv_container(v_ref, block_size), dtype, stream),
+        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "page_table_k": _host_to_gpu(_page_table(batch, kv_len, block_size), thor.DataType.int32, stream),
+        "page_table_v": _host_to_gpu(_page_table(batch, kv_len, block_size), thor.DataType.int32, stream),
+        upstream_name: _host_to_gpu(dO_np, dtype, stream),
+    }
+
+    try:
+        output_shapes = bwd_eq.output_shapes(inputs_gpu)
+        stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+        stamped = bwd_eq.stamp(inputs_gpu, stream)
+        stamped.run()
+    except RuntimeError as exc:
+        pytest.xfail(
+            "cuDNN rejected paged-KV backward support-surface probe: "
+            f"requested_gradients={requested_gradients}: {exc}"
+        )
+
+    print(
+        "SUPPORTED cuDNN paged-KV backward surface: "
+        f"requested_gradients={requested_gradients}, output_shapes={output_shapes}, stage_kinds={stage_kinds}"
+    )
+    got = stamped.outputs()
+    for name in requested_gradients:
+        assert f"{name}_grad" in got
+
 
 @pytest.mark.cuda
 def test_attention_forward_with_additive_bias_matches_reference_and_stays_single_attention_stage():

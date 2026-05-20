@@ -70,9 +70,14 @@ constexpr int64_t UID_AMAX_DP = 65;
 
 void throwInvalidAttention(const string& message) { throw invalid_argument("Invalid cuDNN attention descriptor: " + message); }
 
+bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
+    const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE");
+    return value != nullptr && std::string_view(value) == "1";
+}
+
 bool experimentalCudnnRaggedBiasBackwardProbeEnabled() {
     const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD");
-    return value != nullptr && std::string_view(value) == "1";
+    return (value != nullptr && std::string_view(value) == "1") || experimentalCudnnAttentionSupportSurfaceProbeEnabled();
 }
 
 vector<int64_t> asInt64(const vector<uint64_t>& values) {
@@ -233,10 +238,13 @@ void validateScoreBiasSpec(const AttentionTensorSpec& spec,
     const vector<int64_t> full = denseScoreBiasDimensions(descriptor);
     const bool batchOk = spec.dimensions[0] == full[0] || (allowBroadcast && spec.dimensions[0] == 1);
     const bool headsOk = spec.dimensions[1] == full[1] || (allowBroadcast && spec.dimensions[1] == 1);
-    const bool seqOk = spec.dimensions[2] == full[2] && spec.dimensions[3] == full[3];
-    if (!batchOk || !headsOk || !seqOk) {
+    const bool allowSequenceBroadcast = allowBroadcast && experimentalCudnnAttentionSupportSurfaceProbeEnabled();
+    const bool queryOk = spec.dimensions[2] == full[2] || (allowSequenceBroadcast && spec.dimensions[2] == 1);
+    const bool keyValueOk = spec.dimensions[3] == full[3] || (allowSequenceBroadcast && spec.dimensions[3] == 1);
+    if (!batchOk || !headsOk || !queryOk || !keyValueOk) {
+        const string expected = allowSequenceBroadcast ? "[1|B,1|Hq,1|Sq,1|Skv]" : "[1|B,1|Hq,Sq,Skv]";
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) +
-                               "' dimension mismatch. Expected additive-bias shape [1|B,1|Hq,Sq,Skv] for B/Hq/Sq/Skv " +
+                               "' dimension mismatch. Expected additive-bias shape " + expected + " for B/Hq/Sq/Skv " +
                                joinInts(full) + ", got " + joinInts(spec.dimensions));
     }
 
@@ -930,9 +938,9 @@ void CudnnAttentionDescriptor::validateForward() const {
             throwInvalidAttention("FP8 attention requires q/k/v/o to all be FP8 tensors in this wrapper");
         if (q.dimensions[3] % 16 != 0 || v.dimensions[3] % 16 != 0)
             throwInvalidAttention("FP8 attention head dimensions must be multiples of 16");
-        if (dropout.probability != 0.0f)
+        if (dropout.probability != 0.0f && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
             throwInvalidAttention("FP8 attention dropout is intentionally disabled until validated on target cuDNN/GPU combinations");
-        if (useBias)
+        if (useBias && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
             throwInvalidAttention("FP8 attention additive bias is intentionally disabled until validated on target cuDNN/GPU combinations");
     } else {
         if (!isFp16OrBf16(q.dataType) || q.dataType != k.dataType || q.dataType != v.dataType || q.dataType != o.dataType)
@@ -956,9 +964,9 @@ void CudnnAttentionDescriptor::validateForward() const {
             throwInvalidAttention("ragged attention requires q and o to either both use ragged offsets or both be dense");
         if (k.ragged != v.ragged)
             throwInvalidAttention("ragged attention requires k and v to either both use ragged offsets or both be dense");
-        if (usePagedKvCache)
+        if (usePagedKvCache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
             throwInvalidAttention("ragged attention and paged KV cache are separate variable-length modes and cannot be combined");
-        if (useFp8)
+        if (useFp8 && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
             throwInvalidAttention("ragged FP8 attention is not enabled until FP8 forward is validated for packed variable-length layouts");
     }
     if (useBias) {
@@ -972,11 +980,11 @@ void CudnnAttentionDescriptor::validateForward() const {
                                         maskKind == AttentionMaskKind::CausalBottomRight ||
                                         maskKind == AttentionMaskKind::SlidingWindowTopLeft ||
                                         maskKind == AttentionMaskKind::SlidingWindowBottomRight;
-        if (!usesCausalDiagonal || diagonalRightBound != 0)
+        if ((!usesCausalDiagonal || diagonalRightBound != 0) && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
             throwInvalidAttention("ALiBi requires causal diagonal masking with diagonalRightBound == 0");
     }
     if ((maskKind == AttentionMaskKind::CausalBottomRight || maskKind == AttentionMaskKind::SlidingWindowBottomRight) &&
-        (useBias || useAlibiMask || dropout.probability > 0.0f))
+        (useBias || useAlibiMask || dropout.probability > 0.0f) && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
         throwInvalidAttention(
             "bottom-right/decode attention currently requires additive bias, ALiBi, and dropout to be disabled in the cuDNN primary SDPA path");
     if (usePagedKvCache) {
@@ -984,9 +992,9 @@ void CudnnAttentionDescriptor::validateForward() const {
             throwInvalidAttention("paged KV attention requires pagedKv.maxSequenceLengthKv > 0");
         if (!usePaddingMask)
             throwInvalidAttention("paged KV attention requires usePaddingMask=true with q/kv sequence length tensors");
-        if (useBias)
+        if (useBias && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
             throwInvalidAttention("paged KV attention with additive bias is disabled until the paged-bias layout is defined");
-        if (dropout.probability > 0.0f)
+        if (dropout.probability > 0.0f && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
             throwInvalidAttention("paged KV attention is inference-only and cannot currently be combined with dropout");
         if (k.dimensions[2] <= 0 || v.dimensions[2] <= 0)
             throwInvalidAttention("paged KV K/V container block sizes must be positive");
@@ -997,7 +1005,7 @@ void CudnnAttentionDescriptor::validateForward() const {
 
 void CudnnAttentionDescriptor::validateBackward() const {
     validateForward();
-    if (usePagedKvCache)
+    if (usePagedKvCache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
         throwInvalidAttention("paged KV attention backward is not enabled; the paged KV path is inference-only until training semantics are defined");
     const bool anyRagged = q.ragged || k.ragged || v.ragged || o.ragged;
     if (anyRagged && useBias && !experimentalCudnnRaggedBiasBackwardProbeEnabled())

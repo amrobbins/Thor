@@ -13,9 +13,14 @@
 namespace ThorImplementation {
 namespace {
 
+bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
+    const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE");
+    return value != nullptr && std::string_view(value) == "1";
+}
+
 bool experimentalCudnnRaggedBiasBackwardProbeEnabled() {
     const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD");
-    return value != nullptr && std::string_view(value) == "1";
+    return (value != nullptr && std::string_view(value) == "1") || experimentalCudnnAttentionSupportSurfaceProbeEnabled();
 }
 
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims);
@@ -3189,7 +3194,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
             case ExprOp::ATTENTION: {
                 const uint32_t grad_like_output = shapeAttentionOutputGrad(grad, static_cast<uint32_t>(node_idx), node_dims);
-                if (node.attention_use_paged_kv_cache &&
+                if (node.attention_use_paged_kv_cache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled() &&
                     (node_reaches_requested_inputs.at(node.lhs) || node_reaches_requested_inputs.at(node.rhs) ||
                      node_reaches_requested_inputs.at(node.aux))) {
                     throw std::runtime_error(

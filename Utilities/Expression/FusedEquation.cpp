@@ -1,6 +1,8 @@
 #include "Utilities/Expression/FusedEquation.h"
 #include <optional>
 #include <array>
+#include <cstdlib>
+#include <string_view>
 
 #include "Utilities/Expression/AutoDiff.h"
 #include "Utilities/Expression/CudaSourceEmitter.h"
@@ -20,6 +22,11 @@ using namespace std;
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 namespace ThorImplementation {
+
+static bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
+    const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE");
+    return value != nullptr && std::string_view(value) == "1";
+}
 
 static bool runtimeInputIsTensor(const RuntimeInputValue& value) { return std::holds_alternative<Tensor>(value); }
 static bool runtimeInputIsTensorScalarBinding(const RuntimeInputValue& value) { return std::holds_alternative<TensorScalarBinding>(value); }
@@ -942,12 +949,15 @@ static bool isAllowedAttentionBiasDims(const std::vector<uint64_t>& dims,
                                            uint64_t heads,
                                            uint64_t query_len,
                                            uint64_t kv_len) {
-    return dims.size() == 4 && (dims[0] == 1 || dims[0] == batch) && (dims[1] == 1 || dims[1] == heads) && dims[2] == query_len &&
-           dims[3] == kv_len;
+    const bool allowSequenceBroadcast = experimentalCudnnAttentionSupportSurfaceProbeEnabled();
+    return dims.size() == 4 && (dims[0] == 1 || dims[0] == batch) && (dims[1] == 1 || dims[1] == heads) &&
+           (dims[2] == query_len || (allowSequenceBroadcast && dims[2] == 1)) &&
+           (dims[3] == kv_len || (allowSequenceBroadcast && dims[3] == 1));
 }
 
 static std::string attentionBiasShapeDescription(uint64_t batch, uint64_t heads, uint64_t query_len, uint64_t kv_len) {
-    return "[1|B,1|Hq,Sq,Skv] for B/Hq/Sq/Skv=[" + std::to_string(batch) + "," + std::to_string(heads) + "," +
+    const std::string shape = experimentalCudnnAttentionSupportSurfaceProbeEnabled() ? "[1|B,1|Hq,1|Sq,1|Skv]" : "[1|B,1|Hq,Sq,Skv]";
+    return shape + " for B/Hq/Sq/Skv=[" + std::to_string(batch) + "," + std::to_string(heads) + "," +
            std::to_string(query_len) + "," + std::to_string(kv_len) + "]";
 }
 
