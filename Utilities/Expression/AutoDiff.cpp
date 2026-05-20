@@ -1633,54 +1633,90 @@ std::vector<uint64_t> inferMatmulOutputDims(const ExprNode& node,
     return out_dims;
 }
 
-static std::vector<uint64_t> inferAttentionOutputDims(const std::vector<uint64_t>& q_dims,
-                                                        const std::vector<uint64_t>& k_dims,
-                                                        const std::vector<uint64_t>& v_dims) {
-    if (q_dims.size() != 4 || k_dims.size() != 4 || v_dims.size() != 4) {
-        throw std::runtime_error("Autodiff attention shape inference requires rank-4 q/k/v tensors in logical [B,H,S,D] order.");
+struct AttentionTensorLogicalDims {
+    uint64_t batch;
+    uint64_t heads;
+    uint64_t sequence_length;
+    uint64_t head_dim;
+};
+
+static AttentionTensorLogicalDims logicalAttentionDimsForAutodiff(const std::vector<uint64_t>& dims,
+                                                                    AttentionTensorLayout layout,
+                                                                    const char* name) {
+    if (dims.size() != 4) {
+        throw std::runtime_error(std::string("Autodiff attention shape inference requires rank-4 ") + name + " tensor.");
     }
+    if (layout == AttentionTensorLayout::BHSD) {
+        return {dims.at(0), dims.at(1), dims.at(2), dims.at(3)};
+    }
+    if (layout == AttentionTensorLayout::BSHD) {
+        return {dims.at(0), dims.at(2), dims.at(1), dims.at(3)};
+    }
+    throw std::runtime_error(std::string("Autodiff attention shape inference does not support the configured layout for ") + name + ".");
+}
 
-    const uint64_t batch = q_dims.at(0);
-    const uint64_t query_heads = q_dims.at(1);
-    const uint64_t query_len = q_dims.at(2);
-    const uint64_t qk_dim = q_dims.at(3);
-    const uint64_t kv_batch = k_dims.at(0);
-    const uint64_t kv_heads = k_dims.at(1);
-    const uint64_t kv_len = k_dims.at(2);
-    const uint64_t k_dim = k_dims.at(3);
-    const uint64_t v_batch = v_dims.at(0);
-    const uint64_t v_heads = v_dims.at(1);
-    const uint64_t v_len = v_dims.at(2);
-    const uint64_t v_dim = v_dims.at(3);
+static std::vector<uint64_t> attentionOutputDimsForAutodiff(const ExprNode& node,
+                                                            uint64_t batch,
+                                                            uint64_t query_heads,
+                                                            uint64_t query_len,
+                                                            uint64_t value_dim) {
+    if (node.attention_o_layout == AttentionTensorLayout::BHSD) {
+        return {batch, query_heads, query_len, value_dim};
+    }
+    if (node.attention_o_layout == AttentionTensorLayout::BSHD) {
+        return {batch, query_len, query_heads, value_dim};
+    }
+    throw std::runtime_error("Autodiff attention shape inference does not support the configured output layout.");
+}
 
-    if (batch != kv_batch || batch != v_batch) {
+static std::vector<uint64_t> inferAttentionOutputDims(const ExprNode& node,
+                                                       const std::vector<uint64_t>& q_dims,
+                                                       const std::vector<uint64_t>& k_dims,
+                                                       const std::vector<uint64_t>& v_dims) {
+    const AttentionTensorLogicalDims q = logicalAttentionDimsForAutodiff(q_dims, node.attention_q_layout, "q");
+    const AttentionTensorLogicalDims k = logicalAttentionDimsForAutodiff(k_dims, node.attention_k_layout, "k");
+    const AttentionTensorLogicalDims v = logicalAttentionDimsForAutodiff(v_dims, node.attention_v_layout, "v");
+
+    if (q.batch != k.batch || q.batch != v.batch) {
         throw std::runtime_error("Autodiff attention shape inference found mismatched q/k/v batch dimensions.");
     }
-    if (kv_heads != v_heads) {
+    if (k.heads != v.heads) {
         throw std::runtime_error("Autodiff attention shape inference found mismatched k/v head counts.");
     }
-    if (kv_heads == 0 || query_heads == 0 || query_heads % kv_heads != 0) {
+    if (k.heads == 0 || q.heads == 0 || q.heads % k.heads != 0) {
         throw std::runtime_error("Autodiff attention query heads must be an integer multiple of key/value heads.");
     }
-    if (kv_len != v_len) {
+    if (k.sequence_length != v.sequence_length) {
         throw std::runtime_error("Autodiff attention shape inference found mismatched k/v sequence lengths.");
     }
-    if (qk_dim != k_dim) {
+    if (q.head_dim != k.head_dim) {
         throw std::runtime_error("Autodiff attention q/k head dimensions must match.");
     }
-    if (query_len == 0 || kv_len == 0 || qk_dim == 0 || v_dim == 0) {
+    if (q.sequence_length == 0 || k.sequence_length == 0 || q.head_dim == 0 || v.head_dim == 0) {
         throw std::runtime_error("Autodiff attention q/k/v dimensions must be non-zero.");
     }
 
-    return {batch, query_heads, query_len, v_dim};
+    return attentionOutputDimsForAutodiff(node, q.batch, q.heads, q.sequence_length, v.head_dim);
 }
 
-static std::vector<uint64_t> inferAttentionBackwardOutputDims(ExprOp op,
+static std::vector<uint64_t> inferAttentionDenseBiasDims(const ExprNode& node,
+                                                          const std::vector<uint64_t>& q_dims,
+                                                          const std::vector<uint64_t>& k_dims) {
+    const AttentionTensorLogicalDims q = logicalAttentionDimsForAutodiff(q_dims, node.attention_q_layout, "q");
+    const AttentionTensorLogicalDims k = logicalAttentionDimsForAutodiff(k_dims, node.attention_k_layout, "k");
+    if (q.batch != k.batch) {
+        throw std::runtime_error("Autodiff attention dBias shape inference found mismatched q/k batch dimensions.");
+    }
+    return {q.batch, q.heads, q.sequence_length, k.sequence_length};
+}
+
+static std::vector<uint64_t> inferAttentionBackwardOutputDims(const ExprNode& node,
+                                                              ExprOp op,
                                                               const std::vector<uint64_t>& q_dims,
                                                               const std::vector<uint64_t>& k_dims,
                                                               const std::vector<uint64_t>& v_dims,
                                                               const std::vector<uint64_t>& dO_dims) {
-    const std::vector<uint64_t> forward_dims = inferAttentionOutputDims(q_dims, k_dims, v_dims);
+    const std::vector<uint64_t> forward_dims = inferAttentionOutputDims(node, q_dims, k_dims, v_dims);
     if (dO_dims != forward_dims) {
         throw std::runtime_error("Autodiff attention-backward dO shape must match attention output shape.");
     }
@@ -1693,7 +1729,7 @@ static std::vector<uint64_t> inferAttentionBackwardOutputDims(ExprOp op,
         case ExprOp::ATTENTION_BACKWARD_V:
             return v_dims;
         case ExprOp::ATTENTION_BACKWARD_BIAS:
-            return {q_dims.at(0), q_dims.at(1), q_dims.at(2), k_dims.at(2)};
+            return inferAttentionDenseBiasDims(node, q_dims, k_dims);
         default:
             throw std::runtime_error("Autodiff attention-backward shape inference received a non-attention-backward op.");
     }
@@ -1969,12 +2005,13 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 break;
             }
             case ExprOp::ATTENTION:
-                node_dims[i] = inferAttentionOutputDims(node_dims[node.lhs], node_dims[node.rhs], node_dims[node.aux]);
+                node_dims[i] = inferAttentionOutputDims(node, node_dims[node.lhs], node_dims[node.rhs], node_dims[node.aux]);
                 break;
             case ExprOp::ATTENTION_BACKWARD_Q:
             case ExprOp::ATTENTION_BACKWARD_K:
             case ExprOp::ATTENTION_BACKWARD_V:
-                node_dims[i] = inferAttentionBackwardOutputDims(node.op,
+                node_dims[i] = inferAttentionBackwardOutputDims(node,
+                                                                node.op,
                                                                 node_dims[node.lhs],
                                                                 node_dims[node.rhs],
                                                                 node_dims[node.aux],
@@ -1984,7 +2021,8 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 if (node.beta_node == UINT32_MAX) {
                     throw std::runtime_error("Autodiff attention-backward bias node is missing the forward bias input.");
                 }
-                node_dims[i] = inferAttentionBackwardOutputDims(node.op,
+                node_dims[i] = inferAttentionBackwardOutputDims(node,
+                                                                node.op,
                                                                 node_dims[node.lhs],
                                                                 node_dims[node.rhs],
                                                                 node_dims[node.aux],
@@ -3200,13 +3238,42 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     throw std::runtime_error(
                         "Attention-backward with paged KV cache is not enabled; the paged KV path is inference-only until training semantics are defined.");
                 }
+                if (node.attention_use_fp8_forward_scaling &&
+                    (node_reaches_requested_inputs.at(node.lhs) || node_reaches_requested_inputs.at(node.rhs) ||
+                     node_reaches_requested_inputs.at(node.aux) ||
+                     (node.attention_use_bias && node_reaches_requested_inputs.at(node.alpha_node)))) {
+                    throw std::runtime_error(
+                        "FP8 cuDNN attention is forward-only in Thor; cuDNN FP8 SDPA backward is not supported on the validated support surface.");
+                }
                 const std::vector<uint64_t> q_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : std::vector<uint64_t>{};
                 const std::vector<uint64_t> k_dims = has_forward_dims ? forward_node_dims.at(node.rhs) : std::vector<uint64_t>{};
                 const std::vector<uint64_t> v_dims = has_forward_dims ? forward_node_dims.at(node.aux) : std::vector<uint64_t>{};
+                const std::vector<uint64_t> bias_dims =
+                    (has_forward_dims && node.attention_use_bias && node.alpha_node != UINT32_MAX)
+                        ? forward_node_dims.at(node.alpha_node)
+                        : std::vector<uint64_t>{};
                 const uint32_t q = builder.cloneForward(node.lhs);
                 const uint32_t k = builder.cloneForward(node.rhs);
                 const uint32_t v = builder.cloneForward(node.aux);
-                const uint32_t bias = node.attention_use_bias ? builder.cloneForward(node.alpha_node) : UINT32_MAX;
+                uint32_t bias = node.attention_use_bias ? builder.cloneForward(node.alpha_node) : UINT32_MAX;
+                if (bias != UINT32_MAX && q_dims.size() == 4 && k_dims.size() == 4 && bias_dims.size() == 4) {
+                    const std::vector<uint64_t> dense_score_bias_dims = inferAttentionDenseBiasDims(node, q_dims, k_dims);
+                    const bool broadcasts_query_sequence = bias_dims[2] == 1 && dense_score_bias_dims[2] != 1;
+                    const bool broadcasts_key_sequence = bias_dims[3] == 1 && dense_score_bias_dims[3] != 1;
+                    if ((broadcasts_query_sequence || broadcasts_key_sequence) && bias_dims != dense_score_bias_dims &&
+                        !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
+                        // cuDNN's native backward surface is not reliable for score bias tensors broadcast across
+                        // sequence axes: some shapes are rejected by primary heuristics on SM120 and some accepted
+                        // Skv-vector cases produce incorrect dV/dBias.  Keep the public forward surface broad, but
+                        // lower production backward through an explicit dense score-bias materialization, then let
+                        // the normal broadcast-gradient rule reduce dense dBias back to the original bias shape.
+                        const auto bias_backward_dtype = node.compute_dtype.has_value() ? node.compute_dtype : preferredGradValueDType(node);
+                        bias = builder.addNoFold(builder.fill(0.0, dense_score_bias_dims, bias_backward_dtype),
+                                                 bias,
+                                                 bias_backward_dtype,
+                                                 bias_backward_dtype);
+                    }
+                }
                 ExprNode attention_for_backward = node;
                 if (node.attention_use_padding_mask) {
                     attention_for_backward.attention_seq_len_q_node = builder.cloneForward(node.attention_seq_len_q_node);
@@ -3263,7 +3330,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 }
                 if (node.attention_use_bias && node.alpha_node != UINT32_MAX && node_reaches_requested_inputs.at(node.alpha_node)) {
                     const std::vector<uint64_t> dbias_dense_dims = has_forward_dims
-                        ? inferAttentionBackwardOutputDims(ExprOp::ATTENTION_BACKWARD_BIAS, q_dims, k_dims, v_dims, node_dims)
+                        ? inferAttentionBackwardOutputDims(node, ExprOp::ATTENTION_BACKWARD_BIAS, q_dims, k_dims, v_dims, node_dims)
                         : std::vector<uint64_t>{};
                     const auto dbias_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
                     const uint32_t dBias = builder.attentionBackward(ExprOp::ATTENTION_BACKWARD_BIAS,

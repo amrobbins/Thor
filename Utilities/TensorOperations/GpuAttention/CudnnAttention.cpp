@@ -70,9 +70,15 @@ constexpr int64_t UID_AMAX_DP = 65;
 
 void throwInvalidAttention(const string& message) { throw invalid_argument("Invalid cuDNN attention descriptor: " + message); }
 
-bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
-    const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE");
+bool envFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
     return value != nullptr && std::string_view(value) == "1";
+}
+
+bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
+    return envFlagEnabled("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE") ||
+           envFlagEnabled("THOR_RUN_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE") ||
+           envFlagEnabled("THOR_RUN_EXPERIMENTAL_CUDNN_FP8_ATTENTION_SUPPORT_SURFACE");
 }
 
 bool experimentalCudnnRaggedBiasBackwardProbeEnabled() {
@@ -162,10 +168,26 @@ void requireTensorMatchesSpec(const Tensor& tensor, const AttentionTensorSpec& s
     }
 }
 
+void requireFp8ScaleScalarMatchesDescriptor(const Tensor& scalar, string_view name) {
+    requireInitialized(scalar, name);
+    if (scalar.getDataType() != TensorDescriptor::DataType::FP32) {
+        throw invalid_argument(string("cuDNN FP8 attention scalar '") + string(name) + "' dtype mismatch. Expected FP32, got " +
+                               TensorDescriptor::getElementTypeName(scalar.getDataType()));
+    }
+    const vector<int64_t> expected{1, 1, 1, 1};
+    const vector<int64_t> dims = asInt64(scalar.getDimensions());
+    if (dims != expected) {
+        throw invalid_argument(string("cuDNN FP8 attention scalar '") + string(name) + "' dimension mismatch. Expected " +
+                               joinInts(expected) + ", got " + joinInts(dims));
+    }
+}
+
 // Additive bias is a score-space tensor, not a packed/ragged tensor. Even when Q/K/V/O use ragged THD storage,
 // the bias is indexed by local logical sequence coordinates over the descriptor's max sequence domain.
-// cuDNN's primary SDPA forward path supports broadcasting the leading score dimensions, so Thor accepts:
-//   [1,1,Sq,Skv], [1,Hq,Sq,Skv], [B,1,Sq,Skv], and [B,Hq,Sq,Skv].
+// cuDNN's primary SDPA forward path supports broadcasting each score-bias input dimension independently.
+// For backward, production Thor only sends dense or batch/head-broadcast bias directly to cuDNN. Biases
+// broadcast across Sq and/or Skv are materialized as dense score-space tensors before cuDNN backward, then
+// dense dBias is reduced explicitly back to the original public bias shape.
 vector<int64_t> denseScoreBiasDimensions(const CudnnAttentionDescriptor& descriptor) {
     return {descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), descriptor.keyValueLength()};
 }
@@ -220,6 +242,19 @@ bool isSupportedAttentionDBiasDataType(TensorDescriptor::DataType dtype, const C
     return dtype == descriptor.q.dataType || dtype == descriptor.computeDataType;
 }
 
+TensorDescriptor::DataType attentionForwardBiasDataType(const CudnnAttentionDescriptor& descriptor) {
+    // cuDNN FP16/BF16 SDPA takes additive score bias in the compute dtype, while FP8 SDPA takes
+    // additive score bias in the FP8 IO dtype.  Keeping this as an explicit helper makes the
+    // support-surface probes exercise the same descriptor contract that production code would use.
+    return descriptor.useFp8 ? descriptor.q.dataType : descriptor.computeDataType;
+}
+
+bool scoreBiasUsesSequenceBroadcast(const AttentionTensorSpec& spec, const CudnnAttentionDescriptor& descriptor) {
+    const vector<int64_t> full = denseScoreBiasDimensions(descriptor);
+    return spec.dimensions.size() == 4 &&
+           ((spec.dimensions[2] == 1 && full[2] != 1) || (spec.dimensions[3] == 1 && full[3] != 1));
+}
+
 void validateScoreBiasSpec(const AttentionTensorSpec& spec,
                            const CudnnAttentionDescriptor& descriptor,
                            string_view name,
@@ -238,11 +273,10 @@ void validateScoreBiasSpec(const AttentionTensorSpec& spec,
     const vector<int64_t> full = denseScoreBiasDimensions(descriptor);
     const bool batchOk = spec.dimensions[0] == full[0] || (allowBroadcast && spec.dimensions[0] == 1);
     const bool headsOk = spec.dimensions[1] == full[1] || (allowBroadcast && spec.dimensions[1] == 1);
-    const bool allowSequenceBroadcast = allowBroadcast && experimentalCudnnAttentionSupportSurfaceProbeEnabled();
-    const bool queryOk = spec.dimensions[2] == full[2] || (allowSequenceBroadcast && spec.dimensions[2] == 1);
-    const bool keyValueOk = spec.dimensions[3] == full[3] || (allowSequenceBroadcast && spec.dimensions[3] == 1);
+    const bool queryOk = spec.dimensions[2] == full[2] || (allowBroadcast && spec.dimensions[2] == 1);
+    const bool keyValueOk = spec.dimensions[3] == full[3] || (allowBroadcast && spec.dimensions[3] == 1);
     if (!batchOk || !headsOk || !queryOk || !keyValueOk) {
-        const string expected = allowSequenceBroadcast ? "[1|B,1|Hq,1|Sq,1|Skv]" : "[1|B,1|Hq,Sq,Skv]";
+        const string expected = allowBroadcast ? "[1|B,1|Hq,1|Sq,1|Skv]" : "[B,Hq,Sq,Skv]";
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) +
                                "' dimension mismatch. Expected additive-bias shape " + expected + " for B/Hq/Sq/Skv " +
                                joinInts(full) + ", got " + joinInts(spec.dimensions));
@@ -282,7 +316,7 @@ void requireBiasMatchesDescriptor(const Tensor& bias,
 }
 
 void requireAttentionBiasMatchesDescriptor(const Tensor& bias, const CudnnAttentionDescriptor& descriptor, string_view name) {
-    requireBiasMatchesDescriptor(bias, descriptor, name, descriptor.computeDataType, true);
+    requireBiasMatchesDescriptor(bias, descriptor, name, attentionForwardBiasDataType(descriptor), true);
 }
 
 void requireAttentionDBiasMatchesDescriptor(const Tensor& bias, const CudnnAttentionDescriptor& descriptor, string_view name) {
@@ -711,9 +745,42 @@ class AttentionGraphCache {
             auto attrs = fe::graph::SDPA_fp8_attributes().set_name(descriptor.debugName).set_generate_stats(descriptor.generateStats);
             attrs.set_attn_scale(descriptor.attentionScale.value_or(1.0f / sqrtf(static_cast<float>(descriptor.qkHeadDim()))));
             if (descriptor.maskKind == AttentionMaskKind::CausalTopLeft || descriptor.maskKind == AttentionMaskKind::CausalBottomRight) {
+                // The FP8 frontend API currently exposes only set_causal_mask(bool), with no diagonal-alignment knob.
+                // Keep bottom-right as a probe label only; it verifies that cuDNN still accepts the causal FP8 API for
+                // uneven decode-like shapes, not that a bottom-right diagonal alignment was encoded.
                 attrs.set_causal_mask(true);
             } else if (descriptor.maskKind != AttentionMaskKind::None) {
                 throwInvalidAttention("FP8 cuDNN SDPA currently supports no mask or causal mask in this wrapper");
+            }
+            if (descriptor.usePaddingMask) {
+                attrs.set_padding_mask(true)
+                    .set_seq_len_q(seqLen(built.graph, "seq_len_q", UID_SEQ_Q, descriptor.batchSize()))
+                    .set_seq_len_kv(seqLen(built.graph, "seq_len_kv", UID_SEQ_KV, descriptor.batchSize()));
+            }
+            if (descriptor.useBias) {
+                AttentionTensorSpec fallback;
+                const TensorDescriptor::DataType biasDataType = attentionForwardBiasDataType(descriptor);
+                const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(descriptor, biasDataType, fallback);
+                attrs.set_bias(tensor(built.graph, "bias", UID_BIAS, biasSpec.dimensions, biasSpec.strides, biasDataType));
+            }
+            if (descriptor.dropout.probability > 0.0f) {
+                if (descriptor.dropout.usePhilox) {
+                    attrs.set_dropout(descriptor.dropout.probability,
+                                      scalar(built.graph, "dropout_seed", UID_DROPOUT_SEED, TensorDescriptor::DataType::INT64),
+                                      scalar(built.graph, "dropout_offset", UID_DROPOUT_OFFSET, TensorDescriptor::DataType::INT64));
+                } else {
+                    attrs.set_dropout(
+                        tensor(built.graph,
+                               "dropout_mask",
+                               UID_DROPOUT_MASK,
+                               {descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), descriptor.keyValueLength()},
+                               {descriptor.queryHeads() * descriptor.queryLength() * descriptor.keyValueLength(),
+                                descriptor.queryLength() * descriptor.keyValueLength(),
+                                descriptor.keyValueLength(),
+                                1},
+                               descriptor.q.dataType),
+                        scalar(built.graph, "dropout_scale", UID_DROPOUT_SCALE));
+                }
             }
 
             auto [o, stats, amaxS, amaxO] = built.graph->sdpa_fp8(q,
@@ -737,8 +804,16 @@ class AttentionGraphCache {
                     .set_dim({descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), 1})
                     .set_stride({descriptor.queryHeads() * descriptor.queryLength(), descriptor.queryLength(), 1, 1})
                     .set_data_type(fe::DataType_t::FLOAT);
-            amaxS->set_output(true).set_uid(UID_AMAX_S).set_data_type(fe::DataType_t::FLOAT);
-            amaxO->set_output(true).set_uid(UID_AMAX_O).set_data_type(fe::DataType_t::FLOAT);
+            amaxS->set_output(true)
+                .set_uid(UID_AMAX_S)
+                .set_dim({1, 1, 1, 1})
+                .set_stride({1, 1, 1, 1})
+                .set_data_type(fe::DataType_t::FLOAT);
+            amaxO->set_output(true)
+                .set_uid(UID_AMAX_O)
+                .set_dim({1, 1, 1, 1})
+                .set_stride({1, 1, 1, 1})
+                .set_data_type(fe::DataType_t::FLOAT);
         }
 
         finalize(built, gpuNum);
@@ -747,10 +822,6 @@ class AttentionGraphCache {
 
     BuiltGraph buildBackwardGraph(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
         descriptor.validateBackward();
-        if (descriptor.useFp8)
-            throwInvalidAttention(
-                "FP8 backward API is reserved in the descriptor/args but not enabled in this first Thor wrapper; add it once the forward "
-                "path is validated on target hardware");
 
         BuiltGraph built;
         built.graph = make_shared<fe::graph::Graph>();
@@ -774,6 +845,75 @@ class AttentionGraphCache {
                             {descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), 1},
                             {descriptor.queryHeads() * descriptor.queryLength(), descriptor.queryLength(), 1, 1},
                             TensorDescriptor::DataType::FP32);
+
+        if (descriptor.useFp8) {
+            auto attrs = fe::graph::SDPA_fp8_backward_attributes().set_name(descriptor.debugName + "_fp8_backward");
+            attrs.set_attn_scale(descriptor.attentionScale.value_or(1.0f / sqrtf(static_cast<float>(descriptor.qkHeadDim()))));
+            if (descriptor.maskKind == AttentionMaskKind::CausalTopLeft || descriptor.maskKind == AttentionMaskKind::CausalBottomRight) {
+                attrs.set_causal_mask(true);
+            } else if (descriptor.maskKind != AttentionMaskKind::None) {
+                throwInvalidAttention("FP8 cuDNN SDPA backward currently supports no mask or causal mask in this wrapper");
+            }
+
+            auto [dQ, dK, dV, amaxDQ, amaxDK, amaxDV, amaxDP] =
+                built.graph->sdpa_fp8_backward(q,
+                                               k,
+                                               v,
+                                               o,
+                                               dO,
+                                               stats,
+                                               scalar(built.graph, "descale_q", UID_DESCALE_Q),
+                                               scalar(built.graph, "descale_k", UID_DESCALE_K),
+                                               scalar(built.graph, "descale_v", UID_DESCALE_V),
+                                               scalar(built.graph, "descale_o", UID_DESCALE_O),
+                                               scalar(built.graph, "descale_do", UID_DESCALE_DO),
+                                               scalar(built.graph, "descale_s", UID_DESCALE_S),
+                                               scalar(built.graph, "descale_dp", UID_DESCALE_DP),
+                                               scalar(built.graph, "scale_s", UID_SCALE_S),
+                                               scalar(built.graph, "scale_dq", UID_SCALE_DQ),
+                                               scalar(built.graph, "scale_dk", UID_SCALE_DK),
+                                               scalar(built.graph, "scale_dv", UID_SCALE_DV),
+                                               scalar(built.graph, "scale_dp", UID_SCALE_DP),
+                                               attrs);
+            dQ->set_output(true)
+                .set_uid(UID_DQ)
+                .set_dim(descriptor.q.dimensions)
+                .set_stride(descriptor.q.strides)
+                .set_data_type(toFrontendDataType(descriptor.q.dataType));
+            dK->set_output(true)
+                .set_uid(UID_DK)
+                .set_dim(descriptor.k.dimensions)
+                .set_stride(descriptor.k.strides)
+                .set_data_type(toFrontendDataType(descriptor.k.dataType));
+            dV->set_output(true)
+                .set_uid(UID_DV)
+                .set_dim(descriptor.v.dimensions)
+                .set_stride(descriptor.v.strides)
+                .set_data_type(toFrontendDataType(descriptor.v.dataType));
+            amaxDQ->set_output(true)
+                .set_uid(UID_AMAX_DQ)
+                .set_dim({1, 1, 1, 1})
+                .set_stride({1, 1, 1, 1})
+                .set_data_type(fe::DataType_t::FLOAT);
+            amaxDK->set_output(true)
+                .set_uid(UID_AMAX_DK)
+                .set_dim({1, 1, 1, 1})
+                .set_stride({1, 1, 1, 1})
+                .set_data_type(fe::DataType_t::FLOAT);
+            amaxDV->set_output(true)
+                .set_uid(UID_AMAX_DV)
+                .set_dim({1, 1, 1, 1})
+                .set_stride({1, 1, 1, 1})
+                .set_data_type(fe::DataType_t::FLOAT);
+            amaxDP->set_output(true)
+                .set_uid(UID_AMAX_DP)
+                .set_dim({1, 1, 1, 1})
+                .set_stride({1, 1, 1, 1})
+                .set_data_type(fe::DataType_t::FLOAT);
+
+            finalize(built, gpuNum);
+            return built;
+        }
 
         auto attrs = fe::graph::SDPA_backward_attributes()
                          .set_name(descriptor.debugName + "_backward")
@@ -936,12 +1076,28 @@ void CudnnAttentionDescriptor::validateForward() const {
             throwInvalidAttention("FP8 tensor dtypes require descriptor.useFp8=true so the FP8 cuDNN SDPA API is used");
         if (!isFp8(q.dataType) || !isFp8(k.dataType) || !isFp8(v.dataType) || !isFp8(o.dataType))
             throwInvalidAttention("FP8 attention requires q/k/v/o to all be FP8 tensors in this wrapper");
+        if (q.dataType != k.dataType || q.dataType != v.dataType || q.dataType != o.dataType)
+            throwInvalidAttention("FP8 attention requires q/k/v/o to use the same FP8 format in this wrapper");
         if (q.dimensions[3] % 16 != 0 || v.dimensions[3] % 16 != 0)
             throwInvalidAttention("FP8 attention head dimensions must be multiples of 16");
-        if (dropout.probability != 0.0f && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
-            throwInvalidAttention("FP8 attention dropout is intentionally disabled until validated on target cuDNN/GPU combinations");
+        if ((q.dimensions[3] > 128 || v.dimensions[3] > 128) && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
+            throwInvalidAttention("FP8 cuDNN SDPA forward is enabled only for qk/v head dimensions <= 128 on the validated support surface");
+        if ((maskKind == AttentionMaskKind::SlidingWindowTopLeft || maskKind == AttentionMaskKind::SlidingWindowBottomRight) &&
+            !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
+            throwInvalidAttention("FP8 cuDNN SDPA forward is enabled only for no-mask or causal-mask cases on the validated support surface");
+        if (maskKind == AttentionMaskKind::CausalBottomRight && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
+            throwInvalidAttention(
+                "FP8 cuDNN SDPA exposes only a boolean causal mask in this wrapper; bottom-right/decode diagonal semantics are not enabled");
+        if (useAlibiMask && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
+            throwInvalidAttention("FP8 cuDNN SDPA ALiBi is not enabled on the validated support surface");
         if (useBias && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
-            throwInvalidAttention("FP8 attention additive bias is intentionally disabled until validated on target cuDNN/GPU combinations");
+            throwInvalidAttention("cuDNN FP8 SDPA does not support additive score bias on the validated support surface");
+        if (dropout.probability != 0.0f && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
+            throwInvalidAttention("cuDNN FP8 SDPA dropout is not supported on the validated support surface");
+        if (usePagedKvCache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
+            throwInvalidAttention("FP8 cuDNN SDPA paged KV cache is not enabled on the validated support surface");
+        if (q.dimensions[2] == 1 && keyValueLength() > 1 && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
+            throwInvalidAttention("FP8 cuDNN SDPA decode-style Sq=1 forward is not enabled on the validated support surface");
     } else {
         if (!isFp16OrBf16(q.dataType) || q.dataType != k.dataType || q.dataType != v.dataType || q.dataType != o.dataType)
             throwInvalidAttention("non-FP8 attention requires q/k/v/o to be the same FP16 or BF16 dtype");
@@ -971,8 +1127,9 @@ void CudnnAttentionDescriptor::validateForward() const {
     }
     if (useBias) {
         AttentionTensorSpec fallback;
-        const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, computeDataType, fallback);
-        validateScoreBiasSpec(biasSpec, *this, "bias", computeDataType, true);
+        const TensorDescriptor::DataType biasDataType = attentionForwardBiasDataType(*this);
+        const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, biasDataType, fallback);
+        validateScoreBiasSpec(biasSpec, *this, "bias", biasDataType, true);
     }
 
     if (useAlibiMask) {
@@ -1008,6 +1165,22 @@ void CudnnAttentionDescriptor::validateBackward() const {
     if (usePagedKvCache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
         throwInvalidAttention("paged KV attention backward is not enabled; the paged KV path is inference-only until training semantics are defined");
     const bool anyRagged = q.ragged || k.ragged || v.ragged || o.ragged;
+    if (useFp8 && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
+        throwInvalidAttention(
+            "cuDNN FP8 SDPA backward is not supported on the validated support surface; FP8 attention is forward-only in Thor");
+    }
+    if (useFp8) {
+        if (useBias)
+            throwInvalidAttention("FP8 attention backward does not expose additive bias/dBias in the current cuDNN Frontend API");
+        if (dropout.probability > 0.0f)
+            throwInvalidAttention("FP8 attention backward does not support dropout in the current cuDNN Frontend API");
+        if (usePaddingMask || anyRagged)
+            throwInvalidAttention("FP8 attention backward does not expose padding-mask or ragged sequence-length tensors in the current wrapper");
+        if (usePagedKvCache)
+            throwInvalidAttention("FP8 attention backward does not support paged KV cache in the current wrapper");
+        if (maskKind != AttentionMaskKind::None && maskKind != AttentionMaskKind::CausalTopLeft && maskKind != AttentionMaskKind::CausalBottomRight)
+            throwInvalidAttention("FP8 attention backward currently supports only no mask or causal mask in the current wrapper");
+    }
     if (anyRagged && useBias && !experimentalCudnnRaggedBiasBackwardProbeEnabled())
         throwInvalidAttention(
             "cuDNN primary SDPA backward does not support ragged offsets with additive bias; ragged additive bias is forward-only "
@@ -1015,8 +1188,19 @@ void CudnnAttentionDescriptor::validateBackward() const {
             "to bypass this guard for cuDNN support-surface probing only.");
     if (useBias) {
         AttentionTensorSpec fallback;
-        const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, computeDataType, fallback);
-        validateScoreBiasSpec(biasSpec, *this, "bias", computeDataType, true);
+        const TensorDescriptor::DataType biasDataType = attentionForwardBiasDataType(*this);
+        const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, biasDataType, fallback);
+        // cuDNN backward is reliable for dense bias and batch/head-broadcast bias. Sequence-broadcast
+        // bias is lowered by production autodiff through an explicit dense materialization; keep the native
+        // cuDNN sequence-broadcast path behind the support-surface probe because some shapes are rejected on
+        // SM120 and some accepted Skv-vector shapes produce incorrect gradients.
+        validateScoreBiasSpec(biasSpec, *this, "bias", biasDataType, true);
+        if (scoreBiasUsesSequenceBroadcast(biasSpec, *this) && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
+            throwInvalidAttention(
+                "cuDNN SDPA backward with additive bias broadcast across Sq or Skv is not enabled directly; Thor production "
+                "autodiff must materialize a dense [B,Hq,Sq,Skv] score bias before attention backward and then reduce dBias "
+                "back to the public bias shape");
+        }
 
         AttentionTensorSpec dBiasFallback;
         const AttentionTensorSpec& dBiasSpec = scoreDBiasSpecOrDefault(*this, dBiasFallback);
@@ -1044,7 +1228,8 @@ string CudnnAttentionDescriptor::cacheKey(string_view passName, int gpuNum) cons
         << ";bias=" << useBias << ";paged=" << usePagedKvCache << ";fp8=" << useFp8 << ';';
     if (useBias) {
         AttentionTensorSpec fallback;
-        const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, computeDataType, fallback);
+        const TensorDescriptor::DataType biasDataType = attentionForwardBiasDataType(*this);
+        const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, biasDataType, fallback);
         appendSpec(out, "bias", biasSpec);
         AttentionTensorSpec dBiasFallback;
         const AttentionTensorSpec& dBiasSpec = scoreDBiasSpecOrDefault(*this, dBiasFallback);
@@ -1063,7 +1248,7 @@ CudnnScaledDotProductAttention& CudnnScaledDotProductAttention::instance() {
 void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& descriptor,
                                              const CudnnAttentionForwardArgs& args,
                                              Stream stream) {
-    CudnnAttentionDescriptor runtimeDescriptor = descriptorWithRuntimeBiasSpec(descriptor, args.bias, descriptor.computeDataType);
+    CudnnAttentionDescriptor runtimeDescriptor = descriptorWithRuntimeBiasSpec(descriptor, args.bias, attentionForwardBiasDataType(descriptor));
     runtimeDescriptor.validateForward();
     const int gpuNum = stream.getGpuNum();
     requireGpuTensor(args.q, "q", gpuNum);
@@ -1151,6 +1336,14 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
         requireOptionalGpuTensor(args.scaleO, "scaleO", gpuNum);
         requireOptionalGpuTensor(args.amaxS, "amaxS", gpuNum);
         requireOptionalGpuTensor(args.amaxO, "amaxO", gpuNum);
+        requireFp8ScaleScalarMatchesDescriptor(args.descaleQ.value(), "descaleQ");
+        requireFp8ScaleScalarMatchesDescriptor(args.descaleK.value(), "descaleK");
+        requireFp8ScaleScalarMatchesDescriptor(args.descaleV.value(), "descaleV");
+        requireFp8ScaleScalarMatchesDescriptor(args.descaleS.value(), "descaleS");
+        requireFp8ScaleScalarMatchesDescriptor(args.scaleS.value(), "scaleS");
+        requireFp8ScaleScalarMatchesDescriptor(args.scaleO.value(), "scaleO");
+        requireFp8ScaleScalarMatchesDescriptor(args.amaxS.value(), "amaxS");
+        requireFp8ScaleScalarMatchesDescriptor(args.amaxO.value(), "amaxO");
         insertTensor(pack, UID_DESCALE_Q, args.descaleQ.value());
         insertTensor(pack, UID_DESCALE_K, args.descaleK.value());
         insertTensor(pack, UID_DESCALE_V, args.descaleV.value());
@@ -1167,7 +1360,7 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
 void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& descriptor,
                                               const CudnnAttentionBackwardArgs& args,
                                               Stream stream) {
-    CudnnAttentionDescriptor runtimeDescriptor = descriptorWithRuntimeBiasSpec(descriptor, args.bias, descriptor.computeDataType);
+    CudnnAttentionDescriptor runtimeDescriptor = descriptorWithRuntimeBiasSpec(descriptor, args.bias, attentionForwardBiasDataType(descriptor));
     runtimeDescriptor = descriptorWithRuntimeDBiasSpec(runtimeDescriptor, args.dBias);
     runtimeDescriptor.validateBackward();
     const int gpuNum = stream.getGpuNum();
@@ -1236,6 +1429,56 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
         requireDropoutScalarMatchesDescriptor(args.dropoutOffset.value(), "dropoutOffset");
         insertTensor(pack, UID_DROPOUT_SEED, args.dropoutSeed.value());
         insertTensor(pack, UID_DROPOUT_OFFSET, args.dropoutOffset.value());
+    }
+    if (descriptor.useFp8) {
+        requireOptionalGpuTensor(args.descaleQ, "descaleQ", gpuNum);
+        requireOptionalGpuTensor(args.descaleK, "descaleK", gpuNum);
+        requireOptionalGpuTensor(args.descaleV, "descaleV", gpuNum);
+        requireOptionalGpuTensor(args.descaleO, "descaleO", gpuNum);
+        requireOptionalGpuTensor(args.descaleDO, "descaleDO", gpuNum);
+        requireOptionalGpuTensor(args.descaleS, "descaleS", gpuNum);
+        requireOptionalGpuTensor(args.descaleDP, "descaleDP", gpuNum);
+        requireOptionalGpuTensor(args.scaleS, "scaleS", gpuNum);
+        requireOptionalGpuTensor(args.scaleDQ, "scaleDQ", gpuNum);
+        requireOptionalGpuTensor(args.scaleDK, "scaleDK", gpuNum);
+        requireOptionalGpuTensor(args.scaleDV, "scaleDV", gpuNum);
+        requireOptionalGpuTensor(args.scaleDP, "scaleDP", gpuNum);
+        requireOptionalGpuTensor(args.amaxDQ, "amaxDQ", gpuNum);
+        requireOptionalGpuTensor(args.amaxDK, "amaxDK", gpuNum);
+        requireOptionalGpuTensor(args.amaxDV, "amaxDV", gpuNum);
+        requireOptionalGpuTensor(args.amaxDP, "amaxDP", gpuNum);
+        requireFp8ScaleScalarMatchesDescriptor(args.descaleQ.value(), "descaleQ");
+        requireFp8ScaleScalarMatchesDescriptor(args.descaleK.value(), "descaleK");
+        requireFp8ScaleScalarMatchesDescriptor(args.descaleV.value(), "descaleV");
+        requireFp8ScaleScalarMatchesDescriptor(args.descaleO.value(), "descaleO");
+        requireFp8ScaleScalarMatchesDescriptor(args.descaleDO.value(), "descaleDO");
+        requireFp8ScaleScalarMatchesDescriptor(args.descaleS.value(), "descaleS");
+        requireFp8ScaleScalarMatchesDescriptor(args.descaleDP.value(), "descaleDP");
+        requireFp8ScaleScalarMatchesDescriptor(args.scaleS.value(), "scaleS");
+        requireFp8ScaleScalarMatchesDescriptor(args.scaleDQ.value(), "scaleDQ");
+        requireFp8ScaleScalarMatchesDescriptor(args.scaleDK.value(), "scaleDK");
+        requireFp8ScaleScalarMatchesDescriptor(args.scaleDV.value(), "scaleDV");
+        requireFp8ScaleScalarMatchesDescriptor(args.scaleDP.value(), "scaleDP");
+        requireFp8ScaleScalarMatchesDescriptor(args.amaxDQ.value(), "amaxDQ");
+        requireFp8ScaleScalarMatchesDescriptor(args.amaxDK.value(), "amaxDK");
+        requireFp8ScaleScalarMatchesDescriptor(args.amaxDV.value(), "amaxDV");
+        requireFp8ScaleScalarMatchesDescriptor(args.amaxDP.value(), "amaxDP");
+        insertTensor(pack, UID_DESCALE_Q, args.descaleQ.value());
+        insertTensor(pack, UID_DESCALE_K, args.descaleK.value());
+        insertTensor(pack, UID_DESCALE_V, args.descaleV.value());
+        insertTensor(pack, UID_DESCALE_O, args.descaleO.value());
+        insertTensor(pack, UID_DESCALE_DO, args.descaleDO.value());
+        insertTensor(pack, UID_DESCALE_S, args.descaleS.value());
+        insertTensor(pack, UID_DESCALE_DP, args.descaleDP.value());
+        insertTensor(pack, UID_SCALE_S, args.scaleS.value());
+        insertTensor(pack, UID_SCALE_DQ, args.scaleDQ.value());
+        insertTensor(pack, UID_SCALE_DK, args.scaleDK.value());
+        insertTensor(pack, UID_SCALE_DV, args.scaleDV.value());
+        insertTensor(pack, UID_SCALE_DP, args.scaleDP.value());
+        insertTensor(pack, UID_AMAX_DQ, args.amaxDQ.value());
+        insertTensor(pack, UID_AMAX_DK, args.amaxDK.value());
+        insertTensor(pack, UID_AMAX_DV, args.amaxDV.value());
+        insertTensor(pack, UID_AMAX_DP, args.amaxDP.value());
     }
 
     executeGraph(graph, pack, stream);

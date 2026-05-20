@@ -473,6 +473,31 @@ def test_attention_score_bias_accepts_head_broadcast_and_cross_attention_key_val
     _assert_parameter_shape(arch, "value_weights", [48, 12])
 
 
+def test_attention_score_bias_accepts_sequence_broadcast_shape():
+    n = _net("test_net_attention_score_bias_sequence_broadcast")
+    decoder = _input_tensor(n, "decoder_tokens", [3, 32], thor.DataType.fp16)
+    encoder = _input_tensor(n, "encoder_tokens", [7, 48], thor.DataType.fp16)
+    score_bias = _input_tensor(n, "score_bias", [4, 1, 7], thor.DataType.fp32)
+
+    attention = thor.layers.Attention(
+        n,
+        decoder,
+        4,
+        context_input=encoder,
+        score_bias_input=score_bias,
+        num_key_value_heads=2,
+        head_dim=8,
+        value_dim=6,
+        output_features=40,
+    )
+
+    assert attention.get_use_score_bias()
+    assert attention.get_score_bias_input().get_dimensions() == [4, 1, 7]
+    arch = _only_layer_architecture(n, "attention")
+    assert arch["use_score_bias"] is True
+    assert arch["score_bias_input"]["dimensions"] == [4, 1, 7]
+
+
 def test_attention_score_bias_rejects_invalid_shape_dtype_and_decode_masks():
     n = _net("test_net_attention_score_bias_validation")
     x = _input_tensor(n, "tokens", [5, 32], thor.DataType.fp16)

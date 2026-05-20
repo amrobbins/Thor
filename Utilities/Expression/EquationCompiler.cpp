@@ -661,6 +661,16 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
             addExternalValue(node.attention_dropout_seed_node);
             addExternalValue(node.attention_dropout_offset_node);
         }
+        if (node.op == ExprOp::ATTENTION && node.attention_use_fp8_forward_scaling) {
+            addExternalValue(node.attention_descale_q_node);
+            addExternalValue(node.attention_descale_k_node);
+            addExternalValue(node.attention_descale_v_node);
+            addExternalValue(node.attention_descale_s_node);
+            addExternalValue(node.attention_scale_s_node);
+            addExternalValue(node.attention_scale_o_node);
+            addExternalValue(node.attention_amax_s_node);
+            addExternalValue(node.attention_amax_o_node);
+        }
         if (isAttentionBackwardOp(node.op)) {
             addExternalValue(node.alpha_node);
             if (node.attention_use_bias) {
@@ -1799,11 +1809,12 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     const uint32_t expected_attention_inputs = 3u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u) +
                                                (node.attention_use_ragged_offsets ? 2u : 0u) +
                                                (node.attention_use_paged_kv_cache ? 2u : 0u) +
-                                               (node.attention_dropout_probability > 0.0f ? 2u : 0u);
+                                               (node.attention_dropout_probability > 0.0f ? 2u : 0u) +
+                                               (node.attention_use_fp8_forward_scaling ? 8u : 0u);
     if (expr.numInputs() != expected_attention_inputs) {
         throw std::runtime_error(
             "Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional ragged offsets, "
-            "optional paged-KV page tables, and optional dropout seed/offset.");
+            "optional paged-KV page tables, optional dropout seed/offset, and optional FP8 scale/descale/amax tensors.");
     }
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX) {
         throw std::runtime_error("Attention node is missing q/k/v inputs.");
@@ -1839,9 +1850,21 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
         return dtype.value();
     };
 
-    (void)validate_local_input(node.lhs, "q");
-    (void)validate_local_input(node.rhs, "k");
-    (void)validate_local_input(node.aux, "v");
+    const ExprNode& q_input = validate_local_input(node.lhs, "q");
+    const ExprNode& k_input = validate_local_input(node.rhs, "k");
+    const ExprNode& v_input = validate_local_input(node.aux, "v");
+    const bool has_fp8_tensor = q_input.input_tensor_dtype.value() == DataType::FP8_E4M3 ||
+                                q_input.input_tensor_dtype.value() == DataType::FP8_E5M2 ||
+                                k_input.input_tensor_dtype.value() == DataType::FP8_E4M3 ||
+                                k_input.input_tensor_dtype.value() == DataType::FP8_E5M2 ||
+                                v_input.input_tensor_dtype.value() == DataType::FP8_E4M3 ||
+                                v_input.input_tensor_dtype.value() == DataType::FP8_E5M2 ||
+                                (node.output_dtype.has_value() &&
+                                 (node.output_dtype.value() == DataType::FP8_E4M3 || node.output_dtype.value() == DataType::FP8_E5M2));
+    if (has_fp8_tensor && !node.attention_use_fp8_forward_scaling) {
+        throw std::runtime_error(
+            "FP8 attention tensors require explicit FP8 forward scale/descale/amax inputs; use scaledDotProductAttentionFp8Forward().");
+    }
     if (node.attention_use_bias) {
         if (node.alpha_node == UINT32_MAX) {
             throw std::runtime_error("Attention node marked as using bias but is missing the bias input.");
@@ -1888,12 +1911,38 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
             throw std::runtime_error("Attention dropout seed/offset inputs must be INT64 tensors.");
         }
     }
+    if (node.attention_use_fp8_forward_scaling) {
+        auto validate_fp8_scalar = [&](uint32_t local_idx, const char* label) {
+            const ExprNode& input_node = validate_local_input(local_idx, label);
+            if (input_node.input_tensor_dtype.value() != DataType::FP32) {
+                throw std::runtime_error(std::string("Attention FP8 scalar input '") + label + "' must be an FP32 tensor.");
+            }
+        };
+        validate_fp8_scalar(node.attention_descale_q_node, "descale_q");
+        validate_fp8_scalar(node.attention_descale_k_node, "descale_k");
+        validate_fp8_scalar(node.attention_descale_v_node, "descale_v");
+        validate_fp8_scalar(node.attention_descale_s_node, "descale_s");
+        validate_fp8_scalar(node.attention_scale_s_node, "scale_s");
+        validate_fp8_scalar(node.attention_scale_o_node, "scale_o");
+        validate_fp8_scalar(node.attention_amax_s_node, "amax_s");
+        validate_fp8_scalar(node.attention_amax_o_node, "amax_o");
+    }
 
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Attention node missing resolved output_dtype.");
     }
     if (!node.compute_dtype.has_value()) {
         throw std::runtime_error("Attention node missing resolved compute_dtype.");
+    }
+    if (node.attention_use_fp8_forward_scaling) {
+        const DataType q_dtype = q_input.input_tensor_dtype.value();
+        const DataType k_dtype = k_input.input_tensor_dtype.value();
+        const DataType v_dtype = v_input.input_tensor_dtype.value();
+        const bool q_is_fp8 = q_dtype == DataType::FP8_E4M3 || q_dtype == DataType::FP8_E5M2;
+        if (!q_is_fp8 || q_dtype != k_dtype || q_dtype != v_dtype || node.output_dtype.value() != q_dtype) {
+            throw std::runtime_error(
+                "FP8 attention forward requires q/k/v/output to use the same FP8 dtype in Thor's experimental cuDNN path.");
+        }
     }
     if (node.compute_dtype.value() != DataType::FP32) {
         throw std::runtime_error("cuDNN attention expression stages require FP32 compute dtype.");
@@ -1920,6 +1969,7 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     compiled->use_paged_kv_cache = node.attention_use_paged_kv_cache;
     compiled->paged_kv_max_sequence_length = node.attention_paged_kv_max_sequence_length;
     compiled->dropout_probability = node.attention_dropout_probability;
+    compiled->use_fp8_forward_scaling = node.attention_use_fp8_forward_scaling;
     compiled->compute_dtype = node.compute_dtype.value();
     compiled->output_dtype = node.output_dtype.value();
     return compiled;
@@ -3086,6 +3136,21 @@ static void forceAttentionSeqLenLocalInputDType(PhysicalExpression& stage_expr, 
     input_node.backward_compute_dtype = DataType::INT32;
 }
 
+static void forceAttentionFp8ScalarLocalInputDType(PhysicalExpression& stage_expr, uint32_t local_idx, const char* label) {
+    if (local_idx >= stage_expr.nodes.size()) {
+        throw std::runtime_error(std::string("Attention FP8 scalar local input index out of range for ") + label + ".");
+    }
+    ExprNode& input_node = stage_expr.nodes.at(local_idx);
+    if (input_node.op != ExprOp::INPUT) {
+        throw std::runtime_error(std::string("Attention FP8 scalar local node must be an INPUT for ") + label + ".");
+    }
+    input_node.input_tensor_dtype = DataType::FP32;
+    input_node.output_dtype = DataType::FP32;
+    input_node.compute_dtype = DataType::FP32;
+    input_node.backward_output_dtype = DataType::FP32;
+    input_node.backward_compute_dtype = DataType::FP32;
+}
+
 static void forceAttentionDropoutLocalInputDType(PhysicalExpression& stage_expr, uint32_t local_idx, const char* label) {
     if (local_idx >= stage_expr.nodes.size()) {
         throw std::runtime_error(std::string("Attention dropout local input index out of range for ") + label + ".");
@@ -3123,7 +3188,7 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
     std::vector<uint32_t> input_value_ids;
     input_value_ids.reserve(3 + (node.attention_use_bias ? 1 : 0) + (node.attention_use_padding_mask ? 2 : 0) +
                             (node.attention_use_ragged_offsets ? 2 : 0) + (node.attention_use_paged_kv_cache ? 2 : 0) +
-                            (node.attention_dropout_probability > 0.0f ? 2 : 0));
+                            (node.attention_dropout_probability > 0.0f ? 2 : 0) + (node.attention_use_fp8_forward_scaling ? 8 : 0));
 
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
@@ -3231,6 +3296,33 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
         forceAttentionDropoutLocalInputDType(stage_expr, dropout_offset_local, "dropout_offset");
     }
 
+    uint32_t descale_q_local = UINT32_MAX;
+    uint32_t descale_k_local = UINT32_MAX;
+    uint32_t descale_v_local = UINT32_MAX;
+    uint32_t descale_s_local = UINT32_MAX;
+    uint32_t scale_s_local = UINT32_MAX;
+    uint32_t scale_o_local = UINT32_MAX;
+    uint32_t amax_s_local = UINT32_MAX;
+    uint32_t amax_o_local = UINT32_MAX;
+    if (node.attention_use_fp8_forward_scaling) {
+        descale_q_local = bind_parent_to_local_tensor_input(node.attention_descale_q_node, next_local_slot++);
+        descale_k_local = bind_parent_to_local_tensor_input(node.attention_descale_k_node, next_local_slot++);
+        descale_v_local = bind_parent_to_local_tensor_input(node.attention_descale_v_node, next_local_slot++);
+        descale_s_local = bind_parent_to_local_tensor_input(node.attention_descale_s_node, next_local_slot++);
+        scale_s_local = bind_parent_to_local_tensor_input(node.attention_scale_s_node, next_local_slot++);
+        scale_o_local = bind_parent_to_local_tensor_input(node.attention_scale_o_node, next_local_slot++);
+        amax_s_local = bind_parent_to_local_tensor_input(node.attention_amax_s_node, next_local_slot++);
+        amax_o_local = bind_parent_to_local_tensor_input(node.attention_amax_o_node, next_local_slot++);
+        forceAttentionFp8ScalarLocalInputDType(stage_expr, descale_q_local, "descale_q");
+        forceAttentionFp8ScalarLocalInputDType(stage_expr, descale_k_local, "descale_k");
+        forceAttentionFp8ScalarLocalInputDType(stage_expr, descale_v_local, "descale_v");
+        forceAttentionFp8ScalarLocalInputDType(stage_expr, descale_s_local, "descale_s");
+        forceAttentionFp8ScalarLocalInputDType(stage_expr, scale_s_local, "scale_s");
+        forceAttentionFp8ScalarLocalInputDType(stage_expr, scale_o_local, "scale_o");
+        forceAttentionFp8ScalarLocalInputDType(stage_expr, amax_s_local, "amax_s");
+        forceAttentionFp8ScalarLocalInputDType(stage_expr, amax_o_local, "amax_o");
+    }
+
     ExprNode route = node;
     route.lhs = q_local;
     route.rhs = k_local;
@@ -3245,6 +3337,14 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
     route.attention_page_table_v_node = page_table_v_local;
     route.attention_dropout_seed_node = dropout_seed_local;
     route.attention_dropout_offset_node = dropout_offset_local;
+    route.attention_descale_q_node = descale_q_local;
+    route.attention_descale_k_node = descale_k_local;
+    route.attention_descale_v_node = descale_v_local;
+    route.attention_descale_s_node = descale_s_local;
+    route.attention_scale_s_node = scale_s_local;
+    route.attention_scale_o_node = scale_o_local;
+    route.attention_amax_s_node = amax_s_local;
+    route.attention_amax_o_node = amax_o_local;
     stage_expr.nodes.push_back(std::move(route));
     stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
 
@@ -4428,6 +4528,16 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed", false);
                 ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset", false);
             }
+            if (root.op == ExprOp::ATTENTION && root.attention_use_fp8_forward_scaling) {
+                ensureBoundaryParentEmitted(root.attention_descale_q_node, "descale_q", false);
+                ensureBoundaryParentEmitted(root.attention_descale_k_node, "descale_k", false);
+                ensureBoundaryParentEmitted(root.attention_descale_v_node, "descale_v", false);
+                ensureBoundaryParentEmitted(root.attention_descale_s_node, "descale_s", false);
+                ensureBoundaryParentEmitted(root.attention_scale_s_node, "scale_s", false);
+                ensureBoundaryParentEmitted(root.attention_scale_o_node, "scale_o", false);
+                ensureBoundaryParentEmitted(root.attention_amax_s_node, "amax_s", false);
+                ensureBoundaryParentEmitted(root.attention_amax_o_node, "amax_o", false);
+            }
             if (isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.alpha_node, "dO", false);
                 if (root.attention_use_bias) {
@@ -4714,6 +4824,16 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (root.op == ExprOp::ATTENTION && root.attention_dropout_probability > 0.0f) {
                 ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed", false);
                 ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset", false);
+            }
+            if (root.op == ExprOp::ATTENTION && root.attention_use_fp8_forward_scaling) {
+                ensureBoundaryParentEmitted(root.attention_descale_q_node, "descale_q", false);
+                ensureBoundaryParentEmitted(root.attention_descale_k_node, "descale_k", false);
+                ensureBoundaryParentEmitted(root.attention_descale_v_node, "descale_v", false);
+                ensureBoundaryParentEmitted(root.attention_descale_s_node, "descale_s", false);
+                ensureBoundaryParentEmitted(root.attention_scale_s_node, "scale_s", false);
+                ensureBoundaryParentEmitted(root.attention_scale_o_node, "scale_o", false);
+                ensureBoundaryParentEmitted(root.attention_amax_s_node, "amax_s", false);
+                ensureBoundaryParentEmitted(root.attention_amax_o_node, "amax_o", false);
             }
             if (isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.alpha_node, "dO", false);

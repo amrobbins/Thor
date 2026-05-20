@@ -353,6 +353,20 @@ void StampedAttention::runOn(Stream& run_stream) const {
         args.dropoutSeed = dropout_seed.value();
         args.dropoutOffset = dropout_offset.value();
     }
+    if (compiled_attention->use_fp8_forward_scaling) {
+        if (!descale_q.has_value() || !descale_k.has_value() || !descale_v.has_value() || !descale_s.has_value() ||
+            !scale_s.has_value() || !scale_o.has_value() || !amax_s.has_value() || !amax_o.has_value()) {
+            throw std::runtime_error("StampedAttention requires all FP8 scale/descale/amax tensors for FP8 attention forward.");
+        }
+        args.descaleQ = descale_q.value();
+        args.descaleK = descale_k.value();
+        args.descaleV = descale_v.value();
+        args.descaleS = descale_s.value();
+        args.scaleS = scale_s.value();
+        args.scaleO = scale_o.value();
+        args.amaxS = amax_s.value();
+        args.amaxO = amax_o.value();
+    }
 
     if (forward_state && forward_state->retain_for_backward) {
         if (!forward_state->stats.isInitialized()) {
@@ -434,6 +448,14 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
                                    const std::optional<Tensor>& page_table_v,
                                    const std::optional<Tensor>& dropout_seed,
                                    const std::optional<Tensor>& dropout_offset,
+                                   const std::optional<Tensor>& descale_q,
+                                   const std::optional<Tensor>& descale_k,
+                                   const std::optional<Tensor>& descale_v,
+                                   const std::optional<Tensor>& descale_s,
+                                   const std::optional<Tensor>& scale_s,
+                                   const std::optional<Tensor>& scale_o,
+                                   const std::optional<Tensor>& amax_s,
+                                   const std::optional<Tensor>& amax_o,
                                    const Tensor& output,
                                    const Stream& stream,
                                    std::shared_ptr<AttentionForwardState> forward_state)
@@ -450,6 +472,14 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
       page_table_v(page_table_v),
       dropout_seed(dropout_seed),
       dropout_offset(dropout_offset),
+      descale_q(descale_q),
+      descale_k(descale_k),
+      descale_v(descale_v),
+      descale_s(descale_s),
+      scale_s(scale_s),
+      scale_o(scale_o),
+      amax_s(amax_s),
+      amax_o(amax_o),
       output(output),
       stream(stream),
       forward_state(std::move(forward_state)) {}

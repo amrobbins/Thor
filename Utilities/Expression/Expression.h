@@ -208,6 +208,7 @@ struct ExprNode {
     bool attention_use_paged_kv_cache = false;
     int64_t attention_paged_kv_max_sequence_length = 0;
     float attention_dropout_probability = 0.0f;
+    bool attention_use_fp8_forward_scaling = false;
     uint32_t attention_seq_len_q_node = UINT32_MAX;
     uint32_t attention_seq_len_kv_node = UINT32_MAX;
     uint32_t attention_ragged_offset_q_node = UINT32_MAX;
@@ -216,6 +217,14 @@ struct ExprNode {
     uint32_t attention_page_table_v_node = UINT32_MAX;
     uint32_t attention_dropout_seed_node = UINT32_MAX;
     uint32_t attention_dropout_offset_node = UINT32_MAX;
+    uint32_t attention_descale_q_node = UINT32_MAX;
+    uint32_t attention_descale_k_node = UINT32_MAX;
+    uint32_t attention_descale_v_node = UINT32_MAX;
+    uint32_t attention_descale_s_node = UINT32_MAX;
+    uint32_t attention_scale_s_node = UINT32_MAX;
+    uint32_t attention_scale_o_node = UINT32_MAX;
+    uint32_t attention_amax_s_node = UINT32_MAX;
+    uint32_t attention_amax_o_node = UINT32_MAX;
 
     uint32_t rope_sequence_axis = 2;
     uint32_t rope_head_dim_axis = 3;
@@ -357,6 +366,7 @@ struct AttentionOptions {
     bool use_alibi_mask = false;
     bool use_padding_mask = false;
     float dropout_probability = 0.0f;
+    bool use_fp8_forward_scaling = false;
     bool use_paged_kv_cache = false;
     int64_t paged_kv_max_sequence_length = 0;
     std::optional<TensorDescriptor::DataType> compute_dtype = std::nullopt;
@@ -518,6 +528,32 @@ class Expression {
                                                               const Expression& q_seq_len,
                                                               const Expression& kv_seq_len,
                                                               AttentionOptions options);
+    [[nodiscard]] static Expression scaledDotProductAttentionFp8Forward(const Expression& q,
+                                                                        const Expression& k,
+                                                                        const Expression& v,
+                                                                        const Expression& descale_q,
+                                                                        const Expression& descale_k,
+                                                                        const Expression& descale_v,
+                                                                        const Expression& descale_s,
+                                                                        const Expression& scale_s,
+                                                                        const Expression& scale_o,
+                                                                        const Expression& amax_s,
+                                                                        const Expression& amax_o,
+                                                                        AttentionOptions options);
+    [[nodiscard]] static Expression scaledDotProductAttentionFp8Forward(const Expression& q,
+                                                                        const Expression& k,
+                                                                        const Expression& v,
+                                                                        const Expression& q_seq_len,
+                                                                        const Expression& kv_seq_len,
+                                                                        const Expression& descale_q,
+                                                                        const Expression& descale_k,
+                                                                        const Expression& descale_v,
+                                                                        const Expression& descale_s,
+                                                                        const Expression& scale_s,
+                                                                        const Expression& scale_o,
+                                                                        const Expression& amax_s,
+                                                                        const Expression& amax_o,
+                                                                        AttentionOptions options);
     [[nodiscard]] static Expression scaledDotProductAttentionPagedKv(const Expression& q,
                                                                      const Expression& k,
                                                                      const Expression& v,
@@ -712,7 +748,15 @@ class Expression {
                                                                   const Expression* page_table_v,
                                                                   const Expression* dropout_seed,
                                                                   const Expression* dropout_offset,
-                                                                  AttentionOptions options);
+                                                                  AttentionOptions options,
+                                                                  const Expression* descale_q = nullptr,
+                                                                  const Expression* descale_k = nullptr,
+                                                                  const Expression* descale_v = nullptr,
+                                                                  const Expression* descale_s = nullptr,
+                                                                  const Expression* scale_s = nullptr,
+                                                                  const Expression* scale_o = nullptr,
+                                                                  const Expression* amax_s = nullptr,
+                                                                  const Expression* amax_o = nullptr);
 
     static uint32_t encodeLowerableGemmScaleExpression(const Expression& scale_expr,
                                                        PhysicalExpression& dst,

@@ -112,11 +112,28 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
            std::optional<Tensor> key_value_sequence_lengths,
            std::optional<Tensor> ragged_offsets,
            std::optional<Tensor> query_ragged_offsets,
-           std::optional<Tensor> key_value_ragged_offsets) {
+           std::optional<Tensor> key_value_ragged_offsets,
+           float dropout_probability,
+           int64_t dropout_seed,
+           int64_t dropout_offset,
+           std::optional<Tensor> fp8_descale_q,
+           std::optional<Tensor> fp8_descale_k,
+           std::optional<Tensor> fp8_descale_v,
+           std::optional<Tensor> fp8_descale_s,
+           std::optional<Tensor> fp8_scale_s,
+           std::optional<Tensor> fp8_scale_o,
+           std::optional<Tensor> fp8_amax_s,
+           std::optional<Tensor> fp8_amax_o) {
             requireNoMixedConvenienceAndExplicit(sequence_lengths, query_sequence_lengths, key_value_sequence_lengths, "sequence_lengths");
             requireNoMixedConvenienceAndExplicit(ragged_offsets, query_ragged_offsets, key_value_ragged_offsets, "ragged_offsets");
             if (attention_scale.has_value() && (!std::isfinite(attention_scale.value()) || attention_scale.value() <= 0.0)) {
                 throw nb::value_error("ScaledDotProductAttention instance: attention_scale must be finite and > 0.");
+            }
+            if (!std::isfinite(dropout_probability) || dropout_probability < 0.0f || dropout_probability >= 1.0f) {
+                throw nb::value_error("ScaledDotProductAttention instance: dropout_probability must be finite and in [0, 1).");
+            }
+            if (dropout_probability > 0.0f && dropout_offset < 0) {
+                throw nb::value_error("ScaledDotProductAttention instance: dropout_offset must be non-negative when dropout is enabled.");
             }
 
             ScaledDotProductAttention::Builder builder;
@@ -145,6 +162,9 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
             if (attention_scale.has_value()) {
                 builder.attentionScale(attention_scale.value());
             }
+            if (dropout_probability != 0.0f) {
+                builder.dropout(dropout_probability, dropout_seed, dropout_offset);
+            }
             builder.computeDataType(compute_data_type);
             if (output_data_type.has_value()) {
                 builder.outputDataType(output_data_type.value());
@@ -169,6 +189,25 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
                     builder.keyValueRaggedOffsetsInput(key_value_ragged_offsets.value());
                 }
             }
+            const bool any_fp8_scale = fp8_descale_q.has_value() || fp8_descale_k.has_value() || fp8_descale_v.has_value() ||
+                                       fp8_descale_s.has_value() || fp8_scale_s.has_value() || fp8_scale_o.has_value() ||
+                                       fp8_amax_s.has_value() || fp8_amax_o.has_value();
+            const bool all_fp8_scale = fp8_descale_q.has_value() && fp8_descale_k.has_value() && fp8_descale_v.has_value() &&
+                                       fp8_descale_s.has_value() && fp8_scale_s.has_value() && fp8_scale_o.has_value() &&
+                                       fp8_amax_s.has_value() && fp8_amax_o.has_value();
+            if (any_fp8_scale != all_fp8_scale) {
+                throw nb::value_error("ScaledDotProductAttention instance: FP8 forward requires all descale/scale/amax tensors.");
+            }
+            if (all_fp8_scale) {
+                builder.fp8ForwardScalingInputs(fp8_descale_q.value(),
+                                                fp8_descale_k.value(),
+                                                fp8_descale_v.value(),
+                                                fp8_descale_s.value(),
+                                                fp8_scale_s.value(),
+                                                fp8_scale_o.value(),
+                                                fp8_amax_s.value(),
+                                                fp8_amax_o.value());
+            }
 
             new (self) ScaledDotProductAttention(std::move(builder.build()));
         },
@@ -190,7 +229,18 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
         "key_value_sequence_lengths"_a.none() = nb::none(),
         "ragged_offsets"_a.none() = nb::none(),
         "query_ragged_offsets"_a.none() = nb::none(),
-        "key_value_ragged_offsets"_a.none() = nb::none());
+        "key_value_ragged_offsets"_a.none() = nb::none(),
+        "dropout_probability"_a = 0.0f,
+        "dropout_seed"_a = int64_t{0},
+        "dropout_offset"_a = int64_t{0},
+        "fp8_descale_q"_a.none() = nb::none(),
+        "fp8_descale_k"_a.none() = nb::none(),
+        "fp8_descale_v"_a.none() = nb::none(),
+        "fp8_descale_s"_a.none() = nb::none(),
+        "fp8_scale_s"_a.none() = nb::none(),
+        "fp8_scale_o"_a.none() = nb::none(),
+        "fp8_amax_s"_a.none() = nb::none(),
+        "fp8_amax_o"_a.none() = nb::none());
 
     sdpa.def(
         "get_feature_output",
@@ -202,12 +252,26 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
     sdpa.def("get_diagonal_right_bound", &ScaledDotProductAttention::getDiagonalRightBound);
     sdpa.def("get_use_alibi_mask", &ScaledDotProductAttention::getUseAlibiMask);
     sdpa.def("get_attention_scale", &ScaledDotProductAttention::getAttentionScale);
+    sdpa.def("get_dropout_probability", &ScaledDotProductAttention::getDropoutProbability);
+    sdpa.def("get_dropout_seed", &ScaledDotProductAttention::getDropoutSeed);
+    sdpa.def("get_dropout_offset", &ScaledDotProductAttention::getDropoutOffset);
     sdpa.def("get_use_sequence_lengths", &ScaledDotProductAttention::getUseSequenceLengths);
     sdpa.def("get_use_ragged_offsets", &ScaledDotProductAttention::getUseRaggedOffsets);
+    sdpa.def("get_use_bias", &ScaledDotProductAttention::getUseBias);
+    sdpa.def("get_bias_input", &ScaledDotProductAttention::getBiasInput);
     sdpa.def("get_query_sequence_lengths_input", &ScaledDotProductAttention::getQuerySequenceLengthsInput);
     sdpa.def("get_key_value_sequence_lengths_input", &ScaledDotProductAttention::getKeyValueSequenceLengthsInput);
     sdpa.def("get_query_ragged_offsets_input", &ScaledDotProductAttention::getQueryRaggedOffsetsInput);
     sdpa.def("get_key_value_ragged_offsets_input", &ScaledDotProductAttention::getKeyValueRaggedOffsetsInput);
+    sdpa.def("get_use_fp8_forward_scaling", &ScaledDotProductAttention::getUseFp8ForwardScaling);
+    sdpa.def("get_fp8_descale_q_input", &ScaledDotProductAttention::getFp8DescaleQInput);
+    sdpa.def("get_fp8_descale_k_input", &ScaledDotProductAttention::getFp8DescaleKInput);
+    sdpa.def("get_fp8_descale_v_input", &ScaledDotProductAttention::getFp8DescaleVInput);
+    sdpa.def("get_fp8_descale_s_input", &ScaledDotProductAttention::getFp8DescaleSInput);
+    sdpa.def("get_fp8_scale_s_input", &ScaledDotProductAttention::getFp8ScaleSInput);
+    sdpa.def("get_fp8_scale_o_input", &ScaledDotProductAttention::getFp8ScaleOInput);
+    sdpa.def("get_fp8_amax_s_input", &ScaledDotProductAttention::getFp8AmaxSInput);
+    sdpa.def("get_fp8_amax_o_input", &ScaledDotProductAttention::getFp8AmaxOInput);
     sdpa.def("get_compute_data_type", &ScaledDotProductAttention::getComputeDataType);
     sdpa.def("get_output_data_type", &ScaledDotProductAttention::getOutputDataType);
 
@@ -222,5 +286,12 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
         use query_sequence_lengths/key_value_sequence_lengths and query_ragged_offsets/key_value_ragged_offsets.
         Ragged offsets use the same compact API convention as thor.layers.Attention: logical shape [2]
         is batched by NetworkInput into enough storage for the [batch + 1] cuDNN offset vector.
+        dropout_probability/dropout_seed/dropout_offset expose cuDNN's Philox attention-dropout path.
+
+        Experimental FP8 forward-only SDPA is available by passing all eight scalar fp32
+        tensors fp8_descale_q/fp8_descale_k/fp8_descale_v/fp8_descale_s/fp8_scale_s/
+        fp8_scale_o/fp8_amax_s/fp8_amax_o. This path is forward-only and follows the
+        validated cuDNN FP8 support surface: no additive bias, no dropout, no ALiBi, no
+        ragged or paged-KV path, head dims multiples of 16 and <= 128.
         )nbdoc";
 }

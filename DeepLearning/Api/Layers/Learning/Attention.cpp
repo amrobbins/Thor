@@ -103,10 +103,10 @@ void requireScoreBiasInput(const Thor::Tensor& tensor,
         throw std::invalid_argument("Attention scoreBiasInput tensor is not initialized.");
     }
     const std::vector<uint64_t> dims = tensor.getDimensions();
-    if (dims.size() != 3 || (dims[0] != 1 && dims[0] != numHeads) || dims[1] != querySequenceLength ||
-        dims[2] != keyValueSequenceLength) {
+    if (dims.size() != 3 || (dims[0] != 1 && dims[0] != numHeads) ||
+        (dims[1] != querySequenceLength && dims[1] != 1) || (dims[2] != keyValueSequenceLength && dims[2] != 1)) {
         throw std::invalid_argument(
-            "Attention scoreBiasInput dimensions must be [1|num_heads, query_sequence, key_value_sequence] at the API level.");
+            "Attention scoreBiasInput dimensions must be [1|num_heads, 1|query_sequence, 1|key_value_sequence] at the API level.");
     }
     if (tensor.getDataType() != computeDataType) {
         throw std::invalid_argument("Attention scoreBiasInput dtype must match attention computeDataType.");
@@ -540,9 +540,10 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 const auto scoreBiasDims = scoreBias.getDimensions();
                 if (scoreBiasDims.size() != 4 || scoreBiasDims[0] != batch ||
                     (scoreBiasDims[1] != 1 && scoreBiasDims[1] != numHeads) ||
-                    scoreBiasDims[2] != querySequenceLength || scoreBiasDims[3] != keyValueSequenceLength) {
+                    (scoreBiasDims[2] != querySequenceLength && scoreBiasDims[2] != 1) ||
+                    (scoreBiasDims[3] != keyValueSequenceLength && scoreBiasDims[3] != 1)) {
                     throw std::runtime_error(
-                        "Attention runtime score_bias_input must be [batch, 1|num_heads, query_sequence, key_value_sequence].");
+                        "Attention runtime score_bias_input must be [batch, 1|num_heads, 1|query_sequence, 1|key_value_sequence].");
                 }
                 if (scoreBias.getDataType() != computeDType) {
                     throw std::runtime_error("Attention runtime score_bias_input dtype must match attention compute dtype.");
