@@ -1,6 +1,7 @@
 #include "Utilities/Expression/FusedEquation.h"
 #include <optional>
 #include <array>
+#include <algorithm>
 #include <cstdlib>
 #include <string_view>
 
@@ -2823,7 +2824,8 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
                 break;
             }
             case ExprOp::TRANSPOSE:
-                throw std::runtime_error("inferFusedStageNodeDims encountered unexpected transpose op in fused stage.");
+                node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
+                break;
             case ExprOp::RESHAPE: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
                 auto numel = [](const std::vector<uint64_t>& dims) {
@@ -3197,7 +3199,8 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
                 break;
             }
             case ExprOp::TRANSPOSE:
-                throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unexpected transpose op in fused stage.");
+                node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
+                break;
             case ExprOp::MATMUL:
             case ExprOp::GEMM:
                 throw std::runtime_error("inferFusedStageNodeDimsForReachable encountered unexpected matmul/gemm op in fused stage.");
@@ -3246,6 +3249,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::STRIDED_VIEW_BACKWARD:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
+            case ExprOp::TRANSPOSE:
                 break;
 
             case ExprOp::ADD:
@@ -3294,7 +3298,6 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
                 break;
             }
 
-            case ExprOp::TRANSPOSE:
             case ExprOp::SOFTMAX:
             case ExprOp::ATTENTION:
             case ExprOp::ATTENTION_BACKWARD_Q:
@@ -3776,7 +3779,9 @@ struct ResolvedBroadcastGroup {
 };
 
 static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
-    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return node.op == ExprOp::ROPE; });
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
+        return node.op == ExprOp::ROPE || node.op == ExprOp::TRANSPOSE;
+    });
 }
 
 static bool stageHasShapeOnlyOps(const CompiledExecutionStage& stage) {
@@ -3874,8 +3879,19 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
             return {};
         case ExprOp::FILL:
             return {};
-        case ExprOp::TRANSPOSE:
-            throw std::runtime_error("collectEffectiveInputDimsForNode encountered unexpected transpose op in fused stage.");
+        case ExprOp::TRANSPOSE: {
+            auto result = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
+            // A non-terminal transpose is evaluated by the index-aware fused emitter.
+            // For broadcast grouping, treat the child tensor inputs as if they are
+            // consumed in the transposed node's output domain. The emitter itself
+            // remaps the final output index back to the pre-transpose source index
+            // before loading those inputs.
+            for (auto& [slot, dims_set] : result) {
+                dims_set.clear();
+                dims_set.insert(node_dims[node_idx]);
+            }
+            return result;
+        }
         case ExprOp::STRIDED_VIEW_BACKWARD: {
             auto result = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
             // strided_view_backward is an index-aware gather from the view-gradient input
@@ -4132,6 +4148,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
     for (const auto& [output_dims, output_indices] : outputs_by_dims) {
         struct OutputInfo {
             uint32_t out_idx;
+            std::vector<std::vector<uint64_t>> node_dims;
             std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> effective_dims_by_slot;
             std::unordered_set<uint32_t> used_slots_set;
         };
@@ -4146,6 +4163,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
 
             OutputInfo info;
             info.out_idx = out_idx;
+            info.node_dims = node_dims;
             collectReferencedLocalInputSlots(stage.expr, stage.outputs[out_idx].local_node_idx, info.used_slots_set);
             info.effective_dims_by_slot = collectEffectiveInputDimsForNode(stage.expr, node_dims, stage.outputs[out_idx].local_node_idx);
 
@@ -4187,6 +4205,21 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
             specialized.output_dims = output_dims;
             specialized.numel = product(output_dims);
             specialized.used_input_slots = used_input_slots;
+            specialized.node_dims.assign(stage.expr.nodes.size(), {});
+            for (const OutputInfo& info : infos) {
+                if (std::find(subgroup_output_indices.begin(), subgroup_output_indices.end(), info.out_idx) == subgroup_output_indices.end()) {
+                    continue;
+                }
+                for (size_t node_i = 0; node_i < info.node_dims.size(); ++node_i) {
+                    if (info.node_dims[node_i].empty()) {
+                        continue;
+                    }
+                    if (!specialized.node_dims[node_i].empty() && specialized.node_dims[node_i] != info.node_dims[node_i]) {
+                        throw std::runtime_error("Broadcast group resolved conflicting local node dimensions for subgroup.");
+                    }
+                    specialized.node_dims[node_i] = info.node_dims[node_i];
+                }
+            }
 
             const std::vector<uint64_t> output_strides = computePackedOutputStrides(output_dims);
             const bool force_all_output_axes = expressionHasIndexAwareOps(stage.expr);

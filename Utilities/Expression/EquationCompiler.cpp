@@ -593,13 +593,15 @@ static bool isAttentionBackwardOp(ExprOp op) {
 }
 
 static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
-    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return node.op == ExprOp::ROPE; });
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
+        return node.op == ExprOp::ROPE || node.op == ExprOp::TRANSPOSE;
+    });
 }
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
     return isCudnnReduceOp(op) || isSoftmaxOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) || isAttentionBackwardOp(op) ||
-           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isTransposeOp(op) || op == ExprOp::STRIDED_VIEW;
+           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || op == ExprOp::STRIDED_VIEW;
 }
 
 static uint32_t peelExplicitTransposeChain(const PhysicalExpression& expr, uint32_t node_idx, bool& transpose_toggled) {
@@ -5168,6 +5170,11 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
         compiled->launch_kind = CompiledEquation::LaunchKind::FusedTiledTranspose;
         compiled->elements_per_thread = 1u;
         compiled->tiled_transpose_pack_scalars = CudaSourceEmitter::tiledTransposePackScalars(stage);
+        compiled->uses_uint32_tiled_transpose_index_math = CudaSourceEmitter::specializedBroadcastUsesUInt32IndexMath(groups);
+    } else if (CudaSourceEmitter::specializedBroadcastUsesTiledLogicalTransposeConsumerLaunch(stage, groups)) {
+        compiled->launch_kind = CompiledEquation::LaunchKind::FusedTiledTranspose;
+        compiled->elements_per_thread = 1u;
+        compiled->tiled_transpose_pack_scalars = 1u;
         compiled->uses_uint32_tiled_transpose_index_math = CudaSourceEmitter::specializedBroadcastUsesUInt32IndexMath(groups);
     } else {
         const std::optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
