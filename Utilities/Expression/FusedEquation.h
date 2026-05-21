@@ -658,6 +658,11 @@ enum class SpecializedInputLoadKind { ScalarPack, NativeVector };
 struct SpecializedBroadcastGroup {
     uint64_t numel = 0;
     std::vector<uint64_t> output_dims;
+    // Runtime-resolved local expression node dimensions for this broadcast group.
+    // This is normally only needed by index-aware fused emitters, such as a
+    // non-terminal transpose consumer, where a child subexpression may need to
+    // be evaluated in a different logical index domain than the final output.
+    std::vector<std::vector<uint64_t>> node_dims;
     std::vector<uint32_t> output_indices;
     std::vector<uint32_t> used_input_slots;  // sorted, local stage input slots
     std::vector<SpecializedInputLoadKind> used_input_load_kinds;

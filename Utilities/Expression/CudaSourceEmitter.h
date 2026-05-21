@@ -25,6 +25,8 @@ class CudaSourceEmitter {
                                                 const std::vector<SpecializedBroadcastGroup>& groups,
                                                 const std::string& kernel_name);
     static bool specializedBroadcastUsesUInt32IndexMath(const std::vector<SpecializedBroadcastGroup>& groups);
+    static bool specializedBroadcastUsesTiledLogicalTransposeConsumerLaunch(const CompiledExecutionStage& stage,
+                                                                            const std::vector<SpecializedBroadcastGroup>& groups);
 
     static std::optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const PhysicalExecutionStage& stage);
     static std::optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const CompiledExecutionStage& stage);
