@@ -50,8 +50,6 @@ def _ragged_element_offsets(lengths: np.ndarray, heads: int, dim: int) -> np.nda
     return element_offsets
 
 
-
-
 def _pack_bshd_dense_storage(logical_bhsd: np.ndarray) -> np.ndarray:
     # Thor-side BSHD tensors are actually shaped [B,S,H,D].  References stay in
     # semantic BHSD order, so convert reference values to the Thor tensor shape.
@@ -171,7 +169,7 @@ def _mask_for(kind: AttentionMaskKind, query_len: int, kv_len: int, left: int = 
     if kind == AttentionMaskKind.none:
         return None
     if kind == AttentionMaskKind.causal_top_left:
-        return kv_pos <= q_pos
+        return kv_pos <= (q_pos + right)
     if kind == AttentionMaskKind.sliding_window_top_left:
         return (kv_pos > (q_pos - left)) & (kv_pos <= (q_pos + right))
     if kind == AttentionMaskKind.causal_bottom_right:
@@ -326,7 +324,6 @@ def _compile_attention(
     )
 
 
-
 @pytest.mark.cuda
 def test_expression_reshape_of_matmul_stage_output_is_metadata_alias_not_fused_kernel():
     dtype = thor.DataType.fp16
@@ -363,7 +360,8 @@ def test_expression_reshape_with_same_output_dtype_is_metadata_alias_not_fused_k
     dtype = thor.DataType.fp16
     a = ex.input("a")
     b = ex.input("b")
-    out = ex.matmul(a, b, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape([2, 3, 5]).with_output_dtype(dtype)
+    out = ex.matmul(
+        a, b, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape([2, 3, 5]).with_output_dtype(dtype)
     eq = ex.compile(out, device_num=0)
 
     rng = np.random.default_rng(7012)
@@ -387,7 +385,6 @@ def test_expression_reshape_with_same_output_dtype_is_metadata_alias_not_fused_k
     stamped.run()
     got = _copy_to_host(stamped.output(), dtype, stream)
     _assert_close(got, expected, dtype)
-
 
 
 @pytest.mark.cuda
@@ -441,15 +438,29 @@ def test_composed_attention_projection_biases_lower_to_matmul_bias_epilogues_wit
     storage_dtype = _numpy_storage_dtype(dtype)
     stream = Stream(gpu_num=0)
     inputs_gpu = {
-        "x": _host_to_gpu(rng.normal(0.0, 0.3, size=(batch, sequence, input_features)).astype(storage_dtype), dtype, stream),
-        "qw": _host_to_gpu(rng.normal(0.0, 0.2, size=(input_features, heads * head_dim)).astype(storage_dtype), dtype, stream),
-        "kw": _host_to_gpu(rng.normal(0.0, 0.2, size=(input_features, kv_heads * head_dim)).astype(storage_dtype), dtype, stream),
-        "vw": _host_to_gpu(rng.normal(0.0, 0.2, size=(input_features, kv_heads * value_dim)).astype(storage_dtype), dtype, stream),
-        "ow": _host_to_gpu(rng.normal(0.0, 0.2, size=(heads * value_dim, output_features)).astype(storage_dtype), dtype, stream),
-        "qb": _host_to_gpu(rng.normal(0.0, 0.05, size=(heads * head_dim,)).astype(storage_dtype), dtype, stream),
-        "kb": _host_to_gpu(rng.normal(0.0, 0.05, size=(kv_heads * head_dim,)).astype(storage_dtype), dtype, stream),
-        "vb": _host_to_gpu(rng.normal(0.0, 0.05, size=(kv_heads * value_dim,)).astype(storage_dtype), dtype, stream),
-        "ob": _host_to_gpu(rng.normal(0.0, 0.05, size=(output_features,)).astype(storage_dtype), dtype, stream),
+        "x":
+            _host_to_gpu(
+                rng.normal(0.0, 0.3, size=(batch, sequence, input_features)).astype(storage_dtype), dtype, stream),
+        "qw":
+            _host_to_gpu(
+                rng.normal(0.0, 0.2, size=(input_features, heads * head_dim)).astype(storage_dtype), dtype, stream),
+        "kw":
+            _host_to_gpu(
+                rng.normal(0.0, 0.2, size=(input_features, kv_heads * head_dim)).astype(storage_dtype), dtype, stream),
+        "vw":
+            _host_to_gpu(
+                rng.normal(0.0, 0.2, size=(input_features, kv_heads * value_dim)).astype(storage_dtype), dtype, stream),
+        "ow":
+            _host_to_gpu(
+                rng.normal(0.0, 0.2, size=(heads * value_dim, output_features)).astype(storage_dtype), dtype, stream),
+        "qb":
+            _host_to_gpu(rng.normal(0.0, 0.05, size=(heads * head_dim,)).astype(storage_dtype), dtype, stream),
+        "kb":
+            _host_to_gpu(rng.normal(0.0, 0.05, size=(kv_heads * head_dim,)).astype(storage_dtype), dtype, stream),
+        "vb":
+            _host_to_gpu(rng.normal(0.0, 0.05, size=(kv_heads * value_dim,)).astype(storage_dtype), dtype, stream),
+        "ob":
+            _host_to_gpu(rng.normal(0.0, 0.05, size=(output_features,)).astype(storage_dtype), dtype, stream),
     }
 
     assert eq.output_shape(inputs_gpu) == [batch, sequence, output_features]
@@ -515,20 +526,26 @@ def test_packed_qkv_attention_projection_biases_lower_to_matmul_bias_epilogues_w
         compute_dtype=thor.DataType.fp32,
     ).with_output_dtype(dtype)
     merged = attn.reshape([batch * sequence, merged_width])
-    out = (ex.matmul(merged, output_weights, compute_dtype=thor.DataType.fp32, output_dtype=dtype) + output_bias).reshape(
-        [batch, sequence, output_features]
-    )
+    out = (ex.matmul(merged, output_weights, compute_dtype=thor.DataType.fp32, output_dtype=dtype) +
+           output_bias).reshape([batch, sequence, output_features])
     eq = ex.compile(out, device_num=0)
 
     rng = np.random.default_rng(9017)
     storage_dtype = _numpy_storage_dtype(dtype)
     stream = Stream(gpu_num=0)
     inputs_gpu = {
-        "x": _host_to_gpu(rng.normal(0.0, 0.3, size=(batch, sequence, input_features)).astype(storage_dtype), dtype, stream),
-        "qkv_weights": _host_to_gpu(rng.normal(0.0, 0.2, size=(input_features, qkv_width)).astype(storage_dtype), dtype, stream),
-        "qkv_bias": _host_to_gpu(rng.normal(0.0, 0.05, size=(qkv_width,)).astype(storage_dtype), dtype, stream),
-        "output_weights": _host_to_gpu(rng.normal(0.0, 0.2, size=(merged_width, output_features)).astype(storage_dtype), dtype, stream),
-        "output_bias": _host_to_gpu(rng.normal(0.0, 0.05, size=(output_features,)).astype(storage_dtype), dtype, stream),
+        "x":
+            _host_to_gpu(
+                rng.normal(0.0, 0.3, size=(batch, sequence, input_features)).astype(storage_dtype), dtype, stream),
+        "qkv_weights":
+            _host_to_gpu(rng.normal(0.0, 0.2, size=(input_features, qkv_width)).astype(storage_dtype), dtype, stream),
+        "qkv_bias":
+            _host_to_gpu(rng.normal(0.0, 0.05, size=(qkv_width,)).astype(storage_dtype), dtype, stream),
+        "output_weights":
+            _host_to_gpu(
+                rng.normal(0.0, 0.2, size=(merged_width, output_features)).astype(storage_dtype), dtype, stream),
+        "output_bias":
+            _host_to_gpu(rng.normal(0.0, 0.05, size=(output_features,)).astype(storage_dtype), dtype, stream),
     }
 
     assert eq.output_shape(inputs_gpu) == [batch, sequence, output_features]
@@ -536,7 +553,6 @@ def test_packed_qkv_attention_projection_biases_lower_to_matmul_bias_epilogues_w
     assert sum(1 for kind in kinds if kind.startswith("Matmul")) == 2
     assert kinds.count("Attention") == 1
     assert "FusedKernel" not in kinds
-
 
 
 @pytest.mark.cuda
@@ -569,11 +585,19 @@ def test_expression_reshape_inputs_to_attention_stage_are_metadata_aliases_not_f
     eq = ex.compile(out, device_num=0)
 
     q_bhsd, k_bhsd, v_bhsd = _attention_inputs(
-        batch=batch, query_heads=heads, kv_heads=heads, query_len=sequence, kv_len=sequence, qk_dim=dim, v_dim=dim, dtype=dtype)
+        batch=batch,
+        query_heads=heads,
+        kv_heads=heads,
+        query_len=sequence,
+        kv_len=sequence,
+        qk_dim=dim,
+        v_dim=dim,
+        dtype=dtype)
     q_storage = _pack_bshd_dense_storage(q_bhsd)
     k_storage = _pack_bshd_dense_storage(k_bhsd)
     v_storage = _pack_bshd_dense_storage(v_bhsd)
-    expected_storage = _pack_bshd_dense_storage(_cast_reference_to_storage_dtype(_attention_reference(q_bhsd, k_bhsd, v_bhsd, scale=scale), dtype))
+    expected_storage = _pack_bshd_dense_storage(
+        _cast_reference_to_storage_dtype(_attention_reference(q_bhsd, k_bhsd, v_bhsd, scale=scale), dtype))
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
@@ -591,8 +615,6 @@ def test_expression_reshape_inputs_to_attention_stage_are_metadata_aliases_not_f
     _assert_close(got, expected_storage, dtype)
 
 
-
-
 @pytest.mark.cuda
 @pytest.mark.parametrize("layout", [AttentionTensorLayout.bhsd, AttentionTensorLayout.bshd])
 @pytest.mark.parametrize(
@@ -604,8 +626,7 @@ def test_expression_reshape_inputs_to_attention_stage_are_metadata_aliases_not_f
     ],
 )
 def test_attention_dense_layout_contract_matches_reference_for_mha_gqa_mqa(
-    layout: AttentionTensorLayout, query_heads: int, kv_heads: int
-):
+        layout: AttentionTensorLayout, query_heads: int, kv_heads: int):
     dtype = thor.DataType.fp16
     batch = 2
     query_len = 3
@@ -748,7 +769,8 @@ def test_attention_bshd_strided_packed_qkv_view_backward_scatter_add_matches_ref
 
     expected_qkv_grad = np.zeros((batch * sequence, total_width), dtype=np.float32)
     expected_qkv_grad[:, 0:q_width] = _pack_bshd_dense_storage(expected_dq).reshape(batch * sequence, q_width)
-    expected_qkv_grad[:, q_width:q_width + k_width] = _pack_bshd_dense_storage(expected_dk).reshape(batch * sequence, k_width)
+    expected_qkv_grad[:, q_width:q_width + k_width] = _pack_bshd_dense_storage(expected_dk).reshape(
+        batch * sequence, k_width)
     expected_qkv_grad[:, q_width + k_width:] = _pack_bshd_dense_storage(expected_dv).reshape(batch * sequence, v_width)
     expected_qkv_grad = _cast_reference_to_storage_dtype(expected_qkv_grad, dtype)
 
@@ -758,7 +780,9 @@ def test_attention_bshd_strided_packed_qkv_view_backward_scatter_add_matches_ref
         upstream_name: _host_to_gpu(dO_storage, dtype, stream),
     }
 
-    assert bwd_eq.output_shapes(inputs_gpu) == {"qkv_grad": [batch * sequence, total_width]}
+    assert bwd_eq.output_shapes(inputs_gpu) == {
+        "qkv_grad": [batch * sequence, total_width]
+    }
     stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
     assert stage_kinds.count("AttentionBackward") == 1
     assert stage_kinds.count("FusedKernel") == 1
@@ -841,11 +865,12 @@ def test_attention_bshd_strided_packed_qkv_views_match_reference_without_split_k
     qkv_np = np.ascontiguousarray(qkv_np.reshape(batch * sequence, total_width))
 
     expected = _pack_bshd_dense_storage(
-        _cast_reference_to_storage_dtype(_attention_reference(q_np, k_np, v_np, scale=scale), dtype)
-    )
+        _cast_reference_to_storage_dtype(_attention_reference(q_np, k_np, v_np, scale=scale), dtype))
 
     stream = Stream(gpu_num=0)
-    inputs_gpu = {"qkv": _host_to_gpu(qkv_np, dtype, stream)}
+    inputs_gpu = {
+        "qkv": _host_to_gpu(qkv_np, dtype, stream)
+    }
 
     assert eq.output_shape(inputs_gpu) == [batch, sequence, query_heads, v_dim]
     # Q/K/V are storage aliases into one packed input, so no split/materialize stage should be planned.
@@ -875,15 +900,12 @@ def test_composed_projection_to_attention_bshd_layout_contract_matches_reference
     vw = ex.input("vw")
 
     flat = x.reshape([batch * sequence, input_features])
-    q = ex.matmul(flat, qw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape(
-        [batch, sequence, heads, head_dim]
-    )
-    k = ex.matmul(flat, kw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape(
-        [batch, sequence, kv_heads, head_dim]
-    )
-    v = ex.matmul(flat, vw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape(
-        [batch, sequence, kv_heads, value_dim]
-    )
+    q = ex.matmul(
+        flat, qw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape([batch, sequence, heads, head_dim])
+    k = ex.matmul(
+        flat, kw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape([batch, sequence, kv_heads, head_dim])
+    v = ex.matmul(
+        flat, vw, compute_dtype=thor.DataType.fp32, output_dtype=dtype).reshape([batch, sequence, kv_heads, value_dim])
     attn = ex.scaled_dot_product_attention(
         q,
         k,
@@ -948,6 +970,7 @@ def test_composed_projection_to_attention_bshd_layout_contract_matches_reference
     stamped.run()
     got = _copy_to_host(stamped.output(), dtype, stream)
     _assert_close(got, expected_merged, dtype)
+
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", ATTENTION_DTYPES)
@@ -1063,6 +1086,24 @@ def test_attention_forward_alibi_causal_top_left_mask_matches_reference_and_diff
 
 
 @pytest.mark.cuda
+def test_attention_forward_alibi_causal_top_left_positive_right_bound_rejected_by_cudnn_policy():
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+
+    with pytest.raises(RuntimeError, match="AttentionOptions::use_alibi_mask.*diagonal_right_bound == 0"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            mask_kind=AttentionMaskKind.causal_top_left,
+            diagonal_right_bound=1,
+            use_alibi_mask=True,
+            output_dtype=thor.DataType.fp16,
+            compute_dtype=thor.DataType.fp32,
+        )
+
+
 def test_attention_forward_alibi_with_padding_and_additive_bias_matches_reference():
     dtype = thor.DataType.fp16
     scale = 0.71 / math.sqrt(16.0)
@@ -1122,7 +1163,7 @@ def test_attention_forward_alibi_with_padding_and_additive_bias_matches_referenc
     _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
 
 
-def test_attention_alibi_requires_causal_diagonal_masking_with_zero_right_bound():
+def test_attention_alibi_requires_causal_diagonal_masking_or_supported_top_left_right_bound():
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
@@ -1905,7 +1946,8 @@ def test_attention_forward_ragged_offsets_with_additive_bias_broadcast_shapes_ma
     bias_np = rng.normal(0.0, 0.45, size=bias_shape).astype(np.float32)
     # Make the bias strongly asymmetric so an implementation that drops or misindexes it fails loudly.
     bias_np += np.linspace(-0.7, 0.9, num=bias_np.size, dtype=np.float32).reshape(bias_np.shape)
-    expected = _attention_reference(q_np, k_np, v_np, scale=scale, bias=bias_np, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+    expected = _attention_reference(
+        q_np, k_np, v_np, scale=scale, bias=bias_np, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
 
     q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
     k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
@@ -2007,10 +2049,8 @@ def test_attention_forward_ragged_offsets_with_dropout_is_deterministic():
     got3 = _copy_to_host(stamped3.output(), dtype, stream)
     assert np.max(
         np.abs(
-            _packed_bshd_ragged_valid_values(got1, q_lengths).astype(np.float32)
-            - _packed_bshd_ragged_valid_values(got3, q_lengths).astype(np.float32)
-        )
-    ) > 1.0e-3
+            _packed_bshd_ragged_valid_values(got1, q_lengths).astype(np.float32) -
+            _packed_bshd_ragged_valid_values(got3, q_lengths).astype(np.float32))) > 1.0e-3
 
 
 @pytest.mark.cuda
@@ -3005,8 +3045,7 @@ def _reduce_attention_bias_grad_to_shape(dense_dbias: np.ndarray, bias_shape: tu
         if size not in (1, dense_dbias.shape[axis]):
             raise AssertionError(
                 "attention dBias reduction helper requires each requested bias dimension to either match the dense "
-                f"score dimension or be 1; got dense={dense_dbias.shape}, bias_shape={bias_shape}"
-            )
+                f"score dimension or be 1; got dense={dense_dbias.shape}, bias_shape={bias_shape}")
 
     axes = [axis for axis in range(4) if bias_shape[axis] == 1 and dense_dbias.shape[axis] != 1]
     reduced = dense_dbias
@@ -3463,6 +3502,25 @@ def test_attention_compile_backward_qkv_with_alibi_causal_mask_matches_reference
         _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
     _assert_close(
         _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+
+
+@pytest.mark.cuda
+def test_attention_compile_backward_qkv_with_alibi_causal_top_left_positive_right_bound_rejected_by_cudnn_policy():
+    q = ex.input("q")
+    k = ex.input("k")
+    v = ex.input("v")
+
+    with pytest.raises(RuntimeError, match="AttentionOptions::use_alibi_mask.*diagonal_right_bound == 0"):
+        ex.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            mask_kind=AttentionMaskKind.causal_top_left,
+            diagonal_right_bound=1,
+            use_alibi_mask=True,
+            output_dtype=thor.DataType.fp16,
+            compute_dtype=thor.DataType.fp32,
+        )
 
 
 @pytest.mark.cuda
@@ -4081,7 +4139,7 @@ def _rope_reference(
 
     if scaling_kind == RotaryScalingKind.linear:
         positions = positions / np.float32(scaling_factor)
-        inv_freq = rope_base ** (-2.0 * pair_indices / np.float32(effective_rotary_dim))
+        inv_freq = rope_base**(-2.0 * pair_indices / np.float32(effective_rotary_dim))
         effective_attention_factor = 1.0 if attention_factor is None else attention_factor
     elif scaling_kind == RotaryScalingKind.dynamic_ntk:
         if original_max_position_embeddings <= 0:
@@ -4090,16 +4148,18 @@ def _rope_reference(
         if seq_for_ntk > float(original_max_position_embeddings) and effective_rotary_dim > 2:
             ratio = (scaling_factor * seq_for_ntk / float(original_max_position_embeddings)) - (scaling_factor - 1.0)
             rope_base = np.float32(base * (ratio**(float(effective_rotary_dim) / float(effective_rotary_dim - 2))))
-        inv_freq = rope_base ** (-2.0 * pair_indices / np.float32(effective_rotary_dim))
+        inv_freq = rope_base**(-2.0 * pair_indices / np.float32(effective_rotary_dim))
         effective_attention_factor = 1.0 if attention_factor is None else attention_factor
     elif scaling_kind == RotaryScalingKind.yarn:
         if original_max_position_embeddings <= 0:
             raise ValueError("yarn requires original_max_position_embeddings")
-        pos_freqs = rope_base ** (2.0 * pair_indices / np.float32(effective_rotary_dim))
+        pos_freqs = rope_base**(2.0 * pair_indices / np.float32(effective_rotary_dim))
         inv_freq_extrap = 1.0 / pos_freqs
         inv_freq_interp = 1.0 / (np.float32(scaling_factor) * pos_freqs)
-        low = (effective_rotary_dim * math.log(original_max_position_embeddings / (yarn_beta_fast * 2.0 * math.pi))) / (2.0 * math.log(base))
-        high = (effective_rotary_dim * math.log(original_max_position_embeddings / (yarn_beta_slow * 2.0 * math.pi))) / (2.0 * math.log(base))
+        low = (effective_rotary_dim * math.log(original_max_position_embeddings /
+                                               (yarn_beta_fast * 2.0 * math.pi))) / (2.0 * math.log(base))
+        high = (effective_rotary_dim * math.log(original_max_position_embeddings /
+                                                (yarn_beta_slow * 2.0 * math.pi))) / (2.0 * math.log(base))
         low = max(math.floor(low), 0)
         high = min(math.ceil(high), effective_rotary_dim - 1)
         if low == high:
@@ -4116,30 +4176,32 @@ def _rope_reference(
         if long_rope_short_factors is None or long_rope_long_factors is None:
             raise ValueError("longrope requires short/long factors")
         ext_factors = np.asarray(
-            long_rope_long_factors if seq_len + max(0, position_offset) > original_max_position_embeddings else long_rope_short_factors,
+            long_rope_long_factors if seq_len +
+            max(0, position_offset) > original_max_position_embeddings else long_rope_short_factors,
             dtype=np.float32,
         )
-        inv_freq = 1.0 / (ext_factors * (rope_base ** (2.0 * pair_indices / np.float32(effective_rotary_dim))))
+        inv_freq = 1.0 / (ext_factors * (rope_base**(2.0 * pair_indices / np.float32(effective_rotary_dim))))
         if attention_factor is None:
-            effective_attention_factor = 1.0 if scaling_factor <= 1.0 else math.sqrt(1.0 + math.log(scaling_factor) / math.log(original_max_position_embeddings))
+            effective_attention_factor = 1.0 if scaling_factor <= 1.0 else math.sqrt(
+                1.0 + math.log(scaling_factor) / math.log(original_max_position_embeddings))
         else:
             effective_attention_factor = attention_factor
     elif scaling_kind == RotaryScalingKind.llama3:
         if original_max_position_embeddings <= 0:
             raise ValueError("llama3 requires original_max_position_embeddings")
-        inv_freq_default = rope_base ** (-2.0 * pair_indices / np.float32(effective_rotary_dim))
+        inv_freq_default = rope_base**(-2.0 * pair_indices / np.float32(effective_rotary_dim))
         wavelen = np.float32(2.0 * math.pi) / inv_freq_default
         low_freq_wavelen = np.float32(original_max_position_embeddings / llama3_low_freq_factor)
         high_freq_wavelen = np.float32(original_max_position_embeddings / llama3_high_freq_factor)
         inv_freq = np.where(wavelen > low_freq_wavelen, inv_freq_default / np.float32(scaling_factor), inv_freq_default)
-        smooth = (np.float32(original_max_position_embeddings) / wavelen - np.float32(llama3_low_freq_factor)) / np.float32(
-            llama3_high_freq_factor - llama3_low_freq_factor)
+        smooth = (np.float32(original_max_position_embeddings) / wavelen -
+                  np.float32(llama3_low_freq_factor)) / np.float32(llama3_high_freq_factor - llama3_low_freq_factor)
         smoothed = (1.0 - smooth) * (inv_freq_default / np.float32(scaling_factor)) + smooth * inv_freq_default
         is_medium = np.logical_and(~(wavelen < high_freq_wavelen), ~(wavelen > low_freq_wavelen))
         inv_freq = np.where(is_medium, smoothed, inv_freq)
         effective_attention_factor = 1.0 if attention_factor is None else attention_factor
     else:
-        inv_freq = rope_base ** (-2.0 * pair_indices / np.float32(effective_rotary_dim))
+        inv_freq = rope_base**(-2.0 * pair_indices / np.float32(effective_rotary_dim))
         effective_attention_factor = 1.0 if attention_factor is None else attention_factor
 
     theta = positions[:, None] * inv_freq[None, :]
@@ -4160,7 +4222,6 @@ def _rope_reference(
     out[:, :, :, first_idx] = x_first * cos[None, None, :, :] - x_second * sin[None, None, :, :]
     out[:, :, :, second_idx] = x_first * sin[None, None, :, :] + x_second * cos[None, None, :, :]
     return out
-
 
 
 ROPE_SCALING_FORWARD_CASES = [
@@ -4188,40 +4249,43 @@ ROPE_SCALING_FORWARD_CASES = [
     pytest.param(
         {
             "scaling_kind": RotaryScalingKind.dynamic_ntk,
-            "rope_kwargs": {
-                "rotary_dim": 8,
-                "interleaved": True,
-                "scaling_factor": 2.0,
-                "original_max_position_embeddings": 4,
-            },
+            "rope_kwargs":
+                {
+                    "rotary_dim": 8,
+                    "interleaved": True,
+                    "scaling_factor": 2.0,
+                    "original_max_position_embeddings": 4,
+                },
         },
         id="dynamic_ntk_interleaved",
     ),
     pytest.param(
         {
             "scaling_kind": RotaryScalingKind.yarn,
-            "rope_kwargs": {
-                "rotary_dim": 8,
-                "scaling_factor": 4.0,
-                "original_max_position_embeddings": 16,
-                "yarn_beta_fast": 32.0,
-                "yarn_beta_slow": 1.0,
-            },
+            "rope_kwargs":
+                {
+                    "rotary_dim": 8,
+                    "scaling_factor": 4.0,
+                    "original_max_position_embeddings": 16,
+                    "yarn_beta_fast": 32.0,
+                    "yarn_beta_slow": 1.0,
+                },
         },
         id="yarn_default_attention_factor",
     ),
     pytest.param(
         {
             "scaling_kind": RotaryScalingKind.yarn,
-            "rope_kwargs": {
-                "rotary_dim": 8,
-                "position_offset": 2,
-                "scaling_factor": 3.0,
-                "original_max_position_embeddings": 12,
-                "attention_factor": 1.25,
-                "yarn_beta_fast": 16.0,
-                "yarn_beta_slow": 2.0,
-            },
+            "rope_kwargs":
+                {
+                    "rotary_dim": 8,
+                    "position_offset": 2,
+                    "scaling_factor": 3.0,
+                    "original_max_position_embeddings": 12,
+                    "attention_factor": 1.25,
+                    "yarn_beta_fast": 16.0,
+                    "yarn_beta_slow": 2.0,
+                },
         },
         id="yarn_explicit_attention_factor_and_betas",
     ),
@@ -4229,13 +4293,14 @@ ROPE_SCALING_FORWARD_CASES = [
         {
             "scaling_kind": RotaryScalingKind.longrope,
             "query_len": 3,
-            "rope_kwargs": {
-                "rotary_dim": 8,
-                "scaling_factor": 4.0,
-                "original_max_position_embeddings": 16,
-                "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
-                "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
-            },
+            "rope_kwargs":
+                {
+                    "rotary_dim": 8,
+                    "scaling_factor": 4.0,
+                    "original_max_position_embeddings": 16,
+                    "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
+                    "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+                },
         },
         id="longrope_short_factors",
     ),
@@ -4243,43 +4308,46 @@ ROPE_SCALING_FORWARD_CASES = [
         {
             "scaling_kind": RotaryScalingKind.longrope,
             "query_len": 7,
-            "rope_kwargs": {
-                "rotary_dim": 8,
-                "position_offset": 3,
-                "scaling_factor": 4.0,
-                "original_max_position_embeddings": 4,
-                "attention_factor": 1.4,
-                "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
-                "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
-            },
+            "rope_kwargs":
+                {
+                    "rotary_dim": 8,
+                    "position_offset": 3,
+                    "scaling_factor": 4.0,
+                    "original_max_position_embeddings": 4,
+                    "attention_factor": 1.4,
+                    "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
+                    "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+                },
         },
         id="longrope_long_factors_with_explicit_attention_factor",
     ),
     pytest.param(
         {
             "scaling_kind": RotaryScalingKind.llama3,
-            "rope_kwargs": {
-                "rotary_dim": 8,
-                "scaling_factor": 8.0,
-                "original_max_position_embeddings": 16,
-                "llama3_low_freq_factor": 1.0,
-                "llama3_high_freq_factor": 4.0,
-            },
+            "rope_kwargs":
+                {
+                    "rotary_dim": 8,
+                    "scaling_factor": 8.0,
+                    "original_max_position_embeddings": 16,
+                    "llama3_low_freq_factor": 1.0,
+                    "llama3_high_freq_factor": 4.0,
+                },
         },
         id="llama3_default_band",
     ),
     pytest.param(
         {
             "scaling_kind": RotaryScalingKind.llama3,
-            "rope_kwargs": {
-                "rotary_dim": 8,
-                "position_offset": 1,
-                "scaling_factor": 6.0,
-                "original_max_position_embeddings": 12,
-                "attention_factor": 1.1,
-                "llama3_low_freq_factor": 1.0,
-                "llama3_high_freq_factor": 3.0,
-            },
+            "rope_kwargs":
+                {
+                    "rotary_dim": 8,
+                    "position_offset": 1,
+                    "scaling_factor": 6.0,
+                    "original_max_position_embeddings": 12,
+                    "attention_factor": 1.1,
+                    "llama3_low_freq_factor": 1.0,
+                    "llama3_high_freq_factor": 3.0,
+                },
         },
         id="llama3_custom_band_and_attention_factor",
     ),
@@ -4295,7 +4363,8 @@ def _rope_forward_kwargs(case: dict) -> dict:
 def _run_rope_forward_match_reference(case: dict, *, use_alias: bool = False):
     dtype = thor.DataType.fp16
     query_len = case.get("query_len", 7)
-    q_np, _, _ = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=query_len, kv_len=query_len, dtype=dtype)
+    q_np, _, _ = _attention_inputs(
+        batch=1, query_heads=2, kv_heads=2, query_len=query_len, kv_len=query_len, dtype=dtype)
     q = ex.input("q")
     rope_kwargs = _rope_forward_kwargs(case)
     rope_op = ex.rotary_position_embedding if use_alias else ex.rope
@@ -4309,7 +4378,9 @@ def _run_rope_forward_match_reference(case: dict, *, use_alias: bool = False):
     expected = _rope_reference(q_np, **rope_kwargs)
 
     stream = Stream(gpu_num=0)
-    inputs_gpu = {"q": _host_to_gpu(q_np, dtype, stream)}
+    inputs_gpu = {
+        "q": _host_to_gpu(q_np, dtype, stream)
+    }
     assert eq.output_shape(inputs_gpu) == [1, 2, query_len, 16]
     assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
 
@@ -4332,14 +4403,15 @@ def test_rope_forward_all_scaling_parameterizations_match_reference(case):
         pytest.param(
             {
                 "scaling_kind": RotaryScalingKind.yarn,
-                "rope_kwargs": {
-                    "rotary_dim": 8,
-                    "scaling_factor": 3.0,
-                    "original_max_position_embeddings": 12,
-                    "attention_factor": 1.15,
-                    "yarn_beta_fast": 16.0,
-                    "yarn_beta_slow": 2.0,
-                },
+                "rope_kwargs":
+                    {
+                        "rotary_dim": 8,
+                        "scaling_factor": 3.0,
+                        "original_max_position_embeddings": 12,
+                        "attention_factor": 1.15,
+                        "yarn_beta_fast": 16.0,
+                        "yarn_beta_slow": 2.0,
+                    },
             },
             id="yarn_alias",
         ),
@@ -4347,27 +4419,29 @@ def test_rope_forward_all_scaling_parameterizations_match_reference(case):
             {
                 "scaling_kind": RotaryScalingKind.longrope,
                 "query_len": 7,
-                "rope_kwargs": {
-                    "rotary_dim": 8,
-                    "position_offset": 2,
-                    "scaling_factor": 4.0,
-                    "original_max_position_embeddings": 4,
-                    "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
-                    "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
-                },
+                "rope_kwargs":
+                    {
+                        "rotary_dim": 8,
+                        "position_offset": 2,
+                        "scaling_factor": 4.0,
+                        "original_max_position_embeddings": 4,
+                        "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
+                        "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+                    },
             },
             id="longrope_alias",
         ),
         pytest.param(
             {
                 "scaling_kind": RotaryScalingKind.llama3,
-                "rope_kwargs": {
-                    "rotary_dim": 8,
-                    "scaling_factor": 8.0,
-                    "original_max_position_embeddings": 16,
-                    "llama3_low_freq_factor": 1.0,
-                    "llama3_high_freq_factor": 4.0,
-                },
+                "rope_kwargs":
+                    {
+                        "rotary_dim": 8,
+                        "scaling_factor": 8.0,
+                        "original_max_position_embeddings": 16,
+                        "llama3_low_freq_factor": 1.0,
+                        "llama3_high_freq_factor": 4.0,
+                    },
             },
             id="llama3_alias",
         ),
@@ -4396,27 +4470,29 @@ def test_rotary_position_embedding_alias_accepts_extended_scaling_parameterizati
             {
                 "scaling_kind": RotaryScalingKind.dynamic_ntk,
                 "query_len": 7,
-                "rope_kwargs": {
-                    "rotary_dim": 8,
-                    "interleaved": True,
-                    "scaling_factor": 2.0,
-                    "original_max_position_embeddings": 4,
-                },
+                "rope_kwargs":
+                    {
+                        "rotary_dim": 8,
+                        "interleaved": True,
+                        "scaling_factor": 2.0,
+                        "original_max_position_embeddings": 4,
+                    },
             },
             id="dynamic_ntk_backward",
         ),
         pytest.param(
             {
                 "scaling_kind": RotaryScalingKind.yarn,
-                "rope_kwargs": {
-                    "rotary_dim": 8,
-                    "position_offset": 1,
-                    "scaling_factor": 4.0,
-                    "original_max_position_embeddings": 16,
-                    "attention_factor": 1.2,
-                    "yarn_beta_fast": 32.0,
-                    "yarn_beta_slow": 1.0,
-                },
+                "rope_kwargs":
+                    {
+                        "rotary_dim": 8,
+                        "position_offset": 1,
+                        "scaling_factor": 4.0,
+                        "original_max_position_embeddings": 16,
+                        "attention_factor": 1.2,
+                        "yarn_beta_fast": 32.0,
+                        "yarn_beta_slow": 1.0,
+                    },
             },
             id="yarn_backward",
         ),
@@ -4424,30 +4500,32 @@ def test_rotary_position_embedding_alias_accepts_extended_scaling_parameterizati
             {
                 "scaling_kind": RotaryScalingKind.longrope,
                 "query_len": 7,
-                "rope_kwargs": {
-                    "rotary_dim": 8,
-                    "position_offset": 3,
-                    "scaling_factor": 4.0,
-                    "original_max_position_embeddings": 4,
-                    "attention_factor": 1.3,
-                    "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
-                    "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
-                },
+                "rope_kwargs":
+                    {
+                        "rotary_dim": 8,
+                        "position_offset": 3,
+                        "scaling_factor": 4.0,
+                        "original_max_position_embeddings": 4,
+                        "attention_factor": 1.3,
+                        "long_rope_short_factors": [1.0, 1.1, 1.2, 1.3],
+                        "long_rope_long_factors": [2.0, 2.2, 2.4, 2.6],
+                    },
             },
             id="longrope_backward",
         ),
         pytest.param(
             {
                 "scaling_kind": RotaryScalingKind.llama3,
-                "rope_kwargs": {
-                    "rotary_dim": 8,
-                    "position_offset": 1,
-                    "scaling_factor": 8.0,
-                    "original_max_position_embeddings": 16,
-                    "attention_factor": 1.1,
-                    "llama3_low_freq_factor": 1.0,
-                    "llama3_high_freq_factor": 4.0,
-                },
+                "rope_kwargs":
+                    {
+                        "rotary_dim": 8,
+                        "position_offset": 1,
+                        "scaling_factor": 8.0,
+                        "original_max_position_embeddings": 16,
+                        "attention_factor": 1.1,
+                        "llama3_low_freq_factor": 1.0,
+                        "llama3_high_freq_factor": 4.0,
+                    },
             },
             id="llama3_backward",
         ),
@@ -4468,7 +4546,8 @@ def test_rope_compile_backward_preserves_scaling_parameterizations(case):
     fwd_eq = ex.compile(out, device_num=0)
     bwd_eq = fwd_eq.compile_backward(["q"], error_input_name=upstream_name)
 
-    q_np, _, _ = _attention_inputs(batch=1, query_heads=2, kv_heads=2, query_len=query_len, kv_len=query_len, dtype=dtype)
+    q_np, _, _ = _attention_inputs(
+        batch=1, query_heads=2, kv_heads=2, query_len=query_len, kv_len=query_len, dtype=dtype)
     rng = np.random.default_rng(2468)
     dO_np = rng.normal(0.0, 0.2, size=q_np.shape).astype(_numpy_storage_dtype(dtype))
     expected = _rope_reference(dO_np, inverse=True, **rope_kwargs)
@@ -4478,7 +4557,9 @@ def test_rope_compile_backward_preserves_scaling_parameterizations(case):
         "q": _host_to_gpu(q_np, dtype, stream),
         upstream_name: _host_to_gpu(dO_np, dtype, stream),
     }
-    assert bwd_eq.output_shapes(inputs_gpu) == {"q_grad": [1, 2, query_len, 16]}
+    assert bwd_eq.output_shapes(inputs_gpu) == {
+        "q_grad": [1, 2, query_len, 16]
+    }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
 
     stamped = bwd_eq.stamp(inputs_gpu, stream)
@@ -4545,17 +4626,29 @@ def test_rope_invalid_rotary_dim_raises_during_expression_construction():
     "kwargs,match",
     [
         pytest.param(
-            {"scaling_kind": RotaryScalingKind.yarn, "scaling_factor": 2.0},
+            {
+                "scaling_kind": RotaryScalingKind.yarn,
+                "scaling_factor": 2.0
+            },
             "original_max_position_embeddings",
             id="yarn_requires_original_max",
         ),
         pytest.param(
-            {"scaling_kind": RotaryScalingKind.yarn, "scaling_factor": 2.0, "original_max_position_embeddings": 16, "yarn_beta_fast": 0.0},
+            {
+                "scaling_kind": RotaryScalingKind.yarn,
+                "scaling_factor": 2.0,
+                "original_max_position_embeddings": 16,
+                "yarn_beta_fast": 0.0
+            },
             "beta",
             id="yarn_rejects_non_positive_beta",
         ),
         pytest.param(
-            {"scaling_kind": RotaryScalingKind.longrope, "rotary_dim": 8, "scaling_factor": 2.0},
+            {
+                "scaling_kind": RotaryScalingKind.longrope,
+                "rotary_dim": 8,
+                "scaling_factor": 2.0
+            },
             "original_max_position_embeddings",
             id="longrope_requires_original_max",
         ),
@@ -4595,7 +4688,10 @@ def test_rope_invalid_rotary_dim_raises_during_expression_construction():
             id="longrope_rejects_non_positive_short_factor",
         ),
         pytest.param(
-            {"scaling_kind": RotaryScalingKind.llama3, "scaling_factor": 8.0},
+            {
+                "scaling_kind": RotaryScalingKind.llama3,
+                "scaling_factor": 8.0
+            },
             "original_max_position_embeddings",
             id="llama3_requires_original_max",
         ),
@@ -4623,10 +4719,15 @@ def test_rope_scaling_parameterization_validation_errors(kwargs, match):
 @pytest.mark.parametrize(
     "scaling_kind,kwargs",
     [
-        pytest.param("linear", {"rope_scaling_factor": 2.0}, id="linear"),
+        pytest.param("linear", {
+            "rope_scaling_factor": 2.0
+        }, id="linear"),
         pytest.param(
             "dynamic_ntk",
-            {"rope_scaling_factor": 2.0, "rope_original_max_position_embeddings": 4},
+            {
+                "rope_scaling_factor": 2.0,
+                "rope_original_max_position_embeddings": 4
+            },
             id="dynamic_ntk",
         ),
         pytest.param(
@@ -4797,8 +4898,6 @@ def test_attention_compile_backward_ragged_offsets_with_full_dense_additive_bias
         fwd_eq.compile_backward(["q", "k", "v", "bias"], error_input_name=upstream_name)
 
 
-
-
 @pytest.mark.cuda
 @pytest.mark.parametrize(
     "requested_gradients",
@@ -4817,14 +4916,14 @@ def test_attention_compile_backward_ragged_offsets_with_full_dense_additive_bias
         pytest.param((2, 4, 64, 64), id="bias_b_h"),
     ],
 )
-def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(monkeypatch, bias_shape, requested_gradients):
+def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(
+        monkeypatch, bias_shape, requested_gradients):
     if (os.environ.get("THOR_RUN_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE") != "1" and
             os.environ.get("THOR_RUN_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD_SURFACE") != "1"):
         pytest.skip(
             "Set THOR_RUN_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE=1 to probe all experimental cuDNN attention "
             "support-surface combinations. The legacy THOR_RUN_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD_SURFACE=1 "
-            "also still runs this specific probe."
-        )
+            "also still runs this specific probe.")
     monkeypatch.setenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE", "1")
     monkeypatch.setenv("THOR_EXPERIMENTAL_CUDNN_RAGGED_BIAS_BACKWARD", "1")
 
@@ -4908,15 +5007,25 @@ def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(monk
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
-        "q": _host_to_gpu(q_storage, dtype, stream),
-        "k": _host_to_gpu(k_storage, dtype, stream),
-        "v": _host_to_gpu(v_storage, dtype, stream),
-        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=query_heads, dim=qk_dim), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=kv_heads, dim=qk_dim), thor.DataType.int32, stream),
-        upstream_name: _host_to_gpu(dO_storage, dtype, stream),
+        "q":
+            _host_to_gpu(q_storage, dtype, stream),
+        "k":
+            _host_to_gpu(k_storage, dtype, stream),
+        "v":
+            _host_to_gpu(v_storage, dtype, stream),
+        "bias":
+            _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        "q_seq_len":
+            _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len":
+            _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets":
+            _host_to_gpu(
+                _ragged_element_offsets(q_lengths, heads=query_heads, dim=qk_dim), thor.DataType.int32, stream),
+        "kv_offsets":
+            _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=kv_heads, dim=qk_dim), thor.DataType.int32, stream),
+        upstream_name:
+            _host_to_gpu(dO_storage, dtype, stream),
     }
 
     try:
@@ -4927,33 +5036,34 @@ def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(monk
     except RuntimeError as exc:
         pytest.xfail(
             "cuDNN rejected ragged+additive-bias backward for "
-            f"bias_shape={bias_shape}, requested_gradients={requested_gradients}: {exc}"
-        )
+            f"bias_shape={bias_shape}, requested_gradients={requested_gradients}: {exc}")
 
     print(
         "SUPPORTED cuDNN ragged+additive-bias backward surface: "
         f"bias_shape={bias_shape}, requested_gradients={requested_gradients}, "
-        f"output_shapes={output_shapes}, stage_kinds={stage_kinds}"
-    )
+        f"output_shapes={output_shapes}, stage_kinds={stage_kinds}")
 
     got = stamped.outputs()
     if "q" in requested_gradients:
-        got_q_valid = _packed_bshd_ragged_valid_values(_copy_to_host(got["q_grad"], dtype, stream), q_lengths).astype(np.float32)
+        got_q_valid = _packed_bshd_ragged_valid_values(_copy_to_host(got["q_grad"], dtype, stream),
+                                                       q_lengths).astype(np.float32)
         exp_q_valid = _packed_bshd_ragged_valid_values(
-            _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dq, dtype), q_lengths), q_lengths
-        ).astype(np.float32)
+            _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dq, dtype), q_lengths),
+            q_lengths).astype(np.float32)
         np.testing.assert_allclose(got_q_valid, exp_q_valid, rtol=8e-2, atol=8e-2)
     if "k" in requested_gradients:
-        got_k_valid = _packed_bshd_ragged_valid_values(_copy_to_host(got["k_grad"], dtype, stream), kv_lengths).astype(np.float32)
+        got_k_valid = _packed_bshd_ragged_valid_values(_copy_to_host(got["k_grad"], dtype, stream),
+                                                       kv_lengths).astype(np.float32)
         exp_k_valid = _packed_bshd_ragged_valid_values(
-            _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dk, dtype), kv_lengths), kv_lengths
-        ).astype(np.float32)
+            _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dk, dtype), kv_lengths),
+            kv_lengths).astype(np.float32)
         np.testing.assert_allclose(got_k_valid, exp_k_valid, rtol=8e-2, atol=8e-2)
     if "v" in requested_gradients:
-        got_v_valid = _packed_bshd_ragged_valid_values(_copy_to_host(got["v_grad"], dtype, stream), kv_lengths).astype(np.float32)
+        got_v_valid = _packed_bshd_ragged_valid_values(_copy_to_host(got["v_grad"], dtype, stream),
+                                                       kv_lengths).astype(np.float32)
         exp_v_valid = _packed_bshd_ragged_valid_values(
-            _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dv, dtype), kv_lengths), kv_lengths
-        ).astype(np.float32)
+            _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected_dv, dtype), kv_lengths),
+            kv_lengths).astype(np.float32)
         np.testing.assert_allclose(got_v_valid, exp_v_valid, rtol=8e-2, atol=8e-2)
     if "bias" in requested_gradients:
         assert list(got["bias_grad"].dimensions) == list(bias_shape)
@@ -5124,11 +5234,15 @@ def test_attention_sequence_broadcast_additive_bias_backward_expands_dense_and_r
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
     got = stamped.outputs()
-    _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
     assert got["bias_grad"].dtype == dtype
-    _assert_close(_copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
+    _assert_close(
+        _copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
 
 
 def _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch):
@@ -5136,8 +5250,7 @@ def _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch):
         pytest.skip(
             "Set THOR_RUN_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE=1 to probe currently guarded cuDNN "
             "attention support-surface combinations. The test sets "
-            "THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE=1 internally."
-        )
+            "THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE=1 internally.")
     monkeypatch.setenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE", "1")
     # Keep the legacy internal escape hatch set too so older ragged+bias guards are covered while callers use one
     # public run env for the whole support-surface suite.
@@ -5147,8 +5260,7 @@ def _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch):
 def _xfail_experimental_cudnn_attention_surface_mismatch(surface: str, exc: AssertionError):
     pytest.xfail(
         "cuDNN accepted the experimental attention support-surface probe, but the result did not match Thor's "
-        f"reference semantics for {surface}: {exc}"
-    )
+        f"reference semantics for {surface}: {exc}")
 
 
 @pytest.mark.cuda
@@ -5199,7 +5311,8 @@ def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_forward_s
             device_num=0,
         )
     except RuntimeError as exc:
-        pytest.xfail(f"Thor rejected sequence-broadcast additive-bias forward probe during expression construction: {exc}")
+        pytest.xfail(
+            f"Thor rejected sequence-broadcast additive-bias forward probe during expression construction: {exc}")
 
     q_np, k_np, v_np = _attention_inputs(
         batch=batch,
@@ -5230,19 +5343,18 @@ def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_forward_s
         stamped.run()
         got = _copy_to_host(stamped.output(), dtype, stream)
     except RuntimeError as exc:
-        pytest.xfail(f"cuDNN rejected sequence-broadcast additive-bias forward probe for bias_shape={bias_shape}: {exc}")
+        pytest.xfail(
+            f"cuDNN rejected sequence-broadcast additive-bias forward probe for bias_shape={bias_shape}: {exc}")
 
     try:
         _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
     except AssertionError as exc:
         _xfail_experimental_cudnn_attention_surface_mismatch(
-            f"sequence-broadcast additive-bias forward bias_shape={bias_shape}", exc
-        )
+            f"sequence-broadcast additive-bias forward bias_shape={bias_shape}", exc)
 
     print(
         "SUPPORTED cuDNN sequence-broadcast additive-bias forward surface: "
-        f"bias_shape={bias_shape}, output_shape={output_shape}, stage_kinds={stage_kinds}"
-    )
+        f"bias_shape={bias_shape}, output_shape={output_shape}, stage_kinds={stage_kinds}")
 
 
 @pytest.mark.cuda
@@ -5270,8 +5382,7 @@ def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_forward_s
     ],
 )
 def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_backward_surface(
-    monkeypatch, bias_shape, requested_gradients
-):
+        monkeypatch, bias_shape, requested_gradients):
     _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch)
 
     dtype = thor.DataType.fp16
@@ -5303,7 +5414,8 @@ def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_backward_
             device_num=0,
         )
     except RuntimeError as exc:
-        pytest.xfail(f"Thor rejected sequence-broadcast additive-bias backward probe during expression construction: {exc}")
+        pytest.xfail(
+            f"Thor rejected sequence-broadcast additive-bias backward probe during expression construction: {exc}")
 
     try:
         bwd_eq = fwd_eq.compile_backward(list(requested_gradients), error_input_name=upstream_name)
@@ -5320,7 +5432,8 @@ def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_backward_
         v_dim=v_dim,
         dtype=dtype,
     )
-    rng = np.random.default_rng(11300 + sum((i + 1) * size for i, size in enumerate(bias_shape)) + len(requested_gradients))
+    rng = np.random.default_rng(
+        11300 + sum((i + 1) * size for i, size in enumerate(bias_shape)) + len(requested_gradients))
     bias_np = rng.normal(0.0, 0.13, size=bias_shape).astype(np.float32)
     dO_np = rng.normal(0.0, 0.24, size=(batch, query_heads, query_len, v_dim)).astype(_numpy_storage_dtype(dtype))
 
@@ -5352,20 +5465,27 @@ def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_backward_
     except RuntimeError as exc:
         pytest.xfail(
             "cuDNN rejected sequence-broadcast additive-bias backward probe: "
-            f"bias_shape={bias_shape}, requested_gradients={requested_gradients}: {exc}"
-        )
+            f"bias_shape={bias_shape}, requested_gradients={requested_gradients}: {exc}")
 
     got = stamped.outputs()
     try:
         if "q" in requested_gradients:
-            _assert_close(_copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
+            _assert_close(
+                _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype),
+                dtype)
         if "k" in requested_gradients:
-            _assert_close(_copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
+            _assert_close(
+                _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype),
+                dtype)
         if "v" in requested_gradients:
-            _assert_close(_copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+            _assert_close(
+                _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype),
+                dtype)
         if "bias" in requested_gradients:
             assert list(got["bias_grad"].dimensions) == list(bias_shape)
-            _assert_close(_copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
+            _assert_close(
+                _copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype),
+                dtype)
     except AssertionError as exc:
         _xfail_experimental_cudnn_attention_surface_mismatch(
             "sequence-broadcast additive-bias backward "
@@ -5376,8 +5496,7 @@ def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_backward_
     print(
         "SUPPORTED cuDNN sequence-broadcast additive-bias backward surface: "
         f"bias_shape={bias_shape}, requested_gradients={requested_gradients}, "
-        f"output_shapes={output_shapes}, stage_kinds={stage_kinds}"
-    )
+        f"output_shapes={output_shapes}, stage_kinds={stage_kinds}")
 
 
 @pytest.mark.cuda
@@ -5386,7 +5505,13 @@ def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_backward_
     [
         pytest.param("no_mask", AttentionMaskKind.none, 0, 0, False, id="no_mask"),
         pytest.param("padding_only", AttentionMaskKind.none, 0, 0, True, id="padding_only"),
-        pytest.param("causal_top_left_right_bound", AttentionMaskKind.causal_top_left, 0, 1, False, id="causal_top_left_right_bound"),
+        pytest.param(
+            "causal_top_left_right_bound",
+            AttentionMaskKind.causal_top_left,
+            0,
+            1,
+            False,
+            id="causal_top_left_right_bound"),
         pytest.param(
             "sliding_top_left_right_bound",
             AttentionMaskKind.sliding_window_top_left,
@@ -5398,8 +5523,7 @@ def test_attention_experimental_cudnn_sequence_broadcast_additive_bias_backward_
     ],
 )
 def test_attention_experimental_cudnn_alibi_nonstandard_mask_support_surface(
-    monkeypatch, case_name, mask_kind, diagonal_left_bound, diagonal_right_bound, use_padding_mask
-):
+        monkeypatch, case_name, mask_kind, diagonal_left_bound, diagonal_right_bound, use_padding_mask):
     _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch)
 
     dtype = thor.DataType.fp16
@@ -5481,8 +5605,7 @@ def test_attention_experimental_cudnn_alibi_nonstandard_mask_support_surface(
 
     print(
         "SUPPORTED cuDNN nonstandard ALiBi attention surface: "
-        f"case={case_name}, output_shape={output_shape}, stage_kinds={stage_kinds}"
-    )
+        f"case={case_name}, output_shape={output_shape}, stage_kinds={stage_kinds}")
     _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
 
 
@@ -5552,24 +5675,36 @@ def test_attention_experimental_cudnn_ragged_paged_kv_forward_support_surface(mo
     page_table = _page_table(batch, kv_len, block_size)
     # The existing paged-KV helpers return semantic BHSD storage [pages,H,block,D].  The ragged path requires BSHD
     # physical layouts, so transpose the page containers into Thor-side [pages,block,H,D] storage for this probe.
-    k_container_bshd = np.ascontiguousarray(_paged_kv_container_from_page_table(k_ref, block_size, page_table).transpose(0, 2, 1, 3))
-    v_container_bshd = np.ascontiguousarray(_paged_kv_container_from_page_table(v_ref, block_size, page_table).transpose(0, 2, 1, 3))
+    k_container_bshd = np.ascontiguousarray(
+        _paged_kv_container_from_page_table(k_ref, block_size, page_table).transpose(0, 2, 1, 3))
+    v_container_bshd = np.ascontiguousarray(
+        _paged_kv_container_from_page_table(v_ref, block_size, page_table).transpose(0, 2, 1, 3))
     q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
     expected = _attention_reference(q_np, k_ref, v_ref, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
-        "q": _host_to_gpu(q_storage, dtype, stream),
-        "k": _host_to_gpu(k_container_bshd, dtype, stream),
-        "v": _host_to_gpu(v_container_bshd, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=query_heads, dim=qk_dim), thor.DataType.int32, stream),
+        "q":
+            _host_to_gpu(q_storage, dtype, stream),
+        "k":
+            _host_to_gpu(k_container_bshd, dtype, stream),
+        "v":
+            _host_to_gpu(v_container_bshd, dtype, stream),
+        "q_seq_len":
+            _host_to_gpu(q_lengths, thor.DataType.int32, stream),
+        "kv_seq_len":
+            _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
+        "q_offsets":
+            _host_to_gpu(
+                _ragged_element_offsets(q_lengths, heads=query_heads, dim=qk_dim), thor.DataType.int32, stream),
         # cuDNN may ultimately reject this combination, but if it grows support this keeps the K/V offset tensor in the
         # same batch-indexed form as the existing ragged attention API while page tables identify the physical pages.
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=kv_heads, dim=qk_dim), thor.DataType.int32, stream),
-        "page_table_k": _host_to_gpu(page_table, thor.DataType.int32, stream),
-        "page_table_v": _host_to_gpu(page_table, thor.DataType.int32, stream),
+        "kv_offsets":
+            _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=kv_heads, dim=qk_dim), thor.DataType.int32, stream),
+        "page_table_k":
+            _host_to_gpu(page_table, thor.DataType.int32, stream),
+        "page_table_v":
+            _host_to_gpu(page_table, thor.DataType.int32, stream),
     }
 
     try:
@@ -5583,12 +5718,11 @@ def test_attention_experimental_cudnn_ragged_paged_kv_forward_support_surface(mo
 
     print(
         "SUPPORTED cuDNN ragged+paged-KV forward attention surface: "
-        f"output_shape={output_shape}, stage_kinds={stage_kinds}"
-    )
+        f"output_shape={output_shape}, stage_kinds={stage_kinds}")
     got_valid = _packed_bshd_ragged_valid_values(got_storage, q_lengths).astype(np.float32)
     expected_valid = _packed_bshd_ragged_valid_values(
-        _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected, dtype), q_lengths), q_lengths
-    ).astype(np.float32)
+        _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected, dtype), q_lengths),
+        q_lengths).astype(np.float32)
     np.testing.assert_allclose(got_valid, expected_valid, rtol=8e-2, atol=8e-2)
 
 
@@ -5609,8 +5743,7 @@ def test_attention_experimental_cudnn_ragged_paged_kv_forward_support_surface(mo
     ],
 )
 def test_attention_experimental_cudnn_bottom_right_decode_support_surface(
-    monkeypatch, mask_kind, diagonal_left_bound, diagonal_right_bound, guarded_feature
-):
+        monkeypatch, mask_kind, diagonal_left_bound, diagonal_right_bound, guarded_feature):
     _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch)
 
     dtype = thor.DataType.fp16
@@ -5654,8 +5787,7 @@ def test_attention_experimental_cudnn_bottom_right_decode_support_surface(
     except RuntimeError as exc:
         pytest.xfail(
             "Thor rejected bottom-right/decode cuDNN support-surface probe during expression construction: "
-            f"mask_kind={mask_kind}, guarded_feature={guarded_feature}: {exc}"
-        )
+            f"mask_kind={mask_kind}, guarded_feature={guarded_feature}: {exc}")
 
     q_np, k_np, v_np = _attention_inputs(
         batch=batch,
@@ -5691,14 +5823,12 @@ def test_attention_experimental_cudnn_bottom_right_decode_support_surface(
     except RuntimeError as exc:
         pytest.xfail(
             "cuDNN rejected bottom-right/decode support-surface probe: "
-            f"mask_kind={mask_kind}, guarded_feature={guarded_feature}: {exc}"
-        )
+            f"mask_kind={mask_kind}, guarded_feature={guarded_feature}: {exc}")
 
     print(
         "SUPPORTED cuDNN bottom-right/decode attention surface: "
         f"mask_kind={mask_kind}, guarded_feature={guarded_feature}, "
-        f"output_shape={output_shape}, stage_kinds={stage_kinds}"
-    )
+        f"output_shape={output_shape}, stage_kinds={stage_kinds}")
 
     if guarded_feature == "dropout":
         assert np.all(np.isfinite(got.astype(np.float32)))
@@ -5778,8 +5908,7 @@ def test_attention_experimental_cudnn_paged_kv_forward_support_surface(monkeypat
     except RuntimeError as exc:
         pytest.xfail(
             "Thor rejected paged-KV cuDNN support-surface probe during expression construction: "
-            f"guarded_feature={guarded_feature}: {exc}"
-        )
+            f"guarded_feature={guarded_feature}: {exc}")
 
     q_np, k_ref, v_ref = _attention_inputs(
         batch=batch,
@@ -5819,15 +5948,12 @@ def test_attention_experimental_cudnn_paged_kv_forward_support_surface(monkeypat
         stamped.run()
         got = _copy_to_host(stamped.output(), dtype, stream)
     except RuntimeError as exc:
-        pytest.xfail(
-            "cuDNN rejected paged-KV support-surface probe: "
-            f"guarded_feature={guarded_feature}: {exc}"
-        )
+        pytest.xfail("cuDNN rejected paged-KV support-surface probe: "
+                     f"guarded_feature={guarded_feature}: {exc}")
 
     print(
         "SUPPORTED cuDNN paged-KV attention surface: "
-        f"guarded_feature={guarded_feature}, output_shape={output_shape}, stage_kinds={stage_kinds}"
-    )
+        f"guarded_feature={guarded_feature}, output_shape={output_shape}, stage_kinds={stage_kinds}")
 
     if guarded_feature == "dropout":
         assert np.all(np.isfinite(got.astype(np.float32)))
@@ -5934,13 +6060,11 @@ def test_attention_experimental_cudnn_paged_kv_backward_support_surface(monkeypa
     except RuntimeError as exc:
         pytest.xfail(
             "cuDNN rejected paged-KV backward support-surface probe: "
-            f"requested_gradients={requested_gradients}: {exc}"
-        )
+            f"requested_gradients={requested_gradients}: {exc}")
 
     print(
         "SUPPORTED cuDNN paged-KV backward surface: "
-        f"requested_gradients={requested_gradients}, output_shapes={output_shapes}, stage_kinds={stage_kinds}"
-    )
+        f"requested_gradients={requested_gradients}, output_shapes={output_shapes}, stage_kinds={stage_kinds}")
     got = stamped.outputs()
     for name in requested_gradients:
         assert f"{name}_grad" in got
@@ -6025,9 +6149,6 @@ def test_attention_forward_with_broadcast_additive_bias_shapes_match_reference(b
     stamped.run()
     got = _copy_to_host(stamped.output(), dtype, stream)
     _assert_close(got, _cast_reference_to_storage_dtype(expected, dtype), dtype)
-
-
-
 
 
 @pytest.mark.cuda
@@ -6165,6 +6286,7 @@ def test_attention_forward_ragged_gqa_cross_attention_with_broadcast_additive_bi
     got_valid = _packed_bshd_ragged_valid_values(got_storage, q_lengths).astype(np.float32)
     expected_valid = _packed_bshd_ragged_valid_values(expected_storage, q_lengths).astype(np.float32)
     np.testing.assert_allclose(got_valid, expected_valid, rtol=5e-2, atol=5e-2)
+
 
 @pytest.mark.cuda
 def test_attention_additive_bias_dtype_must_match_compute_dtype_without_hidden_conversion():
@@ -6437,7 +6559,8 @@ def test_attention_compile_backward_qkv_and_dbias_with_broadcast_additive_bias_s
 
 
 @pytest.mark.cuda
-def test_attention_same_plan_backward_dbias_with_broadcast_additive_bias_reuses_forward_stats_and_reduces_to_public_shape():
+def test_attention_same_plan_backward_dbias_with_broadcast_additive_bias_reuses_forward_stats_and_reduces_to_public_shape(
+):
     dtype = thor.DataType.fp16
     scale = 0.59 / math.sqrt(64.0)
     bias_shape = (1, 1, 64, 64)

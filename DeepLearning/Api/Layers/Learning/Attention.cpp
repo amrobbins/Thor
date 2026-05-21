@@ -956,7 +956,8 @@ void Attention::Builder::verifyConfig() const {
         throw std::invalid_argument("Attention ALiBi requires a causal/sliding-window diagonal mask.");
     }
     if (useAlibi && rightBound != 0) {
-        throw std::invalid_argument("Attention ALiBi requires diagonalRightBound == 0.");
+        throw std::invalid_argument(
+            "Attention ALiBi requires diagonalRightBound == 0 because cuDNN rejects ALiBi with positive right bounds.");
     }
     if (useAlibi && (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
                      maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {

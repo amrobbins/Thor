@@ -742,7 +742,8 @@ void ScaledDotProductAttention::Builder::verifyConfig() const {
         throw std::invalid_argument("ScaledDotProductAttention ALiBi requires a causal/sliding-window diagonal mask.");
     }
     if (useAlibi && rightBound != 0) {
-        throw std::invalid_argument("ScaledDotProductAttention ALiBi requires diagonalRightBound == 0.");
+        throw std::invalid_argument(
+            "ScaledDotProductAttention ALiBi requires diagonalRightBound == 0 because cuDNN rejects ALiBi with positive right bounds.");
     }
     if (useAlibi && (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
                      maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {
@@ -1138,7 +1139,8 @@ void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader
         throw std::runtime_error("ScaledDotProductAttention deserialize ALiBi requires a causal/sliding-window diagonal mask.");
     }
     if (useAlibiMask && diagonalRightBound != 0) {
-        throw std::runtime_error("ScaledDotProductAttention deserialize ALiBi requires diagonal_right_bound == 0.");
+        throw std::runtime_error(
+            "ScaledDotProductAttention deserialize ALiBi requires diagonal_right_bound == 0 because cuDNN rejects ALiBi with positive right bounds.");
     }
     if (useAlibiMask && (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
                          maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {

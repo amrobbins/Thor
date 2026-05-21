@@ -290,6 +290,27 @@ TEST(CudnnAttentionDescriptor, AllowsAdditiveBiasBroadcastSurface) {
     }
 }
 
+TEST(CudnnAttentionDescriptor, RejectsAlibiCausalTopLeftPositiveRightBoundOutsideProbeSurface) {
+    CudnnAttentionDescriptor descriptor = makeDescriptor();
+    descriptor.maskKind = AttentionMaskKind::CausalTopLeft;
+    descriptor.diagonalRightBound = 1;
+    descriptor.useAlibiMask = true;
+
+    EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
+    descriptor.generateStats = true;
+    EXPECT_THROW(descriptor.validateBackward(), std::invalid_argument);
+}
+
+TEST(CudnnAttentionDescriptor, RejectsAlibiSlidingWindowTopLeftPositiveRightBoundOutsideProbeSurface) {
+    CudnnAttentionDescriptor descriptor = makeDescriptor();
+    descriptor.maskKind = AttentionMaskKind::SlidingWindowTopLeft;
+    descriptor.diagonalLeftBound = 3;
+    descriptor.diagonalRightBound = 1;
+    descriptor.useAlibiMask = true;
+
+    EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
+}
+
 TEST(CudnnAttentionDescriptor, RejectsInvalidAdditiveBiasBroadcastShape) {
     CudnnAttentionDescriptor descriptor = makeDescriptor();
     descriptor.useBias = true;

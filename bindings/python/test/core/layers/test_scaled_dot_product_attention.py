@@ -56,6 +56,21 @@ def test_scaled_dot_product_attention_exposes_ragged_bias_public_surface():
     assert attention.get_feature_output().get_dimensions() == [6, 2, 32]
 
 
+def test_scaled_dot_product_attention_rejects_alibi_causal_top_left_positive_right_bound():
+    n = _net("test_sdpa_rejects_alibi_causal_top_left_positive_right_bound")
+    q = _input_tensor(n, "q", [4, 6, 16], thor.DataType.fp16)
+
+    with pytest.raises(ValueError, match="ALiBi.*diagonalRightBound == 0"):
+        thor.layers.ScaledDotProductAttention(
+            n,
+            q,
+            mask_kind="causal_top_left",
+            diagonal_right_bound=1,
+            use_alibi_mask=True,
+            output_data_type=thor.DataType.fp16,
+        )
+
+
 def test_scaled_dot_product_attention_accepts_sequence_broadcast_bias_shape():
     n = _net("test_sdpa_sequence_broadcast_bias_shape")
     q = _input_tensor(n, "q", [4, 5, 16], thor.DataType.fp16)

@@ -585,7 +585,8 @@ class AttentionGraphCache {
             case AttentionMaskKind::None:
                 break;
             case AttentionMaskKind::CausalTopLeft:
-                attrs.set_diagonal_alignment(fe::DiagonalAlignment_t::TOP_LEFT).set_diagonal_band_right_bound(0);
+                attrs.set_diagonal_alignment(fe::DiagonalAlignment_t::TOP_LEFT)
+                    .set_diagonal_band_right_bound(descriptor.diagonalRightBound);
                 break;
             case AttentionMaskKind::CausalBottomRight:
                 attrs.set_diagonal_alignment(fe::DiagonalAlignment_t::BOTTOM_RIGHT).set_diagonal_band_right_bound(0);
@@ -610,7 +611,8 @@ class AttentionGraphCache {
             case AttentionMaskKind::None:
                 break;
             case AttentionMaskKind::CausalTopLeft:
-                attrs.set_diagonal_alignment(fe::DiagonalAlignment_t::TOP_LEFT).set_diagonal_band_right_bound(0);
+                attrs.set_diagonal_alignment(fe::DiagonalAlignment_t::TOP_LEFT)
+                    .set_diagonal_band_right_bound(descriptor.diagonalRightBound);
                 break;
             case AttentionMaskKind::CausalBottomRight:
                 attrs.set_diagonal_alignment(fe::DiagonalAlignment_t::BOTTOM_RIGHT).set_diagonal_band_right_bound(0);
@@ -1138,7 +1140,8 @@ void CudnnAttentionDescriptor::validateForward() const {
                                         maskKind == AttentionMaskKind::SlidingWindowTopLeft ||
                                         maskKind == AttentionMaskKind::SlidingWindowBottomRight;
         if ((!usesCausalDiagonal || diagonalRightBound != 0) && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
-            throwInvalidAttention("ALiBi requires causal diagonal masking with diagonalRightBound == 0");
+            throwInvalidAttention(
+                "ALiBi requires causal diagonal masking with diagonalRightBound == 0 because cuDNN rejects ALiBi with positive right bounds");
     }
     if ((maskKind == AttentionMaskKind::CausalBottomRight || maskKind == AttentionMaskKind::SlidingWindowBottomRight) &&
         (useBias || useAlibiMask || dropout.probability > 0.0f) && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())

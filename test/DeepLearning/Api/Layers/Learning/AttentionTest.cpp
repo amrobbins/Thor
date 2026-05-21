@@ -566,7 +566,7 @@ bool attentionKeyAllowed(const AttentionReferenceCase& c, uint32_t queryIndex, u
         case Impl::AttentionMaskKind::None:
             return true;
         case Impl::AttentionMaskKind::CausalTopLeft:
-            return k <= q;
+            return k <= (q + c.diagonalRightBound);
         case Impl::AttentionMaskKind::CausalBottomRight:
             // Attention layer is self-attention today, so query length and KV length are the same; bottom-right
             // diagonal alignment numerically matches top-left alignment, but still exercises the cuDNN option path.
@@ -2127,6 +2127,23 @@ TEST(AttentionApi, ForwardSlidingWindowTopLeftWithRightBoundMatchesFullCpuRefere
     runAttentionApiReferenceCase(
         "attention_api_forward_sliding_window_top_left_with_right_bound_matches_full_cpu_reference", c, 1.3e-1f, 1.3e-1f);
 }
+
+TEST(AttentionApi, RejectsCausalTopLeftAlibiWithPositiveRightBound) {
+    Api::Network network("attention_api_rejects_causal_top_left_alibi_positive_right_bound");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 64}).dataType(DataType::FP16).build();
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(4)
+                     .maskKind(Impl::AttentionMaskKind::CausalTopLeft)
+                     .diagonalRightBound(1)
+                     .useAlibiMask()
+                     .build(),
+                 std::invalid_argument);
+}
+
 
 TEST(AttentionApi, ForwardCausalTopLeftWithAlibiMatchesFullCpuReferenceAndDiffersFromPlainMask) {
     AttentionReferenceCase c;
