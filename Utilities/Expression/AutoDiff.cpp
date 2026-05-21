@@ -1853,10 +1853,12 @@ static std::vector<uint64_t> inferConvolutionBackwardFilterOutputDims(const Expr
 }
 
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims) {
-    if (input_dims.size() != 2) {
-        throw std::runtime_error("Autodiff transpose shape inference currently only supports rank-2 tensors.");
+    if (input_dims.size() < 2) {
+        throw std::runtime_error("Autodiff transpose shape inference requires rank >= 2 tensors.");
     }
-    return std::vector<uint64_t>{input_dims[1], input_dims[0]};
+    std::vector<uint64_t> out_dims = input_dims;
+    std::swap(out_dims[out_dims.size() - 2], out_dims[out_dims.size() - 1]);
+    return out_dims;
 }
 
 std::vector<std::vector<uint64_t>> inferForwardNodeDims(

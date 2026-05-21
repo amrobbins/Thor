@@ -342,9 +342,11 @@ Create a floating-point scalar constant expression.
         "transpose",
         [](const Expression& a) { return a.transpose(); },
         R"nbdoc(
-Return the rank-2 transpose of this expression.
+Return an expression with the last two dimensions swapped.
 
-Transpose is lowered as its own staged operation.
+For rank-2 tensors this is a matrix transpose. For rank > 2, this is
+a batched transpose over the trailing matrix dimensions. A final transpose
+can be folded into a fused tiled materialization kernel.
 )nbdoc");
     expr.def_prop_ro(
         "T",

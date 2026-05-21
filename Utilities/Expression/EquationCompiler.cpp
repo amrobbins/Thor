@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <functional>
 #include <map>
 #include <optional>
@@ -142,6 +143,10 @@ static std::string makeSpecializedBroadcastCacheKey(const std::string& cuda_src,
     return key;
 }
 
+#ifndef THOR_CUDA_CCCL_INCLUDE_DIR
+#define THOR_CUDA_CCCL_INCLUDE_DIR ""
+#endif
+
 string EquationCompiler::getCudaIncludeDir() {
     if (const char* p = std::getenv("THOR_CUDA_INCLUDE_DIR")) {
         if (*p)
@@ -157,6 +162,28 @@ string EquationCompiler::getCudaIncludeDir() {
     }
 
     return THOR_CUDA_INCLUDE_DIR;  // compile-time fallback from CMake
+}
+
+vector<string> EquationCompiler::getCudaIncludeDirs() {
+    vector<string> include_dirs;
+
+    auto add_unique = [&include_dirs](const string& dir) {
+        if (dir.empty())
+            return;
+        if (std::find(include_dirs.begin(), include_dirs.end(), dir) == include_dirs.end())
+            include_dirs.push_back(dir);
+    };
+
+    add_unique(getCudaIncludeDir());
+
+    if (const char* p = std::getenv("THOR_CUDA_CCCL_INCLUDE_DIR")) {
+        if (*p)
+            add_unique(std::string(p));
+    }
+
+    add_unique(THOR_CUDA_CCCL_INCLUDE_DIR);  // compile-time fallback from CMake
+
+    return include_dirs;
 }
 
 static void ensureCudaContextCurrent(int device_num) {
@@ -1340,10 +1367,15 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
 
     string arch = "--gpu-architecture=compute_" + to_string(sig.sm_major) + to_string(sig.sm_minor);
 
-    const std::string cuda_include_dir = getCudaIncludeDir();
-    const std::string cuda_include_path = std::string("--include-path=") + cuda_include_dir;
+    const vector<string> cuda_include_dirs = getCudaIncludeDirs();
+    vector<string> cuda_include_paths;
+    cuda_include_paths.reserve(cuda_include_dirs.size());
+    for (const string& include_dir : cuda_include_dirs)
+        cuda_include_paths.emplace_back(std::string("--include-path=") + include_dir);
 
-    vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++17", "-fmad=true", cuda_include_path.c_str()};
+    vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++17", "-fmad=true"};
+    for (const string& include_path : cuda_include_paths)
+        opts.push_back(include_path.c_str());
     if (sig.use_fast_math)
         opts.push_back("--use_fast_math");
 

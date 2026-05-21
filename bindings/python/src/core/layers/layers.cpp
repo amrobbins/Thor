@@ -32,6 +32,7 @@ void bind_pooling(nb::module_ &layers);
 void bind_reshape(nb::module_ &m);
 void bind_stub(nb::module_ &m);
 void bind_type_converter(nb::module_ &m);
+void bind_transpose(nb::module_ &m);
 
 void bind_layers(nb::module_ &layers) {
     layers.doc() = "Thor layers";
@@ -63,4 +64,5 @@ void bind_layers(nb::module_ &layers) {
     bind_reshape(layers);
     bind_stub(layers);
     bind_type_converter(layers);
+    bind_transpose(layers);
 }

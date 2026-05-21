@@ -210,19 +210,44 @@ def test_transpose_pointwise_after_stage_numerical(dtype: thor.DataType):
 
 
 @pytest.mark.cuda
-def test_transpose_rejects_non_rank2_tensor_at_stamp_time():
+@pytest.mark.parametrize("shape", [(2, 3, 4), (2, 3, 4, 5)], ids=["rank3", "rank4"])
+def test_transpose_forward_batched_trailing_dims_numerical(shape: tuple[int, ...]):
     x = ex.input("x")
     eq = ex.compile(x.transpose(), device_num=0)
 
     dtype = thor.DataType.fp32
-    x_np = np.arange(1, 1 + 2 * 3 * 4, dtype=np.float32).reshape((2, 3, 4))
+    x_np = (np.arange(1, 1 + int(np.prod(shape)), dtype=np.float32).reshape(shape) * 0.125) - 1.0
+    expected = np.swapaxes(x_np, -1, -2)
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
         "x": _host_to_gpu(x_np, dtype, stream)
     }
 
-    with pytest.raises(RuntimeError, match="rank-2"):
+    assert eq.output_shape(inputs_gpu) == list(expected.shape)
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_transpose_rejects_rank1_tensor_at_stamp_time():
+    x = ex.input("x")
+    eq = ex.compile(x.transpose(), device_num=0)
+
+    dtype = thor.DataType.fp32
+    x_np = np.arange(1, 6, dtype=np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream)
+    }
+
+    with pytest.raises(RuntimeError, match="rank >= 2"):
         eq.stamp(inputs_gpu, stream)
 
 

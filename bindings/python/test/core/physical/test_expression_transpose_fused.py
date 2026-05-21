@@ -411,3 +411,78 @@ def test_fused_broadcast_row_arithmetic_transpose_numerical(input_dtype: thor.Da
     assert got.dtype == _numpy_storage_dtype(output_dtype)
     assert got.shape == expected.shape == (67, 35)
     _assert_close(got, expected, output_dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("shape", [(2, 35, 67), (2, 3, 35, 67)], ids=["rank3", "rank4"])
+def test_fused_arithmetic_batched_transpose_trailing_dims_numerical(shape: tuple[int, ...]):
+    x = ex.input("x")
+    y = ex.input("y")
+    input_dtype = thor.DataType.fp32
+    output_dtype = thor.DataType.fp32
+
+    fused = ((x * 1.25) + (y * -0.5) + ((x - y) * 0.125) - 0.25).with_output_dtype(output_dtype)
+    expr = fused.transpose()
+
+    x_np = (np.arange(1, 1 + int(np.prod(shape)), dtype=np.float32).reshape(shape) * 0.01) - 0.25
+    y_np = (np.arange(1, 1 + int(np.prod(shape)), dtype=np.float32).reshape(shape) * -0.02) + 0.5
+    expected_untransposed = _cast_reference_to_storage_dtype(
+        _arithmetic_reference(x_np, y_np, output_dtype),
+        output_dtype,
+    )
+    expected = np.swapaxes(expected_untransposed, -1, -2)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _copy_numpy_to_gpu(x_np, input_dtype, stream),
+        "y": _copy_numpy_to_gpu(y_np, input_dtype, stream),
+    }
+
+    eq = ex.compile(expr, device_num=0)
+    _assert_fused_transpose_stage(eq, inputs_gpu)
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_gpu_to_numpy(stamped.output(), stream)
+
+    assert got.dtype == _numpy_storage_dtype(output_dtype)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, output_dtype)
+
+
+@pytest.mark.cuda
+def test_fused_broadcast_batched_transpose_trailing_dims_numerical():
+    x = ex.input("x")
+    y = ex.input("y")
+    input_dtype = thor.DataType.fp32
+    output_dtype = thor.DataType.fp32
+
+    x_shape = (2, 3, 35, 67)
+    y_shape = (1, 3, 1, 67)
+    fused = ((x * 1.25) + (y * -0.5) + ((x - y) * 0.125) - 0.25).with_output_dtype(output_dtype)
+    expr = fused.transpose()
+
+    x_np = (np.arange(1, 1 + int(np.prod(x_shape)), dtype=np.float32).reshape(x_shape) * 0.01) - 0.25
+    y_np = (np.arange(1, 1 + int(np.prod(y_shape)), dtype=np.float32).reshape(y_shape) * -0.02) + 0.5
+    expected_untransposed = _cast_reference_to_storage_dtype(
+        _arithmetic_reference(x_np, y_np, output_dtype),
+        output_dtype,
+    )
+    expected = np.swapaxes(expected_untransposed, -1, -2)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _copy_numpy_to_gpu(x_np, input_dtype, stream),
+        "y": _copy_numpy_to_gpu(y_np, input_dtype, stream),
+    }
+
+    eq = ex.compile(expr, device_num=0)
+    _assert_fused_transpose_stage(eq, inputs_gpu)
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_gpu_to_numpy(stamped.output(), stream)
+
+    assert got.dtype == _numpy_storage_dtype(output_dtype)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, output_dtype)
