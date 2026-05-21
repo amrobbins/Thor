@@ -1,39 +1,40 @@
 # Thor cuDNN Scaled Dot Product Attention
 
-This directory adds a low-level Thor tensor operation for cuDNN Frontend SDPA.  It is intended to become Thor's first-class Attention execution stage rather than an expression-level matmul-softmax-matmul decomposition.
+This directory implements Thor's cuDNN Frontend SDPA tensor operation and the policy documentation for the Attention execution stage.
 
-## Current scope
+## Support matrix
 
-Implemented in `CudnnAttention.h/.cpp`:
+This is the production support surface enforced by Thor's public `Attention` /
+`ScaledDotProductAttention` APIs.
 
-- FP16/BF16 SDPA forward and backward through the cuDNN Frontend C++ Graph API.
-- FP8 SDPA forward with explicit scale/descale and amax tensors.
-- Graph-plan caching keyed by GPU, pass, tensor dimensions/strides/dtypes, mask/dropout/padding/ragged/paged options, and scale policy.
-- BHSD and BSHD convenience layout builders while preserving semantic `[B,H,S,D]` indexing.
-- MHA, MQA, and GQA validation.
-- Causal top-left, causal bottom-right, sliding-window masks, padding masks, ALiBi, additive bias, ragged offsets, paged KV table hooks, and Philox/custom dropout hooks for FP16/BF16.
-- Warm-up APIs for stamping/compilation paths that want to build cuDNN plans before first execution.
+Legend: **Yes** = supported and covered; **Limited** =
+supported with the listed restrictions; **No** = rejected.
 
-Reserved but intentionally not enabled yet:
+| Feature | FP16/BF16 forward                                                                                                                                                                                                                                                  | FP16/BF16 backward                                                                                                                                                                                                                                                                        | FP8 forward | FP8 backward |
+|---|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---|---|
+| Tensor dtypes | **Yes**: Q/K/V/O all FP16 or all BF16; FP32 compute/intermediate.                                                                                                                                                                                                  | **Yes**: same dtype contract as forward; forward stats required.                                                                                                                                                                                                                          | **Limited**: Q/K/V/O all FP8 E4M3 or all FP8 E5M2; explicit FP32 descale/scale/amax tensors required; head dims must be multiples of 16 and `<= 128`. | **No**: rejected on the validated surface. |
+| Layouts | **Yes**: BHSD and BSHD via explicit strides.                                                                                                                                                                                                                       | **Yes**.                                                                                                                                                                                                                                                                                  | **Limited**: BHSD/BSHD low-level path is present; public FP8 path is experimental forward-only SDPA. | **No**. |
+| MHA / GQA / MQA | **Yes**: Q heads must be an integer multiple of K/V heads.                                                                                                                                                                                                         | **Yes**.                                                                                                                                                                                                                                                                                  | **Yes** within the FP8 forward restrictions. | **No**. |
+| Attention scale | **Yes**: default `1 / sqrt(Dqk)` or explicit positive scale.                                                                                                                                                                                                       | **Yes**: backward reuses the forward scale.                                                                                                                                                                                                                                               | **Yes** within the FP8 forward restrictions. | **No**. |
+| Masks | **Yes**: none, causal top-left, causal bottom-right, sliding-window top-left, sliding-window bottom-right.                                                                                                                                                         | **Yes**.                                                                                                                                                                                                                                                                                  | **Limited**: none or cuDNN's causal mask API only; bottom-right/decode and sliding-window masks are rejected on the validated surface. | **No**. |
+| ALiBi | **Limited**: requires a causal/sliding-window diagonal mask with `diagonalRightBound == 0`; bottom-right/decode masks are rejected.                                                                                                                                | **Limited**: same restrictions as FP16/BF16 forward.                                                                                                                                                                                                                                      | **No**. | **No**. |
+| Additive score bias | **Yes**: score-space bias is `[1\|B, 1\|Hq, 1\|Sq, 1\|Skv]` for expression/low-level SDPA. Public `Attention` currently requires batch-sized bias `[1\|B, 1\|Hq, 1\|Sq, 1\|Skv]`. Bias dtype must match compute dtype. Not allowed with bottom-right/decode masks. | **Limited**: native cuDNN backward is used for dense or batch/head-broadcast bias `[1\|B, 1\|Hq, Sq, Skv]`; sequence-broadcast bias is materialized to dense before attention backward and dBias is explicitly reduced back to the public bias shape. Ragged + bias backward is rejected. | **No** on the validated public surface. | **No**. |
+| dBias | N/A                                                                                                                                                                                                                                                                | **Yes** for supported additive-bias backward; dBias dtype must be the Q dtype or compute dtype depending on the planned output.                                                                                                                                                           | N/A | **No**. |
+| Dropout | **Yes**: Philox seed/offset. Not allowed with bottom-right/decode masks.                                                                                                                                                                                           | **Yes**: Philox seed/offset only.                                                                                                                                                                                                                                                         | **No** on the validated public surface. | **No**. |
+| Padding masks / sequence lengths | **Yes**: int32 Q and KV sequence-length tensors, both supplied together.                                                                                                                                                                                           | **Yes**.                                                                                                                                                                                                                                                                                  | **Limited**: supported for forward with int32 Q/KV sequence lengths; ragged offsets remain disabled. | **No**. |
+| Ragged offsets / packed THD | **Yes**: requires BSHD physical layout, Q/O offsets together, K/V offsets together, int32 batch+1 offsets, and padding-mask sequence lengths.                                                                                                                      | **Yes** for Q/K/V gradients without additive bias.                                                                                                                                                                                                                                        | **No** on the validated public surface. | **No**. |
+| Ragged + additive bias | **Yes** for forward.                                                                                                                                                                                                                                               | **No** rejected until a supported cuDNN dBias/backward path is implemented.                                                                                                                                                                                                               | **No**. | **No**. |
+| Ragged + dropout | **Yes** for forward.                                                                                                                                                                                                                                               | **Yes** for Q/K/V gradients when no additive bias is present.                                                                                                                                                                                                                             | **No**. | **No**. |
 
-- FP8 backward.  The descriptor and args already carry the required tensors.  Enable it after validating FP8 forward numerics/performance on the target Blackwell/Hopper machine and after deciding whether Thor gradients should remain FP8 or accumulate in a higher-precision side buffer.
-- Full API `Attention` / `MultiHeadAttention` layer integration.  The right integration point is a new `CompiledExecutionStage::Kind::Attention` stage so Thor does not lose cuDNN's fused FlashAttention path by lowering to generic expression ops.
+### Important combination rules
 
-## Build requirements
-
-- CUDA toolkit headers/libraries available to Thor.
-- cuDNN backend/runtime available to Thor.
-- cuDNN Frontend C++ headers available as `<cudnn_frontend.h>`.  NVIDIA recommends cudnn-frontend v1.23.0 for cuDNN 9.21.0 and later.
-
-If the frontend header is absent, the wrapper still compiles but throws an informative runtime error when used.
-
-## Suggested validation order
-
-1. Descriptor-only unit tests for layout/shape/mask validation.
-2. Forward inference FP16/BF16 vs CPU/PyTorch reference: no mask, causal top-left, causal bottom-right, sliding window, MQA/GQA.
-3. Training FP16/BF16: forward stats + backward gradients vs reference with tolerances by dtype.
-4. Variable length: padding-mask path, then ragged THD offsets.
-5. Decode/paged KV cache path with a real KV-cache allocator.
-6. FP8 forward: explicit E4M3/E5M2 scale/descale, amax propagation, and stress tests over small/large sequence lengths.
-7. Enable FP8 backward only after steps 1-6 are stable on the actual CUDA/cuDNN/GPU stack.
-8. Wire into expression scheduling as `Attention` stage and benchmark against Thor decomposition, PyTorch SDPA, FlashAttention, and Transformer Engine.
+- **Bottom-right/decode masks** cannot currently be combined with additive bias,
+  ALiBi, or dropout in the production cuDNN primary SDPA path.
+- **ALiBi with positive `diagonalRightBound`** is rejected because cuDNN rejects
+  ALiBi when `diagonal_band_right_bound != 0`.
+- **Sequence-broadcast additive bias** is production-enabled for forward. For
+  backward, Thor must materialize the broadcast bias to dense score space before
+  cuDNN backward, then reduce dense dBias back to the original public bias shape.
+- **FP8 is forward-only** in the public SDPA surface. FP8 backward structs and
+  graph hooks are intentionally kept for support-surface probes, but production
+  Thor rejects FP8 backward.

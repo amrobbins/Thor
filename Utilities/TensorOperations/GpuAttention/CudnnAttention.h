@@ -70,8 +70,10 @@ struct CudnnAttentionDescriptor {
     AttentionTensorSpec o;
 
     // Additive bias is a score-space tensor in semantic [B,Hq,Sq,Skv] order.
-    // cuDNN's primary SDPA forward path supports broadcasting the batch and/or head dimensions
-    // by setting them to 1.  Sequence dimensions must stay equal to the descriptor max Sq/Skv.
+    // Production forward supports independently broadcasting any score dimension by setting
+    // B/Hq/Sq/Skv to 1. Production backward sends only dense or batch/head-broadcast bias
+    // directly to cuDNN; sequence-broadcast bias is materialized to dense by autodiff and
+    // dense dBias is reduced back to the public bias shape.
     std::optional<AttentionTensorSpec> bias;
 
     // Backward dBias is also score-space, but Thor currently exposes only the full dense dBias tensor.

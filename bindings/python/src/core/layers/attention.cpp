@@ -318,10 +318,52 @@ void bind_attention(nb::module_& layers) {
         "context_input"_a.none() = nb::none(),
         "score_bias_input"_a.none() = nb::none(),
         R"nbdoc(
-Public transformer attention layer.
+Public transformer attention layer built from learned Q/K/V/O projections and the
+cuDNN scaled-dot-product attention stage.
 
-The logical feature input shape is ``[sequence, input_features]``.  Placement adds the batch dimension, so the physical
-hot path consumes ``[batch, sequence, input_features]``.
+API tensor shapes omit batch.  ``feature_input`` is ``[Sq, input_features]`` and
+``context_input``, when supplied for cross-attention, is ``[Skv, context_features]``.
+Placement adds the batch dimension, so the cuDNN hot path consumes semantic
+``[B, H, S, D]`` tensors after projection.
+
+Supported production dtype surface:
+
+* FP16 and BF16 forward/backward are the first-class training path.  Q/K/V/O use
+  one FP16 or BF16 storage dtype and attention compute/intermediate dtype is FP32.
+* FP8 attention is not exposed by this high-level learned-projection layer.  Use
+  ``thor.layers.ScaledDotProductAttention`` for the experimental FP8 forward-only
+  low-level SDPA path.
+
+Supported features for FP16/BF16:
+
+* Self-attention and cross-attention through ``context_input``.
+* MHA, GQA, and MQA: ``num_heads`` must be an integer multiple of
+  ``num_key_value_heads``.
+* RoPE with ``none``, ``linear``, ``dynamic_ntk``, ``yarn``, ``longrope``, and
+  ``llama3`` scaling parameterizations.
+* Masks: ``none``, ``causal_top_left``, ``causal_bottom_right``,
+  ``sliding_window_top_left``, and ``sliding_window_bottom_right``.
+* ALiBi only with causal/sliding diagonal masks and ``diagonal_right_bound == 0``;
+  cuDNN rejects ALiBi with a positive right bound.
+* Additive score bias via ``score_bias_input`` with logical API shape
+  ``[1|num_heads, 1|Sq, 1|Skv]`` and dtype equal to ``compute_data_type``.  Forward
+  supports sequence broadcast.  Backward materializes sequence-broadcast bias to
+  dense score space before cuDNN backward, then reduces dBias back to the public
+  bias shape.  Ragged + additive-bias backward is rejected.
+* Dropout uses cuDNN Philox attention dropout.  ``dropout_probability`` must be in
+  ``[0, 1)``.  Thor advances the runtime dropout offset by ``B * Hq * Sq * Skv``.
+* Padding masks use ``query_sequence_lengths`` and ``key_value_sequence_lengths``
+  together, both int32 logical ``[1]`` tensors.
+* Ragged/packed variable-length attention uses both query and key/value ragged
+  offset tensors together, both int32 logical ``[2]`` tensors that NetworkInput
+  batches into cuDNN's ``[B + 1]`` offset vectors.
+
+Important combination rules:
+
+* Bottom-right/decode masks currently require additive bias, ALiBi, and dropout
+  to be disabled in the production cuDNN primary SDPA path.
+* This layer does not expose paged KV cache; use the physical expression SDPA API
+  for the low-level inference-only paged-KV path.
 )nbdoc");
 
     attention.def("get_feature_output", [](Attention& self) -> Tensor { return self.getOutput("feature_output"); });

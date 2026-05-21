@@ -276,22 +276,60 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
     sdpa.def("get_output_data_type", &ScaledDotProductAttention::getOutputDataType);
 
     sdpa.attr("__doc__") = R"nbdoc(
-        cuDNN-backed scaled dot-product attention layer for already-projected Q/K/V tensors.
+cuDNN-backed scaled dot-product attention layer for already-projected Q/K/V tensors.
 
-        API tensor shapes omit batch.  tensor_layout='bhsd' means [heads, sequence, head_dim];
-        tensor_layout='bshd' means [sequence, heads, head_dim].  Additive bias, when provided,
-        is dense score-space [query_heads, query_sequence, key_sequence] and fp32 by default.
+API tensor shapes omit batch.  ``tensor_layout='bhsd'`` means
+``[heads, sequence, head_dim]`` and ``tensor_layout='bshd'`` means
+``[sequence, heads, head_dim]``.  Placement adds the batch dimension and the
+cuDNN stage consumes semantic ``[B, H, S, D]`` tensors.
 
-        sequence_lengths and ragged_offsets are self-attention conveniences.  Cross-attention can
-        use query_sequence_lengths/key_value_sequence_lengths and query_ragged_offsets/key_value_ragged_offsets.
-        Ragged offsets use the same compact API convention as thor.layers.Attention: logical shape [2]
-        is batched by NetworkInput into enough storage for the [batch + 1] cuDNN offset vector.
-        dropout_probability/dropout_seed/dropout_offset expose cuDNN's Philox attention-dropout path.
+FP16/BF16 production support:
 
-        Experimental FP8 forward-only SDPA is available by passing all eight scalar fp32
-        tensors fp8_descale_q/fp8_descale_k/fp8_descale_v/fp8_descale_s/fp8_scale_s/
-        fp8_scale_o/fp8_amax_s/fp8_amax_o. This path is forward-only and follows the
-        validated cuDNN FP8 support surface: no additive bias, no dropout, no ALiBi, no
-        ragged or paged-KV path, head dims multiples of 16 and <= 128.
-        )nbdoc";
+* Q/K/V/O must all use the same FP16 or BF16 dtype.  ``compute_data_type`` should
+  be FP32 and ``output_data_type`` should normally match Q/K/V.
+* Forward and backward are supported for self-attention, cross-attention, MHA,
+  GQA, and MQA.  Query heads must be an integer multiple of key/value heads.
+* Masks: ``none``, ``causal_top_left``, ``causal_bottom_right``,
+  ``sliding_window_top_left``, and ``sliding_window_bottom_right``.
+* ALiBi requires a causal/sliding diagonal mask and ``diagonal_right_bound == 0``.
+  Positive right bounds with ALiBi are rejected because cuDNN rejects that graph.
+* ``bias_input`` is score-space additive bias with API shape
+  ``[1|Hq, 1|Sq, 1|Skv]`` and dtype equal to ``compute_data_type``.  Forward
+  supports sequence broadcast.  Backward materializes sequence-broadcast bias to
+  dense score space before cuDNN backward and reduces dBias back to the public
+  bias shape.  Ragged + additive-bias backward is rejected.
+* ``sequence_lengths`` and ``ragged_offsets`` are self-attention conveniences.
+  Cross-attention can use ``query_sequence_lengths``/``key_value_sequence_lengths``
+  and ``query_ragged_offsets``/``key_value_ragged_offsets``.  Sequence lengths are
+  int32 logical ``[1]`` tensors.  Ragged offsets are int32 logical ``[2]`` tensors
+  that NetworkInput batches into cuDNN ``[B + 1]`` offset vectors.
+* ``dropout_probability``/``dropout_seed``/``dropout_offset`` expose cuDNN Philox
+  attention dropout.  Thor advances the runtime dropout offset by
+  ``B * Hq * Sq * Skv``.
+
+Experimental FP8 forward-only support:
+
+* Enable by passing all eight scalar FP32 tensors:
+  ``fp8_descale_q``, ``fp8_descale_k``, ``fp8_descale_v``, ``fp8_descale_s``,
+  ``fp8_scale_s``, ``fp8_scale_o``, ``fp8_amax_s``, and ``fp8_amax_o``.
+* Q/K/V/O must all be the same FP8 format, either E4M3 or E5M2.  QK and V head
+  dimensions must be multiples of 16 and no larger than 128 on the validated
+  production surface.
+* FP8 backward is not supported.  FP8 additive bias, dropout, ALiBi, ragged,
+  paged KV, bottom-right/decode masks, sliding-window masks, and decode-style
+  ``Sq=1, Skv>1`` are rejected on the validated public surface.
+* FP8 padding masks / sequence lengths are supported for forward; ragged offsets
+  remain disabled for FP8.
+
+Important combination rules:
+
+* Bottom-right/decode masks currently require additive bias, ALiBi, and dropout
+  to be disabled in the production cuDNN primary SDPA path.
+* Paged KV cache is not exposed by this layer.  It is available only through the
+  low-level physical expression API as an inference-only FP16/BF16 path with
+  padding-mask sequence lengths, no bias, and no dropout.
+* Experimental cuDNN support-surface probe environment variables can bypass some
+  guards for measurement, but those combinations are not user-facing support
+  guarantees.
+)nbdoc";
 }

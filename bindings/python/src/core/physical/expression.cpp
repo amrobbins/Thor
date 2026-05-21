@@ -84,6 +84,14 @@ void bind_physical_expression(nb::module_& physical) {
                                 .value("bhsd", AttentionTensorLayout::BHSD)
                                 .value("bshd", AttentionTensorLayout::BSHD);
     attention_layout.attr("__module__") = "thor.physical";
+    attention_layout.attr("__doc__") = R"nbdoc(
+Attention tensor layout used by cuDNN SDPA expression stages.
+
+The semantic tensor shape is always ``[B, H, S, D]``.  ``bhsd`` stores that order
+directly.  ``bshd`` stores batch, sequence, heads, head dimension.  Ragged/packed
+THD attention requires BSHD physical layouts for Q/K/V/O so ragged offsets index
+packed token-contiguous storage.
+)nbdoc";
 
     auto attention_mask_kind = nb::enum_<AttentionMaskKind>(physical, "AttentionMaskKind")
                                    .value("none", AttentionMaskKind::None)
@@ -92,6 +100,15 @@ void bind_physical_expression(nb::module_& physical) {
                                    .value("sliding_window_top_left", AttentionMaskKind::SlidingWindowTopLeft)
                                    .value("sliding_window_bottom_right", AttentionMaskKind::SlidingWindowBottomRight);
     attention_mask_kind.attr("__module__") = "thor.physical";
+    attention_mask_kind.attr("__doc__") = R"nbdoc(
+Mask kinds supported by Thor's cuDNN SDPA path.
+
+``causal_top_left`` and ``sliding_window_top_left`` use standard top-left diagonal
+semantics.  ``causal_bottom_right`` and ``sliding_window_bottom_right`` support
+decode-style alignment, but production cuDNN primary SDPA currently requires
+additive bias, ALiBi, and dropout to be disabled for bottom-right/decode masks.
+ALiBi requires a causal/sliding diagonal mask with ``diagonal_right_bound == 0``.
+)nbdoc";
 
     auto rotary_scaling_kind = nb::enum_<RotaryScalingKind>(physical, "RotaryScalingKind")
                                    .value("none", RotaryScalingKind::None)
@@ -101,6 +118,11 @@ void bind_physical_expression(nb::module_& physical) {
                                    .value("longrope", RotaryScalingKind::LongRope)
                                    .value("llama3", RotaryScalingKind::Llama3);
     rotary_scaling_kind.attr("__module__") = "thor.physical";
+    rotary_scaling_kind.attr("__doc__") = R"nbdoc(
+RoPE scaling parameterization for ``Expression.rotary_position_embedding`` and
+``thor.layers.Attention``.  The high-level Attention layer supports ``none``,
+``linear``, ``dynamic_ntk``, ``yarn``, ``longrope``, and ``llama3``.
+)nbdoc";
 
     physical.def(
         "cudnn_frontend_attention_available",
@@ -861,28 +883,56 @@ which is used by autodiff.
         R"nbdoc(
 Create a cuDNN scaled-dot-product attention expression stage.
 
-All tensors use logical semantic shape [B, H, S, D].  Layout arguments describe
-how the stage should hand those logical tensors to cuDNN.  The default layout is
-BHSD, matching Thor's row-major physical tensor layout for rank-4 attention
-inputs.  output_dtype should normally match q/k/v for the current cuDNN SDPA
-path; compute_dtype should normally be thor.DataType.fp32.
+All tensors use semantic shape ``[B, H, S, D]``.  Layout arguments describe how
+those tensors are handed to cuDNN.  The default layout is BHSD, matching Thor's
+row-major physical tensor layout for rank-4 attention inputs.  ``output_dtype``
+should normally match Q/K/V for the current cuDNN SDPA path; ``compute_dtype``
+should normally be ``thor.DataType.fp32``.
 
-When q_ragged_offsets and kv_ragged_offsets are provided, they must be INT32 GPU
-tensors with shape [B + 1].  They enable cuDNN packed/ragged variable-length
-attention and are passed through as q/o and k/v ragged offsets respectively.
-Additive bias remains a score-space tensor when ragged offsets are used; supported
-forward shapes are [1,1,Sq,Skv], [1,Hq,Sq,Skv], [B,1,Sq,Skv], and
-[B,Hq,Sq,Skv]. It is indexed by each sequence's local q/kv positions, not by
-packed token offsets.
+FP16/BF16 production support:
 
-When page_table_k and page_table_v are provided, they must be INT32 GPU tensors
-with shape [B, 1, ceil(Skv / block_size), 1], where block_size is the K/V
-container block length.  Paged-KV attention requires q_seq_len and kv_seq_len,
-and paged_kv_max_sequence_length must be positive.
+* Q/K/V/O must all use the same FP16 or BF16 dtype.  Forward and backward are
+  supported for self-attention, cross-attention, MHA, GQA, and MQA.
+* Supported masks are ``none``, ``causal_top_left``, ``causal_bottom_right``,
+  ``sliding_window_top_left``, and ``sliding_window_bottom_right``.
+* ALiBi requires a causal/sliding diagonal mask and ``diagonal_right_bound == 0``.
+* ``bias`` is additive score-space bias in ``[1|B, 1|Hq, 1|Sq, 1|Skv]`` semantic
+  order and must use the compute dtype.  Forward supports sequence broadcast.
+  Backward materializes sequence-broadcast bias to dense score space before
+  cuDNN backward, then explicitly reduces dBias back to the requested bias shape.
+* When ``q_ragged_offsets`` and ``kv_ragged_offsets`` are provided, they must be
+  int32 GPU tensors with shape ``[B + 1]``.  They enable cuDNN packed/ragged
+  variable-length attention and are passed through as Q/O and K/V ragged offsets.
+  Ragged + additive-bias forward is supported, but ragged + additive-bias
+  backward is rejected.
+* When ``dropout_probability > 0``, ``dropout_seed`` and ``dropout_offset`` must
+  be int64 GPU scalar expressions with shape ``[1, 1, 1, 1]``.  They are passed
+  to cuDNN's Philox attention dropout path.
 
-When dropout_probability > 0, dropout_seed and dropout_offset must be INT64 GPU
-scalar expressions with shape [1, 1, 1, 1].  They are passed to cuDNN's Philox
-attention dropout path and are part of the attention stage metadata.
+Paged KV cache:
+
+* ``page_table_k`` and ``page_table_v`` must be int32 GPU tensors with shape
+  ``[B, 1, ceil(Skv / block_size), 1]``.  Paged-KV attention requires
+  ``q_seq_len`` and ``kv_seq_len`` and a positive ``paged_kv_max_sequence_length``.
+* The production paged-KV path is FP16/BF16 forward-only/inference-only.  Bias,
+  dropout, ragged offsets, and backward are rejected for paged KV.
+
+FP8 support:
+
+* FP8 is exposed by the lower-level FP8-specific expression path and by
+  ``thor.layers.ScaledDotProductAttention`` with explicit scale/descale/amax
+  tensors.  This generic expression wrapper documents the same validated surface:
+  forward-only, same FP8 format for Q/K/V/O, head dimensions multiples of 16 and
+  ``<= 128``, no additive bias, no dropout, no ALiBi, no ragged, no paged KV, no
+  bottom-right/decode or sliding-window masks, and no decode-style ``Sq=1, Skv>1``.
+* FP8 padding masks / sequence lengths are supported for forward.
+
+Important combination rules:
+
+* Bottom-right/decode masks currently require additive bias, ALiBi, and dropout
+  to be disabled in the production cuDNN primary SDPA path.
+* Experimental cuDNN support-surface probe environment variables can bypass some
+  guards for measurement only; probe-only combinations are not support guarantees.
 )nbdoc");
 
     expr.def_static(

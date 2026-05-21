@@ -2724,7 +2724,7 @@ void validateAttentionOptions(const AttentionOptions& options, bool use_bias, bo
                                           options.mask_kind == AttentionMaskKind::SlidingWindowBottomRight;
         if ((!uses_causal_diagonal || options.diagonal_right_bound != 0) && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
             throw std::runtime_error(
-                "AttentionOptions::use_alibi_mask requires causal diagonal masking with diagonal_right_bound == 0.");
+                "AttentionOptions::use_alibi_mask requires causal diagonal masking with diagonal_right_bound == 0 because cuDNN rejects ALiBi with positive right bounds.");
         }
     }
     if (options.dropout_probability < 0.0f || options.dropout_probability >= 1.0f) {
