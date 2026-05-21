@@ -15,22 +15,42 @@ def _find_site_packages_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _configure_cuda_include_dir() -> None:
-    if "THOR_CUDA_INCLUDE_DIR" in os.environ:
+def _set_env_from_first_existing_include(env_name: str, candidates: list[Path], sentinel: Path) -> None:
+    if env_name in os.environ:
         return
 
-    here = Path(__file__).resolve()
+    for candidate in candidates:
+        if (candidate / sentinel).exists():
+            os.environ.setdefault(env_name, str(candidate))
+            return
+
+
+def _configure_cuda_include_dirs() -> None:
     site_packages = _find_site_packages_root()
 
-    candidates = [
+    # CUDA 13 toolkit wheels use the unified nvidia/cu13/include layout.
+    # Older/split wheels may still expose component-specific include roots.
+    cuda_include_candidates = [
         site_packages / "nvidia" / "cu13" / "include",
         site_packages / "nvidia" / "cuda_runtime" / "include",
     ]
+    _set_env_from_first_existing_include(
+        "THOR_CUDA_INCLUDE_DIR",
+        cuda_include_candidates,
+        Path("vector_types.h"),
+    )
 
-    for candidate in candidates:
-        if (candidate / "vector_types.h").exists():
-            os.environ.setdefault("THOR_CUDA_INCLUDE_DIR", str(candidate))
-            return
+    # CUB is shipped as part of CCCL. CUDA 13 installs it into the unified
+    # nvidia/cu13/include tree; older layouts may use nvidia/cuda_cccl/include.
+    cub_include_candidates = [
+        site_packages / "nvidia" / "cu13" / "include",
+        site_packages / "nvidia" / "cuda_cccl" / "include",
+    ]
+    _set_env_from_first_existing_include(
+        "THOR_CUDA_CCCL_INCLUDE_DIR",
+        cub_include_candidates,
+        Path("cub") / "cub.cuh",
+    )
 
 
 def _preload_cuda_user_space_libs() -> None:
@@ -78,7 +98,7 @@ def _configure_cudnn_frontend_include_dir() -> None:
         os.environ.setdefault("THOR_CUDNN_FRONTEND_INCLUDE_DIR", str(candidate))
 
 
-_configure_cuda_include_dir()
+_configure_cuda_include_dirs()
 _configure_cudnn_frontend_include_dir()
 _preload_cuda_user_space_libs()
 

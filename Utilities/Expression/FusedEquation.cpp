@@ -914,10 +914,12 @@ static std::vector<uint64_t> inferRmsNormOutputDims(const ExprNode& node,
                                                     const std::vector<uint64_t>& scale_dims);
 
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims) {
-    if (input_dims.size() != 2) {
-        throw std::runtime_error("Transpose shape inference currently only supports rank-2 tensors.");
+    if (input_dims.size() < 2) {
+        throw std::runtime_error("Transpose shape inference requires rank >= 2 tensors.");
     }
-    return std::vector<uint64_t>{input_dims[1], input_dims[0]};
+    std::vector<uint64_t> out_dims = input_dims;
+    std::swap(out_dims[out_dims.size() - 2], out_dims[out_dims.size() - 1]);
+    return out_dims;
 }
 
 struct AttentionTensorLogicalDims {
@@ -3729,10 +3731,10 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
     std::vector<uint64_t> output_dims = node_dims[local_node_idx];
     if (stage.kind == CompiledExecutionStage::Kind::FusedKernel &&
         stage.outputs[output_idx].materialized_layout == MaterializedTensorLayout::Transposed) {
-        if (output_dims.size() != 2) {
-            throw std::runtime_error("Transposed fused materialization currently requires a rank-2 logical output.");
+        if (output_dims.size() < 2) {
+            throw std::runtime_error("Transposed fused materialization requires a rank >= 2 logical output.");
         }
-        std::swap(output_dims[0], output_dims[1]);
+        std::swap(output_dims[output_dims.size() - 2], output_dims[output_dims.size() - 1]);
     }
     return output_dims;
 }
@@ -3761,10 +3763,10 @@ static std::vector<uint64_t> logicalDimsForBroadcastComparison(const CompiledExe
                                                                size_t output_idx,
                                                                std::vector<uint64_t> physical_output_dims) {
     if (stage.outputs[output_idx].materialized_layout == MaterializedTensorLayout::Transposed) {
-        if (physical_output_dims.size() != 2) {
-            throw std::runtime_error("Transposed fused materialization currently requires a rank-2 output.");
+        if (physical_output_dims.size() < 2) {
+            throw std::runtime_error("Transposed fused materialization requires a rank >= 2 output.");
         }
-        std::swap(physical_output_dims[0], physical_output_dims[1]);
+        std::swap(physical_output_dims[physical_output_dims.size() - 2], physical_output_dims[physical_output_dims.size() - 1]);
     }
     return physical_output_dims;
 }

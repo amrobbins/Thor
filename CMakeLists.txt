@@ -217,12 +217,38 @@ target_link_libraries(Thor PRIVATE
         "${THOR_CUDNN_LIBRARY}"
 )
 
+# CCCL provides the CUB headers. CUDA 13 wheels normally use the unified
+# nvidia/cu13/include tree, but older/split wheel layouts may use
+# nvidia/cuda_cccl/include. Default to the main CUDA include dir, then prefer
+# an explicitly configured or discoverable CCCL include root when available.
+set(THOR_CUDA_CCCL_INCLUDE_DIR "${THOR_CUDA_INCLUDE_DIR}" CACHE PATH "CUDA CCCL/CUB include directory")
+
+if (DEFINED ENV{THOR_CUDA_CCCL_INCLUDE_DIR} AND NOT "$ENV{THOR_CUDA_CCCL_INCLUDE_DIR}" STREQUAL "")
+    set(THOR_CUDA_CCCL_INCLUDE_DIR "$ENV{THOR_CUDA_CCCL_INCLUDE_DIR}" CACHE PATH "CUDA CCCL/CUB include directory" FORCE)
+elseif (DEFINED Python3_EXECUTABLE AND Python3_EXECUTABLE)
+    execute_process(
+            COMMAND "${Python3_EXECUTABLE}" -c
+            "import sysconfig
+from pathlib import Path
+site = Path(sysconfig.get_paths()['platlib'])
+candidates = [site / 'nvidia' / 'cu13' / 'include', site / 'nvidia' / 'cuda_cccl' / 'include']
+print(next((str(c) for c in candidates if (c / 'cub' / 'cub.cuh').exists()), ''))"
+            OUTPUT_VARIABLE _thor_python_cccl_include_dir
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if (_thor_python_cccl_include_dir)
+        set(THOR_CUDA_CCCL_INCLUDE_DIR "${_thor_python_cccl_include_dir}" CACHE PATH "CUDA CCCL/CUB include directory" FORCE)
+    endif ()
+endif ()
+
 target_include_directories(Thor PUBLIC
         ${CUDAToolkit_INCLUDE_DIRS}
+        "${THOR_CUDA_CCCL_INCLUDE_DIR}"
 )
 
 target_compile_definitions(Thor PRIVATE
         THOR_CUDA_INCLUDE_DIR=\"${THOR_CUDA_INCLUDE_DIR}\"
+        THOR_CUDA_CCCL_INCLUDE_DIR=\"${THOR_CUDA_CCCL_INCLUDE_DIR}\"
 )
 
 find_package(Curses REQUIRED)
@@ -597,6 +623,9 @@ find_package(nanobind CONFIG REQUIRED)
 option(THOR_BUILD_PYTHON "Build Python bindings" ON)
 if (THOR_BUILD_PYTHON)
     add_subdirectory(bindings/python)
+    if (TARGET thor_py_deps)
+        add_dependencies(Thor thor_py_deps)
+    endif ()
 endif ()
 
 # For convenience, rebuild the python bindings before rebuilding the c++ tests

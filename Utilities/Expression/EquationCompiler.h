@@ -67,6 +67,7 @@ class EquationCompiler {
                                                                               const EquationSignature& sig,
                                                                               const std::vector<SpecializedBroadcastGroup>& groups);
     static std::string getCudaIncludeDir();
+    static std::vector<std::string> getCudaIncludeDirs();
 };
 
 }  // namespace ThorImplementation

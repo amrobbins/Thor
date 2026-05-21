@@ -3,6 +3,8 @@ requires = [
     "scikit-build-core>=0.11.6",
     "nanobind>=2.11.0",
     "numpy>=2.3.4",
+    "cmake>=3.22",
+    "ninja",
 ]
 build-backend = "scikit_build_core.build"
 
@@ -25,7 +27,8 @@ dependencies = [
     "nvidia-cudnn-cu13>=9.22,<10",
     "nvidia-cusparse>=12,<13",
     "nvidia-cusolver>=12,<13",
-    "nvidia-cudnn-frontend>=1.23.0, <2"
+    "nvidia-cudnn-frontend>=1.23.0, <2",
+    "nvidia-cuda-cccl>=13,<14"
 ]
 readme = { file = "README.md", content-type = "text/markdown" }
 

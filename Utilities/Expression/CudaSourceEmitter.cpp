@@ -3289,7 +3289,13 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     if (!first_arg) {
         ss << ", ";
     }
-    ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols) {\n";
+    ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols, " << index_type << " batchCount) {\n";
+    ss << "  const " << index_type << " rowTiles = (numRows + static_cast<" << index_type << ">(TILE_DIM) - 1) / static_cast<"
+       << index_type << ">(TILE_DIM);\n";
+    ss << "  const " << index_type << " batchIdx = static_cast<" << index_type << ">(blockIdx.y) / rowTiles;\n";
+    ss << "  if (batchIdx >= batchCount) return;\n";
+    ss << "  const " << index_type << " rowTile = static_cast<" << index_type << ">(blockIdx.y) - batchIdx * rowTiles;\n";
+    ss << "  const " << index_type << " matrixOffset = batchIdx * numRows * numCols;\n\n";
 
     if (emit_decoupled_line_vectorized_path) {
         const DataType input_dtype = maybe_tensor_input_dtype.value();
@@ -3307,7 +3313,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
             ss << "  using OutputPack = " << transposePackType(output_dtype) << ";\n";
         }
         ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_COL_SCALARS + 1];\n";
-        ss << "  const " << index_type << " rowStart = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM;\n";
+        ss << "  const " << index_type << " rowStart = rowTile * TILE_DIM;\n";
         ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int threadLinear = threadIdx.y * TILE_DIM + threadIdx.x;\n\n";
 
@@ -3319,7 +3325,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "    const " << index_type << " logicalRow = rowStart + static_cast<" << index_type << ">(localRow);\n";
         ss << "    const " << index_type << " logicalColBase = colStart + static_cast<" << index_type
            << ">(localReadPackCol) * READ_PACK_SCALARS;\n";
-        ss << "    const " << index_type << " idx_base = logicalRow * numCols + logicalColBase;\n";
+        ss << "    const " << index_type << " idx_base = matrixOffset + logicalRow * numCols + logicalColBase;\n";
 
         auto emit_flat_scalar_lanes = [&](const std::string& base_indent, const std::string& idx_expr_base, bool use_loaded_chunks) {
             if (use_loaded_chunks && isFp8DType(input_dtype)) {
@@ -3355,7 +3361,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                     ss << base_indent << "  const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
                     ss << base_indent << "  const " << index_type << " logicalCol = logicalColBase + " << lane_literal << ";\n";
                     ss << base_indent << "  if (logicalCol < numCols) {\n";
-                    ss << base_indent << "    const " << index_type << " idx = logicalRow * numCols + logicalCol;\n";
+                    ss << base_indent << "    const " << index_type << " idx = matrixOffset + logicalRow * numCols + logicalCol;\n";
                     for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
                         if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
                             continue;
@@ -3379,7 +3385,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                 ss << base_indent << "  const " << index_type << " logicalCol = logicalColBase + static_cast<" << index_type
                    << ">(LANE);\n";
                 ss << base_indent << "  if (logicalCol < numCols) {\n";
-                ss << base_indent << "    const " << index_type << " idx = logicalRow * numCols + logicalCol;\n";
+                ss << base_indent << "    const " << index_type << " idx = matrixOffset + logicalRow * numCols + logicalCol;\n";
                 for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
                     if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
                         continue;
@@ -3448,7 +3454,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
             ss << "        output_pack_data[lane] = tile[localOutPackCol * WRITE_PACK_SCALARS + lane][localOutRow];\n";
             ss << "      }\n";
             ss << "    }\n";
-            ss << "    const " << index_type << " out_base_idx = outputRow * numRows + outputColBase;\n";
+            ss << "    const " << index_type << " out_base_idx = matrixOffset + outputRow * numRows + outputColBase;\n";
             ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + WRITE_PACK_SCALARS <= numRows) &&\n";
             ss << "                                     ((out_base_idx % WRITE_PACK_SCALARS) == "
                << emitUnsignedLiteral(0, use_uint32_index_math) << ");\n";
@@ -3459,13 +3465,13 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
             ss << "      for (unsigned int lane = 0; lane < WRITE_PACK_SCALARS; ++lane) {\n";
             ss << "        const " << index_type << " outputCol = outputColBase + static_cast<" << index_type << ">(lane);\n";
             ss << "        if (outputCol < numRows) {\n";
-            ss << "          out0[outputRow * numRows + outputCol] = output_pack_data[lane];\n";
+            ss << "          out0[matrixOffset + outputRow * numRows + outputCol] = output_pack_data[lane];\n";
             ss << "        }\n";
             ss << "      }\n";
             ss << "    }\n";
         } else {
             ss << "    if (outputRow < numCols && outputColBase < numRows) {\n";
-            ss << "      out0[outputRow * numRows + outputColBase] = tile[localOutPackCol][localOutRow];\n";
+            ss << "      out0[matrixOffset + outputRow * numRows + outputColBase] = tile[localOutPackCol][localOutRow];\n";
             ss << "    }\n";
         }
         ss << "  }\n";
@@ -3496,7 +3502,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         }
         ss << "  union PackRaw { unsigned int raw; Pack pack; };\n";
         ss << "  __shared__ unsigned int tile[TILE_DIM][TILE_DIM + 1];\n";
-        ss << "  const " << index_type << " rowStart = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM;\n";
+        ss << "  const " << index_type << " rowStart = rowTile * TILE_DIM;\n";
         ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int packedCol = threadIdx.x;\n";
         ss << "  const " << index_type << " logicalColBase = colStart + static_cast<" << index_type << ">(packedCol) * PACK_SCALARS;\n";
@@ -3518,7 +3524,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
 
         ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
         ss << "    const " << index_type << " logicalRow = rowStart + threadIdx.y + j;\n";
-        ss << "    const " << index_type << " idx_base = logicalRow * numCols + logicalColBase;\n";
+        ss << "    const " << index_type << " idx_base = matrixOffset + logicalRow * numCols + logicalColBase;\n";
         ss << "    const bool inputPackedLoadOk = (logicalRow < numRows) && (logicalColBase + PACK_SCALARS <= numCols) &&\n";
         ss << "                                   ((idx_base % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
            << ");\n";
@@ -3568,7 +3574,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "      for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
         ss << "        const " << index_type << " logicalCol = logicalColBase + lane;\n";
         ss << "        if (logicalCol < numCols) {\n";
-        ss << "          const " << index_type << " idx = logicalRow * numCols + logicalCol;\n";
+        ss << "          const " << index_type << " idx = matrixOffset + logicalRow * numCols + logicalCol;\n";
         ss << "          {\n";
         if (emit_fp8_to_bf16_float2_path) {
             emitFloatScalarNodeDefinitions(
@@ -3613,7 +3619,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "      const " << output_type << "* input_scalar = reinterpret_cast<const " << output_type << "*>(&input_raw.pack);\n";
         ss << "      output_scalar[lane] = input_scalar[inputColLane];\n";
         ss << "    }\n";
-        ss << "    const " << index_type << " out_base_idx = outputRow * numRows + outputColBase;\n";
+        ss << "    const " << index_type << " out_base_idx = matrixOffset + outputRow * numRows + outputColBase;\n";
         ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + PACK_SCALARS <= numRows) &&\n";
         ss << "                                     ((out_base_idx % PACK_SCALARS) == " << emitUnsignedLiteral(0, use_uint32_index_math)
            << ");\n";
@@ -3624,7 +3630,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         ss << "      for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
         ss << "        const " << index_type << " outputCol = outputColBase + lane;\n";
         ss << "        if (outputCol < numRows) {\n";
-        ss << "          out0[outputRow * numRows + outputCol] = output_scalar[lane];\n";
+        ss << "          out0[matrixOffset + outputRow * numRows + outputCol] = output_scalar[lane];\n";
         ss << "        }\n";
         ss << "      }\n";
         ss << "    }\n";
@@ -3635,12 +3641,12 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
 
     ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_DIM + 1];\n";
     ss << "  const " << index_type << " x = static_cast<" << index_type << ">(blockIdx.x) * TILE_DIM + threadIdx.x;\n";
-    ss << "  const " << index_type << " y = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM + threadIdx.y;\n";
+    ss << "  const " << index_type << " y = rowTile * TILE_DIM + threadIdx.y;\n";
     ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
     ss << "    const " << index_type << " logical_row = y + j;\n";
     ss << "    const " << index_type << " logical_col = x;\n";
     ss << "    if (logical_col < numCols && logical_row < numRows) {\n";
-    ss << "      const " << index_type << " idx = logical_row * numCols + logical_col;\n";
+    ss << "      const " << index_type << " idx = matrixOffset + logical_row * numCols + logical_col;\n";
 
     for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
         if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
@@ -3654,11 +3660,11 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     ss << "    }\n";
     ss << "  }\n\n";
     ss << "  __syncthreads();\n\n";
-    ss << "  const " << index_type << " tx = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM + threadIdx.x;\n";
+    ss << "  const " << index_type << " tx = rowTile * TILE_DIM + threadIdx.x;\n";
     ss << "  const " << index_type << " ty = static_cast<" << index_type << ">(blockIdx.x) * TILE_DIM + threadIdx.y;\n";
     ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
     ss << "    if (tx < numRows && (ty + j) < numCols) {\n";
-    ss << "      const " << index_type << " out_idx = (ty + j) * numRows + tx;\n";
+    ss << "      const " << index_type << " out_idx = matrixOffset + (ty + j) * numRows + tx;\n";
     ss << "      out0[out_idx] = tile[threadIdx.x][threadIdx.y + j];\n";
     ss << "    }\n";
     ss << "  }\n";
@@ -3786,8 +3792,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     if (group.output_indices.size() != 1 || group.output_indices[0] != 0) {
         throw runtime_error("Transposed broadcast fused materialization expects the single stage output in its broadcast group.");
     }
-    if (group.output_dims.size() != 2) {
-        throw runtime_error("Transposed broadcast fused materialization currently requires a rank-2 logical output.");
+    if (group.output_dims.size() < 2) {
+        throw runtime_error("Transposed broadcast fused materialization requires a rank >= 2 logical output.");
     }
 
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
@@ -3839,7 +3845,13 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     if (!first_arg) {
         ss << ", ";
     }
-    ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols) {\n";
+    ss << output_type << "* __restrict__ out0, " << index_type << " numRows, " << index_type << " numCols, " << index_type << " batchCount) {\n";
+    ss << "  const " << index_type << " rowTiles = (numRows + static_cast<" << index_type << ">(TILE_DIM) - 1) / static_cast<"
+       << index_type << ">(TILE_DIM);\n";
+    ss << "  const " << index_type << " batchIdx = static_cast<" << index_type << ">(blockIdx.y) / rowTiles;\n";
+    ss << "  if (batchIdx >= batchCount) return;\n";
+    ss << "  const " << index_type << " rowTile = static_cast<" << index_type << ">(blockIdx.y) - batchIdx * rowTiles;\n";
+    ss << "  const " << index_type << " matrixOffset = batchIdx * numRows * numCols;\n\n";
 
     if (emit_decoupled_line_vectorized_path) {
         const DataType input_dtype = maybe_tensor_input_dtype.value();
@@ -3857,7 +3869,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             ss << "  using OutputPack = " << transposePackType(output_dtype) << ";\n";
         }
         ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_COL_SCALARS + 1];\n";
-        ss << "  const " << index_type << " rowStart = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM;\n";
+        ss << "  const " << index_type << " rowStart = rowTile * TILE_DIM;\n";
         ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int threadLinear = threadIdx.y * TILE_DIM + threadIdx.x;\n\n";
 
@@ -3869,7 +3881,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "    const " << index_type << " logicalRow = rowStart + static_cast<" << index_type << ">(localRow);\n";
         ss << "    const " << index_type << " logicalColBase = colStart + static_cast<" << index_type
            << ">(localReadPackCol) * READ_PACK_SCALARS;\n";
-        ss << "    const " << index_type << " logical_idx_base = static_cast<" << index_type << ">(logicalRow) * static_cast<" << index_type
+        ss << "    const " << index_type << " logical_idx_base = matrixOffset + static_cast<" << index_type << ">(logicalRow) * static_cast<" << index_type
            << ">(numCols) + static_cast<" << index_type << ">(logicalColBase);\n";
 
         auto emit_broadcast_offsets = [&](const std::vector<size_t>& used_indices,
@@ -3981,7 +3993,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "        const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
         ss << "        const " << index_type << " logicalCol = logicalColBase + static_cast<" << index_type << ">(LANE);\n";
         ss << "        if (logicalCol < numCols) {\n";
-        ss << "          const " << index_type << " logical_idx = static_cast<" << index_type << ">(logicalRow) * static_cast<"
+        ss << "          const " << index_type << " logical_idx = matrixOffset + static_cast<" << index_type << ">(logicalRow) * static_cast<"
            << index_type << ">(numCols) + static_cast<" << index_type << ">(logicalCol);\n";
         emit_broadcast_offsets(all_used_indices, "logical_idx", "", "          ");
         auto input_value = [&](uint32_t input_slot) -> std::string {
@@ -4018,7 +4030,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             ss << "        output_pack_data[lane] = tile[localOutPackCol * WRITE_PACK_SCALARS + lane][localOutRow];\n";
             ss << "      }\n";
             ss << "    }\n";
-            ss << "    const " << index_type << " out_base_idx = outputRow * numRows + outputColBase;\n";
+            ss << "    const " << index_type << " out_base_idx = matrixOffset + outputRow * numRows + outputColBase;\n";
             ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + WRITE_PACK_SCALARS <= numRows) &&\n";
             ss << "                                     ((out_base_idx % WRITE_PACK_SCALARS) == "
                << emitUnsignedLiteral(0, use_uint32_index_math) << ");\n";
@@ -4029,13 +4041,13 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             ss << "      for (unsigned int lane = 0; lane < WRITE_PACK_SCALARS; ++lane) {\n";
             ss << "        const " << index_type << " outputCol = outputColBase + static_cast<" << index_type << ">(lane);\n";
             ss << "        if (outputCol < numRows) {\n";
-            ss << "          out0[outputRow * numRows + outputCol] = output_pack_data[lane];\n";
+            ss << "          out0[matrixOffset + outputRow * numRows + outputCol] = output_pack_data[lane];\n";
             ss << "        }\n";
             ss << "      }\n";
             ss << "    }\n";
         } else {
             ss << "    if (outputRow < numCols && outputColBase < numRows) {\n";
-            ss << "      out0[outputRow * numRows + outputColBase] = tile[localOutPackCol][localOutRow];\n";
+            ss << "      out0[matrixOffset + outputRow * numRows + outputColBase] = tile[localOutPackCol][localOutRow];\n";
             ss << "    }\n";
         }
         ss << "  }\n";
@@ -4055,7 +4067,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         }
         ss << "  union PackRaw { unsigned int raw; Pack pack; };\n";
         ss << "  __shared__ unsigned int tile[TILE_DIM][TILE_DIM + 1];\n";
-        ss << "  const " << index_type << " rowStart = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM;\n";
+        ss << "  const " << index_type << " rowStart = rowTile * TILE_DIM;\n";
         ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int packedCol = threadIdx.x;\n";
         ss << "  const " << index_type << " logicalColBase = colStart + static_cast<" << index_type << ">(packedCol) * PACK_SCALARS;\n";
@@ -4151,7 +4163,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         }
         ss << "        const " << index_type << " logicalCol = logicalColBase + lane;\n";
         ss << "        if (logicalCol < numCols) {\n";
-        ss << "          const " << index_type << " logical_idx = static_cast<" << index_type << ">(logicalRow) * static_cast<"
+        ss << "          const " << index_type << " logical_idx = matrixOffset + static_cast<" << index_type << ">(logicalRow) * static_cast<"
            << index_type << ">(numCols) + static_cast<" << index_type << ">(logicalCol);\n";
         for (uint32_t input_slot : group.used_input_slots) {
             ss << "          " << index_type << " in" << input_slot << "_offset = " << emitUnsignedLiteral(0, use_uint32_index_math)
@@ -4200,7 +4212,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "      const " << output_type << "* input_scalar = reinterpret_cast<const " << output_type << "*>(&input_raw.pack);\n";
         ss << "      output_scalar[lane] = input_scalar[inputColLane];\n";
         ss << "    }\n";
-        ss << "    const " << index_type << " out_base_idx = static_cast<" << index_type << ">(outputRow) * static_cast<" << index_type
+        ss << "    const " << index_type << " out_base_idx = matrixOffset + static_cast<" << index_type << ">(outputRow) * static_cast<" << index_type
            << ">(numRows) +\n";
         ss << "                                     static_cast<" << index_type << ">(outputColBase);\n";
         ss << "    const bool outputPackedStoreOk = (outputRow < numCols) && (outputColBase + PACK_SCALARS <= numRows) &&\n";
@@ -4213,7 +4225,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         ss << "      for (unsigned int lane = 0; lane < PACK_SCALARS; ++lane) {\n";
         ss << "        const " << index_type << " outputCol = outputColBase + lane;\n";
         ss << "        if (outputCol < numRows) {\n";
-        ss << "          out0[outputRow * numRows + outputCol] = output_scalar[lane];\n";
+        ss << "          out0[matrixOffset + outputRow * numRows + outputCol] = output_scalar[lane];\n";
         ss << "        }\n";
         ss << "      }\n";
         ss << "    }\n";
@@ -4224,12 +4236,12 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
 
     ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_DIM + 1];\n";
     ss << "  const " << index_type << " x = static_cast<" << index_type << ">(blockIdx.x) * TILE_DIM + threadIdx.x;\n";
-    ss << "  const " << index_type << " y = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM + threadIdx.y;\n";
+    ss << "  const " << index_type << " y = rowTile * TILE_DIM + threadIdx.y;\n";
     ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
     ss << "    const " << index_type << " logical_row = y + j;\n";
     ss << "    const " << index_type << " logical_col = x;\n";
     ss << "    if (logical_col < numCols && logical_row < numRows) {\n";
-    ss << "      const " << index_type << " logical_idx = static_cast<" << index_type << ">(logical_row) * static_cast<" << index_type
+    ss << "      const " << index_type << " logical_idx = matrixOffset + static_cast<" << index_type << ">(logical_row) * static_cast<" << index_type
        << ">(numCols) + static_cast<" << index_type << ">(logical_col);\n";
     for (uint32_t input_slot : group.used_input_slots) {
         ss << "      " << index_type << " in" << input_slot << "_offset = " << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
@@ -4250,11 +4262,11 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     ss << "    }\n";
     ss << "  }\n\n";
     ss << "  __syncthreads();\n\n";
-    ss << "  const " << index_type << " tx = static_cast<" << index_type << ">(blockIdx.y) * TILE_DIM + threadIdx.x;\n";
+    ss << "  const " << index_type << " tx = rowTile * TILE_DIM + threadIdx.x;\n";
     ss << "  const " << index_type << " ty = static_cast<" << index_type << ">(blockIdx.x) * TILE_DIM + threadIdx.y;\n";
     ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
     ss << "    if (tx < numRows && (ty + j) < numCols) {\n";
-    ss << "      const " << index_type << " out_idx = static_cast<" << index_type << ">(ty + j) * static_cast<" << index_type
+    ss << "      const " << index_type << " out_idx = matrixOffset + static_cast<" << index_type << ">(ty + j) * static_cast<" << index_type
        << ">(numRows) +\n";
     ss << "                                   static_cast<" << index_type << ">(tx);\n";
     ss << "      out0[out_idx] = tile[threadIdx.x][threadIdx.y + j];\n";
