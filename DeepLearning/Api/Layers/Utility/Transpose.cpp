@@ -3,7 +3,9 @@
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
+#include <utility>
 
 using namespace std;
 using json = nlohmann::json;
@@ -11,6 +13,7 @@ using json = nlohmann::json;
 namespace Thor {
 
 Transpose::Transpose() = default;
+Transpose::Transpose(std::optional<ThorImplementation::Expression> epilogue) : epilogue(std::move(epilogue)) {}
 Transpose::~Transpose() = default;
 
 json Transpose::architectureJson() const {
@@ -22,6 +25,15 @@ json Transpose::architectureJson() const {
     j["factory"] = Layer::Factory::Layer.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
+
+    j["output_data_type"] = outputDataType;
+    if (epilogue.has_value()) {
+        if (!serializableEpilogue.has_value())
+            serializableEpilogue = makeEpilogueDefinition(epilogue.value());
+        j["epilogue"] = serializableEpilogue.value().architectureJson();
+    } else {
+        j["epilogue"] = nullptr;
+    }
 
     j["feature_input"] = featureInput.value().architectureJson();
     j["feature_output"] = featureOutput.value().architectureJson();
@@ -35,11 +47,20 @@ void Transpose::deserialize(const json &j, Network *network) {
     if (j.at("layer_type").get<string>() != "transpose")
         throw runtime_error("Layer type mismatch in Transpose::deserialize: " + j.at("layer_type").get<string>());
 
+    std::optional<ThorImplementation::Expression> epilogue = std::nullopt;
+    if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
+        ThorImplementation::ExpressionDefinition epilogueDefinition =
+            ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
+        epilogue = epilogueExpressionFromDefinition(epilogueDefinition);
+    }
+
     nlohmann::json input = j["feature_input"].get<nlohmann::json>();
     uint64_t originalTensorId = input.at("id").get<uint64_t>();
     Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
 
     Tensor featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
+    Tensor::DataType outputDataType = j.contains("output_data_type") ? j.at("output_data_type").get<Tensor::DataType>()
+                                                                     : featureOutput.getDataType();
 
     std::vector<uint64_t> expectedOutputDimensions = featureInput.getDimensions();
     if (expectedOutputDimensions.size() < 2) {
@@ -49,11 +70,12 @@ void Transpose::deserialize(const json &j, Network *network) {
     if (featureOutput.getDimensions() != expectedOutputDimensions) {
         throw runtime_error("Transpose::deserialize feature_output dimensions do not match feature_input trailing-dimension transpose.");
     }
-    if (featureOutput.getDataType() != featureInput.getDataType()) {
-        throw runtime_error("Transpose::deserialize feature_output dtype must match feature_input dtype.");
+    if (featureOutput.getDataType() != outputDataType) {
+        throw runtime_error("Transpose::deserialize feature_output dtype must match output_data_type.");
     }
 
-    Transpose transpose;
+    Transpose transpose(epilogue);
+    transpose.outputDataType = outputDataType;
     transpose.featureInput = featureInput;
     transpose.featureOutput = featureOutput;
     transpose.initialized = true;
