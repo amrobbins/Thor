@@ -2351,12 +2351,23 @@ static bool inputRequiresMaterialization(const ExprNode& node) {
     return node.input_tensor_dtype.value() != node.output_dtype.value();
 }
 
-static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_idx, std::unordered_set<uint32_t>& region_nodes) {
+static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
+                                            uint32_t root_idx,
+                                            const std::unordered_set<uint32_t>& forced_boundary_nodes,
+                                            std::unordered_set<uint32_t>& region_nodes) {
+    if (forced_boundary_nodes.count(root_idx)) {
+        throw std::runtime_error("collectFusableRegionStoppingAt root cannot be a forced boundary node.");
+    }
+
     std::vector<uint32_t> stack{root_idx};
 
     while (!stack.empty()) {
         uint32_t node_idx = stack.back();
         stack.pop_back();
+
+        if (forced_boundary_nodes.count(node_idx)) {
+            continue;
+        }
 
         if (!region_nodes.insert(node_idx).second) {
             continue;
@@ -2377,7 +2388,7 @@ static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_i
         }
 
         const ExprNode& lhs = expr.nodes[lhs_idx];
-        if (!isStageBoundaryOp(lhs.op)) {
+        if (!isStageBoundaryOp(lhs.op) && !forced_boundary_nodes.count(lhs_idx)) {
             stack.push_back(lhs_idx);
         }
 
@@ -2388,11 +2399,132 @@ static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_i
             }
 
             const ExprNode& rhs = expr.nodes[rhs_idx];
-            if (!isStageBoundaryOp(rhs.op)) {
+            if (!isStageBoundaryOp(rhs.op) && !forced_boundary_nodes.count(rhs_idx)) {
                 stack.push_back(rhs_idx);
             }
         }
     }
+}
+
+static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_idx, std::unordered_set<uint32_t>& region_nodes) {
+    static const std::unordered_set<uint32_t> no_forced_boundaries;
+    collectFusableRegionStoppingAt(expr, root_idx, no_forced_boundaries, region_nodes);
+}
+
+static bool subgraphContainsLogicalTranspose(const PhysicalExpression& expr, uint32_t root_idx) {
+    if (root_idx >= expr.nodes.size()) {
+        throw std::runtime_error("subgraphContainsLogicalTranspose root index out of range.");
+    }
+
+    std::vector<uint32_t> stack{root_idx};
+    std::unordered_set<uint32_t> visited;
+    while (!stack.empty()) {
+        const uint32_t node_idx = stack.back();
+        stack.pop_back();
+        if (!visited.insert(node_idx).second) {
+            continue;
+        }
+
+        const ExprNode& node = expr.nodes[node_idx];
+        if (node.op == ExprOp::TRANSPOSE) {
+            return true;
+        }
+        if (Expression::isLeafOp(node.op)) {
+            continue;
+        }
+        if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("Malformed expression while searching for logical transpose.");
+        }
+        stack.push_back(node.lhs);
+        if (Expression::isBinaryOp(node.op)) {
+            if (node.rhs == UINT32_MAX || node.rhs >= expr.nodes.size()) {
+                throw std::runtime_error("Malformed binary expression while searching for logical transpose.");
+            }
+            stack.push_back(node.rhs);
+        }
+    }
+    return false;
+}
+
+static void collectReachableLogicalTransposeNodes(const PhysicalExpression& expr,
+                                                  uint32_t root_idx,
+                                                  std::unordered_set<uint32_t>& visited,
+                                                  std::vector<uint32_t>& transpose_nodes) {
+    if (root_idx >= expr.nodes.size()) {
+        throw std::runtime_error("collectReachableLogicalTransposeNodes root index out of range.");
+    }
+    if (!visited.insert(root_idx).second) {
+        return;
+    }
+
+    const ExprNode& node = expr.nodes[root_idx];
+    if (node.op == ExprOp::TRANSPOSE) {
+        transpose_nodes.push_back(root_idx);
+    }
+    if (Expression::isLeafOp(node.op)) {
+        return;
+    }
+    if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
+        throw std::runtime_error("Malformed expression while collecting logical transposes.");
+    }
+    collectReachableLogicalTransposeNodes(expr, node.lhs, visited, transpose_nodes);
+    if (Expression::isBinaryOp(node.op)) {
+        if (node.rhs == UINT32_MAX || node.rhs >= expr.nodes.size()) {
+            throw std::runtime_error("Malformed binary expression while collecting logical transposes.");
+        }
+        collectReachableLogicalTransposeNodes(expr, node.rhs, visited, transpose_nodes);
+    }
+}
+
+static std::vector<uint32_t> collectReachableLogicalTransposeNodes(const PhysicalExpression& expr, uint32_t root_idx) {
+    std::unordered_set<uint32_t> visited;
+    std::vector<uint32_t> transpose_nodes;
+    collectReachableLogicalTransposeNodes(expr, root_idx, visited, transpose_nodes);
+    return transpose_nodes;
+}
+
+static void collectUnsupportedLogicalTransposeBoundariesImpl(const PhysicalExpression& expr,
+                                                             uint32_t root_idx,
+                                                             std::unordered_set<uint32_t>& visited,
+                                                             std::unordered_set<uint32_t>& forced_boundaries) {
+    if (root_idx >= expr.nodes.size()) {
+        throw std::runtime_error("collectUnsupportedLogicalTransposeBoundaries root index out of range.");
+    }
+    if (!visited.insert(root_idx).second) {
+        return;
+    }
+
+    const ExprNode& node = expr.nodes[root_idx];
+    if (node.op == ExprOp::TRANSPOSE) {
+        if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("Malformed transpose while collecting unsupported logical transpose boundaries.");
+        }
+        if (subgraphContainsLogicalTranspose(expr, node.lhs)) {
+            forced_boundaries.insert(root_idx);
+            return;
+        }
+    }
+
+    if (Expression::isLeafOp(node.op)) {
+        return;
+    }
+    if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
+        throw std::runtime_error("Malformed expression while collecting unsupported logical transpose boundaries.");
+    }
+    collectUnsupportedLogicalTransposeBoundariesImpl(expr, node.lhs, visited, forced_boundaries);
+    if (Expression::isBinaryOp(node.op)) {
+        if (node.rhs == UINT32_MAX || node.rhs >= expr.nodes.size()) {
+            throw std::runtime_error("Malformed binary expression while collecting unsupported logical transpose boundaries.");
+        }
+        collectUnsupportedLogicalTransposeBoundariesImpl(expr, node.rhs, visited, forced_boundaries);
+    }
+}
+
+static std::unordered_set<uint32_t> collectUnsupportedLogicalTransposeBoundaries(const PhysicalExpression& expr, uint32_t root_idx) {
+    std::unordered_set<uint32_t> visited;
+    std::unordered_set<uint32_t> forced_boundaries;
+    collectUnsupportedLogicalTransposeBoundariesImpl(expr, root_idx, visited, forced_boundaries);
+    return forced_boundaries;
 }
 
 static void collectBoundaryDependencies(const PhysicalExpression& expr,
@@ -4329,8 +4461,16 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             return true;
         }
 
+        std::unordered_set<uint32_t> forced_transpose_boundaries;
+        for (uint32_t logical_transpose_idx : collectReachableLogicalTransposeNodes(expr, materialized_parent_idx)) {
+            forced_transpose_boundaries.insert(logical_transpose_idx);
+        }
+        for (uint32_t forced_transpose_idx : forced_transpose_boundaries) {
+            emitForDependency(forced_transpose_idx);
+        }
+
         std::unordered_set<uint32_t> region;
-        collectFusableRegion(expr, materialized_parent_idx, region);
+        collectFusableRegionStoppingAt(expr, materialized_parent_idx, forced_transpose_boundaries, region);
         if (regionContainsShapeOnlyOp(expr, region)) {
             return false;
         }
@@ -4627,8 +4767,13 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             return;
         }
 
+        std::unordered_set<uint32_t> forced_transpose_boundaries = collectUnsupportedLogicalTransposeBoundaries(expr, root_idx);
+        for (uint32_t forced_transpose_idx : forced_transpose_boundaries) {
+            emitForDependency(forced_transpose_idx);
+        }
+
         std::unordered_set<uint32_t> region;
-        collectFusableRegion(expr, root_idx, region);
+        collectFusableRegionStoppingAt(expr, root_idx, forced_transpose_boundaries, region);
 
         std::unordered_set<uint32_t> boundary_nodes;
         collectBoundaryDependencies(expr, region, boundary_nodes);
@@ -4638,28 +4783,32 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
         std::string region_sig = fusedRegionSignature(expr, root_idx);
 
-        auto emitted_it = fused_region_value_id.find(region_sig);
-        if (emitted_it != fused_region_value_id.end()) {
-            node_output_value_id[root_idx] = emitted_it->second;
-            return;
-        }
-
-        auto pending_it = pending_terminal_region_to_group.find(region_sig);
-        if (pending_it != pending_terminal_region_to_group.end()) {
-            materializeTerminalGroup(pending_it->second);
-
-            auto fused_it = fused_region_value_id.find(region_sig);
-            if (fused_it == fused_region_value_id.end()) {
-                throw std::runtime_error("Pending terminal region was materialized but no fused region value id was recorded.");
+        if (forced_transpose_boundaries.empty()) {
+            auto emitted_it = fused_region_value_id.find(region_sig);
+            if (emitted_it != fused_region_value_id.end()) {
+                node_output_value_id[root_idx] = emitted_it->second;
+                return;
             }
 
-            node_output_value_id[root_idx] = fused_it->second;
-            return;
+            auto pending_it = pending_terminal_region_to_group.find(region_sig);
+            if (pending_it != pending_terminal_region_to_group.end()) {
+                materializeTerminalGroup(pending_it->second);
+
+                auto fused_it = fused_region_value_id.find(region_sig);
+                if (fused_it == fused_region_value_id.end()) {
+                    throw std::runtime_error("Pending terminal region was materialized but no fused region value id was recorded.");
+                }
+
+                node_output_value_id[root_idx] = fused_it->second;
+                return;
+            }
         }
 
         uint32_t out_id = next_value_id++;
         node_output_value_id[root_idx] = out_id;
-        fused_region_value_id.emplace(region_sig, out_id);
+        if (forced_transpose_boundaries.empty()) {
+            fused_region_value_id.emplace(region_sig, out_id);
+        }
 
         std::vector<RequestedStageOutput> requested_outputs{RequestedStageOutput{
             .name = "",
@@ -4941,8 +5090,13 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             continue;
         }
 
+        std::unordered_set<uint32_t> forced_transpose_boundaries = collectUnsupportedLogicalTransposeBoundaries(expr, named_output.node_idx);
+        for (uint32_t forced_transpose_idx : forced_transpose_boundaries) {
+            emitForDependency(forced_transpose_idx);
+        }
+
         std::unordered_set<uint32_t> region;
-        collectFusableRegion(expr, named_output.node_idx, region);
+        collectFusableRegionStoppingAt(expr, named_output.node_idx, forced_transpose_boundaries, region);
 
         std::unordered_set<uint32_t> boundary_nodes;
         collectBoundaryDependencies(expr, region, boundary_nodes);
@@ -4952,40 +5106,39 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
         std::string region_sig = fusedRegionSignature(expr, named_output.node_idx);
 
-        auto emitted_it = fused_region_value_id.find(region_sig);
-        if (emitted_it != fused_region_value_id.end()) {
-            node_output_value_id[named_output.node_idx] = emitted_it->second;
-            planned.final_outputs.push_back(CompiledStageOutput{
-                .name = named_output.name,
-                .local_node_idx = UINT32_MAX,
-                .value_id = emitted_it->second,
-            });
-            continue;
-        }
-
-        auto pending_it = pending_terminal_region_to_group.find(region_sig);
-        if (pending_it != pending_terminal_region_to_group.end()) {
-            size_t group_idx = pending_it->second;
-            if (group_idx >= terminal_groups.size() || !terminal_groups[group_idx].has_value()) {
-                throw std::runtime_error("Pending terminal region points to invalid group.");
+        if (forced_transpose_boundaries.empty()) {
+            auto emitted_it = fused_region_value_id.find(region_sig);
+            if (emitted_it != fused_region_value_id.end()) {
+                node_output_value_id[named_output.node_idx] = emitted_it->second;
+                planned.final_outputs.push_back(CompiledStageOutput{
+                    .name = named_output.name,
+                    .local_node_idx = UINT32_MAX,
+                    .value_id = emitted_it->second,
+                });
+                continue;
             }
 
-            uint32_t existing_value_id = terminal_groups[group_idx]->exact_region_value_id.at(region_sig);
-            node_output_value_id[named_output.node_idx] = existing_value_id;
+            auto pending_it = pending_terminal_region_to_group.find(region_sig);
+            if (pending_it != pending_terminal_region_to_group.end()) {
+                size_t group_idx = pending_it->second;
+                if (group_idx >= terminal_groups.size() || !terminal_groups[group_idx].has_value()) {
+                    throw std::runtime_error("Pending terminal region points to invalid group.");
+                }
 
-            planned.final_outputs.push_back(CompiledStageOutput{
-                .name = named_output.name,
-                .local_node_idx = UINT32_MAX,
-                .value_id = existing_value_id,
-            });
-            continue;
+                uint32_t existing_value_id = terminal_groups[group_idx]->exact_region_value_id.at(region_sig);
+                node_output_value_id[named_output.node_idx] = existing_value_id;
+
+                planned.final_outputs.push_back(CompiledStageOutput{
+                    .name = named_output.name,
+                    .local_node_idx = UINT32_MAX,
+                    .value_id = existing_value_id,
+                });
+                continue;
+            }
         }
 
         uint32_t out_id = next_value_id++;
         node_output_value_id[named_output.node_idx] = out_id;
-
-        std::unordered_set<uint32_t> dependency_value_ids;
-        collectExternalValueIds(expr, region, node_output_value_id, dependency_value_ids);
 
         RequestedStageOutput requested_output{
             .name = named_output.name,
@@ -4993,7 +5146,14 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             .value_id = out_id,
         };
 
-        addOrMergeTerminalGroup(std::move(region), std::move(dependency_value_ids), requested_output, region_sig);
+        if (forced_transpose_boundaries.empty()) {
+            std::unordered_set<uint32_t> dependency_value_ids;
+            collectExternalValueIds(expr, region, node_output_value_id, dependency_value_ids);
+            addOrMergeTerminalGroup(std::move(region), std::move(dependency_value_ids), requested_output, region_sig);
+        } else {
+            std::vector<RequestedStageOutput> requested_outputs{requested_output};
+            planned.stages.push_back(buildFusedStage(expr, region, requested_outputs, node_output_value_id));
+        }
 
         planned.final_outputs.push_back(CompiledStageOutput{
             .name = named_output.name,

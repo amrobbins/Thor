@@ -392,6 +392,186 @@ def test_tiled_logical_transpose_consumer_rank4_fuses_and_is_numerical():
 
 
 @pytest.mark.cuda
+def test_auto_swizzle_logical_transpose_consumers_with_two_dense_inputs_numerical():
+    x = ex.input("x")
+    y = ex.input("y")
+    bias = ex.input("bias")
+
+    out = ex.exp((x.transpose() * 0.5 + y.transpose() * 0.25) + bias).with_output_dtype(thor.DataType.fp32)
+    eq = ex.compile(out, device_num=0)
+
+    dtype = thor.DataType.fp32
+    shape = (2, 5, 7)
+    x_np = np.arange(1, 1 + int(np.prod(shape)), dtype=np.float32).reshape(shape) * 0.01 - 0.75
+    y_np = np.arange(1, 1 + int(np.prod(shape)), dtype=np.float32).reshape(shape) * -0.006 + 0.5
+    bias_np = np.linspace(-0.125, 0.125, num=7, dtype=np.float32).reshape(1, 7, 1)
+    expected = np.exp(np.swapaxes(x_np, -1, -2) * 0.5 + np.swapaxes(y_np, -1, -2) * 0.25 + bias_np)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+        "bias": _host_to_gpu(bias_np, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == list(expected.shape)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    assert stamped._debug_stage_kinds() == ["FusedKernel"]
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_nested_transpose_scalar_chain_normalizes_and_is_numerical():
+    x = ex.input("x")
+    out = (x.transpose() * 0.5).transpose() + 1.0
+    eq = ex.compile(out, device_num=0)
+
+    dtype = thor.DataType.fp32
+    x_np = np.arange(1, 1 + 5 * 7, dtype=np.float32).reshape(5, 7) * 0.01
+    expected = x_np * 0.5 + 1.0
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == list(expected.shape)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_nested_transpose_full_tensor_chain_stitches_after_normalization():
+    x = ex.input("x")
+    y = ex.input("y")
+    z = ex.input("z")
+    out = ((x.transpose() + y).transpose() + z).with_output_dtype(thor.DataType.fp32)
+    eq = ex.compile(out, device_num=0)
+
+    dtype = thor.DataType.fp32
+    x_np = np.arange(1, 1 + 5 * 7, dtype=np.float32).reshape(5, 7) * 0.01
+    y_np = np.arange(1, 1 + 7 * 5, dtype=np.float32).reshape(7, 5) * -0.02 + 0.25
+    z_np = np.full((5, 7), 0.125, dtype=np.float32)
+    expected = (x_np.T + y_np).T + z_np
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+        "z": _host_to_gpu(z_np, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == list(expected.shape)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    assert stamped._debug_stage_kinds() == ["FusedKernel"]
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_nested_transpose_rhs_full_tensor_chain_stitches_after_normalization():
+    x = ex.input("x")
+    y = ex.input("y")
+    z = ex.input("z")
+    out = ((x + y.transpose()).transpose() + z).with_output_dtype(thor.DataType.fp32)
+    eq = ex.compile(out, device_num=0)
+
+    dtype = thor.DataType.fp32
+    x_np = np.arange(1, 1 + 7 * 5, dtype=np.float32).reshape(7, 5) * 0.01
+    y_np = np.arange(1, 1 + 5 * 7, dtype=np.float32).reshape(5, 7) * -0.02 + 0.25
+    z_np = np.full((5, 7), 0.125, dtype=np.float32)
+    expected = (x_np + y_np.T).T + z_np
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+        "z": _host_to_gpu(z_np, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == list(expected.shape)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    assert stamped._debug_stage_kinds() == ["FusedKernel"]
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_double_transpose_pair_normalizes_before_codegen():
+    x = ex.input("x")
+    y = ex.input("y")
+    out = (x.transpose().transpose() + y).with_output_dtype(thor.DataType.fp32)
+    eq = ex.compile(out, device_num=0)
+
+    dtype = thor.DataType.fp32
+    x_np = np.arange(1, 1 + 5 * 7, dtype=np.float32).reshape(5, 7) * 0.01
+    y_np = np.full((5, 7), 0.5, dtype=np.float32)
+    expected = x_np + y_np
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == list(expected.shape)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_outer_transpose_of_two_transposed_inputs_normalizes_to_single_domain():
+    x = ex.input("x")
+    y = ex.input("y")
+    out = (x.transpose() + y.transpose()).transpose().with_output_dtype(thor.DataType.fp32)
+    eq = ex.compile(out, device_num=0)
+
+    dtype = thor.DataType.fp32
+    x_np = np.arange(1, 1 + 5 * 7, dtype=np.float32).reshape(5, 7) * 0.01
+    y_np = np.arange(1, 1 + 5 * 7, dtype=np.float32).reshape(5, 7) * -0.02
+    expected = x_np + y_np
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == list(expected.shape)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
 def test_transpose_rejects_rank1_tensor_at_stamp_time():
     x = ex.input("x")
     eq = ex.compile(x.transpose(), device_num=0)
