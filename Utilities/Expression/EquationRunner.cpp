@@ -166,13 +166,18 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
 
     if (is_fused_tiled_transpose_launch) {
-        if (outputs.size() != 1) {
-            throw std::runtime_error("Fused tiled-transpose launch expects exactly one output.");
+        if (outputs.empty()) {
+            throw std::runtime_error("Fused tiled-transpose launch expects at least one output.");
         }
         const Tensor& output_tensor = outputs[0];
         const std::vector<uint64_t> output_dims = output_tensor.getDimensions();
         if (output_dims.size() < 2) {
             throw std::runtime_error("Fused tiled-transpose launch requires rank >= 2 outputs.");
+        }
+        for (size_t i = 1; i < outputs.size(); ++i) {
+            if (outputs[i].getDimensions() != output_dims) {
+                throw std::runtime_error("Fused tiled-transpose launch requires all outputs to have identical dimensions.");
+            }
         }
         if (output_tensor.getTotalNumElements() == 0) {
             return;
