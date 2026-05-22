@@ -427,6 +427,117 @@ def test_auto_swizzle_logical_transpose_consumers_with_two_dense_inputs_numerica
 
 
 @pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.bf16, thor.DataType.fp8_e4m3, thor.DataType.fp8_e5m2])
+def test_auto_swizzle_logical_transpose_low_precision_frontiers_pack_lanes_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+
+    out = (x.transpose() * 0.5 + y.transpose() * -0.25 + 0.125).with_output_dtype(thor.DataType.fp32)
+    eq = ex.compile(out, device_num=0)
+
+    shape = (35, 67)
+    x_np = _make_matrix(shape, dtype, scale=0.0025, bias=-0.25)
+    y_np = _make_matrix(shape, dtype, scale=-0.0015, bias=0.5)
+    expected = x_np.astype(np.float32).T * 0.5 + y_np.astype(np.float32).T * -0.25 + 0.125
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == list(expected.shape)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    assert stamped._debug_stage_kinds() == ["FusedKernel"]
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), thor.DataType.fp32, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_auto_swizzle_logical_transpose_mixed_frontiers_pack_to_larger_dtype_numerical():
+    x = ex.input("x")
+    y = ex.input("y")
+
+    out = (x.transpose() * 0.5 + y.transpose() * 0.25 - 0.125).with_output_dtype(thor.DataType.fp32)
+    eq = ex.compile(out, device_num=0)
+
+    shape = (37, 65)
+    x_dtype = thor.DataType.fp8_e4m3
+    y_dtype = thor.DataType.fp16
+    x_np = _make_matrix(shape, x_dtype, scale=0.002, bias=-0.125)
+    y_np = _make_matrix(shape, y_dtype, scale=-0.001, bias=0.375)
+    expected = x_np.astype(np.float32).T * 0.5 + y_np.astype(np.float32).T * 0.25 - 0.125
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, x_dtype, stream),
+        "y": _host_to_gpu(y_np, y_dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == list(expected.shape)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    assert stamped._debug_stage_kinds() == ["FusedKernel"]
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), thor.DataType.fp32, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, x_dtype)
+
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.bf16, thor.DataType.fp8_e4m3])
+def test_auto_swizzle_logical_transpose_multi_output_fused_stage_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+
+    outs = ex.outputs({
+        "sum": ex.tanh(x.transpose() * 0.5 + y.transpose() * 0.25 + 0.125).with_output_dtype(dtype),
+        "diff": ex.sqrt(x.transpose() * 0.125 - y.transpose() * 0.0625 + 1.0).with_output_dtype(dtype),
+    })
+    eq = outs.compile(device_num=0)
+
+    shape = (35, 67)
+    x_np = _make_matrix(shape, dtype, scale=0.002, bias=-0.25)
+    y_np = _make_matrix(shape, dtype, scale=-0.0015, bias=0.5)
+    expected_sum = _cast_reference_to_storage_dtype_with_saturation(
+        np.tanh(x_np.astype(np.float32).T * 0.5 + y_np.astype(np.float32).T * 0.25 + 0.125), dtype
+    )
+    expected_diff = _cast_reference_to_storage_dtype_with_saturation(
+        np.sqrt(x_np.astype(np.float32).T * 0.125 - y_np.astype(np.float32).T * 0.0625 + 1.0), dtype
+    )
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+    }
+
+    assert eq.output_names() == ["sum", "diff"]
+    output_shapes = eq.output_shapes(inputs_gpu)
+    assert output_shapes["sum"] == list(expected_sum.shape)
+    assert output_shapes["diff"] == list(expected_diff.shape)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    assert stamped._debug_stage_kinds() == ["FusedKernel"]
+    stamped.run()
+
+    got_sum = _copy_to_host(stamped.output("sum"), dtype, stream)
+    got_diff = _copy_to_host(stamped.output("diff"), dtype, stream)
+    assert got_sum.shape == expected_sum.shape
+    assert got_diff.shape == expected_diff.shape
+    _assert_close(got_sum, expected_sum, dtype)
+    _assert_close(got_diff, expected_diff, dtype)
+
+@pytest.mark.cuda
 def test_nested_transpose_scalar_chain_normalizes_and_is_numerical():
     x = ex.input("x")
     out = (x.transpose() * 0.5).transpose() + 1.0
@@ -683,3 +794,70 @@ def test_explicit_transpose_is_absorbed_into_explicit_gemm_stage(dtype: thor.Dat
     got = _copy_to_host(stamped.output(), dtype, stream)
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.bf16, thor.DataType.fp8_e4m3, thor.DataType.fp8_e5m2])
+def test_auto_swizzle_logical_transpose_vectorized_downstream_lane_math_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+
+    out = ex.tanh(x.transpose() * 0.5 + y.transpose() * -0.25 + 0.125).with_output_dtype(dtype)
+    eq = ex.compile(out, device_num=0)
+
+    shape = (35, 67)
+    x_np = _make_matrix(shape, dtype, scale=0.0015, bias=-0.2)
+    y_np = _make_matrix(shape, dtype, scale=-0.001, bias=0.3)
+    expected32 = np.tanh(x_np.astype(np.float32).T * 0.5 + y_np.astype(np.float32).T * -0.25 + 0.125)
+    expected = _cast_reference_to_storage_dtype_with_saturation(expected32, dtype)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == list(expected.shape)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    assert stamped._debug_stage_kinds() == ["FusedKernel"]
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), dtype, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_auto_swizzle_logical_transpose_vectorized_downstream_uses_larger_dtype_for_mixed_fp8_bf16_numerical():
+    x = ex.input("x")
+    y = ex.input("y")
+
+    out = ex.sqrt(x.transpose() + y.transpose() + 0.75).with_output_dtype(thor.DataType.bf16)
+    eq = ex.compile(out, device_num=0)
+
+    shape = (37, 65)
+    x_dtype = thor.DataType.fp8_e4m3
+    y_dtype = thor.DataType.bf16
+    x_np = _make_matrix(shape, x_dtype, scale=0.001, bias=-0.1)
+    y_np = _make_matrix(shape, y_dtype, scale=0.0015, bias=0.2)
+    expected32 = np.sqrt(x_np.astype(np.float32).T + y_np.astype(np.float32).T + 0.75)
+    expected = _cast_reference_to_storage_dtype_with_saturation(expected32, thor.DataType.bf16)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, x_dtype, stream),
+        "y": _host_to_gpu(y_np, y_dtype, stream),
+    }
+
+    assert eq.output_shape(inputs_gpu) == list(expected.shape)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["FusedKernel"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    assert stamped._debug_stage_kinds() == ["FusedKernel"]
+    stamped.run()
+
+    got = _copy_to_host(stamped.output(), thor.DataType.bf16, stream)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, thor.DataType.bf16)

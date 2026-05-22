@@ -5334,7 +5334,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
     } else if (CudaSourceEmitter::specializedBroadcastUsesTiledLogicalTransposeConsumerLaunch(stage, groups)) {
         compiled->launch_kind = CompiledEquation::LaunchKind::FusedTiledTranspose;
         compiled->elements_per_thread = 1u;
-        compiled->tiled_transpose_pack_scalars = 1u;
+        compiled->tiled_transpose_pack_scalars = CudaSourceEmitter::tiledLogicalTransposeConsumerPackScalars(stage, groups);
         compiled->uses_uint32_tiled_transpose_index_math = CudaSourceEmitter::specializedBroadcastUsesUInt32IndexMath(groups);
     } else {
         const std::optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
