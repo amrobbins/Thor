@@ -2276,6 +2276,137 @@ Expression Expression::quaternaryOp(
     return Expression(out, newIndex);
 }
 
+namespace {
+
+static bool isTransposePushThroughUnaryOp(ExprOp op) {
+    switch (op) {
+        case ExprOp::NEG:
+        case ExprOp::ABS:
+        case ExprOp::EXP:
+        case ExprOp::EXPM1:
+        case ExprOp::EXP2:
+        case ExprOp::EXP10:
+        case ExprOp::LN:
+        case ExprOp::LOG1P:
+        case ExprOp::LOG2:
+        case ExprOp::LOG10:
+        case ExprOp::SQRT:
+        case ExprOp::TANH:
+        case ExprOp::NORMCDF:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool isTransposePushThroughBinaryOp(ExprOp op) {
+    switch (op) {
+        case ExprOp::ADD:
+        case ExprOp::SUB:
+        case ExprOp::MUL:
+        case ExprOp::DIV:
+        case ExprOp::POW:
+        case ExprOp::MIN:
+        case ExprOp::MAX:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool isScalarLikeTransposeOperand(const ExprNode& node) {
+    return node.op == ExprOp::SCALAR_FP || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR;
+}
+
+static std::optional<uint32_t> tryNormalizeTransposeAtRoot(PhysicalExpression& expr, uint32_t root_idx) {
+    if (root_idx >= expr.nodes.size()) {
+        throw std::runtime_error("tryNormalizeTransposeAtRoot root index out of range.");
+    }
+
+    const ExprNode& root = expr.nodes[root_idx];
+    if (root.op == ExprOp::TRANSPOSE) {
+        if (root.lhs == UINT32_MAX || root.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("Malformed transpose expression: missing lhs while normalizing transpose chain.");
+        }
+        return root.lhs;
+    }
+
+    if (isTransposePushThroughUnaryOp(root.op)) {
+        if (root.lhs == UINT32_MAX || root.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("Malformed unary expression while normalizing transpose chain.");
+        }
+        const ExprNode& child = expr.nodes[root.lhs];
+        if (child.op != ExprOp::TRANSPOSE) {
+            return std::nullopt;
+        }
+        if (child.lhs == UINT32_MAX || child.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("Malformed inner transpose expression while normalizing unary transpose chain.");
+        }
+
+        ExprNode normalized = root;
+        normalized.lhs = child.lhs;
+        normalized.rhs = UINT32_MAX;
+        normalized.aux = UINT32_MAX;
+        const uint32_t normalized_idx = static_cast<uint32_t>(expr.nodes.size());
+        expr.nodes.push_back(std::move(normalized));
+        return normalized_idx;
+    }
+
+    if (isTransposePushThroughBinaryOp(root.op)) {
+        if (root.lhs == UINT32_MAX || root.rhs == UINT32_MAX || root.lhs >= expr.nodes.size() || root.rhs >= expr.nodes.size()) {
+            throw std::runtime_error("Malformed binary expression while normalizing transpose chain.");
+        }
+
+        auto unwrap_transpose_operand = [&](uint32_t operand_idx, bool& consumed_transpose) -> uint32_t {
+            const ExprNode& operand = expr.nodes[operand_idx];
+            if (operand.op == ExprOp::TRANSPOSE) {
+                if (operand.lhs == UINT32_MAX || operand.lhs >= expr.nodes.size()) {
+                    throw std::runtime_error("Malformed inner transpose expression while normalizing binary transpose chain.");
+                }
+                consumed_transpose = true;
+                return operand.lhs;
+            }
+            return operand_idx;
+        };
+
+        bool consumed_lhs_transpose = false;
+        bool consumed_rhs_transpose = false;
+        uint32_t normalized_lhs = unwrap_transpose_operand(root.lhs, consumed_lhs_transpose);
+        uint32_t normalized_rhs = unwrap_transpose_operand(root.rhs, consumed_rhs_transpose);
+        if (!consumed_lhs_transpose && !consumed_rhs_transpose) {
+            return std::nullopt;
+        }
+
+        auto transpose_if_needed = [&](uint32_t operand_idx, bool already_consumed_transpose) -> uint32_t {
+            if (already_consumed_transpose || isScalarLikeTransposeOperand(expr.nodes[operand_idx])) {
+                return operand_idx;
+            }
+
+            ExprNode transpose_node;
+            transpose_node.op = ExprOp::TRANSPOSE;
+            transpose_node.lhs = operand_idx;
+            const uint32_t transpose_idx = static_cast<uint32_t>(expr.nodes.size());
+            expr.nodes.push_back(std::move(transpose_node));
+            return transpose_idx;
+        };
+
+        normalized_lhs = transpose_if_needed(normalized_lhs, consumed_lhs_transpose);
+        normalized_rhs = transpose_if_needed(normalized_rhs, consumed_rhs_transpose);
+
+        ExprNode normalized = root;
+        normalized.lhs = normalized_lhs;
+        normalized.rhs = normalized_rhs;
+        normalized.aux = UINT32_MAX;
+        const uint32_t normalized_idx = static_cast<uint32_t>(expr.nodes.size());
+        expr.nodes.push_back(std::move(normalized));
+        return normalized_idx;
+    }
+
+    return std::nullopt;
+}
+
+}  // namespace
+
 Expression Expression::unaryOp(const Expression& inputExpr, ExprOp op) {
     if (!inputExpr.expr)
         throw std::runtime_error("Cannot apply unary op to empty expression");
@@ -2285,6 +2416,14 @@ Expression Expression::unaryOp(const Expression& inputExpr, ExprOp op) {
 
     std::unordered_map<uint32_t, uint32_t> oldToNew;
     uint32_t newLhsIndex = cloneSubtree(*inputExpr.expr, inputExpr.nodeIndex, *out, oldToNew);
+
+    if (op == ExprOp::TRANSPOSE) {
+        std::optional<uint32_t> normalized_idx = tryNormalizeTransposeAtRoot(*out, newLhsIndex);
+        if (normalized_idx.has_value()) {
+            out->output_node = normalized_idx.value();
+            return Expression(out, normalized_idx.value());
+        }
+    }
 
     ExprNode node{};
     node.op = op;

@@ -330,6 +330,38 @@ static uint32_t transposePackScalars(DataType dtype) {
     }
 }
 
+static void emitSharedTransposeWordHelpers(std::ostringstream& ss) {
+    ss << R"(template <typename T>
+__device__ __forceinline__ unsigned int thor_pack_transpose_word(T value) {
+    static_assert(sizeof(T) <= sizeof(unsigned int), "transpose shared-memory swizzle supports scalar storage types up to 32 bits");
+    union WordCaster { unsigned int word; T value; };
+    WordCaster caster;
+    caster.word = 0u;
+    caster.value = value;
+    return caster.word;
+}
+
+template <typename T>
+__device__ __forceinline__ T thor_unpack_transpose_word(unsigned int word) {
+    static_assert(sizeof(T) <= sizeof(unsigned int), "transpose shared-memory swizzle supports scalar storage types up to 32 bits");
+    union WordCaster { unsigned int word; T value; };
+    WordCaster caster;
+    caster.word = word;
+    return caster.value;
+}
+
+)";
+}
+
+static void emitSharedTransposeTileDeclaration(std::ostringstream& ss, const std::string& columns_expr = "TILE_DIM + 1") {
+    ss << "  // Shared-memory transpose tiles are always 32-bit bank words. The +1 column\n";
+    ss << "  // padding is therefore really +1 4-byte bank slot, not +1 scalar element.\n";
+    ss << "  // Narrow scalar values occupy/pack into these words so transposed shared-memory\n";
+    ss << "  // reads/writes keep the same bank-friendly layout as the classic 32x33 tile.\n";
+    ss << "  __shared__ unsigned int tile[TILE_DIM][" << columns_expr << "];\n";
+}
+
+
 static std::string transposePackType(DataType dtype) {
     switch (dtype) {
         case DataType::FP16:
@@ -1699,8 +1731,15 @@ static void collectReachableLogicalTransposeNodes(const PhysicalExpression& expr
     }
 }
 
-static std::optional<uint32_t> tryFindSingleTiledLogicalTransposeConsumerFrontier(const CompiledExecutionStage& stage,
-                                                                                  const std::vector<SpecializedBroadcastGroup>& groups) {
+static bool subgraphContainsLogicalTranspose(const PhysicalExpression& expr, uint32_t node_idx) {
+    std::unordered_set<uint32_t> visited;
+    std::vector<uint32_t> transpose_nodes;
+    collectReachableLogicalTransposeNodes(expr, node_idx, visited, transpose_nodes);
+    return !transpose_nodes.empty();
+}
+
+static std::optional<std::vector<uint32_t>> tryFindTiledLogicalTransposeConsumerFrontiers(
+    const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups) {
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel || stageHasTransposedMaterializedOutput(stage.outputs)) {
         return std::nullopt;
     }
@@ -1731,41 +1770,59 @@ static std::optional<uint32_t> tryFindSingleTiledLogicalTransposeConsumerFrontie
     std::unordered_set<uint32_t> visited;
     std::vector<uint32_t> transpose_nodes;
     collectReachableLogicalTransposeNodes(stage.expr, output.local_node_idx, visited, transpose_nodes);
-    if (transpose_nodes.size() != 1) {
+    if (transpose_nodes.empty()) {
         return std::nullopt;
     }
+    std::sort(transpose_nodes.begin(), transpose_nodes.end());
+    transpose_nodes.erase(std::unique(transpose_nodes.begin(), transpose_nodes.end()), transpose_nodes.end());
 
-    const uint32_t frontier_idx = transpose_nodes[0];
-    const ExprNode& frontier = stage.expr.nodes[frontier_idx];
-    if (frontier.lhs == UINT32_MAX || frontier.lhs >= stage.expr.nodes.size()) {
-        throw runtime_error("Tiled logical-transpose consumer frontier is missing its lhs.");
-    }
-    const std::vector<uint64_t>& source_dims = group.node_dims[frontier.lhs];
-    const std::vector<uint64_t>& transposed_dims = group.node_dims[frontier_idx];
-    if (source_dims.size() < 2 || transposed_dims.size() < 2) {
-        return std::nullopt;
-    }
-    if (transposed_dims != group.output_dims) {
-        // The first tiled form assumes the post-transpose consumer keeps the
-        // transpose output domain. More complicated mixed-domain cases fall
-        // back to the general recursive index-mapped emitter.
-        return std::nullopt;
-    }
-    if (source_dims.size() != transposed_dims.size()) {
-        return std::nullopt;
-    }
-    for (size_t axis = 0; axis + 2 < source_dims.size(); ++axis) {
-        if (source_dims[axis] != transposed_dims[axis]) {
+    for (uint32_t frontier_idx : transpose_nodes) {
+        const ExprNode& frontier = stage.expr.nodes[frontier_idx];
+        if (frontier.lhs == UINT32_MAX || frontier.lhs >= stage.expr.nodes.size()) {
+            throw runtime_error("Tiled logical-transpose consumer frontier is missing its lhs.");
+        }
+
+        // Auto-swizzle frontiers must be true tile boundaries: the producer side
+        // is evaluated in the pre-transpose/source domain and may not itself
+        // require another logical transpose. Nested transpose chains need a
+        // separate simplification/tiled lowering instead of falling through to a
+        // silent strided index-mapped kernel.
+        if (subgraphContainsLogicalTranspose(stage.expr, frontier.lhs)) {
+            return std::nullopt;
+        }
+
+        const std::vector<uint64_t>& source_dims = group.node_dims[frontier.lhs];
+        const std::vector<uint64_t>& transposed_dims = group.node_dims[frontier_idx];
+        if (source_dims.size() < 2 || transposed_dims.size() < 2) {
+            return std::nullopt;
+        }
+        if (transposed_dims != group.output_dims) {
+            // The auto-swizzle path intentionally only handles transposed full
+            // tensor values consumed in the final output domain. Mixed-domain
+            // transpose chains must be simplified or materialized explicitly.
+            return std::nullopt;
+        }
+        if (source_dims.size() != transposed_dims.size()) {
+            return std::nullopt;
+        }
+        for (size_t axis = 0; axis + 2 < source_dims.size(); ++axis) {
+            if (source_dims[axis] != transposed_dims[axis]) {
+                return std::nullopt;
+            }
+        }
+        if (source_dims[source_dims.size() - 2] != transposed_dims[transposed_dims.size() - 1] ||
+            source_dims[source_dims.size() - 1] != transposed_dims[transposed_dims.size() - 2]) {
             return std::nullopt;
         }
     }
-    if (source_dims[source_dims.size() - 2] != transposed_dims[transposed_dims.size() - 1] ||
-        source_dims[source_dims.size() - 1] != transposed_dims[transposed_dims.size() - 2]) {
-        return std::nullopt;
-    }
 
-    return frontier_idx;
+    return transpose_nodes;
 }
+
+struct TiledLogicalTransposeFrontierValue {
+    std::string value_expr;
+    DataType dtype;
+};
 
 static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstream& ss,
                                                                 const PhysicalExpression& expr,
@@ -1773,9 +1830,7 @@ static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstre
                                                                 uint32_t node_idx,
                                                                 const std::string& idx_expr,
                                                                 const std::vector<uint64_t>& domain_dims,
-                                                                uint32_t frontier_idx,
-                                                                const std::string& frontier_value_expr,
-                                                                DataType frontier_value_dtype,
+                                                                const std::unordered_map<uint32_t, TiledLogicalTransposeFrontierValue>& frontier_values,
                                                                 const std::string& indent,
                                                                 bool use_uint32_index_math,
                                                                 uint32_t& counter) {
@@ -1785,8 +1840,9 @@ static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstre
 
     const ExprNode& n = expr.nodes[node_idx];
     const DataType emitted_dtype = emittedScalarNodeValueDType(n);
-    if (node_idx == frontier_idx) {
-        return castScalarExpr(frontier_value_expr, frontier_value_dtype, emitted_dtype);
+    const auto frontier_it = frontier_values.find(node_idx);
+    if (frontier_it != frontier_values.end()) {
+        return castScalarExpr(frontier_it->second.value_expr, frontier_it->second.dtype, emitted_dtype);
     }
 
     const std::string output_type = scalarStorageType(emitted_dtype);
@@ -1838,9 +1894,10 @@ static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstre
     }
 
     if (n.op == ExprOp::TRANSPOSE) {
-        // The tiled path supports exactly one logical transpose frontier. Any
-        // other transpose stays on the more general index-mapped fallback.
-        throw runtime_error("Unexpected non-frontier transpose in tiled logical-transpose consumer emitter.");
+        // All logical transpose nodes in this lowered form must be represented
+        // by shared-memory frontier values. If one is missing here, selecting
+        // the scalar index-mapped fallback would create a dense column read.
+        throw runtime_error("Unsupported logical transpose pattern for auto-swizzled fused emission.");
     }
 
     if (n.op == ExprOp::RESHAPE || n.op == ExprOp::STRIDED_VIEW || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
@@ -1850,9 +1907,7 @@ static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstre
                                                                                n.lhs,
                                                                                idx_expr,
                                                                                group.node_dims[n.lhs],
-                                                                               frontier_idx,
-                                                                               frontier_value_expr,
-                                                                               frontier_value_dtype,
+                                                                               frontier_values,
                                                                                indent,
                                                                                use_uint32_index_math,
                                                                                counter);
@@ -1867,9 +1922,7 @@ static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstre
                                                                                child_idx,
                                                                                idx_expr,
                                                                                child_domain_dims,
-                                                                               frontier_idx,
-                                                                               frontier_value_expr,
-                                                                               frontier_value_dtype,
+                                                                               frontier_values,
                                                                                indent,
                                                                                use_uint32_index_math,
                                                                                counter);
@@ -3683,6 +3736,9 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
 
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+    if (scalarStorageTypeSizeBytes(output_dtype) > sizeof(unsigned int)) {
+        throw runtime_error("Tiled transpose shared-memory swizzle currently supports output scalar storage types up to 32 bits.");
+    }
     const std::string output_type = scalarStorageType(output_dtype);
     const std::optional<DataType> maybe_vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
     const std::optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
@@ -3710,6 +3766,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     const std::string index_type = emittedIndexType(use_uint32_index_math);
     std::ostringstream ss;
     emitRequiredHeaders(stage.expr, ss);
+    emitSharedTransposeWordHelpers(ss);
     ss << "#define TILE_DIM 32\n";
     ss << "#define BLOCK_ROWS 8\n\n";
     ss << "extern \"C\" __global__\n";
@@ -3754,7 +3811,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         if (write_pack_scalars > 1) {
             ss << "  using OutputPack = " << transposePackType(output_dtype) << ";\n";
         }
-        ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_COL_SCALARS + 1];\n";
+        emitSharedTransposeTileDeclaration(ss, "TILE_COL_SCALARS + 1");
         ss << "  const " << index_type << " rowStart = rowTile * TILE_DIM;\n";
         ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int threadLinear = threadIdx.y * TILE_DIM + threadIdx.x;\n\n";
@@ -3787,8 +3844,8 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                         }
                         emitScalarNodeSuffixed(ss, stage.expr, node_idx, lane_idx_expr, suffix, base_indent + "  ", "", 0, input_value);
                     }
-                    ss << base_indent << "  tile[localRow][LOCAL_COL] = "
-                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                    ss << base_indent << "  tile[localRow][LOCAL_COL] = thor_pack_transpose_word<" << output_type << ">("
+                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ");\n";
                     ss << base_indent << "}\n";
                 }
                 return;
@@ -3810,8 +3867,8 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                         }
                         emitScalarNodeSuffixed(ss, stage.expr, node_idx, "idx", suffix, base_indent + "    ");
                     }
-                    ss << base_indent << "    tile[localRow][LOCAL_COL] = "
-                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                    ss << base_indent << "    tile[localRow][LOCAL_COL] = thor_pack_transpose_word<" << output_type << ">("
+                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ");\n";
                     ss << base_indent << "  }\n";
                     ss << base_indent << "}\n";
                 }
@@ -3834,8 +3891,8 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                     }
                     emitScalarNodeSuffixed(ss, stage.expr, node_idx, "idx", suffix, base_indent + "    ");
                 }
-                ss << base_indent << "    tile[localRow][LOCAL_COL] = "
-                   << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                ss << base_indent << "    tile[localRow][LOCAL_COL] = thor_pack_transpose_word<" << output_type << ">("
+                   << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ");\n";
                 ss << base_indent << "  }\n";
             } else {
                 const std::string lane_idx_expr = idx_expr_base + " + static_cast<" + index_type + ">(LANE)";
@@ -3846,8 +3903,8 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
                     emitScalarNodeSuffixed(ss, stage.expr, node_idx, lane_idx_expr, suffix, base_indent + "  ", "LANE", read_pack_scalars);
                 }
 
-                ss << base_indent << "  tile[localRow][LOCAL_COL] = "
-                   << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                ss << base_indent << "  tile[localRow][LOCAL_COL] = thor_pack_transpose_word<" << output_type << ">("
+                   << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ");\n";
             }
             ss << base_indent << "}\n";
         };
@@ -3893,7 +3950,8 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
             ss << "    for (unsigned int lane = 0; lane < WRITE_PACK_SCALARS; ++lane) {\n";
             ss << "      const " << index_type << " outputCol = outputColBase + static_cast<" << index_type << ">(lane);\n";
             ss << "      if (outputRow < numCols && outputCol < numRows) {\n";
-            ss << "        output_pack_data[lane] = tile[localOutPackCol * WRITE_PACK_SCALARS + lane][localOutRow];\n";
+            ss << "        output_pack_data[lane] = thor_unpack_transpose_word<" << output_type
+               << ">(tile[localOutPackCol * WRITE_PACK_SCALARS + lane][localOutRow]);\n";
             ss << "      }\n";
             ss << "    }\n";
             ss << "    const " << index_type << " out_base_idx = matrixOffset + outputRow * numRows + outputColBase;\n";
@@ -3913,7 +3971,8 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
             ss << "    }\n";
         } else {
             ss << "    if (outputRow < numCols && outputColBase < numRows) {\n";
-            ss << "      out0[matrixOffset + outputRow * numRows + outputColBase] = tile[localOutPackCol][localOutRow];\n";
+            ss << "      out0[matrixOffset + outputRow * numRows + outputColBase] = thor_unpack_transpose_word<" << output_type
+               << ">(tile[localOutPackCol][localOutRow]);\n";
             ss << "    }\n";
         }
         ss << "  }\n";
@@ -3943,7 +4002,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
             ss << "  using InputVec2 = " << input_storage_dtype_vector << ";\n";
         }
         ss << "  union PackRaw { unsigned int raw; Pack pack; };\n";
-        ss << "  __shared__ unsigned int tile[TILE_DIM][TILE_DIM + 1];\n";
+        emitSharedTransposeTileDeclaration(ss);
         ss << "  const " << index_type << " rowStart = rowTile * TILE_DIM;\n";
         ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int packedCol = threadIdx.x;\n";
@@ -4081,7 +4140,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         return ss.str();
     }
 
-    ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_DIM + 1];\n";
+    emitSharedTransposeTileDeclaration(ss);
     ss << "  const " << index_type << " x = static_cast<" << index_type << ">(blockIdx.x) * TILE_DIM + threadIdx.x;\n";
     ss << "  const " << index_type << " y = rowTile * TILE_DIM + threadIdx.y;\n";
     ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
@@ -4097,8 +4156,8 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
         emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, "      ");
     }
 
-    ss << "      tile[threadIdx.y + j][threadIdx.x] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype)
-       << ";\n";
+    ss << "      tile[threadIdx.y + j][threadIdx.x] = thor_pack_transpose_word<" << output_type << ">("
+       << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ");\n";
     ss << "    }\n";
     ss << "  }\n\n";
     ss << "  __syncthreads();\n\n";
@@ -4107,7 +4166,7 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
     ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
     ss << "    if (tx < numRows && (ty + j) < numCols) {\n";
     ss << "      const " << index_type << " out_idx = matrixOffset + (ty + j) * numRows + tx;\n";
-    ss << "      out0[out_idx] = tile[threadIdx.x][threadIdx.y + j];\n";
+    ss << "      out0[out_idx] = thor_unpack_transpose_word<" << output_type << ">(tile[threadIdx.x][threadIdx.y + j]);\n";
     ss << "    }\n";
     ss << "  }\n";
     ss << "}\n";
@@ -4240,6 +4299,9 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
 
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+    if (scalarStorageTypeSizeBytes(output_dtype) > sizeof(unsigned int)) {
+        throw runtime_error("Tiled transpose shared-memory swizzle currently supports output scalar storage types up to 32 bits.");
+    }
     const std::string output_type = scalarStorageType(output_dtype);
     const bool emit_packed_low_precision_path = transposePackScalars(output_dtype) > 1;
     const std::optional<DataType> maybe_tensor_input_dtype = getSingleTensorInputStorageDType(stage.expr, input_dtypes);
@@ -4266,6 +4328,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
 
     std::ostringstream ss;
     emitRequiredHeaders(stage.expr, ss);
+    emitSharedTransposeWordHelpers(ss);
     ss << "#define TILE_DIM 32\n";
     ss << "#define BLOCK_ROWS 8\n\n";
     ss << "extern \"C\" __global__\n";
@@ -4310,7 +4373,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         if (write_pack_scalars > 1) {
             ss << "  using OutputPack = " << transposePackType(output_dtype) << ";\n";
         }
-        ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_COL_SCALARS + 1];\n";
+        emitSharedTransposeTileDeclaration(ss, "TILE_COL_SCALARS + 1");
         ss << "  const " << index_type << " rowStart = rowTile * TILE_DIM;\n";
         ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int threadLinear = threadIdx.y * TILE_DIM + threadIdx.x;\n\n";
@@ -4393,8 +4456,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
                         }
                         emitScalarNodeSuffixed(ss, stage.expr, node_idx, "logical_idx", suffix, "        ", "", 0, input_value);
                     }
-                    ss << "        tile[localRow][LOCAL_COL] = "
-                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+                    ss << "        tile[localRow][LOCAL_COL] = thor_pack_transpose_word<" << output_type << ">("
+                       << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ");\n";
                     ss << "      }\n";
                 }
             } else {
@@ -4420,8 +4483,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
                     }
                     emitScalarNodeSuffixed(ss, stage.expr, node_idx, "logical_idx", "_dbl", "        ", "", 0, input_value);
                 }
-                ss << "        tile[localRow][LOCAL_COL] = "
-                   << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, "_dbl") << ";\n";
+                ss << "        tile[localRow][LOCAL_COL] = thor_pack_transpose_word<" << output_type << ">("
+                   << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, "_dbl") << ");\n";
                 ss << "      }\n";
             }
             ss << "    } else if (logicalRow < numRows) {\n";
@@ -4447,8 +4510,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             }
             emitScalarNodeSuffixed(ss, stage.expr, node_idx, "logical_idx", "_dbs", "          ", "", 0, input_value);
         }
-        ss << "          tile[localRow][LOCAL_COL] = "
-           << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, "_dbs") << ";\n";
+        ss << "          tile[localRow][LOCAL_COL] = thor_pack_transpose_word<" << output_type << ">("
+           << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, "_dbs") << ");\n";
         ss << "        }\n";
         ss << "      }\n";
         ss << "    }\n";
@@ -4469,7 +4532,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             ss << "    for (unsigned int lane = 0; lane < WRITE_PACK_SCALARS; ++lane) {\n";
             ss << "      const " << index_type << " outputCol = outputColBase + static_cast<" << index_type << ">(lane);\n";
             ss << "      if (outputRow < numCols && outputCol < numRows) {\n";
-            ss << "        output_pack_data[lane] = tile[localOutPackCol * WRITE_PACK_SCALARS + lane][localOutRow];\n";
+            ss << "        output_pack_data[lane] = thor_unpack_transpose_word<" << output_type
+               << ">(tile[localOutPackCol * WRITE_PACK_SCALARS + lane][localOutRow]);\n";
             ss << "      }\n";
             ss << "    }\n";
             ss << "    const " << index_type << " out_base_idx = matrixOffset + outputRow * numRows + outputColBase;\n";
@@ -4489,7 +4553,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             ss << "    }\n";
         } else {
             ss << "    if (outputRow < numCols && outputColBase < numRows) {\n";
-            ss << "      out0[matrixOffset + outputRow * numRows + outputColBase] = tile[localOutPackCol][localOutRow];\n";
+            ss << "      out0[matrixOffset + outputRow * numRows + outputColBase] = thor_unpack_transpose_word<" << output_type
+               << ">(tile[localOutPackCol][localOutRow]);\n";
             ss << "    }\n";
         }
         ss << "  }\n";
@@ -4508,7 +4573,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             ss << "  using Vec2 = " << transposeVector2StorageType(output_dtype) << ";\n";
         }
         ss << "  union PackRaw { unsigned int raw; Pack pack; };\n";
-        ss << "  __shared__ unsigned int tile[TILE_DIM][TILE_DIM + 1];\n";
+        emitSharedTransposeTileDeclaration(ss);
         ss << "  const " << index_type << " rowStart = rowTile * TILE_DIM;\n";
         ss << "  const " << index_type << " colStart = static_cast<" << index_type << ">(blockIdx.x) * TILE_COL_SCALARS;\n";
         ss << "  const unsigned int packedCol = threadIdx.x;\n";
@@ -4676,7 +4741,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         return ss.str();
     }
 
-    ss << "  __shared__ " << output_type << " tile[TILE_DIM][TILE_DIM + 1];\n";
+    emitSharedTransposeTileDeclaration(ss);
     ss << "  const " << index_type << " x = static_cast<" << index_type << ">(blockIdx.x) * TILE_DIM + threadIdx.x;\n";
     ss << "  const " << index_type << " y = rowTile * TILE_DIM + threadIdx.y;\n";
     ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
@@ -4699,8 +4764,8 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
         }
         emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/true, "      ");
     }
-    ss << "      tile[threadIdx.y + j][threadIdx.x] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype)
-       << ";\n";
+    ss << "      tile[threadIdx.y + j][threadIdx.x] = thor_pack_transpose_word<" << output_type << ">("
+       << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ");\n";
     ss << "    }\n";
     ss << "  }\n\n";
     ss << "  __syncthreads();\n\n";
@@ -4711,7 +4776,7 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
     ss << "      const " << index_type << " out_idx = matrixOffset + static_cast<" << index_type << ">(ty + j) * static_cast<" << index_type
        << ">(numRows) +\n";
     ss << "                                   static_cast<" << index_type << ">(tx);\n";
-    ss << "      out0[out_idx] = tile[threadIdx.x][threadIdx.y + j];\n";
+    ss << "      out0[out_idx] = thor_unpack_transpose_word<" << output_type << ">(tile[threadIdx.x][threadIdx.y + j]);\n";
     ss << "    }\n";
     ss << "  }\n";
     ss << "}\n";
@@ -4725,14 +4790,12 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
         throw runtime_error("emitTiledLogicalTransposeConsumerSpecializedBroadcast called on non-fused stage.");
     }
-    const std::optional<uint32_t> maybe_frontier_idx = tryFindSingleTiledLogicalTransposeConsumerFrontier(stage, groups);
-    if (!maybe_frontier_idx.has_value()) {
-        throw runtime_error("Tiled logical-transpose consumer emitter was selected without a supported frontier.");
+    const std::optional<std::vector<uint32_t>> maybe_frontiers = tryFindTiledLogicalTransposeConsumerFrontiers(stage, groups);
+    if (!maybe_frontiers.has_value() || maybe_frontiers->empty()) {
+        throw runtime_error("Tiled logical-transpose consumer emitter was selected without supported auto-swizzle frontiers.");
     }
 
-    const uint32_t frontier_idx = maybe_frontier_idx.value();
-    const ExprNode& frontier = stage.expr.nodes[frontier_idx];
-    const uint32_t frontier_source_idx = frontier.lhs;
+    const std::vector<uint32_t>& frontier_indices = maybe_frontiers.value();
     const SpecializedBroadcastGroup& group = groups[0];
     const uint32_t stage_output_idx = group.output_indices[0];
     const CompiledStageOutput& output = stage.outputs[stage_output_idx];
@@ -4740,14 +4803,12 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
     const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
-    const DataType frontier_dtype = emittedScalarNodeValueDType(frontier);
-    const std::string output_type = scalarStorageType(output_dtype);
-    const std::string frontier_type = scalarStorageType(frontier_dtype);
     const bool use_uint32_index_math = groupSupportsUInt32IndexMath(group);
     const std::string index_type = emittedIndexType(use_uint32_index_math);
 
     std::ostringstream ss;
     emitRequiredHeaders(stage.expr, ss);
+    emitSharedTransposeWordHelpers(ss);
     ss << "#define TILE_DIM 32\n";
     ss << "#define BLOCK_ROWS 8\n\n";
     ss << "extern \"C\" __global__\n";
@@ -4784,16 +4845,39 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     ss << "  if (batchIdx >= batchCount) return;\n";
     ss << "  const " << index_type << " rowTile = static_cast<" << index_type << ">(blockIdx.y) - batchIdx * rowTiles;\n";
     ss << "  const " << index_type << " matrixOffset = batchIdx * numRows * numCols;\n";
-    ss << "  __shared__ " << frontier_type << " tile[TILE_DIM][TILE_DIM + 1];\n\n";
+
+    for (uint32_t frontier_idx : frontier_indices) {
+        const DataType frontier_dtype = emittedScalarNodeValueDType(stage.expr.nodes[frontier_idx]);
+        if (scalarStorageTypeSizeBytes(frontier_dtype) > sizeof(unsigned int)) {
+            throw runtime_error("Tiled logical-transpose auto-swizzle currently supports frontier scalar storage types up to 32 bits.");
+        }
+    }
+    emitSharedTransposeTileDeclaration(ss);
+    ss << "  static constexpr unsigned int FRONTIER_VALUE_SLOTS = TILE_DIM / BLOCK_ROWS;\n";
+    for (uint32_t frontier_idx : frontier_indices) {
+        const DataType frontier_dtype = emittedScalarNodeValueDType(stage.expr.nodes[frontier_idx]);
+        ss << "  " << scalarStorageType(frontier_dtype) << " transposed_value_" << frontier_idx
+           << "[FRONTIER_VALUE_SLOTS];\n";
+    }
+    ss << "\n";
 
     ss << "  const " << index_type << " x = static_cast<" << index_type << ">(blockIdx.x) * TILE_DIM + threadIdx.x;\n";
     ss << "  const " << index_type << " y = rowTile * TILE_DIM + threadIdx.y;\n";
-    ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
-    ss << "    const " << index_type << " logical_row = y + j;\n";
-    ss << "    const " << index_type << " logical_col = x;\n";
-    ss << "    if (logical_col < numCols && logical_row < numRows) {\n";
-    ss << "      const " << index_type << " source_idx = matrixOffset + logical_row * numCols + logical_col;\n";
-    {
+    ss << "  const " << index_type << " tx = rowTile * TILE_DIM + threadIdx.x;\n";
+    ss << "  const " << index_type << " ty = static_cast<" << index_type << ">(blockIdx.x) * TILE_DIM + threadIdx.y;\n\n";
+
+    for (size_t frontier_position = 0; frontier_position < frontier_indices.size(); ++frontier_position) {
+        const uint32_t frontier_idx = frontier_indices[frontier_position];
+        const ExprNode& frontier = stage.expr.nodes[frontier_idx];
+        const uint32_t frontier_source_idx = frontier.lhs;
+        const DataType frontier_dtype = emittedScalarNodeValueDType(frontier);
+
+        ss << "  {\n";
+        ss << "    for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
+        ss << "      const " << index_type << " logical_row = y + j;\n";
+        ss << "      const " << index_type << " logical_col = x;\n";
+        ss << "      if (logical_col < numCols && logical_row < numRows) {\n";
+        ss << "        const " << index_type << " source_idx = matrixOffset + logical_row * numCols + logical_col;\n";
         uint32_t counter = 0;
         const std::string source_value = emitIndexMappedScalarValue(ss,
                                                                     stage.expr,
@@ -4801,22 +4885,40 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
                                                                     frontier_source_idx,
                                                                     "source_idx",
                                                                     group.node_dims[frontier_source_idx],
-                                                                    "      ",
+                                                                    "        ",
                                                                     use_uint32_index_math,
                                                                     counter);
-        ss << "      tile[threadIdx.y + j][threadIdx.x] = "
-           << castScalarExpr(source_value, emittedScalarNodeValueDType(stage.expr.nodes[frontier_source_idx]), frontier_dtype) << ";\n";
+        ss << "        tile[threadIdx.y + j][threadIdx.x] = thor_pack_transpose_word<" << scalarStorageType(frontier_dtype) << ">("
+           << castScalarExpr(source_value, emittedScalarNodeValueDType(stage.expr.nodes[frontier_source_idx]), frontier_dtype) << ");\n";
+        ss << "      }\n";
+        ss << "    }\n";
+        ss << "  }\n";
+        ss << "  __syncthreads();\n";
+        ss << "  {\n";
+        ss << "    for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
+        ss << "      if (tx < numRows && (ty + j) < numCols) {\n";
+        ss << "        transposed_value_" << frontier_idx << "[j / BLOCK_ROWS] = thor_unpack_transpose_word<"
+           << scalarStorageType(frontier_dtype) << ">(tile[threadIdx.x][threadIdx.y + j]);\n";
+        ss << "      }\n";
+        ss << "    }\n";
+        ss << "  }\n";
+        if (frontier_position + 1 < frontier_indices.size()) {
+            ss << "  __syncthreads();\n";
+        }
+        ss << "\n";
     }
-    ss << "    }\n";
-    ss << "  }\n\n";
-    ss << "  __syncthreads();\n\n";
 
-    ss << "  const " << index_type << " tx = rowTile * TILE_DIM + threadIdx.x;\n";
-    ss << "  const " << index_type << " ty = static_cast<" << index_type << ">(blockIdx.x) * TILE_DIM + threadIdx.y;\n";
     ss << "  for (unsigned int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {\n";
     ss << "    if (tx < numRows && (ty + j) < numCols) {\n";
     ss << "      const " << index_type << " out_idx = matrixOffset + (ty + j) * numRows + tx;\n";
-    ss << "      const " << frontier_type << " transposed_value = tile[threadIdx.x][threadIdx.y + j];\n";
+
+    std::unordered_map<uint32_t, TiledLogicalTransposeFrontierValue> frontier_values;
+    for (uint32_t frontier_idx : frontier_indices) {
+        const DataType frontier_dtype = emittedScalarNodeValueDType(stage.expr.nodes[frontier_idx]);
+        const std::string value_name = "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS]";
+        frontier_values.emplace(frontier_idx, TiledLogicalTransposeFrontierValue{value_name, frontier_dtype});
+    }
+
     {
         uint32_t counter = 0;
         const std::string value = emitTiledLogicalTransposeConsumerScalarValue(ss,
@@ -4825,9 +4927,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
                                                                                output.local_node_idx,
                                                                                "out_idx",
                                                                                group.output_dims,
-                                                                               frontier_idx,
-                                                                               "transposed_value",
-                                                                               frontier_dtype,
+                                                                               frontier_values,
                                                                                "      ",
                                                                                use_uint32_index_math,
                                                                                counter);
@@ -4840,7 +4940,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     return ss.str();
 }
 
-static std::string emitIndexMappedSpecializedBroadcast(const CompiledExecutionStage& stage,
+[[maybe_unused]] static std::string emitIndexMappedSpecializedBroadcast(const CompiledExecutionStage& stage,
                                                        const std::vector<SpecializedBroadcastGroup>& groups,
                                                        const std::string& kernel_name) {
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
@@ -4916,7 +5016,7 @@ static std::string emitIndexMappedSpecializedBroadcast(const CompiledExecutionSt
 
 bool CudaSourceEmitter::specializedBroadcastUsesTiledLogicalTransposeConsumerLaunch(
     const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups) {
-    return tryFindSingleTiledLogicalTransposeConsumerFrontier(stage, groups).has_value();
+    return tryFindTiledLogicalTransposeConsumerFrontiers(stage, groups).has_value();
 }
 
 std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionStage& stage,
@@ -4939,7 +5039,10 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
         if (CudaSourceEmitter::specializedBroadcastUsesTiledLogicalTransposeConsumerLaunch(stage, groups)) {
             return emitTiledLogicalTransposeConsumerSpecializedBroadcast(stage, groups, kernel_name);
         }
-        return emitIndexMappedSpecializedBroadcast(stage, groups, kernel_name);
+        throw std::runtime_error(
+            "Logical transpose inside a fused broadcast stage would require dense column-strided global access, "
+            "but this pattern is not currently supported by the auto-swizzle emitter. Materialize the transpose boundary "
+            "or simplify the transpose chain before fusing.");
     }
 
     std::optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
