@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "Utilities/Expression/CudaKernelSecurity.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
@@ -92,6 +93,8 @@ class Network {
     bool allowUnsafeLoadedCudaKernelSourceCompilation() const { return allowUnsafeLoadedCudaKernelSourceCompilation_; }
     const std::string& trustedLoadedCudaKernelPublicKey() const { return trustedLoadedCudaKernelPublicKey_; }
     std::vector<std::string> cudaKernelSigningPublicKeys() const;
+    std::vector<ThorImplementation::CudaKernelSourceInspection> cudaKernelSourceInfo() const;
+    std::vector<std::string> cudaKernelSources() const;
     std::string cudaKernelSourceInfoJsonString() const;
     virtual nlohmann::json architectureJson() const;
     virtual std::string architectureJsonString() const;

@@ -1,4 +1,5 @@
 #include "Utilities/Expression/CudaKernelExpression.h"
+#include "Utilities/Expression/CudaKernelSecurity.h"
 #include "Utilities/Expression/FusedEquation.h"
 
 #include "gtest/gtest.h"
@@ -273,6 +274,20 @@ void serializable_scale_kernel(const float* x, float* y, float alpha, int64_t n)
                   .launchGrid1D(CudaKernelExpression::DimExpr::numel("y"), 128)
                   .build();
 
+    CudaKernelSourceInspection directInfo;
+    {
+        const auto info = op.sourceInfo();
+        directInfo.name = info.name;
+        directInfo.entrypoint = info.entrypoint;
+        directInfo.source = info.source;
+        directInfo.compiled_source = info.compiled_source;
+        directInfo.compiled_source_hash = info.source_hash;
+        directInfo.loaded_source_compilation_allowed = info.loaded_source_compilation_allowed;
+    }
+    EXPECT_EQ(directInfo.name, "serializable_scale");
+    EXPECT_NE(directInfo.source.find("serializable_scale_kernel"), std::string::npos);
+    EXPECT_NE(directInfo.compiled_source.find("THOR_CUDA_KERNEL_EXPRESSION_FIXED_WIDTH_TYPES"), std::string::npos);
+
     Outputs outputs = op.apply({{"x", Expression::input("x", DataType::FP32, DataType::FP32)}});
     ExpressionDefinition definition = ExpressionDefinition::fromOutputs(outputs);
     nlohmann::json payload = definition.architectureJson();
@@ -291,8 +306,21 @@ void serializable_scale_kernel(const float* x, float* y, float alpha, int64_t n)
     ASSERT_EQ(signingPublicKeys.size(), 1u);
     const std::string trustedPublicKey = signingPublicKeys.front();
     EXPECT_FALSE(trustedPublicKey.empty());
+    EXPECT_NE(signatureJson.at("public_key_fingerprint").get<std::string>(), trustedPublicKey);
+
+    std::vector<CudaKernelSourceInspection> serializedInfo = collectCudaKernelSourceInfo(payload);
+    ASSERT_EQ(serializedInfo.size(), 1u);
+    EXPECT_EQ(serializedInfo.front().name, "serializable_scale");
+    EXPECT_NE(serializedInfo.front().source.find("serializable_scale_kernel"), std::string::npos);
+    EXPECT_EQ(serializedInfo.front().signing_public_key_fingerprint, signatureJson.at("public_key_fingerprint").get<std::string>());
 
     ExpressionDefinition loadedDefault = ExpressionDefinition::deserialize(payload);
+    std::vector<CudaKernelSourceInspection> firstClassSourceInfo = loadedDefault.cudaKernelSourceInfo();
+    ASSERT_EQ(firstClassSourceInfo.size(), 1u);
+    EXPECT_EQ(firstClassSourceInfo.front().name, "serializable_scale");
+    EXPECT_NE(firstClassSourceInfo.front().source.find("serializable_scale_kernel"), std::string::npos);
+    EXPECT_EQ(loadedDefault.cudaKernelSources(), std::vector<std::string>{firstClassSourceInfo.front().source});
+
     nlohmann::json sourceInfo = loadedDefault.cudaKernelSourceInfoJson();
     ASSERT_EQ(sourceInfo.size(), 1u);
     EXPECT_FALSE(sourceInfo.at(0).at("loaded_source_compilation_allowed").get<bool>());
@@ -309,6 +337,15 @@ void serializable_scale_kernel(const float* x, float* y, float alpha, int64_t n)
     nlohmann::json missingSignature = payload;
     missingSignature.erase("cuda_kernel_manifest_signature");
     EXPECT_THROW((void)ExpressionDefinition::deserialize(missingSignature, true, trustedPublicKey), std::runtime_error);
+
+    nlohmann::json publicKeyInFingerprint = payload;
+    publicKeyInFingerprint["cuda_kernel_manifest_signature"]["public_key_fingerprint"] = trustedPublicKey;
+    try {
+        (void)ExpressionDefinition::deserialize(publicKeyInFingerprint, true, trustedPublicKey);
+        FAIL() << "Expected manifest public_key_fingerprint containing public key material to be rejected";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("public_key_fingerprint contains public key material"), std::string::npos);
+    }
 
     auto wrongKeyOp = CudaKernelExpression::builder("wrong_key_source")
                           .source(R"cuda(

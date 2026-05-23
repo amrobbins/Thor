@@ -1451,32 +1451,44 @@ std::vector<std::string> ExpressionDefinition::cudaKernelSigningPublicKeys() con
     return collectCudaKernelSigningPublicKeys(architectureJson());
 }
 
-json ExpressionDefinition::cudaKernelSourceInfoJson() const {
+std::vector<CudaKernelSourceInspection> ExpressionDefinition::cudaKernelSourceInfo() const {
     validate();
-    json result = json::array();
+    std::vector<CudaKernelSourceInspection> result;
     if (!outputs.expr) {
         return result;
     }
+    result.reserve(outputs.expr->cuda_kernel_expressions.size());
     for (const auto& kernel : outputs.expr->cuda_kernel_expressions) {
         if (!kernel) {
             throw std::runtime_error("ExpressionDefinition has a null CudaKernelExpression spec.");
         }
         const auto info = kernel->sourceInfo();
-        json entry{{"name", info.name},
-                   {"entrypoint", info.entrypoint},
-                   {"source", info.source},
-                   {"compiled_source", info.compiled_source},
-                   {"compiled_source_hash", info.source_hash},
-                   {"loaded_source_compilation_allowed", info.loaded_source_compilation_allowed}};
+        CudaKernelSourceInspection entry;
+        entry.name = info.name;
+        entry.entrypoint = info.entrypoint;
+        entry.source = info.source;
+        entry.compiled_source = info.compiled_source;
+        entry.compiled_source_hash = info.source_hash;
+        entry.loaded_source_compilation_allowed = info.loaded_source_compilation_allowed;
         if (!cuda_kernel_manifest_signature.is_null()) {
-            entry["signature_algorithm"] = cuda_kernel_manifest_signature.value("algorithm", std::string{});
-            entry["signing_public_key_fingerprint"] = cuda_kernel_manifest_signature.value("public_key_fingerprint", std::string{});
-            entry["signature"] = cuda_kernel_manifest_signature.value("signature", std::string{});
+            entry.signature_algorithm = cuda_kernel_manifest_signature.value("algorithm", std::string{});
+            entry.signing_public_key_fingerprint = cuda_kernel_manifest_signature.value("public_key_fingerprint", std::string{});
+            entry.signature = cuda_kernel_manifest_signature.value("signature", std::string{});
         }
         result.push_back(std::move(entry));
     }
     return result;
 }
+
+std::vector<std::string> ExpressionDefinition::cudaKernelSources() const {
+    std::vector<std::string> sources;
+    for (const CudaKernelSourceInspection& info : cudaKernelSourceInfo()) {
+        sources.push_back(info.source);
+    }
+    return sources;
+}
+
+json ExpressionDefinition::cudaKernelSourceInfoJson() const { return cudaKernelSourceInspectionListToJson(cudaKernelSourceInfo()); }
 
 void ExpressionDefinition::allowUnsafeLoadedCudaKernelSourceCompilation(const std::string& trusted_ed25519_public_key) {
     if (!outputs.expr || outputs.expr->cuda_kernel_expressions.empty()) {

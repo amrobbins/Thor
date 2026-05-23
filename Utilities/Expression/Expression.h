@@ -19,6 +19,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
+#include "Utilities/Expression/CudaKernelSecurity.h"
 
 namespace ThorImplementation {
 struct PhysicalExecutionStage;
@@ -330,6 +331,8 @@ struct ExpressionDefinition {
     [[nodiscard]] nlohmann::json architectureJson() const;
     [[nodiscard]] bool hasCudaKernelExpressions() const;
     [[nodiscard]] std::vector<std::string> cudaKernelSigningPublicKeys() const;
+    [[nodiscard]] std::vector<CudaKernelSourceInspection> cudaKernelSourceInfo() const;
+    [[nodiscard]] std::vector<std::string> cudaKernelSources() const;
     [[nodiscard]] nlohmann::json cudaKernelSourceInfoJson() const;
     void allowUnsafeLoadedCudaKernelSourceCompilation(const std::string& trusted_ed25519_public_key);
     [[nodiscard]] static ExpressionDefinition fromOutputs(const Outputs& outputs);
