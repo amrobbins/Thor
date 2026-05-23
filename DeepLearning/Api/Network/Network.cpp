@@ -335,8 +335,20 @@ std::vector<std::string> Network::cudaKernelSigningPublicKeys() const {
     return ThorImplementation::collectCudaKernelSigningPublicKeys(architectureJson());
 }
 
+std::vector<ThorImplementation::CudaKernelSourceInspection> Network::cudaKernelSourceInfo() const {
+    return ThorImplementation::collectCudaKernelSourceInfo(architectureJson());
+}
+
+std::vector<std::string> Network::cudaKernelSources() const {
+    std::vector<std::string> sources;
+    for (const ThorImplementation::CudaKernelSourceInspection& info : cudaKernelSourceInfo()) {
+        sources.push_back(info.source);
+    }
+    return sources;
+}
+
 std::string Network::cudaKernelSourceInfoJsonString() const {
-    return ThorImplementation::collectCudaKernelSourceInfoJson(architectureJson()).dump(4);
+    return ThorImplementation::cudaKernelSourceInspectionListToJson(cudaKernelSourceInfo()).dump(4);
 }
 
 void Network::load(const string &directory) { load(directory, false, ""); }

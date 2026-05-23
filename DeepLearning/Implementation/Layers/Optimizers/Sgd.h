@@ -27,6 +27,7 @@ class Sgd final : public Optimizer {
     float getMomentum() const;
     bool getUseNesterovMomentum() const;
     uint64_t getEpoch() const;
+    float getCurrentLearningRate() const;
 
     std::shared_ptr<Optimizer> clone() const override {
         return std::make_shared<Sgd>(getId(), initialLearningRate, decay, momentum, useNesterovMomentum, 0);

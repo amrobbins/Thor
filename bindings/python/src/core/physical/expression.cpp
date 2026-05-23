@@ -43,6 +43,7 @@ using RotaryPositionEmbeddingOptions = ThorImplementation::RotaryPositionEmbeddi
 using PreparedDynamicExpression = ThorImplementation::PreparedDynamicExpression;
 using DynamicExpressionBuild = ThorImplementation::DynamicExpressionBuild;
 using CudaKernelExpression = ThorImplementation::CudaKernelExpression;
+using CudaKernelSourceInspection = ThorImplementation::CudaKernelSourceInspection;
 using CudaKernelDimExpr = ThorImplementation::CudaKernelExpression::DimExpr;
 using CudaKernelLaunchContext = ThorImplementation::CudaKernelExpression::LaunchContext;
 using CudaKernelLaunchConfig = ThorImplementation::CudaKernelLaunchConfig;
@@ -152,6 +153,34 @@ CudaKernelExpression::LaunchFn launchFnFromPython(nb::callable launch) {
     };
 }
 
+nb::dict cudaKernelSourceInspectionToPython(const CudaKernelSourceInspection& info) {
+    nb::dict entry;
+    entry["name"] = info.name;
+    entry["entrypoint"] = info.entrypoint;
+    entry["source"] = info.source;
+    entry["compiled_source"] = info.compiled_source;
+    entry["compiled_source_hash"] = info.compiled_source_hash;
+    entry["loaded_source_compilation_allowed"] = info.loaded_source_compilation_allowed;
+    if (!info.signature_algorithm.empty()) {
+        entry["signature_algorithm"] = info.signature_algorithm;
+    }
+    if (!info.signing_public_key_fingerprint.empty()) {
+        entry["signing_public_key_fingerprint"] = info.signing_public_key_fingerprint;
+    }
+    if (!info.signature.empty()) {
+        entry["signature"] = info.signature;
+    }
+    return entry;
+}
+
+nb::list cudaKernelSourceInspectionListToPython(const std::vector<CudaKernelSourceInspection>& infos) {
+    nb::list result;
+    for (const CudaKernelSourceInspection& info : infos) {
+        result.append(cudaKernelSourceInspectionToPython(info));
+    }
+    return result;
+}
+
 }  // namespace
 
 static nb::dict parameterFanOverridesToPython(const FusedEquation::ParameterFanOverrideMap& overrides) {
@@ -177,6 +206,18 @@ Return the out-of-band CudaKernelExpression public signing keys that were genera
 by this process for a serialized expression JSON payload. The serialized payload
 contains only public-key fingerprints, so this returns keys only while the
 process-local ephemeral signing registry still has them.
+)nbdoc");
+
+    physical.def(
+        "cuda_kernel_source_info_from_json",
+        [](const std::string& payload) {
+            return cudaKernelSourceInspectionListToPython(ThorImplementation::collectCudaKernelSourceInfo(nlohmann::json::parse(payload)));
+        },
+        "payload"_a,
+        R"nbdoc(
+Return inspectable CudaKernelExpression source entries from serialized expression
+JSON without enabling CUDA source compilation. Each entry includes the kernel
+name, entrypoint, CUDA source, compiled-source hash, and signing fingerprint.
 )nbdoc");
 
     auto attention_layout = nb::enum_<AttentionTensorLayout>(physical, "AttentionTensorLayout")
@@ -359,14 +400,27 @@ kernel launch dynamic shared-memory byte count.
         .def_prop_ro("source", &CudaKernelExpression::source)
         .def_prop_ro("compiled_source", &CudaKernelExpression::compiledSource)
         .def_prop_ro("loaded_source_compilation_allowed", &CudaKernelExpression::loadedSourceCompilationAllowed)
+        .def("source_info", [](const CudaKernelExpression& self) {
+            const auto info = self.sourceInfo();
+            CudaKernelSourceInspection inspection;
+            inspection.name = info.name;
+            inspection.entrypoint = info.entrypoint;
+            inspection.source = info.source;
+            inspection.compiled_source = info.compiled_source;
+            inspection.compiled_source_hash = info.source_hash;
+            inspection.loaded_source_compilation_allowed = info.loaded_source_compilation_allowed;
+            return cudaKernelSourceInspectionToPython(inspection);
+        })
         .def("source_info_json", [](const CudaKernelExpression& self) {
             const auto info = self.sourceInfo();
-            return nlohmann::json{{"name", info.name},
-                                  {"entrypoint", info.entrypoint},
-                                  {"source", info.source},
-                                  {"compiled_source", info.compiled_source},
-                                  {"compiled_source_hash", info.source_hash},
-                                  {"loaded_source_compilation_allowed", info.loaded_source_compilation_allowed}}.dump(2);
+            CudaKernelSourceInspection inspection;
+            inspection.name = info.name;
+            inspection.entrypoint = info.entrypoint;
+            inspection.source = info.source;
+            inspection.compiled_source = info.compiled_source;
+            inspection.compiled_source_hash = info.source_hash;
+            inspection.loaded_source_compilation_allowed = info.loaded_source_compilation_allowed;
+            return ThorImplementation::cudaKernelSourceInspectionToJson(inspection).dump(2);
         })
         .def("apply", &CudaKernelExpression::apply, "inputs"_a)
         .def("__call__", &CudaKernelExpression::apply, "inputs"_a)
@@ -1725,6 +1779,8 @@ Args:
             "payload"_a,
             "allow_unsafe_loaded_cuda_kernel_source"_a = false,
             "trusted_cuda_kernel_public_key"_a = "")
+        .def("cuda_kernel_source_info", [](const ExpressionDefinition& self) { return cudaKernelSourceInspectionListToPython(self.cudaKernelSourceInfo()); })
+        .def("cuda_kernel_sources", &ExpressionDefinition::cudaKernelSources)
         .def("cuda_kernel_source_info_json", [](const ExpressionDefinition& self) { return self.cudaKernelSourceInfoJson().dump(2); })
         .def("cuda_kernel_signing_public_keys", &ExpressionDefinition::cudaKernelSigningPublicKeys)
         .def("allow_unsafe_loaded_cuda_kernel_source_compilation",

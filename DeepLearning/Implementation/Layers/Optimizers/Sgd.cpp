@@ -168,3 +168,5 @@ float Sgd::getMomentum() const { return momentum; }
 bool Sgd::getUseNesterovMomentum() const { return useNesterovMomentum; }
 
 uint64_t Sgd::getEpoch() const { return currentEpoch; }
+
+float Sgd::getCurrentLearningRate() const { return currentLearningRate; }

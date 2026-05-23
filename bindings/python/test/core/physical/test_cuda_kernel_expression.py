@@ -354,6 +354,12 @@ void py_serializable_scale_kernel(const float* x, float* y, float alpha, int64_t
         .build()
     )
 
+    kernel_source_info = kernel.source_info()
+    assert kernel_source_info["name"] == "py_serializable_scale"
+    assert kernel_source_info["entrypoint"] == "py_serializable_scale_kernel"
+    assert "py_serializable_scale_kernel" in kernel_source_info["source"]
+    assert "THOR_CUDA_KERNEL_EXPRESSION_FIXED_WIDTH_TYPES" in kernel_source_info["compiled_source"]
+
     definition_to_save = thor.physical.ExpressionDefinition.from_outputs(
         kernel.apply({"x": ex.input("x", output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32)})
     )
@@ -369,9 +375,24 @@ void py_serializable_scale_kernel(const float* x, float* y, float alpha, int64_t
     assert len(signing_public_keys) == 1
     trusted_public_key = signing_public_keys[0]
     assert trusted_public_key
+    assert signature_json["public_key_fingerprint"] != trusted_public_key
     assert thor.physical.cuda_kernel_signing_public_keys_from_json(payload) == signing_public_keys
 
+    serialized_source_info = thor.physical.cuda_kernel_source_info_from_json(payload)
+    assert len(serialized_source_info) == 1
+    assert serialized_source_info[0]["name"] == "py_serializable_scale"
+    assert serialized_source_info[0]["entrypoint"] == "py_serializable_scale_kernel"
+    assert "py_serializable_scale_kernel" in serialized_source_info[0]["source"]
+    assert serialized_source_info[0]["signing_public_key_fingerprint"] == signature_json["public_key_fingerprint"]
+    assert "signing_public_key" not in serialized_source_info[0]
+
     definition = thor.physical.ExpressionDefinition.from_json(payload)
+    first_class_source_info = definition.cuda_kernel_source_info()
+    assert len(first_class_source_info) == 1
+    assert first_class_source_info[0]["name"] == "py_serializable_scale"
+    assert "py_serializable_scale_kernel" in first_class_source_info[0]["source"]
+    assert definition.cuda_kernel_sources() == [first_class_source_info[0]["source"]]
+
     source_info = json.loads(definition.cuda_kernel_source_info_json())
     assert source_info[0]["loaded_source_compilation_allowed"] is False
     assert "THOR_CUDA_KERNEL_EXPRESSION_FIXED_WIDTH_TYPES" in source_info[0]["compiled_source"]
@@ -396,6 +417,15 @@ void py_serializable_scale_kernel(const float* x, float* y, float alpha, int64_t
     with pytest.raises(RuntimeError, match="no cuda_kernel_manifest_signature"):
         thor.physical.ExpressionDefinition.from_json(
             json.dumps(missing_signature_payload_json),
+            allow_unsafe_loaded_cuda_kernel_source=True,
+            trusted_cuda_kernel_public_key=trusted_public_key,
+        )
+
+    public_key_in_fingerprint_payload_json = json.loads(payload)
+    public_key_in_fingerprint_payload_json["cuda_kernel_manifest_signature"]["public_key_fingerprint"] = trusted_public_key
+    with pytest.raises(RuntimeError, match="public_key_fingerprint contains public key material"):
+        thor.physical.ExpressionDefinition.from_json(
+            json.dumps(public_key_in_fingerprint_payload_json),
             allow_unsafe_loaded_cuda_kernel_source=True,
             trusted_cuda_kernel_public_key=trusted_public_key,
         )
@@ -504,6 +534,12 @@ void py_custom_layer_serializable_scale_kernel(const float* feature_input, float
     assert expression_json["cuda_kernel_manifest_signature"]["algorithm"] == "ed25519"
     assert "public_key" not in expression_json["cuda_kernel_manifest_signature"]
     assert expression_json["cuda_kernel_manifest_signature"]["public_key_fingerprint"]
+
+    network_source_info = network.cuda_kernel_source_info()
+    assert len(network_source_info) == 1
+    assert network_source_info[0]["name"] == "py_custom_layer_serializable_scale"
+    assert "py_custom_layer_serializable_scale_kernel" in network_source_info[0]["source"]
+    assert network.cuda_kernel_sources() == [network_source_info[0]["source"]]
 
     payload = json.dumps(expression_json)
     signing_public_keys = network.cuda_kernel_signing_public_keys()

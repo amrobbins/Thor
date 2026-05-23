@@ -13,6 +13,38 @@ using namespace nb::literals;
 using namespace std;
 using namespace Thor;
 
+namespace {
+
+nb::dict cudaKernelSourceInspectionToPython(const ThorImplementation::CudaKernelSourceInspection& info) {
+    nb::dict entry;
+    entry["name"] = info.name;
+    entry["entrypoint"] = info.entrypoint;
+    entry["source"] = info.source;
+    entry["compiled_source"] = info.compiled_source;
+    entry["compiled_source_hash"] = info.compiled_source_hash;
+    entry["loaded_source_compilation_allowed"] = info.loaded_source_compilation_allowed;
+    if (!info.signature_algorithm.empty()) {
+        entry["signature_algorithm"] = info.signature_algorithm;
+    }
+    if (!info.signing_public_key_fingerprint.empty()) {
+        entry["signing_public_key_fingerprint"] = info.signing_public_key_fingerprint;
+    }
+    if (!info.signature.empty()) {
+        entry["signature"] = info.signature;
+    }
+    return entry;
+}
+
+nb::list cudaKernelSourceInspectionListToPython(const std::vector<ThorImplementation::CudaKernelSourceInspection>& infos) {
+    nb::list result;
+    for (const ThorImplementation::CudaKernelSourceInspection& info : infos) {
+        result.append(cudaKernelSourceInspectionToPython(info));
+    }
+    return result;
+}
+
+}  // namespace
+
 void bind_network(nb::module_ &m) {
     auto network = nb::class_<Network>(m, "Network");
     network.attr("__module__") = "thor";
@@ -63,6 +95,8 @@ the CUDA code safe or sandboxed. Inspect the serialized CUDA source before
 providing the key and enabling compilation.
 )nbdoc");
 
+    network.def("cuda_kernel_source_info", [](const Network& self) { return cudaKernelSourceInspectionListToPython(self.cudaKernelSourceInfo()); });
+    network.def("cuda_kernel_sources", &Network::cudaKernelSources);
     network.def("cuda_kernel_source_info_json", &Network::cudaKernelSourceInfoJsonString);
     network.def("cuda_kernel_signing_public_keys", &Network::cudaKernelSigningPublicKeys);
 
