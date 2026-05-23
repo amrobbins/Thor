@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include "DeepLearning/Implementation/ThorError.h"
@@ -131,8 +132,9 @@ static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
                                             const std::optional<Tensor>& workspace,
                                             const char* op_name);
 
-
-CudnnRmsNormDescriptor CompiledRmsNorm::descriptorFor(const Tensor& inputTensor, const Tensor& scaleTensor, const Tensor& outputTensor) const {
+CudnnRmsNormDescriptor CompiledRmsNorm::descriptorFor(const Tensor& inputTensor,
+                                                      const Tensor& scaleTensor,
+                                                      const Tensor& outputTensor) const {
     const std::vector<uint64_t> inputDims = inputTensor.getDimensions();
     const std::vector<uint64_t> scaleDims = scaleTensor.getDimensions();
     const std::vector<uint64_t> outputDims = outputTensor.getDimensions();
@@ -211,7 +213,6 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
     return descriptor;
 }
 
-
 CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& qTensor,
                                                                   const Tensor& kTensor,
                                                                   const Tensor& vTensor,
@@ -252,7 +253,6 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
     return descriptor;
 }
 
-
 TensorDescriptor::DataType CompiledAttentionBackward::outputDTypeFor(ExprOp op) const {
     switch (op) {
         case ExprOp::ATTENTION_BACKWARD_Q:
@@ -283,17 +283,14 @@ bool sameOptionalFloat(const std::optional<float>& lhs, const std::optional<floa
 bool attentionConfigMatchesBackward(const CompiledAttention& forward,
                                     const CompiledAttentionBackward& backward,
                                     TensorDescriptor::DataType output_dtype) {
-    return forward.q_layout == backward.q_layout && forward.k_layout == backward.k_layout &&
-           forward.v_layout == backward.v_layout && forward.o_layout == backward.o_layout &&
-           forward.mask_kind == backward.mask_kind && forward.diagonal_left_bound == backward.diagonal_left_bound &&
-           forward.diagonal_right_bound == backward.diagonal_right_bound &&
-           sameOptionalFloat(forward.attention_scale, backward.attention_scale) &&
-           forward.use_alibi_mask == backward.use_alibi_mask && forward.use_bias == backward.use_bias &&
-           forward.use_padding_mask == backward.use_padding_mask && forward.use_ragged_offsets == backward.use_ragged_offsets &&
-           forward.use_paged_kv_cache == backward.use_paged_kv_cache &&
+    return forward.q_layout == backward.q_layout && forward.k_layout == backward.k_layout && forward.v_layout == backward.v_layout &&
+           forward.o_layout == backward.o_layout && forward.mask_kind == backward.mask_kind &&
+           forward.diagonal_left_bound == backward.diagonal_left_bound && forward.diagonal_right_bound == backward.diagonal_right_bound &&
+           sameOptionalFloat(forward.attention_scale, backward.attention_scale) && forward.use_alibi_mask == backward.use_alibi_mask &&
+           forward.use_bias == backward.use_bias && forward.use_padding_mask == backward.use_padding_mask &&
+           forward.use_ragged_offsets == backward.use_ragged_offsets && forward.use_paged_kv_cache == backward.use_paged_kv_cache &&
            forward.paged_kv_max_sequence_length == backward.paged_kv_max_sequence_length &&
-           forward.dropout_probability == backward.dropout_probability &&
-           forward.compute_dtype == backward.compute_dtype &&
+           forward.dropout_probability == backward.dropout_probability && forward.compute_dtype == backward.compute_dtype &&
            forward.output_dtype == output_dtype;
 }
 
@@ -354,8 +351,8 @@ void StampedAttention::runOn(Stream& run_stream) const {
         args.dropoutOffset = dropout_offset.value();
     }
     if (compiled_attention->use_fp8_forward_scaling) {
-        if (!descale_q.has_value() || !descale_k.has_value() || !descale_v.has_value() || !descale_s.has_value() ||
-            !scale_s.has_value() || !scale_o.has_value() || !amax_s.has_value() || !amax_o.has_value()) {
+        if (!descale_q.has_value() || !descale_k.has_value() || !descale_v.has_value() || !descale_s.has_value() || !scale_s.has_value() ||
+            !scale_o.has_value() || !amax_s.has_value() || !amax_o.has_value()) {
             throw std::runtime_error("StampedAttention requires all FP8 scale/descale/amax tensors for FP8 attention forward.");
         }
         args.descaleQ = descale_q.value();
@@ -484,7 +481,6 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
       stream(stream),
       forward_state(std::move(forward_state)) {}
 
-
 void StampedAttentionBackward::run() { runOn(stream); }
 
 void StampedAttentionBackward::runOn(Stream& run_stream) const {
@@ -499,7 +495,8 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
     if (use_saved_forward) {
         if (!saved_forward_state->has_valid_stats || !forwardOutput.isInitialized() || !forwardStats.isInitialized()) {
             throw std::runtime_error(
-                "Attention-backward expected same-plan retained cuDNN forward stats, but the matching forward stage did not populate them.");
+                "Attention-backward expected same-plan retained cuDNN forward stats, but the matching forward stage did not populate "
+                "them.");
         }
         if (forwardOutput.getDimensions() != dO.getDimensions() || forwardOutput.getDataType() != dO.getDataType() ||
             forwardOutput.getPlacement() != dO.getPlacement()) {
@@ -554,8 +551,15 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
         CudnnScaledDotProductAttention::instance().forward(descriptor, fwdArgs, run_stream);
     }
 
-    CudnnAttentionBackwardArgs bwdArgs{
-        .q = cudnnQ, .k = cudnnK, .v = cudnnV, .o = cudnnO, .dO = cudnnDO, .stats = forwardStats, .dQ = cudnnDQ, .dK = cudnnDK, .dV = cudnnDV};
+    CudnnAttentionBackwardArgs bwdArgs{.q = cudnnQ,
+                                       .k = cudnnK,
+                                       .v = cudnnV,
+                                       .o = cudnnO,
+                                       .dO = cudnnDO,
+                                       .stats = forwardStats,
+                                       .dQ = cudnnDQ,
+                                       .dK = cudnnDK,
+                                       .dV = cudnnDV};
     if (compiled_attention_backward->use_bias) {
         if (!bias.has_value()) {
             throw std::runtime_error("StampedAttentionBackward requires an additive bias tensor but none was provided.");
@@ -640,6 +644,205 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
     if (this->dBiasScratch.has_value()) {
         outputs.push_back(this->dBiasScratch.value());
     }
+}
+
+StampedCudaKernel::StampedCudaKernel(std::shared_ptr<CompiledCudaKernel> compiled,
+                                     std::vector<Tensor> inputs,
+                                     std::vector<TensorScalarBinding> tensor_runtime_scalars,
+                                     std::vector<Tensor> outputs,
+                                     std::vector<StampedCudaKernelParam> params,
+                                     CudaKernelLaunchConfig launch_config,
+                                     const Stream& stream)
+    : compiled(std::move(compiled)),
+      inputs(std::move(inputs)),
+      tensor_runtime_scalars(std::move(tensor_runtime_scalars)),
+      outputs(std::move(outputs)),
+      params(std::move(params)),
+      launch_config(launch_config),
+      stream(stream) {
+    if (!this->compiled) {
+        throw std::runtime_error("StampedCudaKernel requires a compiled CUDA kernel.");
+    }
+    if (this->compiled->kernel == nullptr) {
+        throw std::runtime_error("StampedCudaKernel compiled kernel handle is null.");
+    }
+    if (this->outputs.empty()) {
+        throw std::runtime_error("StampedCudaKernel requires at least one output tensor.");
+    }
+    for (const Tensor& input : this->inputs) {
+        if (!input.isInitialized()) {
+            throw std::runtime_error("StampedCudaKernel input tensor is not initialized.");
+        }
+        if (input.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
+            throw std::runtime_error("StampedCudaKernel input tensor is not on GPU.");
+        }
+        if (input.getPlacement().getDeviceNum() != this->compiled->device_num) {
+            throw std::runtime_error("StampedCudaKernel input tensor GPU does not match compiled kernel GPU.");
+        }
+    }
+    for (const TensorScalarBinding& binding : this->tensor_runtime_scalars) {
+        if (!binding.buffer.isInitialized()) {
+            throw std::runtime_error("StampedCudaKernel tensor runtime scalar buffer is not initialized.");
+        }
+        if (binding.buffer.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
+            throw std::runtime_error("StampedCudaKernel tensor runtime scalar buffer is not on GPU.");
+        }
+        if (binding.buffer.getPlacement().getDeviceNum() != this->compiled->device_num) {
+            throw std::runtime_error("StampedCudaKernel tensor runtime scalar GPU does not match compiled kernel GPU.");
+        }
+    }
+    for (const Tensor& output : this->outputs) {
+        if (!output.isInitialized()) {
+            throw std::runtime_error("StampedCudaKernel output tensor is not initialized.");
+        }
+        if (output.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
+            throw std::runtime_error("StampedCudaKernel output tensor is not on GPU.");
+        }
+        if (output.getPlacement().getDeviceNum() != this->compiled->device_num) {
+            throw std::runtime_error("StampedCudaKernel output tensor GPU does not match compiled kernel GPU.");
+        }
+    }
+    if (this->stream.getGpuNum() != this->compiled->device_num) {
+        throw std::runtime_error("StampedCudaKernel stream GPU does not match compiled kernel GPU.");
+    }
+}
+
+uint32_t StampedCudaKernel::gpuNum() const {
+    if (!compiled) {
+        throw std::runtime_error("StampedCudaKernel::gpuNum called with no compiled kernel.");
+    }
+    return static_cast<uint32_t>(compiled->device_num);
+}
+
+Tensor StampedCudaKernel::getOutputTensor() const {
+    if (outputs.size() != 1) {
+        throw std::runtime_error("StampedCudaKernel::getOutputTensor called for a multi-output kernel.");
+    }
+    return outputs.front();
+}
+
+void StampedCudaKernel::run() { runOn(stream); }
+
+void StampedCudaKernel::run(const std::unordered_map<std::string, float>& runtime_scalars) { runOn(stream, runtime_scalars); }
+
+void StampedCudaKernel::runOn(Stream& run_stream) const { runOn(run_stream, {}); }
+
+void StampedCudaKernel::runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
+    if (!compiled || compiled->kernel == nullptr) {
+        throw std::runtime_error("StampedCudaKernel::runOn called with no compiled kernel.");
+    }
+    if (run_stream.getGpuNum() != compiled->device_num) {
+        throw std::runtime_error("StampedCudaKernel::runOn stream GPU does not match compiled kernel GPU.");
+    }
+    if (launch_config.grid.x == 0 || launch_config.grid.y == 0 || launch_config.grid.z == 0 || launch_config.block.x == 0 ||
+        launch_config.block.y == 0 || launch_config.block.z == 0) {
+        throw std::runtime_error("StampedCudaKernel launch grid/block dimensions must be non-zero.");
+    }
+
+    ScopedGpu scoped_gpu(compiled->device_num);
+
+    if (runtime_scalars.empty() && requiresRuntimeScalars()) {
+        throw std::runtime_error("StampedCudaKernel::runOn requires runtime scalar values. Call run(runtime_scalars).");
+    }
+
+    std::unordered_set<std::string> consumed_runtime_scalar_names;
+    consumed_runtime_scalar_names.reserve(runtime_scalars.size());
+
+    std::vector<void*> pointer_values;
+    pointer_values.reserve(params.size());
+    std::vector<float> runtime_scalar_values;
+    runtime_scalar_values.reserve(params.size());
+    std::vector<void*> kernel_args;
+    kernel_args.reserve(params.size());
+
+    for (const StampedCudaKernelParam& param : params) {
+        switch (param.kind) {
+            case StampedCudaKernelParam::Kind::TensorInput: {
+                if (param.tensor_index >= inputs.size()) {
+                    throw std::runtime_error("StampedCudaKernel tensor input parameter index out of range: " + param.name);
+                }
+                void* ptr = const_cast<void*>(static_cast<const void*>(inputs[param.tensor_index].getMemPtr<void>()));
+                pointer_values.push_back(ptr);
+                kernel_args.push_back(&pointer_values.back());
+                break;
+            }
+            case StampedCudaKernelParam::Kind::TensorRuntimeScalar: {
+                if (param.tensor_index >= tensor_runtime_scalars.size()) {
+                    throw std::runtime_error("StampedCudaKernel tensor runtime scalar parameter index out of range: " + param.name);
+                }
+                const TensorScalarBinding& binding = tensor_runtime_scalars[param.tensor_index];
+                auto* base = static_cast<const uint8_t*>(binding.buffer.getMemPtr());
+                void* ptr = (void*)(base + binding.byteOffset);
+                pointer_values.push_back(ptr);
+                kernel_args.push_back(&pointer_values.back());
+                break;
+            }
+            case StampedCudaKernelParam::Kind::HostRuntimeScalar: {
+                auto it = runtime_scalars.find(param.name);
+                if (it == runtime_scalars.end()) {
+                    throw std::runtime_error("Missing value for runtime scalar: " + param.name +
+                                             "  - if it was meant to be constant, use a constant scalar instead.");
+                }
+                runtime_scalar_values.push_back(it->second);
+                kernel_args.push_back(&runtime_scalar_values.back());
+                consumed_runtime_scalar_names.insert(param.name);
+                break;
+            }
+            case StampedCudaKernelParam::Kind::TensorOutput: {
+                if (param.tensor_index >= outputs.size()) {
+                    throw std::runtime_error("StampedCudaKernel tensor output parameter index out of range: " + param.name);
+                }
+                void* ptr = (void*)outputs[param.tensor_index].getMemPtr<void>();
+                pointer_values.push_back(ptr);
+                kernel_args.push_back(&pointer_values.back());
+                break;
+            }
+            case StampedCudaKernelParam::Kind::Scalar: {
+                std::visit([&](const auto& value) { kernel_args.push_back(const_cast<void*>(static_cast<const void*>(&value))); },
+                           param.scalar_value);
+                break;
+            }
+            default:
+                throw std::runtime_error("StampedCudaKernel encountered unknown parameter kind.");
+        }
+    }
+
+    for (const auto& [name, _] : runtime_scalars) {
+        if (!consumed_runtime_scalar_names.contains(name)) {
+            throw std::runtime_error("Unexpected runtime scalar override for stamped CUDA kernel: " + name);
+        }
+    }
+
+    CU_CHECK(cuLaunchKernel(compiled->kernel,
+                            launch_config.grid.x,
+                            launch_config.grid.y,
+                            launch_config.grid.z,
+                            launch_config.block.x,
+                            launch_config.block.y,
+                            launch_config.block.z,
+                            launch_config.dynamic_shared_bytes,
+                            reinterpret_cast<CUstream>(run_stream.getStream()),
+                            kernel_args.data(),
+                            nullptr));
+}
+
+bool StampedCudaKernel::requiresRuntimeScalars() const {
+    for (const StampedCudaKernelParam& param : params) {
+        if (param.kind == StampedCudaKernelParam::Kind::HostRuntimeScalar) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::unordered_set<std::string> StampedCudaKernel::runtimeScalarNames() const {
+    std::unordered_set<std::string> names;
+    for (const StampedCudaKernelParam& param : params) {
+        if (param.kind == StampedCudaKernelParam::Kind::HostRuntimeScalar) {
+            names.insert(param.name);
+        }
+    }
+    return names;
 }
 
 void StampedEquation::run() { runOn(stream); }
@@ -845,11 +1048,8 @@ void StampedConvolution::runOn(Stream& run_stream) const {
         putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_X_UID, input);
         putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_W_UID, filter);
         putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_Y_UID, output);
-        executeFrontendConvolutionGraph(*built_convolution,
-                                        run_stream,
-                                        tensor_pack,
-                                        workspace,
-                                        compiled_convolution->is_3d ? "CONV3D forward" : "CONV2D forward");
+        executeFrontendConvolutionGraph(
+            *built_convolution, run_stream, tensor_pack, workspace, compiled_convolution->is_3d ? "CONV3D forward" : "CONV2D forward");
         return;
     }
 
@@ -888,13 +1088,12 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
             putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_W_UID, input);
             putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_Y_UID, grad_output);
             putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_X_UID, output);
-            executeFrontendConvolutionGraph(*built_convolution,
-                                            run_stream,
-                                            tensor_pack,
-                                            workspace,
-                                            compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_DATA
-                                                ? "CONV3D backward-data"
-                                                : "CONV2D backward-data");
+            executeFrontendConvolutionGraph(
+                *built_convolution,
+                run_stream,
+                tensor_pack,
+                workspace,
+                compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_DATA ? "CONV3D backward-data" : "CONV2D backward-data");
             return;
         }
         if (compiled_convolution_backward->op == ExprOp::CONV2D_BACKWARD_FILTER ||
@@ -902,13 +1101,12 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
             putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_X_UID, input);
             putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_Y_UID, grad_output);
             putFrontendTensorPointer(tensor_pack, CUDNN_FRONTEND_CONV_W_UID, output);
-            executeFrontendConvolutionGraph(*built_convolution,
-                                            run_stream,
-                                            tensor_pack,
-                                            workspace,
-                                            compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_FILTER
-                                                ? "CONV3D backward-filter"
-                                                : "CONV2D backward-filter");
+            executeFrontendConvolutionGraph(
+                *built_convolution,
+                run_stream,
+                tensor_pack,
+                workspace,
+                compiled_convolution_backward->op == ExprOp::CONV3D_BACKWARD_FILTER ? "CONV3D backward-filter" : "CONV2D backward-filter");
             return;
         }
         throw std::runtime_error("StampedConvolutionBackward received unsupported cuDNN Frontend convolution backward op.");
@@ -917,12 +1115,8 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
     throw std::runtime_error("StampedConvolutionBackward received non-frontend convolution payload unexpectedly.");
 }
 
-
-StampedRmsNorm::StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
-                               const Tensor& input,
-                               const Tensor& scale,
-                               const Tensor& output,
-                               const Stream& stream)
+StampedRmsNorm::StampedRmsNorm(
+    std::shared_ptr<CompiledRmsNorm> compiled, const Tensor& input, const Tensor& scale, const Tensor& output, const Stream& stream)
     : compiled_rms_norm(std::move(compiled)), input(input), scale(scale), output(output), stream(stream) {
     if (!compiled_rms_norm) {
         throw std::runtime_error("StampedRmsNorm requires a compiled RMSNorm payload.");
@@ -1225,7 +1419,8 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                 throw std::runtime_error("Stamped MATMUL backward epilogue requires epilogue_aux.");
             }
             if (compiled_matmul->transpose_lhs || compiled_matmul->transpose_rhs) {
-                throw std::runtime_error("cuBLASLt MATMUL backward epilogue fusion currently supports only non-transposed row-major stages.");
+                throw std::runtime_error(
+                    "cuBLASLt MATMUL backward epilogue fusion currently supports only non-transposed row-major stages.");
             }
             const float alphaOne = 1.0f;
             const float betaZero = 0.0f;
@@ -1313,18 +1508,20 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                                       beta_host_scratch,
                                                                       run_stream);
 
-    const CublasMatrixMultiply::MatmulDataTypes dataTypes{lhs.getDescriptor().getDataType(),
-                                                          rhs.getDescriptor().getDataType(),
-                                                          use_bias_epilogue ? output.getDescriptor().getDataType() : addend.value().getDescriptor().getDataType(),
-                                                          output.getDescriptor().getDataType(),
-                                                          compiled_matmul->compute_dtype};
+    const CublasMatrixMultiply::MatmulDataTypes dataTypes{
+        lhs.getDescriptor().getDataType(),
+        rhs.getDescriptor().getDataType(),
+        use_bias_epilogue ? output.getDescriptor().getDataType() : addend.value().getDescriptor().getDataType(),
+        output.getDescriptor().getDataType(),
+        compiled_matmul->compute_dtype};
     const bool use_backward_epilogue = compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default;
     if (use_backward_epilogue) {
         if (compiled_matmul->epilogue != MatmulEpilogue::Default) {
             throw std::runtime_error("Stamped GEMM cannot combine forward and backward cuBLASLt epilogues in one stage.");
         }
         if (use_bias_epilogue) {
-            throw std::runtime_error("Stamped GEMM backward epilogue requires a rank-2 addend or no addend; rank-1 bias addends are forward epilogues.");
+            throw std::runtime_error(
+                "Stamped GEMM backward epilogue requires a rank-2 addend or no addend; rank-1 bias addends are forward epilogues.");
         }
         if (compiled_matmul->transpose_aux) {
             throw std::runtime_error("GEMM cuBLASLt backward epilogue fusion does not support transpose_aux.");
@@ -1354,7 +1551,8 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
         return;
     }
 
-    const bool use_cublaslt_epilogue_wrapper = use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default || use_backward_epilogue;
+    const bool use_cublaslt_epilogue_wrapper =
+        use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default || use_backward_epilogue;
     if (use_cublaslt_epilogue_wrapper) {
         if (compiled_matmul->transpose_aux) {
             throw std::runtime_error("GEMM cuBLASLt epilogue fusion does not support transpose_aux.");
@@ -1539,6 +1737,9 @@ void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& run
             if (stage.kind == StampedExecutionStage::Kind::FusedKernel && stage.kernel != nullptr &&
                 stage.kernel->requiresRuntimeScalars()) {
                 needed_names = stage.kernel->runtimeScalarNames();
+            } else if (stage.kind == StampedExecutionStage::Kind::CudaKernel && stage.cuda_kernel != nullptr &&
+                       stage.cuda_kernel->requiresRuntimeScalars()) {
+                needed_names = stage.cuda_kernel->runtimeScalarNames();
             } else if (stage.kind == StampedExecutionStage::Kind::Matmul && stage.matmul != nullptr) {
                 if (stage.matmul->alphaRuntimeName().has_value()) {
                     needed_names.insert(*stage.matmul->alphaRuntimeName());
@@ -1755,8 +1956,7 @@ static fe::DataType_t toFrontendDataType(TensorDescriptor::DataType dtype) {
         case TensorDescriptor::DataType::INT64:
             return fe::DataType_t::INT64;
         default:
-            throw std::runtime_error("Unsupported dtype for cuDNN Frontend convolution: " +
-                                     TensorDescriptor::getElementTypeName(dtype));
+            throw std::runtime_error("Unsupported dtype for cuDNN Frontend convolution: " + TensorDescriptor::getElementTypeName(dtype));
     }
 }
 
@@ -1780,12 +1980,11 @@ static std::vector<int64_t> packedFrontendStrides(const std::vector<int64_t>& di
     return strides;
 }
 
-static std::shared_ptr<fe::graph::Tensor_attributes> createFrontendConvolutionTensor(
-    const std::shared_ptr<fe::graph::Graph>& graph,
-    const std::string& name,
-    int64_t uid,
-    const std::vector<uint64_t>& dims,
-    TensorDescriptor::DataType dtype) {
+static std::shared_ptr<fe::graph::Tensor_attributes> createFrontendConvolutionTensor(const std::shared_ptr<fe::graph::Graph>& graph,
+                                                                                     const std::string& name,
+                                                                                     int64_t uid,
+                                                                                     const std::vector<uint64_t>& dims,
+                                                                                     TensorDescriptor::DataType dtype) {
     const std::vector<int64_t> frontend_dims = toFrontendInt64Vector(dims, name.c_str());
     return graph->tensor(fe::graph::Tensor_attributes()
                              .set_name(name)
@@ -1844,8 +2043,7 @@ static void buildFrontendConvolutionGraph(BuiltConvolution& built, const Stream&
     int64_t workspace_bytes = 0;
     status = built.frontend_graph->get_workspace_size(workspace_bytes);
     if (!status.is_good()) {
-        throw std::runtime_error(std::string("Failed to query cuDNN Frontend ") + op_name +
-                                 " workspace size: " + status.get_message());
+        throw std::runtime_error(std::string("Failed to query cuDNN Frontend ") + op_name + " workspace size: " + status.get_message());
     }
     if (workspace_bytes < 0) {
         throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " returned a negative workspace size.");
@@ -1999,7 +2197,8 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
         lhs.getDescriptor().getDataType(),
         rhs.getDescriptor().getDataType(),
-        addend.has_value() ? (use_bias_epilogue ? output.getDescriptor().getDataType() : addend.value().getDescriptor().getDataType()) : output.getDescriptor().getDataType(),
+        addend.has_value() ? (use_bias_epilogue ? output.getDescriptor().getDataType() : addend.value().getDescriptor().getDataType())
+                           : output.getDescriptor().getDataType(),
         output.getDescriptor().getDataType(),
         compiled_matmul->compute_dtype};
 
@@ -2011,8 +2210,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         (compiled_matmul->transpose_lhs || compiled_matmul->transpose_rhs || compiled_matmul->transpose_aux)) {
         throw std::runtime_error("cuBLASLt GEMM epilogue fusion currently supports only non-transposed row-major matmul/gemm stages.");
     }
-    if (use_backward_epilogue && epilogue_aux.has_value() &&
-        compiled_matmul->epilogue_aux_dtype.has_value() &&
+    if (use_backward_epilogue && epilogue_aux.has_value() && compiled_matmul->epilogue_aux_dtype.has_value() &&
         epilogue_aux.value().getDescriptor().getDataType() != compiled_matmul->epilogue_aux_dtype.value()) {
         throw std::runtime_error("buildMatmul epilogue_aux dtype does not match the compiled matmul dtype plan.");
     }
@@ -2061,7 +2259,8 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     auto built = std::make_shared<BuiltMatmul>(key);
     bool kernelWillRunOnGpu = false;
 
-    const bool use_cublaslt_epilogue_wrapper = use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default || use_backward_epilogue;
+    const bool use_cublaslt_epilogue_wrapper =
+        use_bias_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Default || use_backward_epilogue;
 
     if (compiled_matmul->op == ExprOp::MATMUL && !use_cublaslt_epilogue_wrapper) {
         CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(device_num,
@@ -2170,24 +2369,17 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
 
     auto conv_attrs = fe::graph::Conv_fprop_attributes()
                           .set_name(std::string("thor_expr_") + prefix + "_fprop")
-                          .set_padding(convolutionFrontendPadding(is_3d,
-                                                                  compiled_convolution->pad_d,
-                                                                  compiled_convolution->pad_h,
-                                                                  compiled_convolution->pad_w))
-                          .set_stride(convolutionFrontendStrides(is_3d,
-                                                                 compiled_convolution->stride_d,
-                                                                 compiled_convolution->stride_h,
-                                                                 compiled_convolution->stride_w))
+                          .set_padding(convolutionFrontendPadding(
+                              is_3d, compiled_convolution->pad_d, compiled_convolution->pad_h, compiled_convolution->pad_w))
+                          .set_stride(convolutionFrontendStrides(
+                              is_3d, compiled_convolution->stride_d, compiled_convolution->stride_h, compiled_convolution->stride_w))
                           .set_dilation(convolutionFrontendDilations(is_3d))
                           .set_compute_data_type(toFrontendDataType(compiled_convolution->compute_dtype))
                           .set_convolution_mode(fe::ConvolutionMode_t::CROSS_CORRELATION);
 
     auto y = built->frontend_graph->conv_fprop(x, w, conv_attrs);
-    setFrontendConvolutionOutputTensor(y,
-                                       std::string(prefix) + "_y",
-                                       CUDNN_FRONTEND_CONV_Y_UID,
-                                       output.getDimensions(),
-                                       compiled_convolution->output_dtype);
+    setFrontendConvolutionOutputTensor(
+        y, std::string(prefix) + "_y", CUDNN_FRONTEND_CONV_Y_UID, output.getDimensions(), compiled_convolution->output_dtype);
 
     buildFrontendConvolutionGraph(*built, stream, is_3d ? "CONV3D forward" : "CONV2D forward");
     return built;
@@ -2230,14 +2422,10 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
         .set_compute_data_type(toFrontendDataType(compiled_convolution_backward->compute_dtype));
 
     const char* prefix = is_3d ? "conv3d" : "conv2d";
-    const auto padding = convolutionFrontendPadding(is_3d,
-                                                    compiled_convolution_backward->pad_d,
-                                                    compiled_convolution_backward->pad_h,
-                                                    compiled_convolution_backward->pad_w);
-    const auto strides = convolutionFrontendStrides(is_3d,
-                                                    compiled_convolution_backward->stride_d,
-                                                    compiled_convolution_backward->stride_h,
-                                                    compiled_convolution_backward->stride_w);
+    const auto padding = convolutionFrontendPadding(
+        is_3d, compiled_convolution_backward->pad_d, compiled_convolution_backward->pad_h, compiled_convolution_backward->pad_w);
+    const auto strides = convolutionFrontendStrides(
+        is_3d, compiled_convolution_backward->stride_d, compiled_convolution_backward->stride_h, compiled_convolution_backward->stride_w);
     const auto dilations = convolutionFrontendDilations(is_3d);
     const fe::DataType_t compute_dtype = toFrontendDataType(compiled_convolution_backward->compute_dtype);
 

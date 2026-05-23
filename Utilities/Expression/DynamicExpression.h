@@ -18,12 +18,17 @@
 namespace ThorImplementation {
 
 struct DynamicExpressionBuild {
+    using TensorMap = std::unordered_map<std::string, Tensor>;
+    using TensorScalarMap = std::unordered_map<std::string, TensorScalarBinding>;
+    using ShapeMap = std::unordered_map<std::string, std::vector<uint64_t>>;
+
     std::shared_ptr<FusedEquation> equation;
     std::unordered_map<std::string, Tensor> stamp_inputs;
     std::unordered_map<std::string, TensorScalarBinding> tensor_scalar_inputs;
     std::unordered_map<std::string, Tensor> preallocated_outputs;
     std::unordered_map<std::string, std::vector<uint64_t>> requested_output_shapes;
     std::function<void(Stream&)> pre_forward_hook;
+
 };
 
 class PreparedDynamicExpression {
@@ -486,7 +491,7 @@ class DynamicExpression {
 
     static void validateBuild(const DynamicExpressionBuild& build, const TensorMap& requested_outputs) {
         if (!build.equation) {
-            throw std::invalid_argument("DynamicExpression builder returned a null equation.");
+            throw std::invalid_argument("DynamicExpression builder returned no equation.");
         }
 
         const std::set<std::string> built_output_names = vectorToSet(build.equation->getOutputNames());

@@ -7,6 +7,7 @@
 
 #include "Utilities/Expression/AutoDiff.h"
 #include "Utilities/Expression/CudaSourceEmitter.h"
+#include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
@@ -30,6 +31,7 @@ static bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
 }
 
 static bool runtimeInputIsTensor(const RuntimeInputValue& value) { return std::holds_alternative<Tensor>(value); }
+static bool runtimeInputIsRuntimeScalar(const RuntimeInputValue& value) { return std::holds_alternative<float>(value); }
 static bool runtimeInputIsTensorScalarBinding(const RuntimeInputValue& value) { return std::holds_alternative<TensorScalarBinding>(value); }
 
 static const TensorScalarBinding& runtimeInputTensorScalarBinding(const RuntimeInputValue& value) {
@@ -3298,6 +3300,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
                 break;
             }
 
+            case ExprOp::CUDA_KERNEL_OUTPUT:
             case ExprOp::SOFTMAX:
             case ExprOp::ATTENTION:
             case ExprOp::ATTENTION_BACKWARD_Q:
@@ -3518,6 +3521,9 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
         case CompiledExecutionStage::Kind::FusedKernel:
             return computeFusedStageFlops(stage.expr, stage_input_dims, stage.outputs);
 
+        case CompiledExecutionStage::Kind::CudaKernel:
+            return 0;
+
         case CompiledExecutionStage::Kind::Reduction:
             if (!stage.reduction)
                 throw std::runtime_error("Reduction stage missing payload while computing FLOPs.");
@@ -3703,6 +3709,30 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 throw std::runtime_error("resolveOutputDimsForStageOutput convolution-backward stage missing payload.");
             }
             return resolveConvolutionBackwardOutputDimsFromInputs(*stage.convolution_backward, stage_input_dims);
+        }
+
+        case CompiledExecutionStage::Kind::CudaKernel: {
+            if (!stage.cuda_kernel_expression) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput CUDA kernel stage missing expression spec.");
+            }
+            std::unordered_map<std::string, std::vector<uint64_t>> input_shapes;
+            const auto& input_specs = stage.cuda_kernel_expression->inputs();
+            if (input_specs.size() != stage_input_dims.size()) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput CUDA kernel input shape count mismatch.");
+            }
+            for (size_t i = 0; i < input_specs.size(); ++i) {
+                input_shapes.emplace(input_specs[i].name, stage_input_dims[i]);
+            }
+            const std::vector<std::vector<uint64_t>> output_shapes =
+                stage.cuda_kernel_expression->inferOutputShapesFromInputShapes(input_shapes);
+            if (stage.outputs[output_idx].local_node_idx >= stage.expr.nodes.size()) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput CUDA kernel output node index out of range.");
+            }
+            const ExprNode& output_node = stage.expr.nodes[stage.outputs[output_idx].local_node_idx];
+            if (output_node.cuda_kernel_output_index >= output_shapes.size()) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput CUDA kernel output spec index out of range.");
+            }
+            return output_shapes[output_node.cuda_kernel_output_index];
         }
 
         case CompiledExecutionStage::Kind::FusedKernel:
@@ -4370,6 +4400,11 @@ std::vector<std::string> FusedEquation::filterTensorInputNamesReachableFromOutpu
         reaches_selected_output[node_idx] = true;
 
         const ExprNode& node = expr.nodes[node_idx];
+        if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            for (uint32_t input_node : node.cuda_kernel_input_nodes) {
+                push_child(input_node);
+            }
+        }
         push_child(node.lhs);
         push_child(node.rhs);
         push_child(node.aux);
@@ -4509,6 +4544,30 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
         if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
             for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
                 value_dims[stage.outputs[output_idx].value_id] = resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
+            }
+        } else if (stage.kind == CompiledExecutionStage::Kind::CudaKernel) {
+            if (!stage.cuda_kernel_expression) {
+                throw std::runtime_error("Missing compiled CUDA kernel expression stage.");
+            }
+            std::unordered_map<std::string, std::vector<uint64_t>> input_shapes;
+            const auto& input_specs = stage.cuda_kernel_expression->inputs();
+            if (input_specs.size() != stage_input_dims.size()) {
+                throw std::runtime_error("CUDA kernel stage input shape count mismatch.");
+            }
+            for (size_t i = 0; i < input_specs.size(); ++i) {
+                input_shapes.emplace(input_specs[i].name, stage_input_dims[i]);
+            }
+            const std::vector<std::vector<uint64_t>> output_shapes =
+                stage.cuda_kernel_expression->inferOutputShapesFromInputShapes(input_shapes);
+            for (const CompiledStageOutput& output : stage.outputs) {
+                if (output.local_node_idx >= stage.expr.nodes.size()) {
+                    throw std::runtime_error("CUDA kernel stage output node index out of range.");
+                }
+                const ExprNode& output_node = stage.expr.nodes[output.local_node_idx];
+                if (output_node.cuda_kernel_output_index >= output_shapes.size()) {
+                    throw std::runtime_error("CUDA kernel stage output spec index out of range.");
+                }
+                value_dims[output.value_id] = output_shapes[output_node.cuda_kernel_output_index];
             }
         } else if (stage.kind == CompiledExecutionStage::Kind::Reduction) {
             if (!stage.reduction) {
@@ -6806,6 +6865,85 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedKernel, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
+            case CompiledExecutionStage::Kind::CudaKernel: {
+                if (!stage.cuda_kernel_expression || !stage.cuda_kernel) {
+                    throw std::runtime_error("CudaKernel compiled stage missing expression or compiled kernel.");
+                }
+                const auto& input_specs = stage.cuda_kernel_expression->inputs();
+                if (input_specs.size() != stageInputs.size()) {
+                    throw std::runtime_error("CudaKernel stage input count mismatch while stamping.");
+                }
+
+                std::unordered_map<std::string, Tensor> bound_inputs;
+                std::unordered_map<std::string, TensorScalarBinding> bound_tensor_scalar_inputs;
+                bound_inputs.reserve(input_specs.size());
+                bound_tensor_scalar_inputs.reserve(input_specs.size());
+                for (size_t i = 0; i < input_specs.size(); ++i) {
+                    if (input_specs[i].kind == CudaKernelExpression::TensorParamSpec::Kind::TensorRuntimeScalar) {
+                        if (!runtimeInputIsTensorScalarBinding(stageInputs[i])) {
+                            throw std::runtime_error("CudaKernel stage expected tensor runtime scalar input: " + input_specs[i].name);
+                        }
+                        bound_tensor_scalar_inputs.emplace(input_specs[i].name, runtimeInputTensorScalarBinding(stageInputs[i]));
+                    } else if (input_specs[i].kind == CudaKernelExpression::TensorParamSpec::Kind::HostRuntimeScalar) {
+                        if (!runtimeInputIsRuntimeScalar(stageInputs[i])) {
+                            throw std::runtime_error("CudaKernel stage expected host runtime scalar input: " + input_specs[i].name);
+                        }
+                    } else {
+                        if (!runtimeInputIsTensor(stageInputs[i])) {
+                            throw std::runtime_error("CudaKernel stage expected tensor input: " + input_specs[i].name);
+                        }
+                        bound_inputs.emplace(input_specs[i].name, runtimeInputTensor(stageInputs[i]));
+                    }
+                }
+
+                std::unordered_map<std::string, Tensor> preallocated_outputs;
+                std::unordered_map<std::string, std::vector<uint64_t>> requested_output_shapes;
+                for (const CompiledStageOutput& stage_output : stage.outputs) {
+                    if (stage_output.local_node_idx >= stage.expr.nodes.size()) {
+                        throw std::runtime_error("CudaKernel stage output local node index out of range.");
+                    }
+                    const ExprNode& output_node = stage.expr.nodes[stage_output.local_node_idx];
+                    if (output_node.cuda_kernel_output_index >= stage.cuda_kernel_expression->outputs().size()) {
+                        throw std::runtime_error("CudaKernel stage output spec index out of range.");
+                    }
+                    const std::string& output_name = stage.cuda_kernel_expression->outputs()[output_node.cuda_kernel_output_index].name;
+                    if (!stage_output.name.empty()) {
+                        auto preallocated_it = preallocated_final_outputs_by_name.find(stage_output.name);
+                        if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                            preallocated_outputs.emplace(output_name, preallocated_it->second);
+                        }
+                        auto requested_it = effectiveRequestedOutputShapes.find(stage_output.name);
+                        if (requested_it != effectiveRequestedOutputShapes.end()) {
+                            requested_output_shapes.emplace(output_name, requested_it->second);
+                        }
+                    }
+                }
+
+                std::unordered_map<std::string, Tensor> resolved_outputs;
+                std::shared_ptr<StampedCudaKernel> stampedCudaKernel = stage.cuda_kernel_expression->stampCompiled(
+                    stage.cuda_kernel,
+                    bound_inputs,
+                    preallocated_outputs,
+                    requested_output_shapes,
+                    stream,
+                    resolved_outputs,
+                    bound_tensor_scalar_inputs);
+
+                for (const CompiledStageOutput& stage_output : stage.outputs) {
+                    const ExprNode& output_node = stage.expr.nodes.at(stage_output.local_node_idx);
+                    const std::string& output_name = stage.cuda_kernel_expression->outputs()[output_node.cuda_kernel_output_index].name;
+                    auto output_it = resolved_outputs.find(output_name);
+                    if (output_it == resolved_outputs.end()) {
+                        throw std::runtime_error("CudaKernel stage did not resolve requested output '" + output_name + "'.");
+                    }
+                    values[stage_output.value_id] = output_it->second;
+                    producer_stage_by_value_id[stage_output.value_id] = static_cast<uint32_t>(stage_idx);
+                }
+
+                stampedStages.emplace_back(stampedCudaKernel, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
+
             case CompiledExecutionStage::Kind::Reduction: {
                 if (!stage.reduction) {
                     throw std::runtime_error("Reduction stage missing compiled reduction payload.");
@@ -7747,6 +7885,8 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             }
             addFusedKernelParameterFanOverrides(
                 stage, stage_input_dims, resolved_stage_output_dims, root_input_name_by_slot, parameter_names, result);
+        } else if (stage.kind == CompiledExecutionStage::Kind::CudaKernel) {
+            // User-defined CUDA kernels do not currently infer initializer fan overrides.
         } else if (stage.kind == CompiledExecutionStage::Kind::Matmul) {
             addMatmulParameterFanOverrides(stage, stage_input_dims, root_input_name_by_slot, parameter_names, result);
         } else if (stage.kind == CompiledExecutionStage::Kind::InPlaceRope) {
@@ -7771,6 +7911,30 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
         if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
             for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
                 value_dims[stage.outputs[output_idx].value_id] = resolved_stage_output_dims[output_idx];
+            }
+        } else if (stage.kind == CompiledExecutionStage::Kind::CudaKernel) {
+            if (!stage.cuda_kernel_expression) {
+                throw std::runtime_error("Missing compiled CUDA kernel expression stage.");
+            }
+            std::unordered_map<std::string, std::vector<uint64_t>> input_shapes;
+            const auto& input_specs = stage.cuda_kernel_expression->inputs();
+            if (input_specs.size() != stage_input_dims.size()) {
+                throw std::runtime_error("CUDA kernel stage input shape count mismatch.");
+            }
+            for (size_t i = 0; i < input_specs.size(); ++i) {
+                input_shapes.emplace(input_specs[i].name, stage_input_dims[i]);
+            }
+            const std::vector<std::vector<uint64_t>> output_shapes =
+                stage.cuda_kernel_expression->inferOutputShapesFromInputShapes(input_shapes);
+            for (const CompiledStageOutput& output : stage.outputs) {
+                if (output.local_node_idx >= stage.expr.nodes.size()) {
+                    throw std::runtime_error("CUDA kernel stage output node index out of range.");
+                }
+                const ExprNode& output_node = stage.expr.nodes[output.local_node_idx];
+                if (output_node.cuda_kernel_output_index >= output_shapes.size()) {
+                    throw std::runtime_error("CUDA kernel stage output spec index out of range.");
+                }
+                value_dims[output.value_id] = output_shapes[output_node.cuda_kernel_output_index];
             }
         } else if (stage.kind == CompiledExecutionStage::Kind::Reduction) {
             if (!stage.reduction) {

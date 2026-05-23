@@ -1,6 +1,7 @@
 #include "Utilities/Expression/Expression.h"
 #include <optional>
 #include "Utilities/Expression/EquationCompiler.h"
+#include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 
 #include <cmath>
@@ -217,6 +218,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "attention_backward_v";
         case ExprOp::ATTENTION_BACKWARD_BIAS:
             return "attention_backward_bias";
+        case ExprOp::CUDA_KERNEL_OUTPUT:
+            return "cuda_kernel_output";
         default:
             throw std::runtime_error("Unknown ExprOp.");
     }
@@ -289,6 +292,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"attention_backward_k", ExprOp::ATTENTION_BACKWARD_K},
         {"attention_backward_v", ExprOp::ATTENTION_BACKWARD_V},
         {"attention_backward_bias", ExprOp::ATTENTION_BACKWARD_BIAS},
+        {"cuda_kernel_output", ExprOp::CUDA_KERNEL_OUTPUT},
     };
 
     auto it = lookup.find(op);
@@ -477,6 +481,9 @@ json exprNodeToJson(const ExprNode& node) {
     j["squeeze_axes"] = node.squeeze_axes;
     j["unsqueeze_axes"] = node.unsqueeze_axes;
     j["fill_dims"] = node.fill_dims;
+    j["cuda_kernel_spec_index"] = node.cuda_kernel_spec_index;
+    j["cuda_kernel_output_index"] = node.cuda_kernel_output_index;
+    j["cuda_kernel_input_nodes"] = node.cuda_kernel_input_nodes;
     return j;
 }
 
@@ -579,6 +586,9 @@ ExprNode exprNodeFromJson(const json& j) {
     node.squeeze_axes = j.value("squeeze_axes", std::vector<uint64_t>{});
     node.unsqueeze_axes = j.value("unsqueeze_axes", std::vector<uint64_t>{});
     node.fill_dims = j.value("fill_dims", std::vector<uint64_t>{});
+    node.cuda_kernel_spec_index = j.value("cuda_kernel_spec_index", UINT32_MAX);
+    node.cuda_kernel_output_index = j.value("cuda_kernel_output_index", UINT32_MAX);
+    node.cuda_kernel_input_nodes = j.value("cuda_kernel_input_nodes", std::vector<uint32_t>{});
     return node;
 }
 
@@ -726,6 +736,8 @@ std::string opName(ExprOp op) {
             return "ATTN_BW_V";
         case ExprOp::ATTENTION_BACKWARD_BIAS:
             return "ATTN_BW_BIAS";
+        case ExprOp::CUDA_KERNEL_OUTPUT:
+            return "CUDA_KERNEL";
         default:
             throw std::runtime_error("Unknown ExprOp");
     }
@@ -1018,6 +1030,23 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 out += ",amaxO=" + canonicalizeNode(expr, n.attention_amax_o_node, memo, memoReady);
             }
             out += ")";
+            break;
+        }
+
+        case ExprOp::CUDA_KERNEL_OUTPUT: {
+            if (n.cuda_kernel_spec_index >= expr.cuda_kernel_expressions.size() || !expr.cuda_kernel_expressions[n.cuda_kernel_spec_index]) {
+                throw std::runtime_error("CudaKernelExpression node references missing kernel spec while canonicalizing.");
+            }
+            out = opName(n.op) + "(" + expr.cuda_kernel_expressions[n.cuda_kernel_spec_index]->cacheSignature() +
+                  ";spec=" + std::to_string(n.cuda_kernel_spec_index) +
+                  ";out=" + std::to_string(n.cuda_kernel_output_index) + ";inputs=[";
+            for (size_t i = 0; i < n.cuda_kernel_input_nodes.size(); ++i) {
+                if (i > 0) {
+                    out += ",";
+                }
+                out += canonicalizeNode(expr, n.cuda_kernel_input_nodes[i], memo, memoReady);
+            }
+            out += "])";
             break;
         }
 
@@ -1327,6 +1356,18 @@ void ExpressionDefinition::validate() const {
                 throw std::runtime_error("ExpressionDefinition ATTENTION_BACKWARD bias node must reference an earlier node.");
             }
         }
+        if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            if (node.cuda_kernel_spec_index >= outputs.expr->cuda_kernel_expressions.size() ||
+                !outputs.expr->cuda_kernel_expressions[node.cuda_kernel_spec_index]) {
+                throw std::runtime_error("ExpressionDefinition CudaKernelExpression node references an invalid kernel spec.");
+            }
+            for (uint32_t input_node : node.cuda_kernel_input_nodes) {
+                validateNodeIndex(input_node, "cuda kernel input");
+                if (input_node >= node_index_u32) {
+                    throw std::runtime_error("ExpressionDefinition CudaKernelExpression input nodes must reference earlier nodes.");
+                }
+            }
+        }
     }
 
     std::unordered_set<std::string> seen_output_names;
@@ -1365,6 +1406,10 @@ void ExpressionDefinition::validate() const {
 
 json ExpressionDefinition::architectureJson() const {
     validate();
+    if (outputs.expr && !outputs.expr->cuda_kernel_expressions.empty()) {
+        throw std::runtime_error(
+            "ExpressionDefinition::architectureJson does not serialize CudaKernelExpression source. Register/rebuild custom CUDA expressions in code instead.");
+    }
 
     json j;
     j["type"] = "thor.expression";
@@ -1546,10 +1591,28 @@ bool Expression::isTernaryOp(const ExprOp op) {
 
 namespace {
 
-uint32_t cloneSubtree(const PhysicalExpression& src,
-                      uint32_t srcNodeIndex,
-                      PhysicalExpression& dst,
-                      std::unordered_map<uint32_t, uint32_t>& oldToNew) {
+uint32_t remapCudaKernelSpecForClone(const PhysicalExpression& src,
+                                     uint32_t src_spec_idx,
+                                     PhysicalExpression& dst,
+                                     std::unordered_map<uint32_t, uint32_t>& cuda_spec_remap) {
+    if (src_spec_idx >= src.cuda_kernel_expressions.size() || !src.cuda_kernel_expressions[src_spec_idx]) {
+        throw std::runtime_error("CudaKernelExpression clone references missing kernel spec.");
+    }
+    auto it = cuda_spec_remap.find(src_spec_idx);
+    if (it != cuda_spec_remap.end()) {
+        return it->second;
+    }
+    const uint32_t dst_spec_idx = static_cast<uint32_t>(dst.cuda_kernel_expressions.size());
+    dst.cuda_kernel_expressions.push_back(src.cuda_kernel_expressions[src_spec_idx]);
+    cuda_spec_remap.emplace(src_spec_idx, dst_spec_idx);
+    return dst_spec_idx;
+}
+
+uint32_t cloneSubtreeImpl(const PhysicalExpression& src,
+                          uint32_t srcNodeIndex,
+                          PhysicalExpression& dst,
+                          std::unordered_map<uint32_t, uint32_t>& oldToNew,
+                          std::unordered_map<uint32_t, uint32_t>& cudaSpecRemap) {
     auto it = oldToNew.find(srcNodeIndex);
     if (it != oldToNew.end())
         return it->second;
@@ -1560,7 +1623,7 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
     if (Expression::isUnaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing lhs for unary op");
-        newNode.lhs = cloneSubtree(src, srcNode.lhs, dst, oldToNew);
+        newNode.lhs = cloneSubtreeImpl(src, srcNode.lhs, dst, oldToNew, cudaSpecRemap);
         newNode.rhs = UINT32_MAX;
         newNode.aux = UINT32_MAX;
     } else if (Expression::isBinaryOp(srcNode.op)) {
@@ -1568,54 +1631,54 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
             throw std::runtime_error("Malformed expression: missing lhs for binary op");
         if (srcNode.rhs == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing rhs for binary op");
-        newNode.lhs = cloneSubtree(src, srcNode.lhs, dst, oldToNew);
-        newNode.rhs = cloneSubtree(src, srcNode.rhs, dst, oldToNew);
+        newNode.lhs = cloneSubtreeImpl(src, srcNode.lhs, dst, oldToNew, cudaSpecRemap);
+        newNode.rhs = cloneSubtreeImpl(src, srcNode.rhs, dst, oldToNew, cudaSpecRemap);
         newNode.aux = UINT32_MAX;
         if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
-            newNode.matmul_epilogue_aux = cloneSubtree(src, srcNode.matmul_epilogue_aux, dst, oldToNew);
+            newNode.matmul_epilogue_aux = cloneSubtreeImpl(src, srcNode.matmul_epilogue_aux, dst, oldToNew, cudaSpecRemap);
         }
     } else if (Expression::isTernaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX || srcNode.aux == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing child for ternary op");
-        newNode.lhs = cloneSubtree(src, srcNode.lhs, dst, oldToNew);
-        newNode.rhs = cloneSubtree(src, srcNode.rhs, dst, oldToNew);
-        newNode.aux = cloneSubtree(src, srcNode.aux, dst, oldToNew);
+        newNode.lhs = cloneSubtreeImpl(src, srcNode.lhs, dst, oldToNew, cudaSpecRemap);
+        newNode.rhs = cloneSubtreeImpl(src, srcNode.rhs, dst, oldToNew, cudaSpecRemap);
+        newNode.aux = cloneSubtreeImpl(src, srcNode.aux, dst, oldToNew, cudaSpecRemap);
         if (srcNode.alpha_node != UINT32_MAX) {
-            newNode.alpha_node = cloneSubtree(src, srcNode.alpha_node, dst, oldToNew);
+            newNode.alpha_node = cloneSubtreeImpl(src, srcNode.alpha_node, dst, oldToNew, cudaSpecRemap);
         }
         if (srcNode.beta_node != UINT32_MAX) {
-            newNode.beta_node = cloneSubtree(src, srcNode.beta_node, dst, oldToNew);
+            newNode.beta_node = cloneSubtreeImpl(src, srcNode.beta_node, dst, oldToNew, cudaSpecRemap);
         }
         if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
-            newNode.matmul_epilogue_aux = cloneSubtree(src, srcNode.matmul_epilogue_aux, dst, oldToNew);
+            newNode.matmul_epilogue_aux = cloneSubtreeImpl(src, srcNode.matmul_epilogue_aux, dst, oldToNew, cudaSpecRemap);
         }
         if (srcNode.attention_use_padding_mask) {
             if (srcNode.attention_seq_len_q_node == UINT32_MAX || srcNode.attention_seq_len_kv_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing padding-mask sequence length node while cloning.");
             }
-            newNode.attention_seq_len_q_node = cloneSubtree(src, srcNode.attention_seq_len_q_node, dst, oldToNew);
-            newNode.attention_seq_len_kv_node = cloneSubtree(src, srcNode.attention_seq_len_kv_node, dst, oldToNew);
+            newNode.attention_seq_len_q_node = cloneSubtreeImpl(src, srcNode.attention_seq_len_q_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_seq_len_kv_node = cloneSubtreeImpl(src, srcNode.attention_seq_len_kv_node, dst, oldToNew, cudaSpecRemap);
         }
         if (srcNode.attention_use_ragged_offsets) {
             if (srcNode.attention_ragged_offset_q_node == UINT32_MAX || srcNode.attention_ragged_offset_kv_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing ragged offset node while cloning.");
             }
-            newNode.attention_ragged_offset_q_node = cloneSubtree(src, srcNode.attention_ragged_offset_q_node, dst, oldToNew);
-            newNode.attention_ragged_offset_kv_node = cloneSubtree(src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew);
+            newNode.attention_ragged_offset_q_node = cloneSubtreeImpl(src, srcNode.attention_ragged_offset_q_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_ragged_offset_kv_node = cloneSubtreeImpl(src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew, cudaSpecRemap);
         }
         if (srcNode.attention_use_paged_kv_cache) {
             if (srcNode.attention_page_table_k_node == UINT32_MAX || srcNode.attention_page_table_v_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing paged KV page-table nodes while cloning.");
             }
-            newNode.attention_page_table_k_node = cloneSubtree(src, srcNode.attention_page_table_k_node, dst, oldToNew);
-            newNode.attention_page_table_v_node = cloneSubtree(src, srcNode.attention_page_table_v_node, dst, oldToNew);
+            newNode.attention_page_table_k_node = cloneSubtreeImpl(src, srcNode.attention_page_table_k_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_page_table_v_node = cloneSubtreeImpl(src, srcNode.attention_page_table_v_node, dst, oldToNew, cudaSpecRemap);
         }
         if (srcNode.attention_dropout_probability > 0.0f) {
             if (srcNode.attention_dropout_seed_node == UINT32_MAX || srcNode.attention_dropout_offset_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing dropout seed/offset node while cloning.");
             }
-            newNode.attention_dropout_seed_node = cloneSubtree(src, srcNode.attention_dropout_seed_node, dst, oldToNew);
-            newNode.attention_dropout_offset_node = cloneSubtree(src, srcNode.attention_dropout_offset_node, dst, oldToNew);
+            newNode.attention_dropout_seed_node = cloneSubtreeImpl(src, srcNode.attention_dropout_seed_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_dropout_offset_node = cloneSubtreeImpl(src, srcNode.attention_dropout_offset_node, dst, oldToNew, cudaSpecRemap);
         }
         if (srcNode.attention_use_fp8_forward_scaling) {
             if (srcNode.attention_descale_q_node == UINT32_MAX || srcNode.attention_descale_k_node == UINT32_MAX ||
@@ -1624,15 +1687,25 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
                 srcNode.attention_amax_s_node == UINT32_MAX || srcNode.attention_amax_o_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing FP8 scale/descale/amax node while cloning.");
             }
-            newNode.attention_descale_q_node = cloneSubtree(src, srcNode.attention_descale_q_node, dst, oldToNew);
-            newNode.attention_descale_k_node = cloneSubtree(src, srcNode.attention_descale_k_node, dst, oldToNew);
-            newNode.attention_descale_v_node = cloneSubtree(src, srcNode.attention_descale_v_node, dst, oldToNew);
-            newNode.attention_descale_s_node = cloneSubtree(src, srcNode.attention_descale_s_node, dst, oldToNew);
-            newNode.attention_scale_s_node = cloneSubtree(src, srcNode.attention_scale_s_node, dst, oldToNew);
-            newNode.attention_scale_o_node = cloneSubtree(src, srcNode.attention_scale_o_node, dst, oldToNew);
-            newNode.attention_amax_s_node = cloneSubtree(src, srcNode.attention_amax_s_node, dst, oldToNew);
-            newNode.attention_amax_o_node = cloneSubtree(src, srcNode.attention_amax_o_node, dst, oldToNew);
+            newNode.attention_descale_q_node = cloneSubtreeImpl(src, srcNode.attention_descale_q_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_descale_k_node = cloneSubtreeImpl(src, srcNode.attention_descale_k_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_descale_v_node = cloneSubtreeImpl(src, srcNode.attention_descale_v_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_descale_s_node = cloneSubtreeImpl(src, srcNode.attention_descale_s_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_scale_s_node = cloneSubtreeImpl(src, srcNode.attention_scale_s_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_scale_o_node = cloneSubtreeImpl(src, srcNode.attention_scale_o_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_amax_s_node = cloneSubtreeImpl(src, srcNode.attention_amax_s_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_amax_o_node = cloneSubtreeImpl(src, srcNode.attention_amax_o_node, dst, oldToNew, cudaSpecRemap);
         }
+    } else if (srcNode.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+        newNode.cuda_kernel_spec_index = remapCudaKernelSpecForClone(src, srcNode.cuda_kernel_spec_index, dst, cudaSpecRemap);
+        newNode.cuda_kernel_input_nodes.clear();
+        newNode.cuda_kernel_input_nodes.reserve(srcNode.cuda_kernel_input_nodes.size());
+        for (uint32_t input_node : srcNode.cuda_kernel_input_nodes) {
+            newNode.cuda_kernel_input_nodes.push_back(cloneSubtreeImpl(src, input_node, dst, oldToNew, cudaSpecRemap));
+        }
+        newNode.lhs = UINT32_MAX;
+        newNode.rhs = UINT32_MAX;
+        newNode.aux = UINT32_MAX;
     } else if (Expression::isLeafOp(srcNode.op)) {
         // nothing to recurse into
     } else {
@@ -1646,11 +1719,21 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
     return newIndex;
 }
 
-uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
-                                      uint32_t srcNodeIndex,
-                                      PhysicalExpression& dst,
-                                      std::unordered_map<uint32_t, uint32_t>& oldToNew,
-                                      std::unordered_map<std::string, uint32_t>& dstInputSlotsByName) {
+uint32_t cloneSubtree(const PhysicalExpression& src,
+                      uint32_t srcNodeIndex,
+                      PhysicalExpression& dst,
+                      std::unordered_map<uint32_t, uint32_t>& oldToNew) {
+    std::unordered_map<uint32_t, uint32_t> cudaSpecRemap;
+    return cloneSubtreeImpl(src, srcNodeIndex, dst, oldToNew, cudaSpecRemap);
+}
+
+
+uint32_t cloneSubtreeWithMergedInputsImpl(const PhysicalExpression& src,
+                                          uint32_t srcNodeIndex,
+                                          PhysicalExpression& dst,
+                                          std::unordered_map<uint32_t, uint32_t>& oldToNew,
+                                          std::unordered_map<std::string, uint32_t>& dstInputSlotsByName,
+                                          std::unordered_map<uint32_t, uint32_t>& cudaSpecRemap) {
     auto it = oldToNew.find(srcNodeIndex);
     if (it != oldToNew.end())
         return it->second;
@@ -1689,34 +1772,34 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
     } else if (Expression::isUnaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing lhs for unary op while merging outputs.");
-        newNode.lhs = cloneSubtreeWithMergedInputs(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName);
+        newNode.lhs = cloneSubtreeWithMergedInputsImpl(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         newNode.rhs = UINT32_MAX;
         newNode.aux = UINT32_MAX;
     } else if (Expression::isBinaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing child for binary op while merging outputs.");
-        newNode.lhs = cloneSubtreeWithMergedInputs(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName);
-        newNode.rhs = cloneSubtreeWithMergedInputs(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName);
+        newNode.lhs = cloneSubtreeWithMergedInputsImpl(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+        newNode.rhs = cloneSubtreeWithMergedInputsImpl(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         newNode.aux = UINT32_MAX;
         if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
             newNode.matmul_epilogue_aux =
-                cloneSubtreeWithMergedInputs(src, srcNode.matmul_epilogue_aux, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.matmul_epilogue_aux, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
     } else if (Expression::isTernaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX || srcNode.aux == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing child for ternary op while merging outputs.");
-        newNode.lhs = cloneSubtreeWithMergedInputs(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName);
-        newNode.rhs = cloneSubtreeWithMergedInputs(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName);
-        newNode.aux = cloneSubtreeWithMergedInputs(src, srcNode.aux, dst, oldToNew, dstInputSlotsByName);
+        newNode.lhs = cloneSubtreeWithMergedInputsImpl(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+        newNode.rhs = cloneSubtreeWithMergedInputsImpl(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+        newNode.aux = cloneSubtreeWithMergedInputsImpl(src, srcNode.aux, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         if (srcNode.alpha_node != UINT32_MAX) {
-            newNode.alpha_node = cloneSubtreeWithMergedInputs(src, srcNode.alpha_node, dst, oldToNew, dstInputSlotsByName);
+            newNode.alpha_node = cloneSubtreeWithMergedInputsImpl(src, srcNode.alpha_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
         if (srcNode.beta_node != UINT32_MAX) {
-            newNode.beta_node = cloneSubtreeWithMergedInputs(src, srcNode.beta_node, dst, oldToNew, dstInputSlotsByName);
+            newNode.beta_node = cloneSubtreeWithMergedInputsImpl(src, srcNode.beta_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
         if (srcNode.matmul_epilogue_aux != UINT32_MAX) {
             newNode.matmul_epilogue_aux =
-                cloneSubtreeWithMergedInputs(src, srcNode.matmul_epilogue_aux, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.matmul_epilogue_aux, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
         if (srcNode.attention_use_padding_mask) {
             if (srcNode.attention_seq_len_q_node == UINT32_MAX || srcNode.attention_seq_len_kv_node == UINT32_MAX) {
@@ -1724,36 +1807,36 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
                     "Malformed attention expression: missing padding-mask sequence length node while merging outputs.");
             }
             newNode.attention_seq_len_q_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_seq_len_q_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_seq_len_q_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
             newNode.attention_seq_len_kv_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_seq_len_kv_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_seq_len_kv_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
         if (srcNode.attention_use_ragged_offsets) {
             if (srcNode.attention_ragged_offset_q_node == UINT32_MAX || srcNode.attention_ragged_offset_kv_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing ragged offset node while merging outputs.");
             }
             newNode.attention_ragged_offset_q_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_ragged_offset_q_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_ragged_offset_q_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
             newNode.attention_ragged_offset_kv_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
         if (srcNode.attention_use_paged_kv_cache) {
             if (srcNode.attention_page_table_k_node == UINT32_MAX || srcNode.attention_page_table_v_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing paged KV page-table nodes while cloning merged inputs.");
             }
             newNode.attention_page_table_k_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_page_table_k_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_page_table_k_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
             newNode.attention_page_table_v_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_page_table_v_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_page_table_v_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
         if (srcNode.attention_dropout_probability > 0.0f) {
             if (srcNode.attention_dropout_seed_node == UINT32_MAX || srcNode.attention_dropout_offset_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing dropout seed/offset node while merging outputs.");
             }
             newNode.attention_dropout_seed_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_dropout_seed_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_dropout_seed_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
             newNode.attention_dropout_offset_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_dropout_offset_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_dropout_offset_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
         if (srcNode.attention_use_fp8_forward_scaling) {
             if (srcNode.attention_descale_q_node == UINT32_MAX || srcNode.attention_descale_k_node == UINT32_MAX ||
@@ -1763,22 +1846,33 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
                 throw std::runtime_error("Malformed attention expression: missing FP8 scale/descale/amax node while merging outputs.");
             }
             newNode.attention_descale_q_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_descale_q_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_descale_q_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
             newNode.attention_descale_k_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_descale_k_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_descale_k_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
             newNode.attention_descale_v_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_descale_v_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_descale_v_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
             newNode.attention_descale_s_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_descale_s_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_descale_s_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
             newNode.attention_scale_s_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_scale_s_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_scale_s_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
             newNode.attention_scale_o_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_scale_o_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_scale_o_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
             newNode.attention_amax_s_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_amax_s_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_amax_s_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
             newNode.attention_amax_o_node =
-                cloneSubtreeWithMergedInputs(src, srcNode.attention_amax_o_node, dst, oldToNew, dstInputSlotsByName);
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_amax_o_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
+    } else if (srcNode.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+        newNode.cuda_kernel_spec_index = remapCudaKernelSpecForClone(src, srcNode.cuda_kernel_spec_index, dst, cudaSpecRemap);
+        newNode.cuda_kernel_input_nodes.clear();
+        newNode.cuda_kernel_input_nodes.reserve(srcNode.cuda_kernel_input_nodes.size());
+        for (uint32_t input_node : srcNode.cuda_kernel_input_nodes) {
+            newNode.cuda_kernel_input_nodes.push_back(
+                cloneSubtreeWithMergedInputsImpl(src, input_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap));
+        }
+        newNode.lhs = UINT32_MAX;
+        newNode.rhs = UINT32_MAX;
+        newNode.aux = UINT32_MAX;
     } else if (srcNode.op == ExprOp::SCALAR_FP || srcNode.op == ExprOp::FILL) {
         // nothing to recurse into
     } else {
@@ -1790,6 +1884,16 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
     oldToNew[srcNodeIndex] = newIndex;
     return newIndex;
 }
+
+uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
+                                      uint32_t srcNodeIndex,
+                                      PhysicalExpression& dst,
+                                      std::unordered_map<uint32_t, uint32_t>& oldToNew,
+                                      std::unordered_map<std::string, uint32_t>& dstInputSlotsByName) {
+    std::unordered_map<uint32_t, uint32_t> cudaSpecRemap;
+    return cloneSubtreeWithMergedInputsImpl(src, srcNodeIndex, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+}
+
 
 uint32_t cloneSubtreeWithInputSubstitution(const PhysicalExpression& src,
                                            uint32_t srcNodeIndex,
@@ -2124,14 +2228,21 @@ Expression Expression::binaryOp(const Expression& lhsExpr, const Expression& rhs
     const MergeInputsResult mergedInputs = mergeInputsByName(*lhsExpr.expr, *rhsExpr.expr);
     out->inputs = mergedInputs.mergedInputs;
 
-    std::unordered_map<uint32_t, uint32_t> lhsMap;
-    std::unordered_map<uint32_t, uint32_t> rhsMap;
+    struct CloneState {
+        std::unordered_map<uint32_t, uint32_t> node_map;
+        std::unordered_map<uint32_t, uint32_t> cuda_spec_remap;
+    };
+    std::unordered_map<const PhysicalExpression*, CloneState> clone_states;
+    auto clone_expr = [&](const Expression& expression) -> uint32_t {
+        CloneState& state = clone_states[expression.expr.get()];
+        return cloneSubtreeImpl(*expression.expr, expression.nodeIndex, *out, state.node_map, state.cuda_spec_remap);
+    };
 
-    uint32_t newLhsIndex = cloneSubtree(*lhsExpr.expr, lhsExpr.nodeIndex, *out, lhsMap);
-    uint32_t newRhsIndex = cloneSubtree(*rhsExpr.expr, rhsExpr.nodeIndex, *out, rhsMap);
+    uint32_t newLhsIndex = clone_expr(lhsExpr);
+    uint32_t newRhsIndex = clone_expr(rhsExpr);
 
-    remapClonedInputSlots(*lhsExpr.expr, lhsMap, mergedInputs.lhsSlotRemap, *out);
-    remapClonedInputSlots(*rhsExpr.expr, rhsMap, mergedInputs.rhsSlotRemap, *out);
+    remapClonedInputSlots(*lhsExpr.expr, clone_states.at(lhsExpr.expr.get()).node_map, mergedInputs.lhsSlotRemap, *out);
+    remapClonedInputSlots(*rhsExpr.expr, clone_states.at(rhsExpr.expr.get()).node_map, mergedInputs.rhsSlotRemap, *out);
 
     ExprNode node{};
     node.op = op;
@@ -2174,13 +2285,19 @@ Expression Expression::ternaryOp(const Expression& lhsExpr, const Expression& rh
         }
     }
 
-    std::unordered_map<uint32_t, uint32_t> lhsMap;
-    std::unordered_map<uint32_t, uint32_t> rhsMap;
-    std::unordered_map<uint32_t, uint32_t> auxMap;
+    struct CloneState {
+        std::unordered_map<uint32_t, uint32_t> node_map;
+        std::unordered_map<uint32_t, uint32_t> cuda_spec_remap;
+    };
+    std::unordered_map<const PhysicalExpression*, CloneState> clone_states;
+    auto clone_expr = [&](const Expression& expression) -> uint32_t {
+        CloneState& state = clone_states[expression.expr.get()];
+        return cloneSubtreeImpl(*expression.expr, expression.nodeIndex, *out, state.node_map, state.cuda_spec_remap);
+    };
 
-    uint32_t newLhsIndex = cloneSubtree(*lhsExpr.expr, lhsExpr.nodeIndex, *out, lhsMap);
-    uint32_t newRhsIndex = cloneSubtree(*rhsExpr.expr, rhsExpr.nodeIndex, *out, rhsMap);
-    uint32_t newAuxIndex = cloneSubtree(*auxExpr.expr, auxExpr.nodeIndex, *out, auxMap);
+    uint32_t newLhsIndex = clone_expr(lhsExpr);
+    uint32_t newRhsIndex = clone_expr(rhsExpr);
+    uint32_t newAuxIndex = clone_expr(auxExpr);
 
     std::vector<uint32_t> lhsSlotRemap(lhsExpr.expr->inputs.size());
     for (size_t i = 0; i < lhsExpr.expr->inputs.size(); ++i)
@@ -2192,9 +2309,9 @@ Expression Expression::ternaryOp(const Expression& lhsExpr, const Expression& rh
     for (size_t i = 0; i < auxExpr.expr->inputs.size(); ++i)
         auxSlotRemap[i] = mergedByName.at(auxExpr.expr->inputs[i].name);
 
-    remapClonedInputSlots(*lhsExpr.expr, lhsMap, lhsSlotRemap, *out);
-    remapClonedInputSlots(*rhsExpr.expr, rhsMap, rhsSlotRemap, *out);
-    remapClonedInputSlots(*auxExpr.expr, auxMap, auxSlotRemap, *out);
+    remapClonedInputSlots(*lhsExpr.expr, clone_states.at(lhsExpr.expr.get()).node_map, lhsSlotRemap, *out);
+    remapClonedInputSlots(*rhsExpr.expr, clone_states.at(rhsExpr.expr.get()).node_map, rhsSlotRemap, *out);
+    remapClonedInputSlots(*auxExpr.expr, clone_states.at(auxExpr.expr.get()).node_map, auxSlotRemap, *out);
 
     ExprNode node{};
     node.op = op;
@@ -2241,26 +2358,32 @@ Expression Expression::quaternaryOp(
     merge_inputs_from(*auxExpr.expr);
     merge_inputs_from(*fourthExpr.expr);
 
-    std::unordered_map<uint32_t, uint32_t> lhsMap;
-    std::unordered_map<uint32_t, uint32_t> rhsMap;
-    std::unordered_map<uint32_t, uint32_t> auxMap;
-    std::unordered_map<uint32_t, uint32_t> fourthMap;
+    struct CloneState {
+        std::unordered_map<uint32_t, uint32_t> node_map;
+        std::unordered_map<uint32_t, uint32_t> cuda_spec_remap;
+    };
+    std::unordered_map<const PhysicalExpression*, CloneState> clone_states;
+    auto clone_expr = [&](const Expression& expression) -> uint32_t {
+        CloneState& state = clone_states[expression.expr.get()];
+        return cloneSubtreeImpl(*expression.expr, expression.nodeIndex, *out, state.node_map, state.cuda_spec_remap);
+    };
 
-    uint32_t newLhsIndex = cloneSubtree(*lhsExpr.expr, lhsExpr.nodeIndex, *out, lhsMap);
-    uint32_t newRhsIndex = cloneSubtree(*rhsExpr.expr, rhsExpr.nodeIndex, *out, rhsMap);
-    uint32_t newAuxIndex = cloneSubtree(*auxExpr.expr, auxExpr.nodeIndex, *out, auxMap);
-    uint32_t newFourthIndex = cloneSubtree(*fourthExpr.expr, fourthExpr.nodeIndex, *out, fourthMap);
+    uint32_t newLhsIndex = clone_expr(lhsExpr);
+    uint32_t newRhsIndex = clone_expr(rhsExpr);
+    uint32_t newAuxIndex = clone_expr(auxExpr);
+    uint32_t newFourthIndex = clone_expr(fourthExpr);
 
-    auto remap_for = [&](const PhysicalExpression& src, std::unordered_map<uint32_t, uint32_t>& map) {
+    auto remap_for = [&](const Expression& expression) {
+        const PhysicalExpression& src = *expression.expr;
         std::vector<uint32_t> slotRemap(src.inputs.size());
         for (size_t i = 0; i < src.inputs.size(); ++i)
             slotRemap[i] = mergedByName.at(src.inputs[i].name);
-        remapClonedInputSlots(src, map, slotRemap, *out);
+        remapClonedInputSlots(src, clone_states.at(expression.expr.get()).node_map, slotRemap, *out);
     };
-    remap_for(*lhsExpr.expr, lhsMap);
-    remap_for(*rhsExpr.expr, rhsMap);
-    remap_for(*auxExpr.expr, auxMap);
-    remap_for(*fourthExpr.expr, fourthMap);
+    remap_for(lhsExpr);
+    remap_for(rhsExpr);
+    remap_for(auxExpr);
+    remap_for(fourthExpr);
 
     ExprNode node{};
     node.op = op;
@@ -2590,6 +2713,16 @@ static uint32_t cloneSubtreeIntoMergedExpression(const Expression& src_expr,
                                                  std::unordered_map<uint32_t, uint32_t>& old_to_new,
                                                  std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name) {
     PhysicalExpression src = src_expr.expression();
+    return cloneSubtreeWithMergedInputs(src, src.output_node, dst, old_to_new, dst_input_slots_by_name);
+}
+
+uint32_t Expression::cloneInto(const PhysicalExpression& src,
+                               PhysicalExpression& dst,
+                               std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name) {
+    if (src.output_node >= src.nodes.size()) {
+        throw std::runtime_error("Expression::cloneInto source output node is out of range.");
+    }
+    std::unordered_map<uint32_t, uint32_t> old_to_new;
     return cloneSubtreeWithMergedInputs(src, src.output_node, dst, old_to_new, dst_input_slots_by_name);
 }
 

@@ -32,11 +32,13 @@ struct ParameterFanOverride {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
                 return "FusedKernel";
+            case Kind::CudaKernel:
+                return "CudaKernel";
             case Kind::Reduction:
                 return "Reduction";
             case Kind::ArgMinMax:
@@ -68,6 +70,9 @@ struct CompiledExecutionStage {
     PhysicalExpression expr;
 
     const std::shared_ptr<CompiledEquation> flat = nullptr;
+    const std::shared_ptr<const CudaKernelExpression> cuda_kernel_expression = nullptr;
+    const std::shared_ptr<CompiledCudaKernel> cuda_kernel = nullptr;
+    const std::vector<TensorDescriptor::DataType> cuda_kernel_output_dtypes = {};
     const std::shared_ptr<CompiledReduction> reduction = nullptr;
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
@@ -95,6 +100,12 @@ struct CompiledExecutionStage {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing fused stage kernel.");
                 }
                 return flat->output_dtypes.at(output_idx);
+
+            case Kind::CudaKernel:
+                if (!cuda_kernel) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing CUDA kernel stage.");
+                }
+                return cuda_kernel_output_dtypes.at(output_idx);
 
             case Kind::Reduction:
                 if (!reduction) {
@@ -185,6 +196,22 @@ struct CompiledExecutionStage {
         : kind(Kind::FusedKernel),
           expr(expr),
           flat(flat),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const PhysicalExpression& expr,
+                           const std::shared_ptr<const CudaKernelExpression>& cuda_kernel_expression,
+                           const std::shared_ptr<CompiledCudaKernel>& cuda_kernel,
+                           std::vector<TensorDescriptor::DataType> output_dtypes,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::CudaKernel),
+          expr(expr),
+          cuda_kernel_expression(cuda_kernel_expression),
+          cuda_kernel(cuda_kernel),
+          cuda_kernel_output_dtypes(std::move(output_dtypes)),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
