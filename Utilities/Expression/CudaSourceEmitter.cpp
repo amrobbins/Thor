@@ -1407,6 +1407,17 @@ static DataType emittedScalarNodeValueDType(const ExprNode& node) {
     return requireNodeComputeDType(node);
 }
 
+static DataType tiledLogicalTransposeFrontierStorageDType(const PhysicalExpression& expr, uint32_t frontier_idx) {
+    if (frontier_idx >= expr.nodes.size()) {
+        throw runtime_error("Tiled logical-transpose frontier index out of range while selecting storage dtype.");
+    }
+    const ExprNode& frontier = expr.nodes[frontier_idx];
+    if (frontier.op != ExprOp::TRANSPOSE) {
+        throw runtime_error("Tiled logical-transpose frontier storage dtype requested for a non-transpose node.");
+    }
+    return requireNodeOutputDType(frontier);
+}
+
 static std::string emitResolvedScalarValueExpr(const PhysicalExpression& expr, uint32_t node_idx, DataType target_dtype) {
     if (node_idx >= expr.nodes.size()) {
         throw runtime_error("Node index out of range in resolved scalar emitter query.");
@@ -1900,7 +1911,7 @@ static uint32_t tiledLogicalTransposeConsumerSlotBytes(const CompiledExecutionSt
         if (frontier_idx >= stage.expr.nodes.size()) {
             throw runtime_error("Tiled logical-transpose consumer frontier index out of range while selecting pack width.");
         }
-        const DataType frontier_dtype = emittedScalarNodeValueDType(stage.expr.nodes[frontier_idx]);
+        const DataType frontier_dtype = tiledLogicalTransposeFrontierStorageDType(stage.expr, frontier_idx);
         const uint32_t dtype_bytes = scalarStorageTypeSizeBytes(frontier_dtype);
         if (dtype_bytes > sizeof(unsigned int)) {
             throw runtime_error("Tiled logical-transpose auto-swizzle currently supports frontier scalar storage types up to 32 bits.");
@@ -1910,9 +1921,14 @@ static uint32_t tiledLogicalTransposeConsumerSlotBytes(const CompiledExecutionSt
     return max_slot_bytes;
 }
 
+uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerSlotBytes(
+    const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups) {
+    return ::ThorImplementation::tiledLogicalTransposeConsumerSlotBytes(stage, groups);
+}
+
 uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerPackScalars(
     const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups) {
-    const uint32_t slot_bytes = tiledLogicalTransposeConsumerSlotBytes(stage, groups);
+    const uint32_t slot_bytes = CudaSourceEmitter::tiledLogicalTransposeConsumerSlotBytes(stage, groups);
     return std::max<uint32_t>(1U, static_cast<uint32_t>(sizeof(unsigned int)) / slot_bytes);
 }
 
@@ -2043,6 +2059,43 @@ static std::optional<TiledLogicalTransposeDenseInputLoad> tryResolveTiledLogical
 
         node_idx = node.lhs;
     }
+}
+
+uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerDensePackedInputLoadCount(
+    const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups) {
+    const std::optional<std::vector<uint32_t>> maybe_frontiers = tryFindTiledLogicalTransposeConsumerFrontiers(stage, groups);
+    if (!maybe_frontiers.has_value() || maybe_frontiers->empty()) {
+        return 0U;
+    }
+
+    const uint32_t logical_transpose_pack_scalars = CudaSourceEmitter::tiledLogicalTransposeConsumerPackScalars(stage, groups);
+    if (logical_transpose_pack_scalars <= 1U) {
+        return 0U;
+    }
+
+    const uint32_t logical_transpose_slot_bytes = CudaSourceEmitter::tiledLogicalTransposeConsumerSlotBytes(stage, groups);
+    const SpecializedBroadcastGroup& group = groups[0];
+    uint32_t count = 0U;
+    for (uint32_t frontier_idx : maybe_frontiers.value()) {
+        if (frontier_idx >= stage.expr.nodes.size()) {
+            throw runtime_error("Tiled logical-transpose packed-load debug frontier index out of range.");
+        }
+        const ExprNode& frontier = stage.expr.nodes[frontier_idx];
+        if (frontier.lhs == UINT32_MAX || frontier.lhs >= group.node_dims.size()) {
+            throw runtime_error("Tiled logical-transpose packed-load debug frontier source out of range.");
+        }
+        const DataType frontier_dtype = requireNodeOutputDType(frontier);
+        const std::optional<TiledLogicalTransposeDenseInputLoad> dense_input_load =
+            tryResolveTiledLogicalTransposeDenseInputLoad(stage.expr,
+                                                          group,
+                                                          frontier.lhs,
+                                                          group.node_dims[frontier.lhs],
+                                                          frontier_dtype);
+        if (dense_input_load.has_value() && scalarStorageTypeSizeBytes(dense_input_load->input_dtype) <= logical_transpose_slot_bytes) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstream& ss,
@@ -3300,7 +3353,7 @@ static std::optional<DataType> preferredTiledLogicalTransposeVectorComputeDType(
 
     const ExprNode& n = expr.nodes[node_idx];
     if (frontier_indices.find(node_idx) != frontier_indices.end()) {
-        const DataType frontier_dtype = emittedScalarNodeValueDType(n);
+        const DataType frontier_dtype = requireNodeOutputDType(n);
         return vectorizedComputeScalarDType(frontier_dtype);
     }
 
@@ -3354,6 +3407,39 @@ static std::optional<DataType> tiledLogicalTransposeConsumerVectorComputeDType(
     }
 
     return maybe_vector_compute_dtype.value();
+}
+
+uint32_t CudaSourceEmitter::tiledLogicalTransposeConsumerVectorizedOutputCount(
+    const CompiledExecutionStage& stage, const std::vector<SpecializedBroadcastGroup>& groups) {
+    const std::optional<std::vector<uint32_t>> maybe_frontiers = tryFindTiledLogicalTransposeConsumerFrontiers(stage, groups);
+    if (!maybe_frontiers.has_value() || maybe_frontiers->empty()) {
+        return 0U;
+    }
+
+    const uint32_t logical_transpose_pack_scalars = CudaSourceEmitter::tiledLogicalTransposeConsumerPackScalars(stage, groups);
+    if (logical_transpose_pack_scalars < 2U || groups.empty()) {
+        return 0U;
+    }
+
+    uint32_t count = 0U;
+    const SpecializedBroadcastGroup& group = groups[0];
+    for (uint32_t stage_output_idx : group.output_indices) {
+        if (stage_output_idx >= stage.outputs.size()) {
+            throw runtime_error("Tiled logical-transpose vector debug output index out of range.");
+        }
+        const CompiledStageOutput& output = stage.outputs[stage_output_idx];
+        if (output.local_node_idx >= stage.expr.nodes.size()) {
+            throw runtime_error("Tiled logical-transpose vector debug output node index out of range.");
+        }
+        if (tiledLogicalTransposeConsumerVectorComputeDType(stage.expr,
+                                                            output.local_node_idx,
+                                                            maybe_frontiers.value(),
+                                                            logical_transpose_pack_scalars)
+                .has_value()) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 static std::string emitTiledLogicalTransposeConsumerVectorValue(
@@ -5409,7 +5495,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     ss << "  const " << index_type << " matrixOffset = batchIdx * numRows * numCols;\n";
 
     for (uint32_t frontier_idx : frontier_indices) {
-        const DataType frontier_dtype = emittedScalarNodeValueDType(stage.expr.nodes[frontier_idx]);
+        const DataType frontier_dtype = tiledLogicalTransposeFrontierStorageDType(stage.expr, frontier_idx);
         const uint32_t frontier_bytes = scalarStorageTypeSizeBytes(frontier_dtype);
         if (frontier_bytes > sizeof(unsigned int)) {
             throw runtime_error("Tiled logical-transpose auto-swizzle currently supports frontier scalar storage types up to 32 bits.");
@@ -5421,7 +5507,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     emitSharedTransposeTileDeclaration(ss);
     ss << "  static constexpr unsigned int FRONTIER_VALUE_SLOTS = TILE_DIM / BLOCK_ROWS;\n";
     for (uint32_t frontier_idx : frontier_indices) {
-        const DataType frontier_dtype = emittedScalarNodeValueDType(stage.expr.nodes[frontier_idx]);
+        const DataType frontier_dtype = tiledLogicalTransposeFrontierStorageDType(stage.expr, frontier_idx);
         ss << "  " << scalarStorageType(frontier_dtype) << " transposed_value_" << frontier_idx
            << "[FRONTIER_VALUE_SLOTS][LOGICAL_TRANSPOSE_PACK_SCALARS];\n";
     }
@@ -5437,7 +5523,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
         const uint32_t frontier_idx = frontier_indices[frontier_position];
         const ExprNode& frontier = stage.expr.nodes[frontier_idx];
         const uint32_t frontier_source_idx = frontier.lhs;
-        const DataType frontier_dtype = emittedScalarNodeValueDType(frontier);
+        const DataType frontier_dtype = requireNodeOutputDType(frontier);
         const std::string frontier_type = scalarStorageType(frontier_dtype);
 
         const std::optional<TiledLogicalTransposeDenseInputLoad> dense_input_load =
@@ -5576,7 +5662,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
 
             std::unordered_map<uint32_t, TiledLogicalTransposeFrontierVectorValue> frontier_vector_values;
             for (uint32_t frontier_idx : frontier_indices) {
-                const DataType frontier_dtype = emittedScalarNodeValueDType(stage.expr.nodes[frontier_idx]);
+                const DataType frontier_dtype = tiledLogicalTransposeFrontierStorageDType(stage.expr, frontier_idx);
                 const std::string value0 =
                     "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS][lane_pair]";
                 const std::string value1 =
@@ -5607,7 +5693,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
 
             std::unordered_map<uint32_t, TiledLogicalTransposeFrontierValue> scalar_tail_frontier_values;
             for (uint32_t frontier_idx : frontier_indices) {
-                const DataType frontier_dtype = emittedScalarNodeValueDType(stage.expr.nodes[frontier_idx]);
+                const DataType frontier_dtype = tiledLogicalTransposeFrontierStorageDType(stage.expr, frontier_idx);
                 const std::string value_name =
                     "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS][lane]";
                 scalar_tail_frontier_values.emplace(frontier_idx, TiledLogicalTransposeFrontierValue{value_name, frontier_dtype});
@@ -5639,7 +5725,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
 
             std::unordered_map<uint32_t, TiledLogicalTransposeFrontierValue> frontier_values;
             for (uint32_t frontier_idx : frontier_indices) {
-                const DataType frontier_dtype = emittedScalarNodeValueDType(stage.expr.nodes[frontier_idx]);
+                const DataType frontier_dtype = tiledLogicalTransposeFrontierStorageDType(stage.expr, frontier_idx);
                 const std::string value_name =
                     "transposed_value_" + std::to_string(frontier_idx) + "[j / BLOCK_ROWS][lane]";
                 frontier_values.emplace(frontier_idx, TiledLogicalTransposeFrontierValue{value_name, frontier_dtype});

@@ -1812,6 +1812,71 @@ outputs: dict[str, PhysicalTensor]
         "tensor_scalar_inputs"_a = std::unordered_map<std::string, TensorScalarBinding>{});
 
     fused_equation.def(
+        "_debug_fused_kernel_launches",
+        [](const FusedEquation& self,
+           const std::unordered_map<std::string, Tensor>& inputs,
+           const std::unordered_map<std::string, float>& scalar_inputs,
+           const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) {
+            auto launch_kind_name = [](ThorImplementation::CompiledEquation::LaunchKind kind) {
+                switch (kind) {
+                    case ThorImplementation::CompiledEquation::LaunchKind::Flat:
+                        return "Flat";
+                    case ThorImplementation::CompiledEquation::LaunchKind::BroadcastSingle:
+                        return "BroadcastSingle";
+                    case ThorImplementation::CompiledEquation::LaunchKind::BroadcastGrouped:
+                        return "BroadcastGrouped";
+                    case ThorImplementation::CompiledEquation::LaunchKind::FusedTiledTranspose:
+                        return "FusedTiledTranspose";
+                }
+                return "<unknown>";
+            };
+
+            std::shared_ptr<ThorImplementation::PreparedConvenienceRunPlan> prepared_plan =
+                self.prepareConvenienceRunPlanForInputs(inputs, scalar_inputs, tensor_scalar_inputs);
+            std::shared_ptr<ThorImplementation::CompiledOutputs> compiled = prepared_plan->compiled_outputs;
+            std::vector<std::string> result;
+            for (size_t stage_idx = 0; stage_idx < compiled->stages.size(); ++stage_idx) {
+                const auto& stage = compiled->stages[stage_idx];
+                if (stage.kind != ThorImplementation::CompiledExecutionStage::Kind::FusedKernel) {
+                    continue;
+                }
+                if (stage_idx >= prepared_plan->stages.size()) {
+                    throw std::runtime_error("Prepared debug launch plan is missing a stage.");
+                }
+                const std::shared_ptr<ThorImplementation::CompiledEquation>& launch_equation =
+                    prepared_plan->stages[stage_idx].compiled_equation;
+                if (!launch_equation) {
+                    continue;
+                }
+
+                std::ostringstream oss;
+                oss << "FusedKernel(stage=" << stage_idx
+                    << ",launch=" << launch_kind_name(launch_equation->launch_kind)
+                    << ",outputs=" << stage.outputs.size()
+                    << ",elements_per_thread=" << launch_equation->elements_per_thread
+                    << ",tiled_pack=" << launch_equation->tiled_transpose_pack_scalars
+                    << ",logical_transpose=" << (launch_equation->uses_tiled_logical_transpose_consumer ? 1 : 0)
+                    << ",logical_slot_bytes=" << launch_equation->tiled_logical_transpose_slot_bytes
+                    << ",logical_dense_packed_loads=" << launch_equation->tiled_logical_transpose_dense_packed_input_load_count
+                    << ",logical_vectorized_outputs=" << launch_equation->tiled_logical_transpose_vectorized_output_count
+                    << ")";
+                result.push_back(oss.str());
+            }
+            return result;
+        },
+        "inputs"_a,
+        nb::kw_only(),
+        "scalar_inputs"_a = std::unordered_map<std::string, float>{},
+        "tensor_scalar_inputs"_a = std::unordered_map<std::string, TensorScalarBinding>{},
+        R"nbdoc(
+Return compact debug descriptions for compiled fused-kernel launch metadata.
+
+This is intended for tests that need to assert a specific optimized lowering,
+for example tiled logical-transpose auto-swizzle pack width or vectorized lane math,
+instead of only asserting that a stage compiled to a generic FusedKernel.
+)nbdoc");
+
+    fused_equation.def(
         "compile_backward",
         [](const FusedEquation& self,
            const std::vector<std::string>& wrt_names,

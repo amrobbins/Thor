@@ -4790,6 +4790,20 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(
     return compileForRootValues(root_values);
 }
 
+std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRunPlanForInputs(
+    const std::unordered_map<std::string, Tensor>& namedInputs,
+    const std::unordered_map<std::string, float>& scalarInputs,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) const {
+    std::unordered_map<uint32_t, RuntimeInputValue> root_values =
+        bindRootInputsForCompilation(namedInputs, scalarInputs, tensor_scalar_inputs);
+
+    if (root_values.empty()) {
+        throw std::runtime_error("FusedEquation::prepareConvenienceRunPlanForInputs requires at least one bound root input.");
+    }
+
+    return prepareConvenienceRunPlan(root_values);
+}
+
 std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
     const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const {
     if (root_values.empty()) {
