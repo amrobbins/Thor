@@ -54,6 +54,22 @@ def _assert_close(got: np.ndarray, expected: np.ndarray, dtype: thor.DataType):
         raise AssertionError(f"Unhandled dtype: {dtype}")
 
 
+def _parse_debug_fused_launch(desc: str) -> dict[str, str]:
+    assert desc.startswith("FusedKernel(") and desc.endswith(")"), desc
+    fields = desc[len("FusedKernel("):-1].split(",")
+    parsed = {}
+    for field in fields:
+        key, value = field.split("=", 1)
+        parsed[key] = value
+    return parsed
+
+
+def _single_debug_fused_launch(eq, inputs_gpu: dict[str, PhysicalTensor]) -> dict[str, str]:
+    launches = eq._debug_fused_kernel_launches(inputs_gpu)
+    assert len(launches) == 1, launches
+    return _parse_debug_fused_launch(launches[0])
+
+
 def _host_to_gpu(arr: np.ndarray, dtype: thor.DataType, stream: Stream, gpu_num: int = 0) -> PhysicalTensor:
     cpu = Placement(DeviceType.cpu, 0)
     gpu = Placement(DeviceType.gpu, gpu_num)
@@ -427,6 +443,140 @@ def test_auto_swizzle_logical_transpose_consumers_with_two_dense_inputs_numerica
 
 
 @pytest.mark.cuda
+def test_terminal_materialized_tiled_transpose_is_not_reported_as_logical_auto_swizzle_metadata():
+    x = ex.input("x")
+    eq = ex.compile(x.transpose(), device_num=0)
+
+    dtype = thor.DataType.fp16
+    shape = (35, 67)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(_make_matrix(shape, dtype, scale=0.0025, bias=-0.25), dtype, stream),
+    }
+
+    launch = _single_debug_fused_launch(eq, inputs_gpu)
+    assert launch["launch"] == "FusedTiledTranspose"
+    assert launch["logical_transpose"] == "0"
+    assert launch["logical_dense_packed_loads"] == "0"
+    assert launch["logical_vectorized_outputs"] == "0"
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "dtype,expected_slot_bytes,expected_pack_scalars",
+    [
+        (thor.DataType.fp16, 2, 2),
+        (thor.DataType.bf16, 2, 2),
+        (thor.DataType.fp8_e4m3, 1, 4),
+        (thor.DataType.fp8_e5m2, 1, 4),
+    ],
+)
+def test_auto_swizzle_logical_transpose_low_precision_frontiers_emit_optimized_launch_metadata(
+    dtype: thor.DataType, expected_slot_bytes: int, expected_pack_scalars: int
+):
+    x = ex.input("x")
+    y = ex.input("y")
+
+    # Keep the whole consumer expression low precision so the downstream lane math
+    # can use half2/bfloat162 rather than promoting to FP32 scalar math.
+    out = (x.transpose() + y.transpose()).with_output_dtype(dtype)
+    eq = ex.compile(out, device_num=0)
+
+    shape = (35, 67)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(_make_matrix(shape, dtype, scale=0.0025, bias=-0.25), dtype, stream),
+        "y": _host_to_gpu(_make_matrix(shape, dtype, scale=-0.0015, bias=0.5), dtype, stream),
+    }
+
+    launch = _single_debug_fused_launch(eq, inputs_gpu)
+    assert launch["launch"] == "FusedTiledTranspose"
+    assert launch["outputs"] == "1"
+    assert launch["logical_transpose"] == "1"
+    assert int(launch["logical_slot_bytes"]) == expected_slot_bytes
+    assert int(launch["tiled_pack"]) == expected_pack_scalars
+    assert launch["logical_dense_packed_loads"] == "2"
+    assert launch["logical_vectorized_outputs"] == "1"
+
+
+@pytest.mark.cuda
+def test_auto_swizzle_logical_transpose_mixed_fp8_fp16_uses_larger_dtype_pack_metadata():
+    x = ex.input("x")
+    y = ex.input("y")
+
+    out = (x.transpose() + y.transpose()).with_output_dtype(thor.DataType.fp16)
+    eq = ex.compile(out, device_num=0)
+
+    shape = (37, 65)
+    x_dtype = thor.DataType.fp8_e4m3
+    y_dtype = thor.DataType.fp16
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(_make_matrix(shape, x_dtype, scale=0.002, bias=-0.125), x_dtype, stream),
+        "y": _host_to_gpu(_make_matrix(shape, y_dtype, scale=-0.001, bias=0.375), y_dtype, stream),
+    }
+
+    launch = _single_debug_fused_launch(eq, inputs_gpu)
+    assert launch["launch"] == "FusedTiledTranspose"
+    assert launch["logical_transpose"] == "1"
+    assert launch["logical_slot_bytes"] == "2"
+    assert launch["tiled_pack"] == "2"
+    assert launch["logical_dense_packed_loads"] == "2"
+    assert launch["logical_vectorized_outputs"] == "1"
+
+
+@pytest.mark.cuda
+def test_auto_swizzle_logical_transpose_computed_frontier_keeps_packed_banks_but_not_dense_load_metadata():
+    x = ex.input("x")
+    pre_bias = ex.input("pre_bias")
+
+    frontier = (x + pre_bias).transpose()
+    out = (frontier + frontier).with_output_dtype(thor.DataType.fp16)
+    eq = ex.compile(out, device_num=0)
+
+    dtype = thor.DataType.fp16
+    x_shape = (35, 67)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(_make_matrix(x_shape, dtype, scale=0.002, bias=-0.25), dtype, stream),
+        "pre_bias": _host_to_gpu(_make_matrix((1, 67), dtype, scale=0.001, bias=0.125), dtype, stream),
+    }
+
+    launch = _single_debug_fused_launch(eq, inputs_gpu)
+    assert launch["launch"] == "FusedTiledTranspose"
+    assert launch["logical_transpose"] == "1"
+    assert launch["logical_slot_bytes"] == "2"
+    assert launch["tiled_pack"] == "2"
+    assert launch["logical_dense_packed_loads"] == "0"
+    assert launch["logical_vectorized_outputs"] == "1"
+
+
+@pytest.mark.cuda
+def test_auto_swizzle_logical_transpose_downstream_non_frontier_input_disables_vectorized_lane_math_metadata():
+    x = ex.input("x")
+    post_bias = ex.input("post_bias")
+
+    out = (x.transpose() + post_bias).with_output_dtype(thor.DataType.fp16)
+    eq = ex.compile(out, device_num=0)
+
+    dtype = thor.DataType.fp16
+    x_shape = (35, 67)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(_make_matrix(x_shape, dtype, scale=0.002, bias=-0.25), dtype, stream),
+        "post_bias": _host_to_gpu(_make_matrix((67, 35), dtype, scale=-0.001, bias=0.375), dtype, stream),
+    }
+
+    launch = _single_debug_fused_launch(eq, inputs_gpu)
+    assert launch["launch"] == "FusedTiledTranspose"
+    assert launch["logical_transpose"] == "1"
+    assert launch["logical_slot_bytes"] == "2"
+    assert launch["tiled_pack"] == "2"
+    assert launch["logical_dense_packed_loads"] == "1"
+    assert launch["logical_vectorized_outputs"] == "0"
+
+
+@pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [thor.DataType.fp16, thor.DataType.bf16, thor.DataType.fp8_e4m3, thor.DataType.fp8_e5m2])
 def test_auto_swizzle_logical_transpose_low_precision_frontiers_pack_lanes_numerical(dtype: thor.DataType):
     x = ex.input("x")
@@ -536,6 +686,45 @@ def test_auto_swizzle_logical_transpose_multi_output_fused_stage_numerical(dtype
     assert got_diff.shape == expected_diff.shape
     _assert_close(got_sum, expected_sum, dtype)
     _assert_close(got_diff, expected_diff, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "dtype,expected_slot_bytes,expected_pack_scalars",
+    [
+        (thor.DataType.fp16, 2, 2),
+        (thor.DataType.bf16, 2, 2),
+        (thor.DataType.fp8_e4m3, 1, 4),
+    ],
+)
+def test_auto_swizzle_logical_transpose_multi_output_fused_stage_emits_optimized_launch_metadata(
+    dtype: thor.DataType, expected_slot_bytes: int, expected_pack_scalars: int
+):
+    x = ex.input("x")
+    y = ex.input("y")
+
+    outs = ex.outputs({
+        "sum": (x.transpose() + y.transpose()).with_output_dtype(dtype),
+        "diff": (x.transpose() - y.transpose()).with_output_dtype(dtype),
+    })
+    eq = outs.compile(device_num=0)
+
+    shape = (35, 67)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(_make_matrix(shape, dtype, scale=0.002, bias=-0.25), dtype, stream),
+        "y": _host_to_gpu(_make_matrix(shape, dtype, scale=-0.0015, bias=0.5), dtype, stream),
+    }
+
+    launch = _single_debug_fused_launch(eq, inputs_gpu)
+    assert launch["launch"] == "FusedTiledTranspose"
+    assert launch["outputs"] == "2"
+    assert launch["logical_transpose"] == "1"
+    assert int(launch["logical_slot_bytes"]) == expected_slot_bytes
+    assert int(launch["tiled_pack"]) == expected_pack_scalars
+    assert launch["logical_dense_packed_loads"] == "2"
+    assert launch["logical_vectorized_outputs"] == "2"
+
 
 @pytest.mark.cuda
 def test_nested_transpose_scalar_chain_normalizes_and_is_numerical():

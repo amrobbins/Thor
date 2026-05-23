@@ -66,6 +66,15 @@ struct CompiledEquation {
     bool uses_uint32_numel_arg = false;
     bool uses_uint32_tiled_transpose_index_math = true;
 
+    // Debug/test metadata for the tiled logical-transpose consumer auto-swizzle path.
+    // These are intentionally not consulted by the runtime launcher; they let tests
+    // assert that the intended optimized lowering was selected instead of merely
+    // asserting that the stage is some generic FusedKernel.
+    bool uses_tiled_logical_transpose_consumer = false;
+    uint32_t tiled_logical_transpose_slot_bytes = sizeof(unsigned int);
+    uint32_t tiled_logical_transpose_dense_packed_input_load_count = 0;
+    uint32_t tiled_logical_transpose_vectorized_output_count = 0;
+
     int deviceNum = 0;
     std::vector<std::string> input_names;
     std::vector<NamedInput::Kind> input_kinds;

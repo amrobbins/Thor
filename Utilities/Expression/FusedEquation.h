@@ -456,6 +456,11 @@ class FusedEquation {
         const std::unordered_map<std::string, float>& scalarInputs = {},
         const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs = {}) const;
 
+    [[nodiscard]] std::shared_ptr<PreparedConvenienceRunPlan> prepareConvenienceRunPlanForInputs(
+        const std::unordered_map<std::string, Tensor>& namedInputs,
+        const std::unordered_map<std::string, float>& scalarInputs = {},
+        const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs = {}) const;
+
    private:
     explicit FusedEquation(PhysicalOutputs outputs_template,
                            int device_num,

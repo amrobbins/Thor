@@ -5336,6 +5336,12 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
         compiled->elements_per_thread = 1u;
         compiled->tiled_transpose_pack_scalars = CudaSourceEmitter::tiledLogicalTransposeConsumerPackScalars(stage, groups);
         compiled->uses_uint32_tiled_transpose_index_math = CudaSourceEmitter::specializedBroadcastUsesUInt32IndexMath(groups);
+        compiled->uses_tiled_logical_transpose_consumer = true;
+        compiled->tiled_logical_transpose_slot_bytes = CudaSourceEmitter::tiledLogicalTransposeConsumerSlotBytes(stage, groups);
+        compiled->tiled_logical_transpose_dense_packed_input_load_count =
+            CudaSourceEmitter::tiledLogicalTransposeConsumerDensePackedInputLoadCount(stage, groups);
+        compiled->tiled_logical_transpose_vectorized_output_count =
+            CudaSourceEmitter::tiledLogicalTransposeConsumerVectorizedOutputCount(stage, groups);
     } else {
         const std::optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
         compiled->elements_per_thread = vectorized_dtype.has_value() ? 2u : 1u;
