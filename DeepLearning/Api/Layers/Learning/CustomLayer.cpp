@@ -595,8 +595,10 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
     const bool useFastMath = j.value("use_fast_math", false);
     std::vector<std::string> inputNames = j.at("input_names").get<std::vector<std::string>>();
     std::vector<std::string> outputNames = j.at("output_names").get<std::vector<std::string>>();
-    ThorImplementation::ExpressionDefinition expressionDefinition =
-        ThorImplementation::ExpressionDefinition::deserialize(j.at("expression"));
+    ThorImplementation::ExpressionDefinition expressionDefinition = ThorImplementation::ExpressionDefinition::deserialize(
+        j.at("expression"),
+        network != nullptr && network->allowUnsafeLoadedCudaKernelSourceCompilation(),
+        network != nullptr ? network->trustedLoadedCudaKernelPublicKey() : std::string{});
 
     std::vector<TensorMap> inputInterfaces;
     for (const json& interfaceJson : j.at("input_interfaces")) {

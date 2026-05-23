@@ -4,6 +4,7 @@
 #include <nvrtc.h>
 
 #include <algorithm>
+#include <iomanip>
 #include <limits>
 #include <mutex>
 #include <sstream>
@@ -16,6 +17,7 @@
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/FusedEquation.h"
 
+using json = nlohmann::json;
 
 namespace ThorImplementation {
 namespace {
@@ -53,7 +55,8 @@ void validateScalarDataType(TensorDescriptor::DataType type) {
             return;
         default:
             throw std::invalid_argument("CudaKernelExpression scalar dtype '" + dtypeName(type) +
-                                        "' is not supported for by-value kernel scalar arguments. Supported scalar dtypes are int32, uint32, int64, uint64, fp32, and fp64.");
+                                        "' is not supported for by-value kernel scalar arguments. Supported scalar dtypes are int32, "
+                                        "uint32, int64, uint64, fp32, and fp64.");
     }
 }
 
@@ -75,6 +78,21 @@ uint64_t checkedNumel(const std::vector<uint64_t>& dims) {
         n *= d;
     }
     return n;
+}
+
+std::string stableSourceHash(const std::string& text) {
+    constexpr uint64_t kOffset = 1469598103934665603ULL;
+    constexpr uint64_t kPrime = 1099511628211ULL;
+
+    uint64_t hash = kOffset;
+    for (unsigned char c : text) {
+        hash ^= static_cast<uint64_t>(c);
+        hash *= kPrime;
+    }
+
+    std::ostringstream ss;
+    ss << "fnv1a64:" << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return ss.str();
 }
 
 void ensureCudaContextCurrentForCudaKernelExpression(int device_num) {
@@ -150,12 +168,12 @@ std::string customKernelCacheKey(const std::string& name,
                                  const std::string& entry,
                                  const EquationSignature& sig) {
     std::ostringstream oss;
-    oss << "cuda_kernel_expression:v3\n";
+    oss << "cuda_kernel_expression:v4\n";
     oss << "name=" << name << "\n";
     oss << "entry=" << entry << "\n";
     oss << "sm=" << sig.sm_major << sig.sm_minor << "\n";
     oss << "fast_math=" << (sig.use_fast_math ? 1 : 0) << "\n";
-    oss << "source_hash=" << std::hash<std::string>{}(compiled_source) << "\n";
+    oss << "source_hash=" << stableSourceHash(compiled_source) << "\n";
     oss << compiled_source;
     return oss.str();
 }
@@ -212,6 +230,48 @@ std::string joinNames(const std::vector<std::string>& names) {
     return oss.str();
 }
 
+const char* tensorParamKindName(CudaKernelExpression::TensorParamSpec::Kind kind) {
+    switch (kind) {
+        case CudaKernelExpression::TensorParamSpec::Kind::Tensor:
+            return "tensor";
+        case CudaKernelExpression::TensorParamSpec::Kind::TensorRuntimeScalar:
+            return "tensor_runtime_scalar";
+        case CudaKernelExpression::TensorParamSpec::Kind::HostRuntimeScalar:
+            return "host_runtime_scalar";
+    }
+    throw std::runtime_error("Unknown CudaKernelExpression tensor param kind.");
+}
+
+CudaKernelExpression::TensorParamSpec::Kind tensorParamKindFromName(const std::string& kind) {
+    if (kind == "tensor")
+        return CudaKernelExpression::TensorParamSpec::Kind::Tensor;
+    if (kind == "tensor_runtime_scalar")
+        return CudaKernelExpression::TensorParamSpec::Kind::TensorRuntimeScalar;
+    if (kind == "host_runtime_scalar")
+        return CudaKernelExpression::TensorParamSpec::Kind::HostRuntimeScalar;
+    throw std::runtime_error("Unknown CudaKernelExpression tensor param kind in serialized expression: " + kind);
+}
+
+const char* dimExprKindName(CudaKernelExpression::DimExpr::Kind kind) {
+    switch (kind) {
+        case CudaKernelExpression::DimExpr::Kind::Constant:
+            return "constant";
+        case CudaKernelExpression::DimExpr::Kind::TensorDim:
+            return "tensor_dim";
+        case CudaKernelExpression::DimExpr::Kind::TensorNumel:
+            return "tensor_numel";
+    }
+    throw std::runtime_error("Unknown CudaKernelExpression DimExpr kind.");
+}
+
+const char* launchSpecKindName(CudaKernelExpression::LaunchSpec::Kind kind) {
+    switch (kind) {
+        case CudaKernelExpression::LaunchSpec::Kind::Grid1D:
+            return "grid_1d";
+    }
+    throw std::runtime_error("Unknown CudaKernelExpression launch spec kind.");
+}
+
 }  // namespace
 
 uint64_t CudaKernelExpression::DimExpr::resolve(const std::unordered_map<std::string, Tensor>& tensors) const {
@@ -223,8 +283,8 @@ uint64_t CudaKernelExpression::DimExpr::resolve(const std::unordered_map<std::st
             const auto dims = tensor.getDimensions();
             if (axis_ >= dims.size()) {
                 throw std::runtime_error("CudaKernelExpression dimension expression axis " + std::to_string(axis_) +
-                                         " is out of range for tensor '" + tensor_name_ + "' with rank " +
-                                         std::to_string(dims.size()) + ".");
+                                         " is out of range for tensor '" + tensor_name_ + "' with rank " + std::to_string(dims.size()) +
+                                         ".");
             }
             return dims[axis_];
         }
@@ -243,7 +303,8 @@ uint64_t CudaKernelExpression::DimExpr::resolve(const std::unordered_map<std::st
         case Kind::TensorDim: {
             auto it = tensor_shapes.find(tensor_name_);
             if (it == tensor_shapes.end()) {
-                throw std::runtime_error("CudaKernelExpression dimension expression references unknown tensor shape '" + tensor_name_ + "'.");
+                throw std::runtime_error("CudaKernelExpression dimension expression references unknown tensor shape '" + tensor_name_ +
+                                         "'.");
             }
             if (axis_ >= it->second.size()) {
                 throw std::runtime_error("CudaKernelExpression dimension expression axis " + std::to_string(axis_) +
@@ -274,9 +335,87 @@ std::string CudaKernelExpression::DimExpr::describe() const {
     return "<unknown>";
 }
 
-const Tensor& CudaKernelExpression::LaunchContext::input(const std::string& name) const { return lookupTensor(inputs, name, "launch input"); }
+json CudaKernelExpression::DimExpr::architectureJson() const {
+    json j;
+    j["kind"] = dimExprKindName(kind_);
+    j["tensor_name"] = tensor_name_;
+    j["axis"] = axis_;
+    j["value"] = value_;
+    return j;
+}
 
-const Tensor& CudaKernelExpression::LaunchContext::output(const std::string& name) const { return lookupTensor(outputs, name, "launch output"); }
+CudaKernelExpression::DimExpr CudaKernelExpression::DimExpr::deserialize(const json& j) {
+    const std::string kind = j.at("kind").get<std::string>();
+    if (kind == "constant") {
+        return constant(j.at("value").get<uint64_t>());
+    }
+    if (kind == "tensor_dim") {
+        return dim(j.at("tensor_name").get<std::string>(), j.at("axis").get<uint32_t>());
+    }
+    if (kind == "tensor_numel") {
+        return numel(j.at("tensor_name").get<std::string>());
+    }
+    throw std::runtime_error("Unknown CudaKernelExpression DimExpr kind in serialized expression: " + kind);
+}
+
+CudaKernelExpression::LaunchSpec CudaKernelExpression::LaunchSpec::grid1D(DimExpr elements,
+                                                                          uint32_t block_size,
+                                                                          uint32_t dynamic_shared_bytes) {
+    if (block_size == 0) {
+        throw std::invalid_argument("CudaKernelExpression grid_1d launch block_size must be nonzero.");
+    }
+    return LaunchSpec{Kind::Grid1D, std::move(elements), block_size, dynamic_shared_bytes};
+}
+
+CudaKernelLaunchConfig CudaKernelExpression::LaunchSpec::resolve(const LaunchContext& launch_context) const {
+    switch (kind) {
+        case Kind::Grid1D: {
+            if (block_size == 0) {
+                throw std::runtime_error("CudaKernelExpression grid_1d launch block_size must be nonzero.");
+            }
+            std::unordered_map<std::string, Tensor> tensors = launch_context.inputs;
+            for (const auto& [name, tensor] : launch_context.outputs) {
+                tensors.emplace(name, tensor);
+            }
+            uint64_t n = elements.resolve(tensors);
+            uint64_t grid_x = (n + block_size - 1) / block_size;
+            if (grid_x == 0) {
+                grid_x = 1;
+            }
+            if (grid_x > std::numeric_limits<uint32_t>::max()) {
+                throw std::runtime_error("CudaKernelExpression grid_1d launch grid.x exceeds uint32_t range.");
+            }
+            return CudaKernelLaunchConfig{dim3(static_cast<uint32_t>(grid_x), 1, 1), dim3(block_size, 1, 1), dynamic_shared_bytes};
+        }
+    }
+    throw std::runtime_error("Unknown CudaKernelExpression launch spec kind.");
+}
+
+json CudaKernelExpression::LaunchSpec::architectureJson() const {
+    json j;
+    j["kind"] = launchSpecKindName(kind);
+    j["elements"] = elements.architectureJson();
+    j["block_size"] = block_size;
+    j["dynamic_shared_bytes"] = dynamic_shared_bytes;
+    return j;
+}
+
+CudaKernelExpression::LaunchSpec CudaKernelExpression::LaunchSpec::deserialize(const json& j) {
+    const std::string kind_name = j.at("kind").get<std::string>();
+    if (kind_name == "grid_1d") {
+        return grid1D(
+            DimExpr::deserialize(j.at("elements")), j.value("block_size", uint32_t{256}), j.value("dynamic_shared_bytes", uint32_t{0}));
+    }
+    throw std::runtime_error("Unknown CudaKernelExpression launch spec kind in serialized expression: " + kind_name);
+}
+
+const Tensor& CudaKernelExpression::LaunchContext::input(const std::string& name) const {
+    return lookupTensor(inputs, name, "launch input");
+}
+
+const Tensor& CudaKernelExpression::LaunchContext::output(const std::string& name) const {
+    return lookupTensor(outputs, name, "launch output");
+}
 
 uint64_t CudaKernelExpression::LaunchContext::dim(const std::string& tensor_name, uint32_t axis) const {
     auto input_it = inputs.find(tensor_name);
@@ -342,31 +481,34 @@ CudaKernelExpression::Builder& CudaKernelExpression::Builder::input(std::string 
     return *this;
 }
 
-CudaKernelExpression::Builder& CudaKernelExpression::Builder::tensorRuntimeScalarInput(std::string name,
-                                                                                       TensorDescriptor::DataType dtype) {
+CudaKernelExpression::Builder& CudaKernelExpression::Builder::tensorRuntimeScalarInput(std::string name, TensorDescriptor::DataType dtype) {
     validateName(name, "tensor runtime scalar input");
     inputs_.push_back(TensorParamSpec{std::move(name), dtype, TensorParamSpec::Kind::TensorRuntimeScalar});
     return *this;
 }
 
-CudaKernelExpression::Builder& CudaKernelExpression::Builder::hostRuntimeScalarInput(std::string name,
-                                                                                     TensorDescriptor::DataType dtype) {
+CudaKernelExpression::Builder& CudaKernelExpression::Builder::hostRuntimeScalarInput(std::string name, TensorDescriptor::DataType dtype) {
     validateName(name, "host runtime scalar input");
     validateHostRuntimeScalarDataType(dtype);
     inputs_.push_back(TensorParamSpec{std::move(name), dtype, TensorParamSpec::Kind::HostRuntimeScalar});
     return *this;
 }
 
-CudaKernelExpression::Builder& CudaKernelExpression::Builder::output(std::string name, TensorDescriptor::DataType dtype, std::vector<DimExpr> shape) {
+CudaKernelExpression::Builder& CudaKernelExpression::Builder::output(std::string name,
+                                                                     TensorDescriptor::DataType dtype,
+                                                                     std::vector<DimExpr> shape) {
     validateName(name, "output");
     if (shape.empty()) {
-        throw std::invalid_argument("CudaKernelExpression output '" + name + "' requires a non-empty shape. Use scalar outputs as shape {1}.");
+        throw std::invalid_argument("CudaKernelExpression output '" + name +
+                                    "' requires a non-empty shape. Use scalar outputs as shape {1}.");
     }
     outputs_.push_back(OutputParamSpec{std::move(name), dtype, std::move(shape), {}});
     return *this;
 }
 
-CudaKernelExpression::Builder& CudaKernelExpression::Builder::outputLike(std::string name, TensorDescriptor::DataType dtype, const std::string& input_name) {
+CudaKernelExpression::Builder& CudaKernelExpression::Builder::outputLike(std::string name,
+                                                                         TensorDescriptor::DataType dtype,
+                                                                         const std::string& input_name) {
     validateName(name, "output");
     validateName(input_name, "input");
     outputs_.push_back(OutputParamSpec{std::move(name), dtype, {}, input_name});
@@ -374,9 +516,7 @@ CudaKernelExpression::Builder& CudaKernelExpression::Builder::outputLike(std::st
 }
 
 CudaKernelExpression::Builder& CudaKernelExpression::Builder::scalar(
-    std::string name,
-    TensorDescriptor::DataType type,
-    std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> value) {
+    std::string name, TensorDescriptor::DataType type, std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> value) {
     validateName(name, "scalar");
     validateScalarDataType(type);
     scalars_.push_back(ScalarParamSpec{std::move(name), type, std::move(value)});
@@ -385,6 +525,15 @@ CudaKernelExpression::Builder& CudaKernelExpression::Builder::scalar(
 
 CudaKernelExpression::Builder& CudaKernelExpression::Builder::launch(LaunchFn launch_fn) {
     launch_fn_ = std::move(launch_fn);
+    launch_spec_ = std::nullopt;
+    return *this;
+}
+
+CudaKernelExpression::Builder& CudaKernelExpression::Builder::launchGrid1D(DimExpr elements,
+                                                                           uint32_t block_size,
+                                                                           uint32_t dynamic_shared_bytes) {
+    launch_spec_ = LaunchSpec::grid1D(std::move(elements), block_size, dynamic_shared_bytes);
+    launch_fn_ = nullptr;
     return *this;
 }
 
@@ -406,8 +555,8 @@ CudaKernelExpression CudaKernelExpression::Builder::build() const {
     if (outputs_.empty()) {
         throw std::invalid_argument("CudaKernelExpression requires at least one output tensor.");
     }
-    if (!launch_fn_) {
-        throw std::invalid_argument("CudaKernelExpression requires a launch function.");
+    if (!launch_fn_ && !launch_spec_.has_value()) {
+        throw std::invalid_argument("CudaKernelExpression requires a launch function or serializable launch spec.");
     }
 
     std::unordered_set<std::string> names;
@@ -427,14 +576,14 @@ CudaKernelExpression CudaKernelExpression::Builder::build() const {
         insert(output.name, "output");
         if (!output.like_input_name.empty() && !tensor_input_names.contains(output.like_input_name)) {
             throw std::invalid_argument("CudaKernelExpression output '" + output.name +
-                                        "' must be declared like a tensor input, got unknown/non-tensor input '" +
-                                        output.like_input_name + "'.");
+                                        "' must be declared like a tensor input, got unknown/non-tensor input '" + output.like_input_name +
+                                        "'.");
         }
     }
     for (const auto& scalar : scalars_)
         insert(scalar.name, "scalar");
 
-    return CudaKernelExpression(name_, source_, entry_, inputs_, outputs_, scalars_, launch_fn_, use_fast_math_);
+    return CudaKernelExpression(name_, source_, entry_, inputs_, outputs_, scalars_, launch_fn_, launch_spec_, use_fast_math_, true);
 }
 
 CudaKernelExpression::CudaKernelExpression(std::string name,
@@ -444,7 +593,9 @@ CudaKernelExpression::CudaKernelExpression(std::string name,
                                            std::vector<OutputParamSpec> outputs,
                                            std::vector<ScalarParamSpec> scalars,
                                            LaunchFn launch_fn,
-                                           bool use_fast_math)
+                                           std::optional<LaunchSpec> launch_spec,
+                                           bool use_fast_math,
+                                           bool loaded_source_compilation_allowed)
     : name_(std::move(name)),
       source_(std::move(source)),
       entry_(std::move(entry)),
@@ -452,14 +603,16 @@ CudaKernelExpression::CudaKernelExpression(std::string name,
       outputs_(std::move(outputs)),
       scalars_(std::move(scalars)),
       launch_fn_(std::move(launch_fn)),
-      use_fast_math_(use_fast_math) {}
+      launch_spec_(std::move(launch_spec)),
+      use_fast_math_(use_fast_math),
+      loaded_source_compilation_allowed_(loaded_source_compilation_allowed) {}
 
 std::string CudaKernelExpression::cacheSignature() const {
     std::ostringstream oss;
     oss << "name=" << name_ << "\n";
     oss << "entry=" << entry_ << "\n";
     oss << "fast_math=" << (use_fast_math_ ? 1 : 0) << "\n";
-    oss << "source_hash=" << std::hash<std::string>{}(source_) << "\n";
+    oss << "source_hash=" << stableSourceHash(source_) << "\n";
     oss << "inputs=";
     for (const TensorParamSpec& input : inputs_) {
         oss << input.name << ":" << inputKindName(input.kind) << ":" << dtypeName(input.dtype) << ";";
@@ -482,7 +635,172 @@ std::string CudaKernelExpression::cacheSignature() const {
     for (const ScalarParamSpec& scalar : scalars_) {
         oss << scalar.name << ":" << static_cast<int>(scalar.type) << ";";
     }
+    if (launch_spec_.has_value()) {
+        oss << "\nlaunch=" << launch_spec_->architectureJson().dump();
+    } else {
+        oss << "\nlaunch=<runtime_callback>";
+    }
     return oss.str();
+}
+
+std::string CudaKernelExpression::compiledSource() const { return customKernelCompiledSource(source_); }
+
+CudaKernelExpression::SourceInfo CudaKernelExpression::sourceInfo() const {
+    const std::string compiled = compiledSource();
+    return SourceInfo{
+        .name = name_,
+        .entrypoint = entry_,
+        .source = source_,
+        .compiled_source = compiled,
+        .source_hash = stableSourceHash(compiled),
+        .loaded_source_compilation_allowed = loaded_source_compilation_allowed_,
+    };
+}
+
+json CudaKernelExpression::architectureJson() const {
+    if (!launch_spec_.has_value()) {
+        throw std::runtime_error("CudaKernelExpression '" + name_ +
+                                 "' was built with a non-serializable launch callback. Use launchGrid1D(...) for CudaKernelExpressions "
+                                 "that may be saved/loaded.");
+    }
+
+    json j;
+    j["schema_version"] = 1;
+    j["name"] = name_;
+    j["source"] = source_;
+    j["entry"] = entry_;
+    j["use_fast_math"] = use_fast_math_;
+    j["compiled_source_hash"] = stableSourceHash(compiledSource());
+    j["loaded_source_compilation_allowed"] = loaded_source_compilation_allowed_;
+
+    j["inputs"] = json::array();
+    for (const TensorParamSpec& input : inputs_) {
+        j["inputs"].push_back(json{{"name", input.name}, {"dtype", input.dtype}, {"kind", tensorParamKindName(input.kind)}});
+    }
+
+    j["outputs"] = json::array();
+    for (const OutputParamSpec& output : outputs_) {
+        json output_json{{"name", output.name}, {"dtype", output.dtype}};
+        if (!output.like_input_name.empty()) {
+            output_json["like_input_name"] = output.like_input_name;
+        } else {
+            output_json["shape"] = json::array();
+            for (const DimExpr& dim : output.shape) {
+                output_json["shape"].push_back(dim.architectureJson());
+            }
+        }
+        j["outputs"].push_back(std::move(output_json));
+    }
+
+    auto scalar_value_to_json = [](const ScalarParamSpec& scalar) {
+        return std::visit(
+            [](const auto& v) -> json {
+                using T = std::decay_t<decltype(v)>;
+                if constexpr (std::is_same_v<T, DimExpr>) {
+                    return json{{"kind", "dim_expr"}, {"value", v.architectureJson()}};
+                } else {
+                    return json{{"kind", "literal"}, {"value", v}};
+                }
+            },
+            scalar.value);
+    };
+
+    j["scalars"] = json::array();
+    for (const ScalarParamSpec& scalar : scalars_) {
+        j["scalars"].push_back(json{{"name", scalar.name}, {"dtype", scalar.type}, {"value", scalar_value_to_json(scalar)}});
+    }
+
+    j["launch"] = launch_spec_->architectureJson();
+    return j;
+}
+
+CudaKernelExpression CudaKernelExpression::deserialize(const json& j, bool allow_unsafe_loaded_cuda_source) {
+    const int schema_version = j.value("schema_version", 1);
+    if (schema_version != 1) {
+        throw std::runtime_error("Unsupported CudaKernelExpression schema_version: " + std::to_string(schema_version));
+    }
+
+    Builder builder(j.at("name").get<std::string>());
+    builder.source(j.at("source").get<std::string>());
+    builder.entry(j.at("entry").get<std::string>());
+    builder.useFastMath(j.value("use_fast_math", false));
+
+    for (const json& input_json : j.at("inputs")) {
+        const std::string name = input_json.at("name").get<std::string>();
+        const TensorDescriptor::DataType dtype = input_json.at("dtype").get<TensorDescriptor::DataType>();
+        const TensorParamSpec::Kind kind = tensorParamKindFromName(input_json.value("kind", std::string("tensor")));
+        switch (kind) {
+            case TensorParamSpec::Kind::Tensor:
+                builder.input(name, dtype);
+                break;
+            case TensorParamSpec::Kind::TensorRuntimeScalar:
+                builder.tensorRuntimeScalarInput(name, dtype);
+                break;
+            case TensorParamSpec::Kind::HostRuntimeScalar:
+                builder.hostRuntimeScalarInput(name, dtype);
+                break;
+        }
+    }
+
+    for (const json& output_json : j.at("outputs")) {
+        const std::string name = output_json.at("name").get<std::string>();
+        const TensorDescriptor::DataType dtype = output_json.at("dtype").get<TensorDescriptor::DataType>();
+        if (output_json.contains("like_input_name")) {
+            builder.outputLike(name, dtype, output_json.at("like_input_name").get<std::string>());
+        } else {
+            std::vector<DimExpr> shape;
+            for (const json& dim_json : output_json.at("shape")) {
+                shape.push_back(DimExpr::deserialize(dim_json));
+            }
+            builder.output(name, dtype, std::move(shape));
+        }
+    }
+
+    auto parse_scalar_value = [](TensorDescriptor::DataType dtype,
+                                 const json& value_json) -> std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> {
+        const std::string kind = value_json.at("kind").get<std::string>();
+        if (kind == "dim_expr") {
+            return DimExpr::deserialize(value_json.at("value"));
+        }
+        if (kind != "literal") {
+            throw std::runtime_error("Unknown CudaKernelExpression scalar value kind in serialized expression: " + kind);
+        }
+        switch (dtype) {
+            case TensorDescriptor::DataType::INT32:
+                return value_json.at("value").get<int32_t>();
+            case TensorDescriptor::DataType::UINT32:
+                return value_json.at("value").get<uint32_t>();
+            case TensorDescriptor::DataType::INT64:
+                return value_json.at("value").get<int64_t>();
+            case TensorDescriptor::DataType::UINT64:
+                return value_json.at("value").get<uint64_t>();
+            case TensorDescriptor::DataType::FP32:
+                return value_json.at("value").get<float>();
+            case TensorDescriptor::DataType::FP64:
+                return value_json.at("value").get<double>();
+            default:
+                throw std::runtime_error("Unsupported CudaKernelExpression scalar dtype in serialized expression: " + dtypeName(dtype));
+        }
+    };
+
+    for (const json& scalar_json : j.at("scalars")) {
+        const std::string name = scalar_json.at("name").get<std::string>();
+        const TensorDescriptor::DataType dtype = scalar_json.at("dtype").get<TensorDescriptor::DataType>();
+        builder.scalar(name, dtype, parse_scalar_value(dtype, scalar_json.at("value")));
+    }
+
+    LaunchSpec launch_spec = LaunchSpec::deserialize(j.at("launch"));
+    builder.launchGrid1D(launch_spec.elements, launch_spec.block_size, launch_spec.dynamic_shared_bytes);
+
+    CudaKernelExpression result = builder.build();
+    result.loaded_source_compilation_allowed_ = allow_unsafe_loaded_cuda_source;
+
+    const std::string expected_hash = j.value("compiled_source_hash", std::string{});
+    if (!expected_hash.empty() && expected_hash != stableSourceHash(result.compiledSource())) {
+        throw std::runtime_error("CudaKernelExpression compiled_source_hash mismatch for loaded kernel '" + result.name_ + "'.");
+    }
+
+    return result;
 }
 
 std::vector<std::vector<uint64_t>> CudaKernelExpression::inferOutputShapesFromInputShapes(
@@ -514,7 +832,17 @@ std::vector<std::vector<uint64_t>> CudaKernelExpression::inferOutputShapesFromIn
 }
 
 std::shared_ptr<CompiledCudaKernel> CudaKernelExpression::compile(int device_num) const {
-    EquationSignature sig = buildSignature(static_cast<uint32_t>(inputs_.size() + outputs_.size() + scalars_.size()), device_num, use_fast_math_);
+    if (!loaded_source_compilation_allowed_) {
+        throw std::runtime_error(
+            "Refusing to compile CudaKernelExpression '" + name_ +
+            "' because its CUDA source was loaded from a serialized model. Custom CUDA source in loaded models is unsafe code execution. "
+            "If you will be running it, you should inspect the serialized CUDA source/compiled source, then load it with "
+            "allow_unsafe_loaded_cuda_source=true and the trusted Ed25519 public key that was printed when the model was saved. Signature "
+            "verification provides evidence of the identity of the signed CUDA manifest.");
+    }
+
+    EquationSignature sig =
+        buildSignature(static_cast<uint32_t>(inputs_.size() + outputs_.size() + scalars_.size()), device_num, use_fast_math_);
     const std::string compiled_source = customKernelCompiledSource(source_);
     const std::string key = customKernelCacheKey(name_, compiled_source, entry_, sig);
 
@@ -627,7 +955,8 @@ CudaKernelScalarValue CudaKernelExpression::resolveScalar(const ScalarParamSpec&
                 if constexpr (std::is_same_v<T, DimExpr>) {
                     const uint64_t u = v.resolve(tensors);
                     if (u > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-                        throw std::runtime_error("CudaKernelExpression scalar expression exceeds int64_t range for scalar '" + scalar.name + "'.");
+                        throw std::runtime_error("CudaKernelExpression scalar expression exceeds int64_t range for scalar '" + scalar.name +
+                                                 "'.");
                     }
                     return static_cast<int64_t>(u);
                 } else {
@@ -679,7 +1008,8 @@ CudaKernelScalarValue CudaKernelExpression::resolveScalar(const ScalarParamSpec&
                 },
                 scalar.value);
         default:
-            throw std::runtime_error("CudaKernelExpression scalar '" + scalar.name + "' has unsupported dtype '" + dtypeName(scalar.type) + "'.");
+            throw std::runtime_error("CudaKernelExpression scalar '" + scalar.name + "' has unsupported dtype '" + dtypeName(scalar.type) +
+                                     "'.");
     }
 }
 
@@ -719,11 +1049,13 @@ std::shared_ptr<StampedCudaKernel> CudaKernelExpression::stampCompiled(
         }
     }
     if (bound_inputs.size() != expected_tensor_inputs) {
-        throw std::invalid_argument("CudaKernelExpression tensor input count mismatch. Expected {" + joinNames(std::vector<std::string>(expected_tensor_names.begin(), expected_tensor_names.end())) + "}.");
+        throw std::invalid_argument("CudaKernelExpression tensor input count mismatch. Expected {" +
+                                    joinNames(std::vector<std::string>(expected_tensor_names.begin(), expected_tensor_names.end())) + "}.");
     }
     if (tensor_scalar_inputs.size() != expected_tensor_runtime_scalars) {
-        throw std::invalid_argument("CudaKernelExpression tensor runtime scalar input count mismatch. Expected {" +
-                                    joinNames(std::vector<std::string>(expected_tensor_scalar_names.begin(), expected_tensor_scalar_names.end())) + "}.");
+        throw std::invalid_argument(
+            "CudaKernelExpression tensor runtime scalar input count mismatch. Expected {" +
+            joinNames(std::vector<std::string>(expected_tensor_scalar_names.begin(), expected_tensor_scalar_names.end())) + "}.");
     }
     for (const auto& [name, _] : bound_inputs) {
         if (!expected_tensor_names.contains(name)) {
@@ -740,7 +1072,7 @@ std::shared_ptr<StampedCudaKernel> CudaKernelExpression::stampCompiled(
     resolved_outputs = allocateAndValidateOutputs(bound_inputs, preallocated_outputs, requested_output_shapes, placement);
 
     LaunchContext launch_context{bound_inputs, resolved_outputs, stream.getGpuNum()};
-    CudaKernelLaunchConfig launch_config = launch_fn_(launch_context);
+    CudaKernelLaunchConfig launch_config = launch_fn_ ? launch_fn_(launch_context) : launch_spec_->resolve(launch_context);
 
     std::unordered_map<std::string, Tensor> all_tensors = bound_inputs;
     for (const auto& [name, tensor] : resolved_outputs) {
@@ -797,7 +1129,8 @@ std::shared_ptr<StampedCudaKernel> CudaKernelExpression::stampCompiled(
             }
             const size_t elem_bytes = static_cast<size_t>(TensorDescriptor::getElementSizeInBytes(spec.dtype));
             if (binding.byteOffset + elem_bytes > binding.buffer.getArraySizeInBytes()) {
-                throw std::runtime_error("CudaKernelExpression tensor runtime scalar '" + spec.name + "' binding exceeds backing buffer size.");
+                throw std::runtime_error("CudaKernelExpression tensor runtime scalar '" + spec.name +
+                                         "' binding exceeds backing buffer size.");
             }
             const size_t idx = ordered_tensor_scalars.size();
             ordered_tensor_scalars.push_back(binding);
@@ -816,14 +1149,14 @@ std::shared_ptr<StampedCudaKernel> CudaKernelExpression::stampCompiled(
         params.push_back(StampedCudaKernelParam{StampedCudaKernelParam::Kind::Scalar, spec.name, 0, resolveScalar(spec, all_tensors)});
     }
 
-    return std::make_shared<StampedCudaKernel>(compiled, ordered_inputs, ordered_tensor_scalars, ordered_outputs, params, launch_config, stream);
+    return std::make_shared<StampedCudaKernel>(
+        compiled, ordered_inputs, ordered_tensor_scalars, ordered_outputs, params, launch_config, stream);
 }
 
-StampedExecutionPlan CudaKernelExpression::stamp(
-    const std::unordered_map<std::string, Tensor>& bound_inputs,
-    const std::unordered_map<std::string, Tensor>& preallocated_outputs,
-    Stream& stream,
-    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) const {
+StampedExecutionPlan CudaKernelExpression::stamp(const std::unordered_map<std::string, Tensor>& bound_inputs,
+                                                 const std::unordered_map<std::string, Tensor>& preallocated_outputs,
+                                                 Stream& stream,
+                                                 const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) const {
     std::unordered_map<std::string, std::vector<uint64_t>> requested_output_shapes;
     std::unordered_map<std::string, Tensor> outputs;
     std::shared_ptr<StampedCudaKernel> stamped = stampCompiled(
@@ -881,8 +1214,7 @@ Outputs CudaKernelExpression::apply(const std::unordered_map<std::string, Expres
 
     for (size_t i = 0; i < input_physical_exprs.size(); ++i) {
         uint32_t remapped_output = Expression::cloneInto(input_physical_exprs[i], *dst, dst_input_slots_by_name);
-        if (inputs_[i].kind == TensorParamSpec::Kind::TensorRuntimeScalar ||
-            inputs_[i].kind == TensorParamSpec::Kind::HostRuntimeScalar) {
+        if (inputs_[i].kind == TensorParamSpec::Kind::TensorRuntimeScalar || inputs_[i].kind == TensorParamSpec::Kind::HostRuntimeScalar) {
             ExprNode& node = dst->nodes.at(remapped_output);
             node.input_tensor_dtype = inputs_[i].dtype;
             node.output_dtype = inputs_[i].dtype;

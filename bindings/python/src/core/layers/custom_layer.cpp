@@ -629,20 +629,37 @@ void bind_custom_layer(nb::module_& layers) {
             }
             std::vector<std::string> paramNames = parameterNames(parameters);
 
-            DynamicExpression expr =
-                buildObj.is_none()
-                    ? makeDynamicExpressionFromSelf(pySelfObj.is_valid() ? nb::handle(pySelfObj) : pySelf,
-                                                    inputs.names,
-                                                    outputNames,
-                                                    paramNames,
-                                                    useFastMath,
-                                                    activation)
-                    : makeDynamicExpressionFromCallable(callableFromPythonObject(buildObj, "build"),
-                                                        inputs.names,
-                                                        outputNames,
-                                                        paramNames,
-                                                        useFastMath,
-                                                        activation);
+            DynamicExpression expr = [&]() {
+                if (buildObj.is_none()) {
+                    return makeDynamicExpressionFromSelf(pySelfObj.is_valid() ? nb::handle(pySelfObj) : pySelf,
+                                                         inputs.names,
+                                                         outputNames,
+                                                         paramNames,
+                                                         useFastMath,
+                                                         activation);
+                }
+
+                if (nb::isinstance<DynamicExpression>(buildObj)) {
+                    if (activation != nullptr) {
+                        throw std::runtime_error(
+                            "CustomLayer activation can only be stitched when build is a Python callable returning "
+                            "dict[str, thor.physical.Expression].");
+                    }
+
+                    DynamicExpression dynamicExpr = nb::cast<DynamicExpression>(buildObj);
+                    validateCustomLayerExpressionInputs(concatenateInputNames(inputs.names, paramNames),
+                                                        toNameSet(dynamicExpr.getExpectedInputNames()));
+                    validateCustomLayerForwardOutputs(outputNames, toNameSet(dynamicExpr.getExpectedOutputNames()));
+                    return dynamicExpr;
+                }
+
+                return makeDynamicExpressionFromCallable(callableFromPythonObject(buildObj, "build"),
+                                                         inputs.names,
+                                                         outputNames,
+                                                         paramNames,
+                                                         useFastMath,
+                                                         activation);
+            }();
 
             CustomLayer::Builder builder;
             builder.network(network)
@@ -676,6 +693,13 @@ The C++ API layer owns the CustomLayer construction logic, including named input
 interfaces and logical output tensor inference. Python can use it either directly by
 passing build=... and parameters=..., or by subclassing and overriding parameters()
 and build(context).
+
+The build argument may be either a Python callable or a thor.physical.DynamicExpression.
+A DynamicExpression created from an ExpressionDefinition, including
+CudaKernelExpression.as_dynamic_expression(), preserves its serialized definition and
+can therefore be saved with the network. Arbitrary Python callables remain runtime
+builders and are not serializable unless their result is packaged as a serializable
+DynamicExpression first.
 
 Convenience forms:
 - inputs=<thor.Tensor> defaults to {"feature_input": tensor}

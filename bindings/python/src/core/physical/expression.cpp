@@ -16,6 +16,7 @@
 #include <variant>
 
 #include "Utilities/Expression/CudaKernelExpression.h"
+#include "Utilities/Expression/CudaKernelSecurity.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
@@ -165,6 +166,19 @@ static nb::dict parameterFanOverridesToPython(const FusedEquation::ParameterFanO
 }
 
 void bind_physical_expression(nb::module_& physical) {
+    physical.def(
+        "cuda_kernel_signing_public_keys_from_json",
+        [](const std::string& payload) {
+            return ThorImplementation::collectCudaKernelSigningPublicKeys(nlohmann::json::parse(payload));
+        },
+        "payload"_a,
+        R"nbdoc(
+Return the out-of-band CudaKernelExpression public signing keys that were generated
+by this process for a serialized expression JSON payload. The serialized payload
+contains only public-key fingerprints, so this returns keys only while the
+process-local ephemeral signing registry still has them.
+)nbdoc");
+
     auto attention_layout = nb::enum_<AttentionTensorLayout>(physical, "AttentionTensorLayout")
                                 .value("bhsd", AttentionTensorLayout::BHSD)
                                 .value("bshd", AttentionTensorLayout::BSHD);
@@ -324,6 +338,16 @@ kernel launch dynamic shared-memory byte count.
             },
             "launch"_a,
             nb::rv_policy::reference_internal)
+        .def(
+            "launch_grid_1d",
+            [](CudaKernelExpression::Builder& self, nb::object elements, uint32_t block_size, uint32_t dynamic_shared_bytes)
+                -> CudaKernelExpression::Builder& {
+                return self.launchGrid1D(dimExprFromPython(elements), block_size, dynamic_shared_bytes);
+            },
+            "elements"_a,
+            "block_size"_a = 256,
+            "dynamic_shared_bytes"_a = 0,
+            nb::rv_policy::reference_internal)
         .def("use_fast_math", &CudaKernelExpression::Builder::useFastMath, "enabled"_a = true, nb::rv_policy::reference_internal)
         .def("build", &CudaKernelExpression::Builder::build);
 
@@ -332,6 +356,18 @@ kernel launch dynamic shared-memory byte count.
         .def_static("numel", &CudaKernelDimExpr::numel, "tensor_name"_a)
         .def_static("constant_dim", &CudaKernelDimExpr::constant, "value"_a)
         .def("name", &CudaKernelExpression::name)
+        .def_prop_ro("source", &CudaKernelExpression::source)
+        .def_prop_ro("compiled_source", &CudaKernelExpression::compiledSource)
+        .def_prop_ro("loaded_source_compilation_allowed", &CudaKernelExpression::loadedSourceCompilationAllowed)
+        .def("source_info_json", [](const CudaKernelExpression& self) {
+            const auto info = self.sourceInfo();
+            return nlohmann::json{{"name", info.name},
+                                  {"entrypoint", info.entrypoint},
+                                  {"source", info.source},
+                                  {"compiled_source", info.compiled_source},
+                                  {"compiled_source_hash", info.source_hash},
+                                  {"loaded_source_compilation_allowed", info.loaded_source_compilation_allowed}}.dump(2);
+        })
         .def("apply", &CudaKernelExpression::apply, "inputs"_a)
         .def("__call__", &CudaKernelExpression::apply, "inputs"_a)
         .def("as_dynamic_expression", &CudaKernelExpression::asDynamicExpression)
@@ -1659,10 +1695,15 @@ Args:
         .def("to_json", [](const Outputs& self) { return ExpressionDefinition::fromOutputs(self).architectureJson().dump(); })
         .def_static(
             "from_json",
-            [](const std::string& payload) {
-                return Outputs::fromPhysicalOutputs(ExpressionDefinition::deserialize(nlohmann::json::parse(payload)).outputs);
+            [](const std::string& payload, bool allow_unsafe_loaded_cuda_kernel_source, const std::string& trusted_cuda_kernel_public_key) {
+                return Outputs::fromPhysicalOutputs(
+                    ExpressionDefinition::deserialize(
+                        nlohmann::json::parse(payload), allow_unsafe_loaded_cuda_kernel_source, trusted_cuda_kernel_public_key)
+                        .outputs);
             },
-            "payload"_a)
+            "payload"_a,
+            "allow_unsafe_loaded_cuda_kernel_source"_a = false,
+            "trusted_cuda_kernel_public_key"_a = "")
         .def("output_names", [](const Outputs& self) {
             std::vector<std::string> names;
             for (const NamedOutput& output : self.namedOutputs()) {
@@ -1677,8 +1718,19 @@ Args:
         .def("to_json", [](const ExpressionDefinition& self) { return self.architectureJson().dump(); })
         .def_static(
             "from_json",
-            [](const std::string& payload) { return ExpressionDefinition::deserialize(nlohmann::json::parse(payload)); },
-            "payload"_a)
+            [](const std::string& payload, bool allow_unsafe_loaded_cuda_kernel_source, const std::string& trusted_cuda_kernel_public_key) {
+                return ExpressionDefinition::deserialize(
+                    nlohmann::json::parse(payload), allow_unsafe_loaded_cuda_kernel_source, trusted_cuda_kernel_public_key);
+            },
+            "payload"_a,
+            "allow_unsafe_loaded_cuda_kernel_source"_a = false,
+            "trusted_cuda_kernel_public_key"_a = "")
+        .def("cuda_kernel_source_info_json", [](const ExpressionDefinition& self) { return self.cudaKernelSourceInfoJson().dump(2); })
+        .def("cuda_kernel_signing_public_keys", &ExpressionDefinition::cudaKernelSigningPublicKeys)
+        .def("allow_unsafe_loaded_cuda_kernel_source_compilation",
+             &ExpressionDefinition::allowUnsafeLoadedCudaKernelSourceCompilation,
+             "trusted_cuda_kernel_public_key"_a)
+        .def_prop_ro("has_cuda_kernel_expressions", &ExpressionDefinition::hasCudaKernelExpressions)
         .def_prop_ro("expected_input_names", [](const ExpressionDefinition& self) { return self.expected_input_names; })
         .def_prop_ro("expected_output_names", [](const ExpressionDefinition& self) { return self.expected_output_names; })
         .def_prop_ro("canonical_hash", [](const ExpressionDefinition& self) { return self.canonical_hash; });

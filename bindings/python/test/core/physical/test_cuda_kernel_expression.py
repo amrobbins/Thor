@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import pytest
 import thor
@@ -328,3 +329,213 @@ void py_host_runtime_scalar_dtype_reject_kernel(const float* x, float alpha, flo
 
     with pytest.raises(ValueError, match="Host runtime scalars are currently bound as fp32"):
         builder.host_runtime_scalar_input("alpha", thor.DataType.int64)
+
+
+@pytest.mark.cuda
+def test_cuda_kernel_expression_serialized_source_is_inspectable_and_requires_opt_in_from_python():
+    kernel = (
+        CudaKernelExpression.builder("py_serializable_scale")
+        .source(
+            r"""
+extern "C" __global__
+void py_serializable_scale_kernel(const float* x, float* y, float alpha, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    y[i] = alpha * x[i];
+}
+"""
+        )
+        .entry("py_serializable_scale_kernel")
+        .input("x", thor.DataType.fp32)
+        .output_like("y", thor.DataType.fp32, "x")
+        .scalar("alpha", thor.DataType.fp32, 3.0)
+        .scalar("n", thor.DataType.int64, CudaKernelExpression.numel("y"))
+        .launch_grid_1d(CudaKernelExpression.numel("y"), block_size=128)
+        .build()
+    )
+
+    definition_to_save = thor.physical.ExpressionDefinition.from_outputs(
+        kernel.apply({"x": ex.input("x", output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32)})
+    )
+    payload = definition_to_save.to_json()
+    payload_json = json.loads(payload)
+    assert payload_json["cuda_kernels"][0]["name"] == "py_serializable_scale"
+    assert "py_serializable_scale_kernel" in payload_json["cuda_kernels"][0]["source"]
+    signature_json = payload_json["cuda_kernel_manifest_signature"]
+    assert signature_json["algorithm"] == "ed25519"
+    assert "public_key" not in signature_json
+    assert signature_json["public_key_fingerprint"]
+    signing_public_keys = definition_to_save.cuda_kernel_signing_public_keys()
+    assert len(signing_public_keys) == 1
+    trusted_public_key = signing_public_keys[0]
+    assert trusted_public_key
+    assert thor.physical.cuda_kernel_signing_public_keys_from_json(payload) == signing_public_keys
+
+    definition = thor.physical.ExpressionDefinition.from_json(payload)
+    source_info = json.loads(definition.cuda_kernel_source_info_json())
+    assert source_info[0]["loaded_source_compilation_allowed"] is False
+    assert "THOR_CUDA_KERNEL_EXPRESSION_FIXED_WIDTH_TYPES" in source_info[0]["compiled_source"]
+    assert "py_serializable_scale_kernel" in source_info[0]["compiled_source"]
+    assert source_info[0]["signing_public_key_fingerprint"]
+    assert "signing_public_key" not in source_info[0]
+
+    dynamic_expression = thor.physical.DynamicExpression.from_expression_definition(definition)
+
+    stream = Stream(gpu_num=0)
+    x_np = np.array([1.0, -2.0, 3.0, 4.5, -5.0, 6.0], dtype=np.float32)
+    x_gpu = _copy_numpy_to_gpu(x_np, thor.DataType.fp32, stream)
+
+    with pytest.raises(RuntimeError, match="Refusing to compile CudaKernelExpression"):
+        dynamic_expression.stamp({"x": x_gpu}, {}, stream)
+
+    with pytest.raises(RuntimeError, match="trusted Ed25519 public key"):
+        thor.physical.ExpressionDefinition.from_json(payload, allow_unsafe_loaded_cuda_kernel_source=True)
+
+    missing_signature_payload_json = json.loads(payload)
+    del missing_signature_payload_json["cuda_kernel_manifest_signature"]
+    with pytest.raises(RuntimeError, match="no cuda_kernel_manifest_signature"):
+        thor.physical.ExpressionDefinition.from_json(
+            json.dumps(missing_signature_payload_json),
+            allow_unsafe_loaded_cuda_kernel_source=True,
+            trusted_cuda_kernel_public_key=trusted_public_key,
+        )
+
+    wrong_key_kernel = (
+        CudaKernelExpression.builder("py_wrong_key_source")
+        .source(
+            r"""
+extern "C" __global__
+void py_wrong_key_source_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    y[i] = x[i];
+}
+"""
+        )
+        .entry("py_wrong_key_source_kernel")
+        .input("x", thor.DataType.fp32)
+        .output_like("y", thor.DataType.fp32, "x")
+        .scalar("n", thor.DataType.int64, CudaKernelExpression.numel("y"))
+        .launch_grid_1d(CudaKernelExpression.numel("y"), block_size=128)
+        .build()
+    )
+    wrong_key_definition = thor.physical.ExpressionDefinition.from_outputs(
+        wrong_key_kernel.apply({"x": ex.input("x", output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32)})
+    )
+    wrong_key_payload_json = json.loads(wrong_key_definition.to_json())
+    assert "public_key" not in wrong_key_payload_json["cuda_kernel_manifest_signature"]
+    wrong_signing_public_keys = wrong_key_definition.cuda_kernel_signing_public_keys()
+    assert len(wrong_signing_public_keys) == 1
+    wrong_trusted_public_key = wrong_signing_public_keys[0]
+    assert wrong_trusted_public_key != trusted_public_key
+    with pytest.raises(RuntimeError, match="does not match"):
+        thor.physical.ExpressionDefinition.from_json(
+            payload,
+            allow_unsafe_loaded_cuda_kernel_source=True,
+            trusted_cuda_kernel_public_key=wrong_trusted_public_key,
+        )
+
+    tampered_payload_json = json.loads(payload)
+    tampered_payload_json["cuda_kernels"][0]["source"] += "\n// tampered\n"
+    with pytest.raises(RuntimeError, match="signature verification failed|SHA-256 hash"):
+        thor.physical.ExpressionDefinition.from_json(
+            json.dumps(tampered_payload_json),
+            allow_unsafe_loaded_cuda_kernel_source=True,
+            trusted_cuda_kernel_public_key=trusted_public_key,
+        )
+
+    tampered_launch_payload_json = json.loads(payload)
+    tampered_launch_payload_json["cuda_kernels"][0]["launch"]["block"] = 256
+    with pytest.raises(RuntimeError, match="signature verification failed|SHA-256 hash"):
+        thor.physical.ExpressionDefinition.from_json(
+            json.dumps(tampered_launch_payload_json),
+            allow_unsafe_loaded_cuda_kernel_source=True,
+            trusted_cuda_kernel_public_key=trusted_public_key,
+        )
+
+    allowed_definition = thor.physical.ExpressionDefinition.from_json(
+        payload,
+        allow_unsafe_loaded_cuda_kernel_source=True,
+        trusted_cuda_kernel_public_key=trusted_public_key,
+    )
+    allowed_source_info = json.loads(allowed_definition.cuda_kernel_source_info_json())
+    assert allowed_source_info[0]["loaded_source_compilation_allowed"] is True
+
+    stamped = thor.physical.DynamicExpression.from_expression_definition(allowed_definition).stamp({"x": x_gpu}, {}, stream)
+    stamped.run()
+    y_np = _copy_gpu_to_numpy(stamped.output("y"), stream)
+    np.testing.assert_allclose(y_np, x_np * 3.0, rtol=1e-6, atol=1e-6)
+
+
+def test_python_defined_cuda_kernel_expression_serializes_through_custom_layer():
+    network = thor.Network("py_cuda_kernel_custom_layer_serializable")
+    x = thor.layers.NetworkInput(network, "x", [4], thor.DataType.fp32).get_feature_output()
+
+    kernel = (
+        CudaKernelExpression.builder("py_custom_layer_serializable_scale")
+        .source(
+            r"""
+extern "C" __global__
+void py_custom_layer_serializable_scale_kernel(const float* feature_input, float* feature_output, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    feature_output[i] = 2.0f * feature_input[i];
+}
+"""
+        )
+        .entry("py_custom_layer_serializable_scale_kernel")
+        .input("feature_input", thor.DataType.fp32)
+        .output_like("feature_output", thor.DataType.fp32, "feature_input")
+        .scalar("n", thor.DataType.int64, CudaKernelExpression.numel("feature_output"))
+        .launch_grid_1d(CudaKernelExpression.numel("feature_output"), block_size=128)
+        .build()
+    )
+
+    layer = thor.layers.CustomLayer(network=network, inputs=x, build=kernel.as_dynamic_expression())
+    thor.layers.NetworkOutput(network, "out", layer["feature_output"], thor.DataType.fp32)
+
+    architecture = json.loads(network.get_architecture_json())
+    custom_layers = [layer_json for layer_json in architecture["layers"] if layer_json["layer_type"] == "custom_layer"]
+    assert len(custom_layers) == 1
+
+    expression_json = custom_layers[0]["expression"]
+    assert expression_json["cuda_kernels"][0]["name"] == "py_custom_layer_serializable_scale"
+    assert "py_custom_layer_serializable_scale_kernel" in expression_json["cuda_kernels"][0]["source"]
+    assert expression_json["cuda_kernel_manifest_signature"]["algorithm"] == "ed25519"
+    assert "public_key" not in expression_json["cuda_kernel_manifest_signature"]
+    assert expression_json["cuda_kernel_manifest_signature"]["public_key_fingerprint"]
+
+    payload = json.dumps(expression_json)
+    signing_public_keys = network.cuda_kernel_signing_public_keys()
+    assert len(signing_public_keys) == 1
+    trusted_public_key = signing_public_keys[0]
+    definition = thor.physical.ExpressionDefinition.from_json(
+        payload,
+        allow_unsafe_loaded_cuda_kernel_source=True,
+        trusted_cuda_kernel_public_key=trusted_public_key,
+    )
+    assert definition.has_cuda_kernel_expressions is True
+
+def test_cuda_kernel_expression_nonserializable_launch_callback_is_rejected_when_serializing_from_python():
+    kernel = (
+        CudaKernelExpression.builder("py_callback_launch_not_serializable")
+        .source(
+            r"""
+extern "C" __global__
+void py_callback_launch_not_serializable_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    y[i] = x[i];
+}
+"""
+        )
+        .entry("py_callback_launch_not_serializable_kernel")
+        .input("x", thor.DataType.fp32)
+        .output_like("y", thor.DataType.fp32, "x")
+        .scalar("n", thor.DataType.int64, CudaKernelExpression.numel("y"))
+        .launch(lambda ctx: CudaKernelLaunchConfig.grid_1d(ctx.numel("y"), block_size=128))
+        .build()
+    )
+
+    with pytest.raises(RuntimeError, match="non-serializable launch callback"):
+        kernel.apply({"x": ex.input("x")}).to_json()

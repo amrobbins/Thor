@@ -87,6 +87,12 @@ class Network {
                       const bool overwrite,
                       const bool saveOptimizerState) const;
     virtual void load(const std::string &directory);
+    virtual void load(const std::string &directory, bool allowUnsafeLoadedCudaKernelSource);
+    virtual void load(const std::string &directory, bool allowUnsafeLoadedCudaKernelSource, const std::string &trustedCudaKernelPublicKey);
+    bool allowUnsafeLoadedCudaKernelSourceCompilation() const { return allowUnsafeLoadedCudaKernelSourceCompilation_; }
+    const std::string& trustedLoadedCudaKernelPublicKey() const { return trustedLoadedCudaKernelPublicKey_; }
+    std::vector<std::string> cudaKernelSigningPublicKeys() const;
+    std::string cudaKernelSourceInfoJsonString() const;
     virtual nlohmann::json architectureJson() const;
     virtual std::string architectureJsonString() const;
 
@@ -180,6 +186,9 @@ class Network {
     bool terminatesWithoutHitting(Tensor tensor, std::shared_ptr<Layer> layer);
 
     bool frozen;
+
+    bool allowUnsafeLoadedCudaKernelSourceCompilation_ = false;
+    std::string trustedLoadedCudaKernelPublicKey_;
 
     std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
 
