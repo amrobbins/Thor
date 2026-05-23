@@ -250,3 +250,129 @@ void host_runtime_scalar_dtype_reject_kernel(const float* x, float alpha, float*
                      .hostRuntimeScalarInput("alpha", DataType::INT64),
                  std::invalid_argument);
 }
+
+TEST(CudaKernelExpression, SerializedCudaSourceIsInspectableAndRequiresUnsafeOptInToRunAfterLoad) {
+    Stream stream(0);
+    Tensor x = makeGpuTensor({2, 3}, {1.0f, -2.0f, 3.0f, 4.5f, -5.0f, 6.0f}, stream);
+
+    auto op = CudaKernelExpression::builder("serializable_scale")
+                  .source(R"cuda(
+extern "C" __global__
+void serializable_scale_kernel(const float* x, float* y, float alpha, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] = alpha * x[i];
+    }
+}
+)cuda")
+                  .entry("serializable_scale_kernel")
+                  .input("x", DataType::FP32)
+                  .outputLike("y", DataType::FP32, "x")
+                  .scalar("alpha", DataType::FP32, 3.0f)
+                  .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                  .launchGrid1D(CudaKernelExpression::DimExpr::numel("y"), 128)
+                  .build();
+
+    Outputs outputs = op.apply({{"x", Expression::input("x", DataType::FP32, DataType::FP32)}});
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(outputs);
+    nlohmann::json payload = definition.architectureJson();
+
+    ASSERT_TRUE(payload.contains("cuda_kernels"));
+    ASSERT_TRUE(payload.contains("cuda_kernel_manifest_signature"));
+    ASSERT_EQ(payload.at("cuda_kernels").size(), 1u);
+    EXPECT_EQ(payload.at("cuda_kernels").at(0).at("name").get<std::string>(), "serializable_scale");
+    EXPECT_NE(payload.at("cuda_kernels").at(0).at("source").get<std::string>().find("serializable_scale_kernel"),
+              std::string::npos);
+    const nlohmann::json& signatureJson = payload.at("cuda_kernel_manifest_signature");
+    EXPECT_EQ(signatureJson.at("algorithm").get<std::string>(), "ed25519");
+    EXPECT_FALSE(signatureJson.contains("public_key"));
+    EXPECT_FALSE(signatureJson.at("public_key_fingerprint").get<std::string>().empty());
+    std::vector<std::string> signingPublicKeys = definition.cudaKernelSigningPublicKeys();
+    ASSERT_EQ(signingPublicKeys.size(), 1u);
+    const std::string trustedPublicKey = signingPublicKeys.front();
+    EXPECT_FALSE(trustedPublicKey.empty());
+
+    ExpressionDefinition loadedDefault = ExpressionDefinition::deserialize(payload);
+    nlohmann::json sourceInfo = loadedDefault.cudaKernelSourceInfoJson();
+    ASSERT_EQ(sourceInfo.size(), 1u);
+    EXPECT_FALSE(sourceInfo.at(0).at("loaded_source_compilation_allowed").get<bool>());
+    EXPECT_NE(sourceInfo.at(0).at("compiled_source").get<std::string>().find("THOR_CUDA_KERNEL_EXPRESSION_FIXED_WIDTH_TYPES"),
+              std::string::npos);
+    EXPECT_NE(sourceInfo.at(0).at("compiled_source").get<std::string>().find("serializable_scale_kernel"), std::string::npos);
+    EXPECT_TRUE(sourceInfo.at(0).contains("signing_public_key_fingerprint"));
+    EXPECT_FALSE(sourceInfo.at(0).contains("signing_public_key"));
+
+    EXPECT_THROW((void)DynamicExpression::fromExpressionDefinition(loadedDefault).stamp({{"x", x}}, {}, stream), std::runtime_error);
+
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(payload, true), std::runtime_error);
+
+    nlohmann::json missingSignature = payload;
+    missingSignature.erase("cuda_kernel_manifest_signature");
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(missingSignature, true, trustedPublicKey), std::runtime_error);
+
+    auto wrongKeyOp = CudaKernelExpression::builder("wrong_key_source")
+                          .source(R"cuda(
+extern "C" __global__
+void wrong_key_source_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = x[i];
+}
+)cuda")
+                          .entry("wrong_key_source_kernel")
+                          .input("x", DataType::FP32)
+                          .outputLike("y", DataType::FP32, "x")
+                          .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                          .launchGrid1D(CudaKernelExpression::DimExpr::numel("y"), 128)
+                          .build();
+    ExpressionDefinition wrongKeyDefinition =
+        ExpressionDefinition::fromOutputs(wrongKeyOp.apply({{"x", Expression::input("x", DataType::FP32, DataType::FP32)}}));
+    nlohmann::json wrongKeyPayload = wrongKeyDefinition.architectureJson();
+    EXPECT_FALSE(wrongKeyPayload.at("cuda_kernel_manifest_signature").contains("public_key"));
+    std::vector<std::string> wrongSigningPublicKeys = wrongKeyDefinition.cudaKernelSigningPublicKeys();
+    ASSERT_EQ(wrongSigningPublicKeys.size(), 1u);
+    const std::string wrongTrustedPublicKey = wrongSigningPublicKeys.front();
+    ASSERT_FALSE(wrongTrustedPublicKey.empty());
+    ASSERT_NE(wrongTrustedPublicKey, trustedPublicKey);
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(payload, true, wrongTrustedPublicKey), std::runtime_error);
+
+    nlohmann::json tampered = payload;
+    tampered["cuda_kernels"][0]["source"] = tampered["cuda_kernels"][0]["source"].get<std::string>() + "\n// tampered\n";
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(tampered, true, trustedPublicKey), std::runtime_error);
+
+    nlohmann::json tamperedLaunch = payload;
+    tamperedLaunch["cuda_kernels"][0]["launch"]["block"] = 256;
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(tamperedLaunch, true, trustedPublicKey), std::runtime_error);
+
+    ExpressionDefinition loadedAllowed = ExpressionDefinition::deserialize(payload, true, trustedPublicKey);
+    nlohmann::json allowedSourceInfo = loadedAllowed.cudaKernelSourceInfoJson();
+    EXPECT_TRUE(allowedSourceInfo.at(0).at("loaded_source_compilation_allowed").get<bool>());
+
+    auto plan = DynamicExpression::fromExpressionDefinition(loadedAllowed).stamp({{"x", x}}, {}, stream);
+    plan.run();
+    expectNear(copyToCpuValues(plan.output("y"), stream), {3.0f, -6.0f, 9.0f, 13.5f, -15.0f, 18.0f});
+}
+
+TEST(CudaKernelExpression, NonSerializableLaunchCallbackIsRejectedWhenSavingExpressionDefinition) {
+    auto op = CudaKernelExpression::builder("callback_launch_not_serializable")
+                  .source(R"cuda(
+extern "C" __global__
+void callback_launch_not_serializable_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = x[i];
+}
+)cuda")
+                  .entry("callback_launch_not_serializable_kernel")
+                  .input("x", DataType::FP32)
+                  .outputLike("y", DataType::FP32, "x")
+                  .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                  .launch([](const CudaKernelExpression::LaunchContext& ctx) {
+                      constexpr uint32_t block = 128;
+                      const uint32_t grid = static_cast<uint32_t>((ctx.numel("y") + block - 1) / block);
+                      return CudaKernelLaunchConfig{dim3(grid, 1, 1), dim3(block, 1, 1), 0};
+                  })
+                  .build();
+
+    Outputs outputs = op.apply({{"x", Expression::input("x", DataType::FP32, DataType::FP32)}});
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(outputs);
+    EXPECT_THROW((void)definition.architectureJson(), std::runtime_error);
+}

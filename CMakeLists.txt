@@ -353,6 +353,7 @@ find_package(OpenMP REQUIRED)
 target_link_libraries(Thor PRIVATE OpenMP::OpenMP_CXX)
 
 find_package(CUDAToolkit REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # Main CUDA headers directory for things like cuda.h.
 # CUDAToolkit_INCLUDE_DIRS is a list; take the primary include dir and
@@ -366,6 +367,7 @@ if (NOT EXISTS "${THOR_CUDA_INCLUDE_DIR}/cuda.h")
 endif ()
 
 target_link_libraries(Thor PRIVATE
+        OpenSSL::Crypto
         CUDA::cudart
         # CUDA::cuda_driver
         CUDA::cublas

@@ -45,7 +45,26 @@ A Network that contains layers. FIXME.
 
     network.def("get_architecture_json", &Network::architectureJsonString);
     network.def("save", nb::overload_cast<const std::string &, bool>(&Network::save), "directory"_a, "overwrite"_a = false);
-    network.def("load", &Network::load, "directory"_a);
+    network.def(
+        "load",
+        nb::overload_cast<const std::string &, bool, const std::string &>(&Network::load),
+        "directory"_a,
+        "allow_unsafe_loaded_cuda_kernel_source"_a = false,
+        "trusted_cuda_kernel_public_key"_a = "",
+        R"nbdoc(
+Load a saved Thor network.
+
+By default, loaded CudaKernelExpression CUDA source is inspectable but is not
+allowed to compile/run. Setting ``allow_unsafe_loaded_cuda_kernel_source=True``
+still requires a trusted Ed25519 public key supplied out-of-band through
+``trusted_cuda_kernel_public_key``. Signature verification proves only that the
+loaded CUDA source/ABI/launch policy matches what was signed; it does not make
+the CUDA code safe or sandboxed. Inspect the serialized CUDA source before
+providing the key and enabling compilation.
+)nbdoc");
+
+    network.def("cuda_kernel_source_info_json", &Network::cudaKernelSourceInfoJsonString);
+    network.def("cuda_kernel_signing_public_keys", &Network::cudaKernelSigningPublicKeys);
 
     network.def("get_default_optimizer", &Network::getDefaultOptimizer);
 

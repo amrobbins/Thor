@@ -325,10 +325,17 @@ struct ExpressionDefinition {
     std::vector<std::string> expected_input_names;
     std::vector<std::string> expected_output_names;
     std::string canonical_hash;
+    mutable nlohmann::json cuda_kernel_manifest_signature;
 
     [[nodiscard]] nlohmann::json architectureJson() const;
+    [[nodiscard]] bool hasCudaKernelExpressions() const;
+    [[nodiscard]] std::vector<std::string> cudaKernelSigningPublicKeys() const;
+    [[nodiscard]] nlohmann::json cudaKernelSourceInfoJson() const;
+    void allowUnsafeLoadedCudaKernelSourceCompilation(const std::string& trusted_ed25519_public_key);
     [[nodiscard]] static ExpressionDefinition fromOutputs(const Outputs& outputs);
-    [[nodiscard]] static ExpressionDefinition deserialize(const nlohmann::json& j);
+    [[nodiscard]] static ExpressionDefinition deserialize(const nlohmann::json& j,
+                                                        bool allow_unsafe_loaded_cuda_source = false,
+                                                        const std::string& trusted_ed25519_public_key = "");
     void validate() const;
 };
 

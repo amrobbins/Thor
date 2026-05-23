@@ -3,11 +3,36 @@
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Expression/CudaKernelSecurity.h"
+#include <iostream>
 
 using namespace std;
 using json = nlohmann::json;
 
 using ThorImplementation::TensorPlacement;
+
+namespace {
+
+void printCudaKernelSigningPublicKeys(const std::vector<std::string>& cudaKernelPublicKeys) {
+    if (cudaKernelPublicKeys.empty()) {
+        return;
+    }
+    std::cout << "\nThor saved a model containing CudaKernelExpression custom CUDA source.\n";
+    std::cout << ThorImplementation::cudaKernelLoadedModelSafetyDisclaimer() << "\n";
+    std::cout << "Loaded custom CUDA source is inspectable by loading the model without enabling compilation, "
+              << "or by inspecting cuda_kernels[].source / cuda_kernel_manifest_signature in the saved JSON.\n";
+    std::cout << "The serialized model records only the signing public-key fingerprint, not the public key. "
+              << "Persist the out-of-band public key below separately if this saved model should be loadable with custom CUDA "
+              << "source compilation enabled.\n";
+    std::cout << "To allow a loaded model to compile these kernels, provide the trusted Ed25519 public key below "
+              << "to the load API only after applying your own security policy.\n";
+    for (const std::string& key : cudaKernelPublicKeys) {
+        std::cout << "CudaKernelExpression Ed25519 public key: " << key << "\n";
+    }
+    std::cout << std::endl;
+}
+
+}  // namespace
 
 namespace Thor {
 string Network::statusCodeToString(StatusCode statusCode) {
@@ -237,6 +262,7 @@ void Network::save(const string &directory, const bool overwrite) {
     json modelJson = architectureJson();
     if (defaultOptimizer != nullptr)
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
+    printCudaKernelSigningPublicKeys(ThorImplementation::collectCudaKernelSigningPublicKeys(modelJson));
     string modelJsonDump = modelJson.dump(4);
 
     string qualifiedModelName = networkName + ".thor.json";
@@ -273,6 +299,8 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
 
     string qualifiedModelName = networkName + ".thor.json";
+    printCudaKernelSigningPublicKeys(ThorImplementation::collectCudaKernelSigningPublicKeys(modelJson));
+
     string jsonDump = modelJson.dump(4);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     ThorImplementation::TensorDescriptor jsonTensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {jsonDump.size()});
@@ -303,7 +331,21 @@ string Network::architectureJsonString() const {
     return jsonDump;
 }
 
-void Network::load(const string &directory) {
+std::vector<std::string> Network::cudaKernelSigningPublicKeys() const {
+    return ThorImplementation::collectCudaKernelSigningPublicKeys(architectureJson());
+}
+
+std::string Network::cudaKernelSourceInfoJsonString() const {
+    return ThorImplementation::collectCudaKernelSourceInfoJson(architectureJson()).dump(4);
+}
+
+void Network::load(const string &directory) { load(directory, false, ""); }
+
+void Network::load(const string &directory, bool allowUnsafeLoadedCudaKernelSource) { load(directory, allowUnsafeLoadedCudaKernelSource, ""); }
+
+void Network::load(const string &directory, bool allowUnsafeLoadedCudaKernelSource, const string &trustedCudaKernelPublicKey) {
+    allowUnsafeLoadedCudaKernelSourceCompilation_ = allowUnsafeLoadedCudaKernelSource;
+    trustedLoadedCudaKernelPublicKey_ = trustedCudaKernelPublicKey;
     // Read the model json from the archive
     archiveReader = make_shared<thor_file::TarReader>(networkName, directory);
     string modelJsonFileName = networkName + ".thor.json";

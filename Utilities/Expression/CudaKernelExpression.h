@@ -33,6 +33,8 @@ class CudaKernelExpression {
         [[nodiscard]] uint64_t resolve(const std::unordered_map<std::string, Tensor>& tensors) const;
         [[nodiscard]] uint64_t resolve(const std::unordered_map<std::string, std::vector<uint64_t>>& tensor_shapes) const;
         [[nodiscard]] std::string describe() const;
+        [[nodiscard]] nlohmann::json architectureJson() const;
+        [[nodiscard]] static DimExpr deserialize(const nlohmann::json& j);
 
        private:
         DimExpr(Kind kind, std::string tensor_name, uint32_t axis, uint64_t value)
@@ -79,6 +81,29 @@ class CudaKernelExpression {
 
     using LaunchFn = std::function<CudaKernelLaunchConfig(const LaunchContext&)>;
 
+    struct LaunchSpec {
+        enum class Kind : uint8_t { Grid1D };
+
+        Kind kind = Kind::Grid1D;
+        DimExpr elements = DimExpr::constant(1);
+        uint32_t block_size = 256;
+        uint32_t dynamic_shared_bytes = 0;
+
+        [[nodiscard]] static LaunchSpec grid1D(DimExpr elements, uint32_t block_size = 256, uint32_t dynamic_shared_bytes = 0);
+        [[nodiscard]] CudaKernelLaunchConfig resolve(const LaunchContext& launch_context) const;
+        [[nodiscard]] nlohmann::json architectureJson() const;
+        [[nodiscard]] static LaunchSpec deserialize(const nlohmann::json& j);
+    };
+
+    struct SourceInfo {
+        std::string name;
+        std::string entrypoint;
+        std::string source;
+        std::string compiled_source;
+        std::string source_hash;
+        bool loaded_source_compilation_allowed = true;
+    };
+
     class Builder {
        public:
         explicit Builder(std::string name);
@@ -92,6 +117,7 @@ class CudaKernelExpression {
         Builder& outputLike(std::string name, TensorDescriptor::DataType dtype, const std::string& input_name);
         Builder& scalar(std::string name, TensorDescriptor::DataType type, std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> value);
         Builder& launch(LaunchFn launch_fn);
+        Builder& launchGrid1D(DimExpr elements, uint32_t block_size = 256, uint32_t dynamic_shared_bytes = 0);
         Builder& useFastMath(bool enabled = true);
 
         [[nodiscard]] CudaKernelExpression build() const;
@@ -104,18 +130,26 @@ class CudaKernelExpression {
         std::vector<OutputParamSpec> outputs_;
         std::vector<ScalarParamSpec> scalars_;
         LaunchFn launch_fn_;
+        std::optional<LaunchSpec> launch_spec_;
         bool use_fast_math_ = false;
     };
 
     [[nodiscard]] static Builder builder(std::string name) { return Builder(std::move(name)); }
 
     [[nodiscard]] const std::string& name() const { return name_; }
+    [[nodiscard]] const std::string& source() const { return source_; }
+    [[nodiscard]] const std::string& entrypoint() const { return entry_; }
+    [[nodiscard]] std::string compiledSource() const;
+    [[nodiscard]] SourceInfo sourceInfo() const;
+    [[nodiscard]] bool loadedSourceCompilationAllowed() const { return loaded_source_compilation_allowed_; }
     [[nodiscard]] const std::vector<TensorParamSpec>& inputs() const { return inputs_; }
     [[nodiscard]] const std::vector<OutputParamSpec>& outputs() const { return outputs_; }
     [[nodiscard]] const std::vector<ScalarParamSpec>& scalars() const { return scalars_; }
     [[nodiscard]] std::string cacheSignature() const;
     [[nodiscard]] std::vector<std::vector<uint64_t>> inferOutputShapesFromInputShapes(
         const std::unordered_map<std::string, std::vector<uint64_t>>& input_shapes) const;
+    [[nodiscard]] nlohmann::json architectureJson() const;
+    [[nodiscard]] static CudaKernelExpression deserialize(const nlohmann::json& j, bool allow_unsafe_loaded_cuda_source = false);
 
     [[nodiscard]] Outputs apply(const std::unordered_map<std::string, Expression>& inputs) const;
     [[nodiscard]] DynamicExpression asDynamicExpression() const;
@@ -143,7 +177,9 @@ class CudaKernelExpression {
                          std::vector<OutputParamSpec> outputs,
                          std::vector<ScalarParamSpec> scalars,
                          LaunchFn launch_fn,
-                         bool use_fast_math);
+                         std::optional<LaunchSpec> launch_spec,
+                         bool use_fast_math,
+                         bool loaded_source_compilation_allowed);
 
     [[nodiscard]] std::unordered_map<std::string, Tensor> allocateAndValidateOutputs(
         const std::unordered_map<std::string, Tensor>& inputs,
@@ -161,7 +197,9 @@ class CudaKernelExpression {
     std::vector<OutputParamSpec> outputs_;
     std::vector<ScalarParamSpec> scalars_;
     LaunchFn launch_fn_;
+    std::optional<LaunchSpec> launch_spec_;
     bool use_fast_math_ = false;
+    bool loaded_source_compilation_allowed_ = true;
 };
 
 }  // namespace ThorImplementation

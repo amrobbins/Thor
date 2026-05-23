@@ -1,7 +1,8 @@
 #include "Utilities/Expression/Expression.h"
 #include <optional>
-#include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/CudaKernelExpression.h"
+#include "Utilities/Expression/CudaKernelSecurity.h"
+#include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 
 #include <cmath>
@@ -860,17 +861,13 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                   ";dims=" + formatUIntVectorCanonical(n.reshape_dims) + ")";
             break;
         case ExprOp::STRIDED_VIEW:
-            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
-                  ";dims=" + formatUIntVectorCanonical(n.view_dims) +
-                  ";strides=" + formatUIntVectorCanonical(n.view_strides) +
-                  ";offset=" + std::to_string(n.view_element_offset) + ")";
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ";dims=" + formatUIntVectorCanonical(n.view_dims) +
+                  ";strides=" + formatUIntVectorCanonical(n.view_strides) + ";offset=" + std::to_string(n.view_element_offset) + ")";
             break;
         case ExprOp::STRIDED_VIEW_BACKWARD:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
-                  ";sourceDims=" + formatUIntVectorCanonical(n.fill_dims) +
-                  ";viewDims=" + formatUIntVectorCanonical(n.view_dims) +
-                  ";viewStrides=" + formatUIntVectorCanonical(n.view_strides) +
-                  ";offset=" + std::to_string(n.view_element_offset) + ")";
+                  ";sourceDims=" + formatUIntVectorCanonical(n.fill_dims) + ";viewDims=" + formatUIntVectorCanonical(n.view_dims) +
+                  ";viewStrides=" + formatUIntVectorCanonical(n.view_strides) + ";offset=" + std::to_string(n.view_element_offset) + ")";
             break;
         case ExprOp::UNSQUEEZE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
@@ -1034,12 +1031,12 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         }
 
         case ExprOp::CUDA_KERNEL_OUTPUT: {
-            if (n.cuda_kernel_spec_index >= expr.cuda_kernel_expressions.size() || !expr.cuda_kernel_expressions[n.cuda_kernel_spec_index]) {
+            if (n.cuda_kernel_spec_index >= expr.cuda_kernel_expressions.size() ||
+                !expr.cuda_kernel_expressions[n.cuda_kernel_spec_index]) {
                 throw std::runtime_error("CudaKernelExpression node references missing kernel spec while canonicalizing.");
             }
             out = opName(n.op) + "(" + expr.cuda_kernel_expressions[n.cuda_kernel_spec_index]->cacheSignature() +
-                  ";spec=" + std::to_string(n.cuda_kernel_spec_index) +
-                  ";out=" + std::to_string(n.cuda_kernel_output_index) + ";inputs=[";
+                  ";spec=" + std::to_string(n.cuda_kernel_spec_index) + ";out=" + std::to_string(n.cuda_kernel_output_index) + ";inputs=[";
             for (size_t i = 0; i < n.cuda_kernel_input_nodes.size(); ++i) {
                 if (i > 0) {
                     out += ",";
@@ -1406,10 +1403,6 @@ void ExpressionDefinition::validate() const {
 
 json ExpressionDefinition::architectureJson() const {
     validate();
-    if (outputs.expr && !outputs.expr->cuda_kernel_expressions.empty()) {
-        throw std::runtime_error(
-            "ExpressionDefinition::architectureJson does not serialize CudaKernelExpression source. Register/rebuild custom CUDA expressions in code instead.");
-    }
 
     json j;
     j["type"] = "thor.expression";
@@ -1419,6 +1412,15 @@ json ExpressionDefinition::architectureJson() const {
     j["outputs"] = json::array();
     j["expected_input_names"] = expected_input_names;
     j["expected_output_names"] = expected_output_names;
+    if (!outputs.expr->cuda_kernel_expressions.empty()) {
+        j["cuda_kernels"] = json::array();
+        for (const auto& kernel : outputs.expr->cuda_kernel_expressions) {
+            if (!kernel) {
+                throw std::runtime_error("ExpressionDefinition::architectureJson encountered a null CudaKernelExpression spec.");
+            }
+            j["cuda_kernels"].push_back(kernel->architectureJson());
+        }
+    }
 
     for (const NamedInput& input : outputs.expr->inputs) {
         j["inputs"].push_back(json{{"slot", input.slot}, {"name", input.name}, {"kind", namedInputKindToString(input.kind)}});
@@ -1432,7 +1434,56 @@ json ExpressionDefinition::architectureJson() const {
 
     const std::string computed_hash = expressionHash(outputs);
     j["canonical_hash"] = computed_hash;
+    if (j.contains("cuda_kernels") && !j.at("cuda_kernels").empty()) {
+        if (!cuda_kernel_manifest_signature.is_null()) {
+            j["cuda_kernel_manifest_signature"] = cuda_kernel_manifest_signature;
+        } else {
+            (void)cudaKernelGenerateAndAttachManifestSignature(j);
+            cuda_kernel_manifest_signature = j.at("cuda_kernel_manifest_signature");
+        }
+    }
     return j;
+}
+
+bool ExpressionDefinition::hasCudaKernelExpressions() const { return outputs.expr && !outputs.expr->cuda_kernel_expressions.empty(); }
+
+std::vector<std::string> ExpressionDefinition::cudaKernelSigningPublicKeys() const {
+    return collectCudaKernelSigningPublicKeys(architectureJson());
+}
+
+json ExpressionDefinition::cudaKernelSourceInfoJson() const {
+    validate();
+    json result = json::array();
+    if (!outputs.expr) {
+        return result;
+    }
+    for (const auto& kernel : outputs.expr->cuda_kernel_expressions) {
+        if (!kernel) {
+            throw std::runtime_error("ExpressionDefinition has a null CudaKernelExpression spec.");
+        }
+        const auto info = kernel->sourceInfo();
+        json entry{{"name", info.name},
+                   {"entrypoint", info.entrypoint},
+                   {"source", info.source},
+                   {"compiled_source", info.compiled_source},
+                   {"compiled_source_hash", info.source_hash},
+                   {"loaded_source_compilation_allowed", info.loaded_source_compilation_allowed}};
+        if (!cuda_kernel_manifest_signature.is_null()) {
+            entry["signature_algorithm"] = cuda_kernel_manifest_signature.value("algorithm", std::string{});
+            entry["signing_public_key_fingerprint"] = cuda_kernel_manifest_signature.value("public_key_fingerprint", std::string{});
+            entry["signature"] = cuda_kernel_manifest_signature.value("signature", std::string{});
+        }
+        result.push_back(std::move(entry));
+    }
+    return result;
+}
+
+void ExpressionDefinition::allowUnsafeLoadedCudaKernelSourceCompilation(const std::string& trusted_ed25519_public_key) {
+    if (!outputs.expr || outputs.expr->cuda_kernel_expressions.empty()) {
+        return;
+    }
+    json j = architectureJson();
+    *this = deserialize(j, true, trusted_ed25519_public_key);
 }
 
 ExpressionDefinition ExpressionDefinition::fromOutputs(const Outputs& outputs) {
@@ -1450,7 +1501,9 @@ ExpressionDefinition ExpressionDefinition::fromOutputs(const Outputs& outputs) {
     return definition;
 }
 
-ExpressionDefinition ExpressionDefinition::deserialize(const json& j) {
+ExpressionDefinition ExpressionDefinition::deserialize(const json& j,
+                                                       bool allow_unsafe_loaded_cuda_source,
+                                                       const std::string& trusted_ed25519_public_key) {
     if (j.at("type").get<std::string>() != "thor.expression") {
         throw std::runtime_error("ExpressionDefinition::deserialize type mismatch: " + j.at("type").get<std::string>());
     }
@@ -1464,6 +1517,9 @@ ExpressionDefinition ExpressionDefinition::deserialize(const json& j) {
     definition.expected_input_names = j.value("expected_input_names", std::vector<std::string>{});
     definition.expected_output_names = j.value("expected_output_names", std::vector<std::string>{});
     definition.canonical_hash = j.value("canonical_hash", std::string{});
+    if (j.contains("cuda_kernel_manifest_signature")) {
+        definition.cuda_kernel_manifest_signature = j.at("cuda_kernel_manifest_signature");
+    }
 
     for (const json& input_json : j.at("inputs")) {
         definition.outputs.expr->inputs.push_back(NamedInput{
@@ -1471,6 +1527,22 @@ ExpressionDefinition ExpressionDefinition::deserialize(const json& j) {
             .slot = input_json.at("slot").get<uint32_t>(),
             .kind = namedInputKindFromString(input_json.at("kind").get<std::string>()),
         });
+    }
+
+    bool cuda_kernel_source_compilation_allowed = false;
+    if (j.contains("cuda_kernels") && !j.at("cuda_kernels").empty()) {
+        if (allow_unsafe_loaded_cuda_source) {
+            CudaKernelSignatureVerificationResult verification = cudaKernelVerifyManifestSignature(j, trusted_ed25519_public_key);
+            if (!verification.verified) {
+                throw std::runtime_error(verification.message);
+            }
+            cuda_kernel_source_compilation_allowed = true;
+        }
+
+        for (const json& kernel_json : j.at("cuda_kernels")) {
+            definition.outputs.expr->cuda_kernel_expressions.push_back(std::make_shared<CudaKernelExpression>(
+                CudaKernelExpression::deserialize(kernel_json, cuda_kernel_source_compilation_allowed)));
+        }
     }
 
     for (const json& node_json : j.at("nodes")) {
@@ -1663,8 +1735,10 @@ uint32_t cloneSubtreeImpl(const PhysicalExpression& src,
             if (srcNode.attention_ragged_offset_q_node == UINT32_MAX || srcNode.attention_ragged_offset_kv_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing ragged offset node while cloning.");
             }
-            newNode.attention_ragged_offset_q_node = cloneSubtreeImpl(src, srcNode.attention_ragged_offset_q_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_ragged_offset_kv_node = cloneSubtreeImpl(src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_ragged_offset_q_node =
+                cloneSubtreeImpl(src, srcNode.attention_ragged_offset_q_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_ragged_offset_kv_node =
+                cloneSubtreeImpl(src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew, cudaSpecRemap);
         }
         if (srcNode.attention_use_paged_kv_cache) {
             if (srcNode.attention_page_table_k_node == UINT32_MAX || srcNode.attention_page_table_v_node == UINT32_MAX) {
@@ -1678,7 +1752,8 @@ uint32_t cloneSubtreeImpl(const PhysicalExpression& src,
                 throw std::runtime_error("Malformed attention expression: missing dropout seed/offset node while cloning.");
             }
             newNode.attention_dropout_seed_node = cloneSubtreeImpl(src, srcNode.attention_dropout_seed_node, dst, oldToNew, cudaSpecRemap);
-            newNode.attention_dropout_offset_node = cloneSubtreeImpl(src, srcNode.attention_dropout_offset_node, dst, oldToNew, cudaSpecRemap);
+            newNode.attention_dropout_offset_node =
+                cloneSubtreeImpl(src, srcNode.attention_dropout_offset_node, dst, oldToNew, cudaSpecRemap);
         }
         if (srcNode.attention_use_fp8_forward_scaling) {
             if (srcNode.attention_descale_q_node == UINT32_MAX || srcNode.attention_descale_k_node == UINT32_MAX ||
@@ -1726,7 +1801,6 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
     std::unordered_map<uint32_t, uint32_t> cudaSpecRemap;
     return cloneSubtreeImpl(src, srcNodeIndex, dst, oldToNew, cudaSpecRemap);
 }
-
 
 uint32_t cloneSubtreeWithMergedInputsImpl(const PhysicalExpression& src,
                                           uint32_t srcNodeIndex,
@@ -1792,7 +1866,8 @@ uint32_t cloneSubtreeWithMergedInputsImpl(const PhysicalExpression& src,
         newNode.rhs = cloneSubtreeWithMergedInputsImpl(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         newNode.aux = cloneSubtreeWithMergedInputsImpl(src, srcNode.aux, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         if (srcNode.alpha_node != UINT32_MAX) {
-            newNode.alpha_node = cloneSubtreeWithMergedInputsImpl(src, srcNode.alpha_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+            newNode.alpha_node =
+                cloneSubtreeWithMergedInputsImpl(src, srcNode.alpha_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
         if (srcNode.beta_node != UINT32_MAX) {
             newNode.beta_node = cloneSubtreeWithMergedInputsImpl(src, srcNode.beta_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
@@ -1815,28 +1890,28 @@ uint32_t cloneSubtreeWithMergedInputsImpl(const PhysicalExpression& src,
             if (srcNode.attention_ragged_offset_q_node == UINT32_MAX || srcNode.attention_ragged_offset_kv_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing ragged offset node while merging outputs.");
             }
-            newNode.attention_ragged_offset_q_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_ragged_offset_q_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_ragged_offset_kv_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+            newNode.attention_ragged_offset_q_node = cloneSubtreeWithMergedInputsImpl(
+                src, srcNode.attention_ragged_offset_q_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+            newNode.attention_ragged_offset_kv_node = cloneSubtreeWithMergedInputsImpl(
+                src, srcNode.attention_ragged_offset_kv_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
         if (srcNode.attention_use_paged_kv_cache) {
             if (srcNode.attention_page_table_k_node == UINT32_MAX || srcNode.attention_page_table_v_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing paged KV page-table nodes while cloning merged inputs.");
             }
-            newNode.attention_page_table_k_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_page_table_k_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_page_table_v_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_page_table_v_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+            newNode.attention_page_table_k_node = cloneSubtreeWithMergedInputsImpl(
+                src, srcNode.attention_page_table_k_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+            newNode.attention_page_table_v_node = cloneSubtreeWithMergedInputsImpl(
+                src, srcNode.attention_page_table_v_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
         if (srcNode.attention_dropout_probability > 0.0f) {
             if (srcNode.attention_dropout_seed_node == UINT32_MAX || srcNode.attention_dropout_offset_node == UINT32_MAX) {
                 throw std::runtime_error("Malformed attention expression: missing dropout seed/offset node while merging outputs.");
             }
-            newNode.attention_dropout_seed_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_dropout_seed_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
-            newNode.attention_dropout_offset_node =
-                cloneSubtreeWithMergedInputsImpl(src, srcNode.attention_dropout_offset_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+            newNode.attention_dropout_seed_node = cloneSubtreeWithMergedInputsImpl(
+                src, srcNode.attention_dropout_seed_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+            newNode.attention_dropout_offset_node = cloneSubtreeWithMergedInputsImpl(
+                src, srcNode.attention_dropout_offset_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
         }
         if (srcNode.attention_use_fp8_forward_scaling) {
             if (srcNode.attention_descale_q_node == UINT32_MAX || srcNode.attention_descale_k_node == UINT32_MAX ||
@@ -1893,7 +1968,6 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
     std::unordered_map<uint32_t, uint32_t> cudaSpecRemap;
     return cloneSubtreeWithMergedInputsImpl(src, srcNodeIndex, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
 }
-
 
 uint32_t cloneSubtreeWithInputSubstitution(const PhysicalExpression& src,
                                            uint32_t srcNodeIndex,
@@ -2704,9 +2778,7 @@ Expression Expression::rmsNorm(const Expression& input,
     return out;
 }
 
-Expression Expression::swish() const {
-    return *this * this->sigmoid();
-}
+Expression Expression::swish() const { return *this * this->sigmoid(); }
 
 static uint32_t cloneSubtreeIntoMergedExpression(const Expression& src_expr,
                                                  PhysicalExpression& dst,
@@ -2980,11 +3052,11 @@ void applyAttentionOptions(ExprNode& node, const AttentionOptions& options, bool
 }
 
 void validateAttentionOptions(const AttentionOptions& options, bool use_bias, bool use_ragged_offsets = false) {
-    if (use_ragged_offsets &&
-        (options.q_layout != AttentionTensorLayout::BSHD || options.k_layout != AttentionTensorLayout::BSHD ||
-         options.v_layout != AttentionTensorLayout::BSHD || options.o_layout != AttentionTensorLayout::BSHD)) {
+    if (use_ragged_offsets && (options.q_layout != AttentionTensorLayout::BSHD || options.k_layout != AttentionTensorLayout::BSHD ||
+                               options.v_layout != AttentionTensorLayout::BSHD || options.o_layout != AttentionTensorLayout::BSHD)) {
         throw std::runtime_error(
-            "Ragged attention requires BSHD physical layouts for q/k/v/o because cuDNN ragged offsets index packed token-contiguous THD storage.");
+            "Ragged attention requires BSHD physical layouts for q/k/v/o because cuDNN ragged offsets index packed token-contiguous THD "
+            "storage.");
     }
     if (options.diagonal_left_bound < 0 || options.diagonal_right_bound < 0) {
         throw std::runtime_error("Attention diagonal/sliding-window bounds must be non-negative.");
@@ -2996,7 +3068,8 @@ void validateAttentionOptions(const AttentionOptions& options, bool use_bias, bo
                                           options.mask_kind == AttentionMaskKind::SlidingWindowBottomRight;
         if ((!uses_causal_diagonal || options.diagonal_right_bound != 0) && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
             throw std::runtime_error(
-                "AttentionOptions::use_alibi_mask requires causal diagonal masking with diagonal_right_bound == 0 because cuDNN rejects ALiBi with positive right bounds.");
+                "AttentionOptions::use_alibi_mask requires causal diagonal masking with diagonal_right_bound == 0 because cuDNN rejects "
+                "ALiBi with positive right bounds.");
         }
     }
     if (options.dropout_probability < 0.0f || options.dropout_probability >= 1.0f) {
@@ -3017,12 +3090,12 @@ void validateAttentionOptions(const AttentionOptions& options, bool use_bias, bo
     if (options.use_paged_kv_cache && options.dropout_probability > 0.0f && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
         throw std::runtime_error("Paged KV attention is inference-only and cannot currently be combined with dropout.");
     }
-    if ((options.mask_kind == AttentionMaskKind::CausalBottomRight ||
-         options.mask_kind == AttentionMaskKind::SlidingWindowBottomRight) &&
+    if ((options.mask_kind == AttentionMaskKind::CausalBottomRight || options.mask_kind == AttentionMaskKind::SlidingWindowBottomRight) &&
         (use_bias || options.use_alibi_mask || options.dropout_probability > 0.0f) &&
         !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
         throw std::runtime_error(
-            "AttentionMaskKind::CausalBottomRight/SlidingWindowBottomRight is currently supported only without additive bias, ALiBi, or dropout in the cuDNN primary SDPA path.");
+            "AttentionMaskKind::CausalBottomRight/SlidingWindowBottomRight is currently supported only without additive bias, ALiBi, or "
+            "dropout in the cuDNN primary SDPA path.");
     }
 }
 }  // namespace
@@ -3054,8 +3127,8 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
         (page_table_v != nullptr && !page_table_v->expr) || (dropout_seed != nullptr && !dropout_seed->expr) ||
         (dropout_offset != nullptr && !dropout_offset->expr) || (descale_q != nullptr && !descale_q->expr) ||
         (descale_k != nullptr && !descale_k->expr) || (descale_v != nullptr && !descale_v->expr) ||
-        (descale_s != nullptr && !descale_s->expr) || (scale_s != nullptr && !scale_s->expr) ||
-        (scale_o != nullptr && !scale_o->expr) || (amax_s != nullptr && !amax_s->expr) || (amax_o != nullptr && !amax_o->expr)) {
+        (descale_s != nullptr && !descale_s->expr) || (scale_s != nullptr && !scale_s->expr) || (scale_o != nullptr && !scale_o->expr) ||
+        (amax_s != nullptr && !amax_s->expr) || (amax_o != nullptr && !amax_o->expr)) {
         throw std::runtime_error("Cannot build attention from empty expressions.");
     }
     const bool use_ragged_offsets = q_ragged_offsets != nullptr || kv_ragged_offsets != nullptr;
@@ -3075,7 +3148,8 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
     }
     if (use_ragged_offsets && (q_seq_len == nullptr || kv_seq_len == nullptr)) {
         throw std::runtime_error(
-            "Ragged attention requires q_seq_len and kv_seq_len expressions in addition to q/kv ragged offsets because cuDNN THD uses sequence lengths for padding-mask semantics.");
+            "Ragged attention requires q_seq_len and kv_seq_len expressions in addition to q/kv ragged offsets because cuDNN THD uses "
+            "sequence lengths for padding-mask semantics.");
     }
     if (!options.use_padding_mask && (q_seq_len != nullptr || kv_seq_len != nullptr)) {
         throw std::runtime_error("q_seq_len/kv_seq_len were provided but AttentionOptions::use_padding_mask is false.");
@@ -3098,7 +3172,8 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
     if (use_fp8_forward_scaling) {
         if (descale_q == nullptr || descale_k == nullptr || descale_v == nullptr || descale_s == nullptr || scale_s == nullptr ||
             scale_o == nullptr || amax_s == nullptr || amax_o == nullptr) {
-            throw std::runtime_error("FP8 attention forward requires all descale_q/descale_k/descale_v/descale_s/scale_s/scale_o/amax_s/amax_o expressions.");
+            throw std::runtime_error(
+                "FP8 attention forward requires all descale_q/descale_k/descale_v/descale_s/scale_s/scale_o/amax_s/amax_o expressions.");
         }
         if (bias != nullptr) {
             throw std::runtime_error("FP8 attention forward does not support additive bias on the validated cuDNN support surface.");
@@ -3185,7 +3260,8 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q, const Expression& k, const Expression& v, AttentionOptions options) {
-    return attentionWithOptionalMetadata(q, k, v, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
+    return attentionWithOptionalMetadata(
+        q, k, v, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttentionWithDropout(const Expression& q,
@@ -3194,12 +3270,14 @@ Expression Expression::scaledDotProductAttentionWithDropout(const Expression& q,
                                                             const Expression& dropout_seed,
                                                             const Expression& dropout_offset,
                                                             AttentionOptions options) {
-    return attentionWithOptionalMetadata(q, k, v, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
+    return attentionWithOptionalMetadata(
+        q, k, v, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttention(
     const Expression& q, const Expression& k, const Expression& v, const Expression& bias, AttentionOptions options) {
-    return attentionWithOptionalMetadata(q, k, v, &bias, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
+    return attentionWithOptionalMetadata(
+        q, k, v, &bias, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttentionWithDropout(const Expression& q,
@@ -3209,7 +3287,8 @@ Expression Expression::scaledDotProductAttentionWithDropout(const Expression& q,
                                                             const Expression& dropout_seed,
                                                             const Expression& dropout_offset,
                                                             AttentionOptions options) {
-    return attentionWithOptionalMetadata(q, k, v, &bias, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
+    return attentionWithOptionalMetadata(
+        q, k, v, &bias, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q,
@@ -3219,9 +3298,9 @@ Expression Expression::scaledDotProductAttention(const Expression& q,
                                                  const Expression& kv_seq_len,
                                                  AttentionOptions options) {
     options.use_padding_mask = true;
-    return attentionWithOptionalMetadata(q, k, v, nullptr, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
+    return attentionWithOptionalMetadata(
+        q, k, v, nullptr, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
 }
-
 
 Expression Expression::scaledDotProductAttentionFp8Forward(const Expression& q,
                                                            const Expression& k,
@@ -3297,7 +3376,6 @@ Expression Expression::scaledDotProductAttentionFp8Forward(const Expression& q,
                                          &amax_s,
                                          &amax_o);
 }
-
 
 Expression Expression::scaledDotProductAttentionPagedKv(const Expression& q,
                                                         const Expression& k,
@@ -3413,7 +3491,8 @@ Expression Expression::scaledDotProductAttention(const Expression& q,
                                                  const Expression& dropout_offset,
                                                  AttentionOptions options) {
     options.use_padding_mask = true;
-    return attentionWithOptionalMetadata(q, k, v, nullptr, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
+    return attentionWithOptionalMetadata(
+        q, k, v, nullptr, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q,
@@ -3424,7 +3503,8 @@ Expression Expression::scaledDotProductAttention(const Expression& q,
                                                  const Expression& kv_seq_len,
                                                  AttentionOptions options) {
     options.use_padding_mask = true;
-    return attentionWithOptionalMetadata(q, k, v, &bias, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
+    return attentionWithOptionalMetadata(
+        q, k, v, &bias, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q,
@@ -3437,7 +3517,8 @@ Expression Expression::scaledDotProductAttention(const Expression& q,
                                                  const Expression& dropout_offset,
                                                  AttentionOptions options) {
     options.use_padding_mask = true;
-    return attentionWithOptionalMetadata(q, k, v, &bias, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
+    return attentionWithOptionalMetadata(
+        q, k, v, &bias, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
 }
 
 Expression Expression::conv2d(const Expression& input,
