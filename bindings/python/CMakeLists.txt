@@ -64,6 +64,10 @@ add_dependencies(_thor thor_py_pkg_sync)
 target_link_libraries(_thor PRIVATE Thor)
 target_compile_features(_thor PRIVATE cxx_std_20)
 
+if (COMMAND thor_apply_linker_settings)
+    thor_apply_linker_settings(_thor)
+endif ()
+
 # Put the built extension inside the build-tree package dir: <bin>/bindings/python/thor/_thor*.so
 set_target_properties(_thor PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${THOR_PY_PKG_BUILD_DIR}"
@@ -304,7 +308,7 @@ add_custom_target(check
         $<TARGET_FILE:thor_tests> --gtest_color=yes
         COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_SOURCE_DIR}
         "${Python_EXECUTABLE}" -m pytest -q "${THOR_PY_TEST_DIR}"
-        DEPENDS thor_tests ${_thor_py_deps}
+        DEPENDS thor_tests thor_py_install thor_py_deps
         USES_TERMINAL
         VERBATIM
 )

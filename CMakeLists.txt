@@ -106,6 +106,180 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 add_compile_options(-UNDEBUG)
 
 # ============================================================
+# Fast / multi-threaded linker selection
+# ============================================================
+set(THOR_LINKER "default" CACHE STRING "Linker to use: default, auto, mold, lld, gold, bfd")
+set_property(CACHE THOR_LINKER PROPERTY STRINGS auto default mold lld gold bfd)
+
+set(
+        THOR_LINKER_THREADS
+        ""
+        CACHE STRING
+        "Explicit linker thread count. Empty means use the selected linker's default."
+)
+
+set(_thor_selected_linker "")
+set(_thor_selected_linker_dir "")
+set(_thor_selected_linker_path "")
+
+# GCC's -fuse-ld=<name> does not run a binary named <name>; it looks for
+# linker-driver names such as ld.mold or ld.lld.  Some installs provide only
+# mold/lld, so create a private build-tree symlink with the name GCC expects.
+function(_thor_prepare_fuse_linker linker_name linker_driver_name result_var)
+    set(_prepared_path "")
+    set(_prepared_dir "")
+
+    find_program(_driver_path NAMES "${linker_driver_name}" NO_CACHE)
+    if (_driver_path)
+        get_filename_component(_prepared_dir "${_driver_path}" DIRECTORY)
+        set(_prepared_path "${_driver_path}")
+    else ()
+        find_program(_plain_path NAMES "${linker_name}" NO_CACHE)
+        if (_plain_path)
+            set(_prepared_dir "${CMAKE_BINARY_DIR}/thor-linker-bin")
+            set(_prepared_path "${_prepared_dir}/${linker_driver_name}")
+            file(MAKE_DIRECTORY "${_prepared_dir}")
+            file(REMOVE "${_prepared_path}")
+            execute_process(
+                    COMMAND "${CMAKE_COMMAND}" -E create_symlink "${_plain_path}" "${_prepared_path}"
+                    RESULT_VARIABLE _symlink_result
+            )
+            if (NOT _symlink_result EQUAL 0)
+                set(_prepared_path "")
+                set(_prepared_dir "")
+            endif ()
+        endif ()
+    endif ()
+
+    set(${result_var} "${_prepared_path}" PARENT_SCOPE)
+    set(${result_var}_DIR "${_prepared_dir}" PARENT_SCOPE)
+endfunction()
+
+if (THOR_LINKER STREQUAL "default" OR THOR_LINKER STREQUAL "")
+    # Preserve the compiler driver's original behavior. Do not add -fuse-ld,
+    # do not add -B, and do not try to force ld.bfd/gold/lld/mold.
+    message(STATUS "Thor: using compiler default linker")
+elseif (THOR_LINKER STREQUAL "auto")
+    # Fast-linker auto mode is opt-in. Prefer mold, then lld, then gold;
+    # if none are available, leave the compiler default linker unchanged.
+    _thor_prepare_fuse_linker("mold" "ld.mold" _thor_mold_path)
+    if (_thor_mold_path)
+        set(_thor_selected_linker "mold")
+        set(_thor_selected_linker_path "${_thor_mold_path}")
+        set(_thor_selected_linker_dir "${_thor_mold_path_DIR}")
+    else ()
+        _thor_prepare_fuse_linker("lld" "ld.lld" _thor_lld_path)
+        if (_thor_lld_path)
+            set(_thor_selected_linker "lld")
+            set(_thor_selected_linker_path "${_thor_lld_path}")
+            set(_thor_selected_linker_dir "${_thor_lld_path_DIR}")
+        else ()
+            find_program(_thor_ld_gold NAMES ld.gold NO_CACHE)
+            if (_thor_ld_gold)
+                get_filename_component(_thor_selected_linker_dir "${_thor_ld_gold}" DIRECTORY)
+                set(_thor_selected_linker "gold")
+                set(_thor_selected_linker_path "${_thor_ld_gold}")
+            else ()
+                message(STATUS "Thor: no mold/lld/gold found; using compiler default linker")
+            endif ()
+        endif ()
+    endif ()
+elseif (THOR_LINKER STREQUAL "mold")
+    _thor_prepare_fuse_linker("mold" "ld.mold" _thor_mold_path)
+    if (NOT _thor_mold_path)
+        message(FATAL_ERROR
+                "THOR_LINKER=mold was requested, but neither ld.mold nor mold was found.\n"
+                "Install mold, or configure with -DTHOR_LINKER=lld/default.")
+    endif ()
+    set(_thor_selected_linker "mold")
+    set(_thor_selected_linker_path "${_thor_mold_path}")
+    set(_thor_selected_linker_dir "${_thor_mold_path_DIR}")
+elseif (THOR_LINKER STREQUAL "lld")
+    _thor_prepare_fuse_linker("lld" "ld.lld" _thor_lld_path)
+    if (NOT _thor_lld_path)
+        message(FATAL_ERROR
+                "THOR_LINKER=lld was requested, but neither ld.lld nor lld was found.\n"
+                "Install lld, or configure with -DTHOR_LINKER=mold/default.")
+    endif ()
+    set(_thor_selected_linker "lld")
+    set(_thor_selected_linker_path "${_thor_lld_path}")
+    set(_thor_selected_linker_dir "${_thor_lld_path_DIR}")
+elseif (THOR_LINKER STREQUAL "gold")
+    find_program(_thor_ld_gold NAMES ld.gold NO_CACHE)
+    if (NOT _thor_ld_gold)
+        message(FATAL_ERROR "THOR_LINKER=gold was requested, but ld.gold was not found.")
+    endif ()
+    get_filename_component(_thor_selected_linker_dir "${_thor_ld_gold}" DIRECTORY)
+    set(_thor_selected_linker "gold")
+    set(_thor_selected_linker_path "${_thor_ld_gold}")
+elseif (THOR_LINKER STREQUAL "bfd")
+    find_program(_thor_ld_bfd NAMES ld.bfd NO_CACHE)
+    if (_thor_ld_bfd)
+        get_filename_component(_thor_selected_linker_dir "${_thor_ld_bfd}" DIRECTORY)
+        set(_thor_selected_linker_path "${_thor_ld_bfd}")
+    endif ()
+    set(_thor_selected_linker "bfd")
+else ()
+    message(FATAL_ERROR "Invalid THOR_LINKER='${THOR_LINKER}'. Use auto, default, mold, lld, gold, or bfd.")
+endif ()
+
+if (_thor_selected_linker)
+    if (_thor_selected_linker_path)
+        message(STATUS "Thor: selected linker = ${_thor_selected_linker} (${_thor_selected_linker_path})")
+    else ()
+        message(STATUS "Thor: selected linker = ${_thor_selected_linker}")
+    endif ()
+endif ()
+
+function(thor_apply_linker_settings target_name)
+    if (NOT TARGET ${target_name})
+        return()
+    endif ()
+
+    if (_thor_selected_linker)
+        if (_thor_selected_linker_dir)
+            # Help GCC find ld.mold/ld.lld/ld.gold even when it is not in GCC's
+            # built-in linker search directory.
+            target_link_options(${target_name} PRIVATE
+                    "-B${_thor_selected_linker_dir}/"
+            )
+        endif ()
+
+        target_link_options(${target_name} PRIVATE
+                "-fuse-ld=${_thor_selected_linker}"
+        )
+    endif ()
+
+    if (_thor_selected_linker STREQUAL "mold")
+        if (THOR_LINKER_THREADS)
+            target_link_options(${target_name} PRIVATE
+                    "LINKER:--thread-count=${THOR_LINKER_THREADS}"
+            )
+        endif ()
+    elseif (_thor_selected_linker STREQUAL "lld")
+        if (THOR_LINKER_THREADS)
+            target_link_options(${target_name} PRIVATE
+                    "LINKER:--threads=${THOR_LINKER_THREADS}"
+            )
+        endif ()
+    elseif (_thor_selected_linker STREQUAL "gold")
+        target_link_options(${target_name} PRIVATE
+                "LINKER:--threads"
+        )
+        if (THOR_LINKER_THREADS)
+            target_link_options(${target_name} PRIVATE
+                    "LINKER:--thread-count=${THOR_LINKER_THREADS}"
+            )
+        endif ()
+    elseif (_thor_selected_linker STREQUAL "bfd" AND THOR_LINKER_THREADS)
+        message(WARNING
+                "Thor: ld.bfd does not provide a general multi-threaded link option; "
+                "THOR_LINKER_THREADS will be ignored."
+        )
+    endif ()
+endfunction()
+
+# ============================================================
 # Automatic Git versioning
 # ============================================================
 find_package(Git QUIET)
@@ -170,8 +344,9 @@ target_compile_options(Thor PRIVATE
         -Wdeprecated
 )
 target_link_options(Thor PRIVATE
-        -Wl,--no-as-needed
+        "LINKER:--no-as-needed"
 )
+thor_apply_linker_settings(Thor)
 
 # OpenMP
 find_package(OpenMP REQUIRED)
@@ -282,12 +457,42 @@ separate_arguments(GM_CPPFLAGS_LIST NATIVE_COMMAND "${GM_CPPFLAGS}")
 separate_arguments(GM_CXXFLAGS_LIST NATIVE_COMMAND "${GM_CXXFLAGS}")
 separate_arguments(GM_LDFLAGS_LIST NATIVE_COMMAND "${GM_LDFLAGS}")
 
+# GraphicsMagick++-config can leak distro package build flags into consumers.
+# In Debug builds only, strip LTO-related flags because they slow compiles/relinks
+# and are not useful for normal debugging. Non-Debug builds keep the original flags.
+set(GM_CXXFLAGS_DEBUG_LIST "${GM_CXXFLAGS_LIST}")
+set(GM_LDFLAGS_DEBUG_LIST "${GM_LDFLAGS_LIST}")
+foreach (_gm_flags_var IN ITEMS GM_CXXFLAGS_DEBUG_LIST GM_LDFLAGS_DEBUG_LIST)
+    list(FILTER ${_gm_flags_var} EXCLUDE REGEX "^-flto(=.*)?$")
+    list(FILTER ${_gm_flags_var} EXCLUDE REGEX "^-ffat-lto-objects$")
+endforeach ()
+
+# Build per-flag generator expressions. This avoids putting semicolon-separated
+# CMake lists inside one generator expression, which can mis-handle multi-flag lists.
+set(_thor_gm_cxxflags_genex "")
+foreach (_gm_flag IN LISTS GM_CXXFLAGS_DEBUG_LIST)
+    list(APPEND _thor_gm_cxxflags_genex
+            "$<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:${_gm_flag}>")
+endforeach ()
+foreach (_gm_flag IN LISTS GM_CXXFLAGS_LIST)
+    list(APPEND _thor_gm_cxxflags_genex
+            "$<$<AND:$<NOT:$<CONFIG:Debug>>,$<COMPILE_LANGUAGE:CXX>>:${_gm_flag}>")
+endforeach ()
+
+set(_thor_gm_ldflags_genex "")
+foreach (_gm_flag IN LISTS GM_LDFLAGS_DEBUG_LIST)
+    list(APPEND _thor_gm_ldflags_genex "$<$<CONFIG:Debug>:${_gm_flag}>")
+endforeach ()
+foreach (_gm_flag IN LISTS GM_LDFLAGS_LIST)
+    list(APPEND _thor_gm_ldflags_genex "$<$<NOT:$<CONFIG:Debug>>:${_gm_flag}>")
+endforeach ()
+
 target_include_directories(Thor PUBLIC ${GMAGICK_INCLUDE_DIRS})
 target_compile_options(Thor PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:${GM_CPPFLAGS_LIST}>
-        $<$<COMPILE_LANGUAGE:CXX>:${GM_CXXFLAGS_LIST}>
+        ${_thor_gm_cxxflags_genex}
 )
-target_link_libraries(Thor PRIVATE ${GM_LDFLAGS_LIST})
+target_link_libraries(Thor PRIVATE ${_thor_gm_ldflags_genex})
 
 # ============================================================
 # Boost
@@ -489,6 +694,7 @@ target_compile_definitions(Thor PRIVATE
 
 file(GLOB_RECURSE TEST_SOURCES "${CMAKE_SOURCE_DIR}/test/*.cpp")
 add_executable(thor_tests ${TEST_SOURCES})
+thor_apply_linker_settings(thor_tests)
 target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main CUDA::cudart CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
 target_link_libraries(thor_tests PRIVATE "${THOR_CUDNN_LIBRARY}")
 find_package(OpenMP REQUIRED)
@@ -623,6 +829,7 @@ find_package(nanobind CONFIG REQUIRED)
 option(THOR_BUILD_PYTHON "Build Python bindings" ON)
 if (THOR_BUILD_PYTHON)
     add_subdirectory(bindings/python)
+
     if (TARGET thor_py_deps)
         add_dependencies(Thor thor_py_deps)
     endif ()

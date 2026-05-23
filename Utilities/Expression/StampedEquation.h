@@ -8,8 +8,10 @@
 #include <stdexcept>
 #include <string>
 #include <memory>
+#include <variant>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -246,6 +248,46 @@ struct CompiledAttention {
     CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o) const;
 };
 
+struct CompiledCudaKernel {
+    std::string cache_key;
+    std::string kernel_name;
+    CUmodule module = nullptr;
+    CUfunction kernel = nullptr;
+    int device_num = 0;
+
+    CompiledCudaKernel() = default;
+    CompiledCudaKernel(const CompiledCudaKernel&) = delete;
+    CompiledCudaKernel& operator=(const CompiledCudaKernel&) = delete;
+    CompiledCudaKernel(CompiledCudaKernel&&) = default;
+    CompiledCudaKernel& operator=(CompiledCudaKernel&&) = default;
+
+    ~CompiledCudaKernel() {
+        if (module != nullptr) {
+            try {
+                CU_CHECK(cuModuleUnload(module));
+            } catch (...) {
+            }
+        }
+    }
+};
+
+struct CudaKernelLaunchConfig {
+    dim3 grid{1, 1, 1};
+    dim3 block{1, 1, 1};
+    uint32_t dynamic_shared_bytes = 0;
+};
+
+using CudaKernelScalarValue = std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double>;
+
+struct StampedCudaKernelParam {
+    enum class Kind : uint8_t { TensorInput, TensorRuntimeScalar, HostRuntimeScalar, TensorOutput, Scalar };
+
+    Kind kind = Kind::TensorInput;
+    std::string name;
+    size_t tensor_index = 0;
+    CudaKernelScalarValue scalar_value = int32_t{0};
+};
+
 struct CompiledAttentionBackward {
     AttentionTensorLayout q_layout = AttentionTensorLayout::BHSD;
     AttentionTensorLayout k_layout = AttentionTensorLayout::BHSD;
@@ -371,6 +413,37 @@ class StampedEquation {
     std::shared_ptr<CompiledEquation> compiledEquation;
     std::vector<RuntimeInputValue> inputs;
     std::vector<Tensor> outputs;
+    Stream stream;
+};
+
+class StampedCudaKernel {
+   public:
+    StampedCudaKernel(std::shared_ptr<CompiledCudaKernel> compiled,
+                      std::vector<Tensor> inputs,
+                      std::vector<TensorScalarBinding> tensor_runtime_scalars,
+                      std::vector<Tensor> outputs,
+                      std::vector<StampedCudaKernelParam> params,
+                      CudaKernelLaunchConfig launch_config,
+                      const Stream& stream);
+
+    void run();
+    void runOn(Stream& run_stream) const;
+    void run(const std::unordered_map<std::string, float>& runtime_scalars);
+    void runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const;
+
+    [[nodiscard]] bool requiresRuntimeScalars() const;
+    [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
+    [[nodiscard]] uint32_t gpuNum() const;
+    [[nodiscard]] const std::vector<Tensor>& getOutputTensors() const { return outputs; }
+    [[nodiscard]] Tensor getOutputTensor() const;
+
+   private:
+    std::shared_ptr<CompiledCudaKernel> compiled;
+    std::vector<Tensor> inputs;
+    std::vector<TensorScalarBinding> tensor_runtime_scalars;
+    std::vector<Tensor> outputs;
+    std::vector<StampedCudaKernelParam> params;
+    CudaKernelLaunchConfig launch_config;
     Stream stream;
 };
 
@@ -799,11 +872,13 @@ class StampedInPlaceRope {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
                 return "FusedKernel";
+            case Kind::CudaKernel:
+                return "CudaKernel";
             case Kind::Reduction:
                 return "Reduction";
             case Kind::ArgMinMax:
@@ -837,6 +912,7 @@ struct StampedExecutionStage {
     const uint64_t flop_count = 0;
 
     const std::shared_ptr<StampedEquation> kernel = nullptr;
+    const std::shared_ptr<StampedCudaKernel> cuda_kernel = nullptr;
     const std::shared_ptr<StampedReduction> reduction = nullptr;
     const std::shared_ptr<StampedArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<StampedSoftmax> softmax = nullptr;
@@ -857,6 +933,15 @@ struct StampedExecutionStage {
           gpu_num(fused->gpuNum()),
           flop_count(flop_count),
           kernel(fused) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedCudaKernel>& cuda_kernel,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::CudaKernel),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(cuda_kernel->gpuNum()),
+          flop_count(flop_count),
+          cuda_kernel(cuda_kernel) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedReduction>& reduction,
                                    std::vector<uint32_t> dependency_stage_indices = {},
@@ -969,6 +1054,12 @@ struct StampedExecutionStage {
                 kernel->runOn(run_stream);
             else
                 kernel->runOn(run_stream, runtime_scalars);
+        } else if (kind == Kind::CudaKernel) {
+            THOR_THROW_IF_FALSE(cuda_kernel != nullptr);
+            if (runtime_scalars.empty())
+                cuda_kernel->runOn(run_stream);
+            else
+                cuda_kernel->runOn(run_stream, runtime_scalars);
         } else if (kind == Kind::Reduction) {
             THOR_THROW_IF_FALSE(reduction != nullptr);
             reduction->runOn(run_stream);

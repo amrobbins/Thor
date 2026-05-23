@@ -1,5 +1,6 @@
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
+#include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
 
 #include "CudaSourceEmitter.h"
@@ -601,7 +602,7 @@ static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
     return isCudnnReduceOp(op) || isSoftmaxOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) || isAttentionBackwardOp(op) ||
-           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || op == ExprOp::STRIDED_VIEW;
+           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
 
 static uint32_t peelExplicitTransposeChain(const PhysicalExpression& expr, uint32_t node_idx, bool& transpose_toggled) {
@@ -660,6 +661,13 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
         }
 
         if (Expression::isLeafOp(node.op)) {
+            continue;
+        }
+
+        if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            for (uint32_t input_node : node.cuda_kernel_input_nodes) {
+                addExternalValue(input_node);
+            }
             continue;
         }
 
@@ -2709,6 +2717,105 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
     };
 }
 
+static PhysicalExecutionStage buildCudaKernelStage(const PhysicalExpression& expr,
+                                                  const std::vector<RequestedStageOutput>& requested_outputs,
+                                                  const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    if (requested_outputs.empty()) {
+        throw std::runtime_error("buildCudaKernelStage requires at least one requested output.");
+    }
+
+    const ExprNode& first_output = expr.nodes.at(requested_outputs.front().old_root_idx);
+    if (first_output.op != ExprOp::CUDA_KERNEL_OUTPUT) {
+        throw std::runtime_error("buildCudaKernelStage called on non-CUDA-kernel output node.");
+    }
+    const uint32_t spec_idx = first_output.cuda_kernel_spec_index;
+    if (spec_idx >= expr.cuda_kernel_expressions.size() || !expr.cuda_kernel_expressions[spec_idx]) {
+        throw std::runtime_error("buildCudaKernelStage references missing CUDA kernel spec.");
+    }
+
+    PhysicalExpression stage_expr;
+    stage_expr.cuda_kernel_expressions.push_back(expr.cuda_kernel_expressions[spec_idx]);
+
+    std::vector<uint32_t> stage_input_value_ids;
+    std::vector<uint32_t> local_input_node_indices;
+    local_input_node_indices.reserve(first_output.cuda_kernel_input_nodes.size());
+
+    for (uint32_t input_idx : first_output.cuda_kernel_input_nodes) {
+        if (input_idx >= expr.nodes.size()) {
+            throw std::runtime_error("buildCudaKernelStage input node index out of range.");
+        }
+
+        const ExprNode& parent = expr.nodes[input_idx];
+        uint32_t value_id = UINT32_MAX;
+        NamedInput::Kind input_kind = NamedInput::Kind::Tensor;
+        std::string local_name = "__arg" + std::to_string(stage_input_value_ids.size());
+        if ((parent.op == ExprOp::INPUT || parent.op == ExprOp::RUNTIME_SCALAR || parent.op == ExprOp::TENSOR_RUNTIME_SCALAR) &&
+            !inputRequiresMaterialization(parent)) {
+            value_id = parent.input_slot;
+            if (value_id >= expr.inputs.size()) {
+                throw std::runtime_error("buildCudaKernelStage root input slot out of range.");
+            }
+            input_kind = expr.inputs[value_id].kind;
+            local_name = expr.inputs[value_id].name;
+        } else {
+            auto value_it = node_output_value_id.find(input_idx);
+            if (value_it == node_output_value_id.end()) {
+                throw std::runtime_error("buildCudaKernelStage missing value id for kernel input dependency.");
+            }
+            value_id = value_it->second;
+        }
+
+        const uint32_t local_slot = static_cast<uint32_t>(stage_input_value_ids.size());
+        stage_input_value_ids.push_back(value_id);
+        stage_expr.inputs.push_back(NamedInput{local_name, local_slot, input_kind});
+
+        ExprNode local_input;
+        local_input.op = parent.op == ExprOp::TENSOR_RUNTIME_SCALAR   ? ExprOp::TENSOR_RUNTIME_SCALAR
+                         : parent.op == ExprOp::RUNTIME_SCALAR       ? ExprOp::RUNTIME_SCALAR
+                                                                      : ExprOp::INPUT;
+        local_input.input_slot = local_slot;
+        local_input.input_tensor_dtype = parent.output_dtype;
+        local_input.output_dtype = parent.output_dtype;
+        local_input.compute_dtype = parent.compute_dtype;
+        local_input.backward_output_dtype = parent.backward_output_dtype;
+        local_input.backward_compute_dtype = parent.backward_compute_dtype;
+
+        const uint32_t local_node_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+        stage_expr.nodes.push_back(std::move(local_input));
+        local_input_node_indices.push_back(local_node_idx);
+    }
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.reserve(requested_outputs.size());
+    for (const RequestedStageOutput& requested : requested_outputs) {
+        const ExprNode& old_node = expr.nodes.at(requested.old_root_idx);
+        if (old_node.op != ExprOp::CUDA_KERNEL_OUTPUT || old_node.cuda_kernel_spec_index != spec_idx) {
+            throw std::runtime_error("buildCudaKernelStage requested output does not belong to the same CUDA kernel spec.");
+        }
+        if (old_node.cuda_kernel_input_nodes != first_output.cuda_kernel_input_nodes) {
+            throw std::runtime_error("buildCudaKernelStage requested outputs have mismatched input ABI nodes.");
+        }
+
+        ExprNode new_node = old_node;
+        new_node.cuda_kernel_spec_index = 0;
+        new_node.cuda_kernel_input_nodes = local_input_node_indices;
+        const uint32_t local_node_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+        stage_expr.nodes.push_back(std::move(new_node));
+        stage_outputs.push_back(CompiledStageOutput{
+            .name = requested.name,
+            .local_node_idx = local_node_idx,
+            .value_id = requested.value_id,
+            .materialized_layout = requested.materialized_layout,
+        });
+    }
+
+    return PhysicalExecutionStage{PhysicalExecutionStage::Kind::CudaKernel,
+                                  std::move(stage_expr),
+                                  std::move(stage_input_value_ids),
+                                  std::move(stage_outputs),
+                                  {}};
+}
+
 static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr,
                                                   uint32_t node_idx,
                                                   uint32_t output_value_id,
@@ -4123,6 +4230,11 @@ static std::vector<uint32_t> computeNodeUseCounts(const PhysicalExpression& expr
             node.op == ExprOp::ATTENTION_BACKWARD_V || node.op == ExprOp::ATTENTION_BACKWARD_BIAS) {
             bump(node.aux);
         }
+        if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            for (uint32_t input_node : node.cuda_kernel_input_nodes) {
+                bump(input_node);
+            }
+        }
         bump(node.alpha_node);
         bump(node.beta_node);
         bump(node.matmul_epilogue_aux);
@@ -4312,6 +4424,11 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     PlannedExecution planned;
     uint32_t next_value_id = expr.numInputs();
 
+    std::unordered_map<uint32_t, std::string> final_output_name_by_node;
+    for (const NamedOutput& output : outputs.outputs) {
+        final_output_name_by_node.emplace(output.node_idx, output.name);
+    }
+
     std::unordered_map<uint32_t, std::vector<PendingMatmulBgradOutput>> pending_matmul_bgrad_outputs;
     for (const NamedOutput& output : outputs.outputs) {
         uint32_t matmul_idx = UINT32_MAX;
@@ -4349,6 +4466,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
     std::function<void(size_t)> materializeTerminalGroup;
     std::function<void(uint32_t)> emitForDependency;
+    std::function<void(uint32_t)> emitCudaKernelStage;
     std::function<uint32_t(uint32_t, std::optional<uint32_t>)> emitStorageAlias;
     std::function<bool(uint32_t, uint32_t, const std::string&)> tryEmitTiledTransposeMaterializedFusedStage;
     std::function<std::unordered_set<uint32_t>(const std::vector<uint32_t>&)> tryEmitGroupedRopeMaterialization;
@@ -4608,6 +4726,73 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         return emitted_roots;
     };
 
+    emitCudaKernelStage = [&](uint32_t root_idx) {
+        if (root_idx >= expr.nodes.size()) {
+            throw std::runtime_error("emitCudaKernelStage root index out of range.");
+        }
+        const ExprNode& root = expr.nodes[root_idx];
+        if (root.op != ExprOp::CUDA_KERNEL_OUTPUT) {
+            throw std::runtime_error("emitCudaKernelStage called on non-CUDA-kernel output node.");
+        }
+
+        const uint32_t spec_idx = root.cuda_kernel_spec_index;
+        if (spec_idx >= expr.cuda_kernel_expressions.size() || !expr.cuda_kernel_expressions[spec_idx]) {
+            throw std::runtime_error("emitCudaKernelStage references missing CUDA kernel spec.");
+        }
+
+        bool already_emitted = true;
+        std::vector<uint32_t> kernel_output_nodes;
+        for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+            const ExprNode& candidate = expr.nodes[node_idx];
+            if (candidate.op == ExprOp::CUDA_KERNEL_OUTPUT && candidate.cuda_kernel_spec_index == spec_idx &&
+                candidate.cuda_kernel_input_nodes == root.cuda_kernel_input_nodes) {
+                kernel_output_nodes.push_back(node_idx);
+                if (node_output_value_id.find(node_idx) == node_output_value_id.end()) {
+                    already_emitted = false;
+                }
+            }
+        }
+        if (already_emitted) {
+            return;
+        }
+
+        for (uint32_t input_node_idx : root.cuda_kernel_input_nodes) {
+            if (input_node_idx >= expr.nodes.size()) {
+                throw std::runtime_error("CudaKernelExpression input dependency node index out of range.");
+            }
+            const ExprNode& parent = expr.nodes[input_node_idx];
+            if ((parent.op != ExprOp::INPUT && parent.op != ExprOp::RUNTIME_SCALAR && parent.op != ExprOp::TENSOR_RUNTIME_SCALAR) ||
+                inputRequiresMaterialization(parent)) {
+                emitForDependency(input_node_idx);
+            }
+        }
+
+        std::sort(kernel_output_nodes.begin(), kernel_output_nodes.end(), [&](uint32_t a, uint32_t b) {
+            return expr.nodes[a].cuda_kernel_output_index < expr.nodes[b].cuda_kernel_output_index;
+        });
+
+        std::vector<RequestedStageOutput> requested_outputs;
+        requested_outputs.reserve(kernel_output_nodes.size());
+        for (uint32_t node_idx : kernel_output_nodes) {
+            uint32_t value_id;
+            auto existing_it = node_output_value_id.find(node_idx);
+            if (existing_it != node_output_value_id.end()) {
+                value_id = existing_it->second;
+            } else {
+                value_id = next_value_id++;
+                node_output_value_id[node_idx] = value_id;
+            }
+            auto final_name_it = final_output_name_by_node.find(node_idx);
+            requested_outputs.push_back(RequestedStageOutput{
+                .name = final_name_it == final_output_name_by_node.end() ? std::string{} : final_name_it->second,
+                .old_root_idx = node_idx,
+                .value_id = value_id,
+            });
+        }
+
+        planned.stages.push_back(buildCudaKernelStage(expr, requested_outputs, node_output_value_id));
+    };
+
     emitForDependency = [&](uint32_t root_idx) {
         if (node_output_value_id.find(root_idx) != node_output_value_id.end()) {
             return;
@@ -4624,6 +4809,11 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 return;
             }
             --next_value_id;
+        }
+
+        if (root.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            emitCudaKernelStage(root_idx);
+            return;
         }
 
         if (isStageBoundaryOp(root.op)) {
@@ -4927,6 +5117,20 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             --next_value_id;
         }
 
+        if (root.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            emitCudaKernelStage(named_output.node_idx);
+            auto value_it = node_output_value_id.find(named_output.node_idx);
+            if (value_it == node_output_value_id.end()) {
+                throw std::runtime_error("CudaKernelExpression final output missing value id after stage emission.");
+            }
+            planned.final_outputs.push_back(CompiledStageOutput{
+                .name = named_output.name,
+                .local_node_idx = UINT32_MAX,
+                .value_id = value_it->second,
+            });
+            continue;
+        }
+
         if (isStageBoundaryOp(root.op)) {
             const std::string boundary_sig = fusedRegionSignature(expr, named_output.node_idx);
             auto emitted_boundary_it = stage_boundary_value_id.find(boundary_sig);
@@ -5205,6 +5409,33 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
                 flat = compileFusedStage(stage, sig);
                 compiled->stages.emplace_back(stage.expr, flat, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
+            case PhysicalExecutionStage::Kind::CudaKernel: {
+                if (stage.expr.cuda_kernel_expressions.size() != 1 || !stage.expr.cuda_kernel_expressions[0]) {
+                    throw std::runtime_error("CudaKernel physical stage requires exactly one kernel spec.");
+                }
+                std::shared_ptr<const CudaKernelExpression> cuda_expr = stage.expr.cuda_kernel_expressions[0];
+                std::shared_ptr<CompiledCudaKernel> compiled_kernel = cuda_expr->compile(sig.device_num);
+                std::vector<DataType> output_dtypes;
+                output_dtypes.reserve(stage.outputs.size());
+                for (const CompiledStageOutput& output : stage.outputs) {
+                    if (output.local_node_idx >= stage.expr.nodes.size()) {
+                        throw std::runtime_error("CudaKernel physical stage output node index out of range.");
+                    }
+                    const ExprNode& node = stage.expr.nodes[output.local_node_idx];
+                    if (!node.output_dtype.has_value()) {
+                        throw std::runtime_error("CudaKernel physical stage output node missing dtype.");
+                    }
+                    output_dtypes.push_back(node.output_dtype.value());
+                }
+                compiled->stages.emplace_back(stage.expr,
+                                              cuda_expr,
+                                              compiled_kernel,
+                                              output_dtypes,
+                                              stage.input_value_ids,
+                                              stage.outputs,
+                                              stage.parameter_fan_overrides);
+                break;
+            }
             case PhysicalExecutionStage::Kind::Reduction:
                 reduction = compileReduction(stage.expr);
                 compiled->stages.emplace_back(reduction, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);

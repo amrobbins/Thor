@@ -214,6 +214,13 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         return node.output_dtype.has_value() ? node.output_dtype.value() : DataType::FP32;
     }
 
+    if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+        if (!node.output_dtype.has_value()) {
+            throw std::runtime_error("CudaKernelExpression output node is missing output dtype.");
+        }
+        return node.output_dtype.value();
+    }
+
     std::vector<DataType> tensor_parent_dtypes;
     tensor_parent_dtypes.reserve(4);
 
@@ -265,6 +272,13 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
 
     if (node.op == ExprOp::SCALAR_FP || node.op == ExprOp::FILL) {
         return node.output_dtype.has_value() ? node.output_dtype.value() : DataType::FP32;
+    }
+
+    if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+        if (!node.output_dtype.has_value()) {
+            throw std::runtime_error("CudaKernelExpression output node is missing output dtype.");
+        }
+        return node.output_dtype.value();
     }
 
     if (node.op == ExprOp::RMSNORM) {
@@ -393,7 +407,11 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
             seedRequiredComputeDType(required_compute_dtype[parent_idx], propagated_dtype);
         };
 
-        if (!Expression::isLeafOp(node.op)) {
+        if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            for (uint32_t input_node : node.cuda_kernel_input_nodes) {
+                propagate_to_parent(input_node);
+            }
+        } else if (!Expression::isLeafOp(node.op)) {
             propagate_to_parent(node.lhs);
         }
         if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
@@ -463,6 +481,18 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
             node.backward_output_dtype = backward_output_dtype;
             node.backward_compute_dtype = backward_compute_dtype;
 
+            resolved_output_dtypes[node_idx] = output_dtype;
+            continue;
+        }
+
+        if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            if (!node.output_dtype.has_value()) {
+                throw std::runtime_error("CudaKernelExpression output node is missing output dtype.");
+            }
+            const DataType output_dtype = node.output_dtype.value();
+            node.compute_dtype = node.compute_dtype.value_or(output_dtype);
+            node.backward_output_dtype = node.backward_output_dtype.value_or(output_dtype);
+            node.backward_compute_dtype = node.backward_compute_dtype.value_or(node.compute_dtype.value());
             resolved_output_dtypes[node_idx] = output_dtype;
             continue;
         }

@@ -5,12 +5,17 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/unordered_set.h>
+#include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
-#include <sstream>
+#include <array>
+#include <limits>
 #include <optional>
+#include <sstream>
 #include <utility>
+#include <variant>
 
+#include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
@@ -36,6 +41,10 @@ using RotaryScalingKind = ThorImplementation::RotaryScalingKind;
 using RotaryPositionEmbeddingOptions = ThorImplementation::RotaryPositionEmbeddingOptions;
 using PreparedDynamicExpression = ThorImplementation::PreparedDynamicExpression;
 using DynamicExpressionBuild = ThorImplementation::DynamicExpressionBuild;
+using CudaKernelExpression = ThorImplementation::CudaKernelExpression;
+using CudaKernelDimExpr = ThorImplementation::CudaKernelExpression::DimExpr;
+using CudaKernelLaunchContext = ThorImplementation::CudaKernelExpression::LaunchContext;
+using CudaKernelLaunchConfig = ThorImplementation::CudaKernelLaunchConfig;
 using DynamicTensorMap = std::unordered_map<std::string, Tensor>;
 using DynamicTensorScalarMap = std::unordered_map<std::string, TensorScalarBinding>;
 using DynamicShapeMap = std::unordered_map<std::string, std::vector<uint64_t>>;
@@ -65,6 +74,82 @@ class GilSafePythonObject {
    private:
     PyObject* object = nullptr;
 };
+
+dim3 dim3FromPython(nb::handle value, const char* name) {
+    std::vector<uint32_t> dims = nb::cast<std::vector<uint32_t>>(value);
+    if (dims.empty() || dims.size() > 3) {
+        throw nb::value_error((std::string(name) + " must contain 1, 2, or 3 unsigned integer dimensions.").c_str());
+    }
+
+    while (dims.size() < 3) {
+        dims.push_back(1);
+    }
+    return dim3(dims[0], dims[1], dims[2]);
+}
+
+CudaKernelLaunchConfig makeCudaKernelLaunchConfig(nb::handle grid, nb::handle block, uint32_t dynamic_shared_bytes) {
+    CudaKernelLaunchConfig config;
+    config.grid = dim3FromPython(grid, "grid");
+    config.block = dim3FromPython(block, "block");
+    config.dynamic_shared_bytes = dynamic_shared_bytes;
+    return config;
+}
+
+CudaKernelDimExpr dimExprFromPython(nb::handle value) {
+    if (nb::isinstance<CudaKernelDimExpr>(value)) {
+        return nb::cast<CudaKernelDimExpr>(value);
+    }
+    if (nb::isinstance<nb::int_>(value)) {
+        const int64_t dim = nb::cast<int64_t>(value);
+        if (dim < 0) {
+            throw nb::value_error("CudaKernelExpression dimensions must be non-negative.");
+        }
+        return CudaKernelDimExpr::constant(static_cast<uint64_t>(dim));
+    }
+    throw nb::type_error("CudaKernelExpression shape entries must be integers or CudaKernelDimExpr objects.");
+}
+
+std::vector<CudaKernelDimExpr> dimExprVectorFromPython(nb::handle shape) {
+    std::vector<CudaKernelDimExpr> dims;
+    for (nb::handle item : nb::cast<nb::sequence>(shape)) {
+        dims.push_back(dimExprFromPython(item));
+    }
+    return dims;
+}
+
+std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, CudaKernelDimExpr> scalarValueFromPython(DataType type,
+                                                                                                           nb::handle value) {
+    if (nb::isinstance<CudaKernelDimExpr>(value)) {
+        return nb::cast<CudaKernelDimExpr>(value);
+    }
+
+    switch (type) {
+        case DataType::INT32:
+            return static_cast<int32_t>(nb::cast<int64_t>(value));
+        case DataType::UINT32:
+            return static_cast<uint32_t>(nb::cast<uint64_t>(value));
+        case DataType::INT64:
+            return static_cast<int64_t>(nb::cast<int64_t>(value));
+        case DataType::UINT64:
+            return static_cast<uint64_t>(nb::cast<uint64_t>(value));
+        case DataType::FP32:
+            return static_cast<float>(nb::cast<double>(value));
+        case DataType::FP64:
+            return static_cast<double>(nb::cast<double>(value));
+        default:
+            throw nb::value_error("CudaKernelExpression scalar dtype is not supported for by-value kernel scalar arguments. Supported scalar dtypes are int32, uint32, int64, uint64, fp32, and fp64.");
+    }
+}
+
+CudaKernelExpression::LaunchFn launchFnFromPython(nb::callable launch) {
+    auto launch_ref = std::make_shared<GilSafePythonObject>(launch);
+    return [launch_ref](const CudaKernelLaunchContext& ctx) -> CudaKernelLaunchConfig {
+        nb::gil_scoped_acquire gil;
+        nb::callable launch_callable = nb::borrow<nb::callable>(launch_ref->get());
+        nb::object result = launch_callable(nb::cast(&ctx, nb::rv_policy::reference));
+        return nb::cast<CudaKernelLaunchConfig>(result);
+    };
+}
 
 }  // namespace
 
@@ -129,6 +214,146 @@ RoPE scaling parameterization for ``Expression.rotary_position_embedding`` and
         []() { return ThorImplementation::CudnnScaledDotProductAttention::frontendAvailable(); },
         R"nbdoc(
 Return True when Thor was compiled with the cuDNN Frontend C++ headers needed by the cuDNN SDPA attention executor.
+)nbdoc");
+
+    auto cuda_kernel_dim_expr = nb::class_<CudaKernelDimExpr>(physical, "CudaKernelDimExpr");
+    cuda_kernel_dim_expr.attr("__module__") = "thor.physical";
+    cuda_kernel_dim_expr.def_static("constant", &CudaKernelDimExpr::constant, "value"_a)
+        .def_static("dim", &CudaKernelDimExpr::dim, "tensor_name"_a, "axis"_a)
+        .def_static("numel", &CudaKernelDimExpr::numel, "tensor_name"_a)
+        .def("describe", &CudaKernelDimExpr::describe)
+        .def("__repr__", [](const CudaKernelDimExpr& self) { return "CudaKernelDimExpr(" + self.describe() + ")"; });
+
+    auto cuda_kernel_launch_config = nb::class_<CudaKernelLaunchConfig>(physical, "CudaKernelLaunchConfig");
+    cuda_kernel_launch_config.attr("__module__") = "thor.physical";
+    cuda_kernel_launch_config
+        .def(
+            "__init__",
+            [](CudaKernelLaunchConfig* self, nb::object grid, nb::object block, uint32_t dynamic_shared_bytes) {
+                new (self) CudaKernelLaunchConfig(makeCudaKernelLaunchConfig(grid, block, dynamic_shared_bytes));
+            },
+            "grid"_a,
+            "block"_a,
+            "dynamic_shared_bytes"_a = 0,
+            R"nbdoc(
+CUDA launch configuration for a CudaKernelExpression.
+
+``grid`` and ``block`` may be 1-, 2-, or 3-element integer sequences. Missing
+trailing dimensions default to 1. ``dynamic_shared_bytes`` is passed as the
+kernel launch dynamic shared-memory byte count.
+)nbdoc")
+        .def_static(
+            "grid_1d",
+            [](uint64_t elements, uint32_t block_size, uint32_t dynamic_shared_bytes) {
+                if (block_size == 0) {
+                    throw nb::value_error("block_size must be nonzero.");
+                }
+                uint64_t grid_x = (elements + block_size - 1) / block_size;
+                if (grid_x == 0) {
+                    grid_x = 1;
+                }
+                if (grid_x > std::numeric_limits<uint32_t>::max()) {
+                    throw nb::value_error("grid_x does not fit in uint32_t.");
+                }
+                return CudaKernelLaunchConfig{dim3(static_cast<uint32_t>(grid_x), 1, 1), dim3(block_size, 1, 1), dynamic_shared_bytes};
+            },
+            "elements"_a,
+            "block_size"_a = 256,
+            "dynamic_shared_bytes"_a = 0)
+        .def_prop_rw(
+            "dynamic_shared_bytes",
+            [](const CudaKernelLaunchConfig& self) { return self.dynamic_shared_bytes; },
+            [](CudaKernelLaunchConfig& self, uint32_t bytes) { self.dynamic_shared_bytes = bytes; })
+        .def_prop_ro("grid",
+                     [](const CudaKernelLaunchConfig& self) { return std::vector<uint32_t>{self.grid.x, self.grid.y, self.grid.z}; })
+        .def_prop_ro("block",
+                     [](const CudaKernelLaunchConfig& self) { return std::vector<uint32_t>{self.block.x, self.block.y, self.block.z}; });
+
+    auto cuda_kernel_launch_context = nb::class_<CudaKernelLaunchContext>(physical, "CudaKernelLaunchContext");
+    cuda_kernel_launch_context.attr("__module__") = "thor.physical";
+    cuda_kernel_launch_context.def("dim", &CudaKernelLaunchContext::dim, "tensor_name"_a, "axis"_a)
+        .def("numel", &CudaKernelLaunchContext::numel, "tensor_name"_a)
+        .def("dtype", &CudaKernelLaunchContext::dtype, "tensor_name"_a)
+        .def_prop_ro("device_num", [](const CudaKernelLaunchContext& self) { return self.device_num; });
+
+    auto cuda_kernel_expression = nb::class_<CudaKernelExpression>(physical, "CudaKernelExpression");
+    cuda_kernel_expression.attr("__module__") = "thor.physical";
+
+    auto cuda_kernel_expression_builder = nb::class_<CudaKernelExpression::Builder>(physical, "CudaKernelExpressionBuilder");
+    cuda_kernel_expression_builder.attr("__module__") = "thor.physical";
+    cuda_kernel_expression_builder.def(nb::init<std::string>(), "name"_a)
+        .def("source", &CudaKernelExpression::Builder::source, "cuda_source"_a, nb::rv_policy::reference_internal)
+        .def("entry", &CudaKernelExpression::Builder::entry, "entrypoint"_a, nb::rv_policy::reference_internal)
+        .def("input", &CudaKernelExpression::Builder::input, "name"_a, "dtype"_a, nb::rv_policy::reference_internal)
+        .def("tensor_runtime_scalar_input",
+             &CudaKernelExpression::Builder::tensorRuntimeScalarInput,
+             "name"_a,
+             "dtype"_a,
+             nb::rv_policy::reference_internal)
+        .def("host_runtime_scalar_input",
+             &CudaKernelExpression::Builder::hostRuntimeScalarInput,
+             "name"_a,
+             "dtype"_a,
+             nb::rv_policy::reference_internal)
+        .def(
+            "output",
+            [](CudaKernelExpression::Builder& self, const std::string& name, DataType dtype, nb::sequence shape)
+                -> CudaKernelExpression::Builder& { return self.output(name, dtype, dimExprVectorFromPython(shape)); },
+            "name"_a,
+            "dtype"_a,
+            "shape"_a,
+            nb::rv_policy::reference_internal)
+        .def("output_like",
+             &CudaKernelExpression::Builder::outputLike,
+             "name"_a,
+             "dtype"_a,
+             "input_name"_a,
+             nb::rv_policy::reference_internal)
+        .def(
+            "scalar",
+            [](CudaKernelExpression::Builder& self, const std::string& name, DataType type, nb::object value)
+                -> CudaKernelExpression::Builder& { return self.scalar(name, type, scalarValueFromPython(type, value)); },
+            "name"_a,
+            "type"_a,
+            "value"_a,
+            nb::rv_policy::reference_internal)
+        .def(
+            "launch",
+            [](CudaKernelExpression::Builder& self, nb::callable launch) -> CudaKernelExpression::Builder& {
+                return self.launch(launchFnFromPython(launch));
+            },
+            "launch"_a,
+            nb::rv_policy::reference_internal)
+        .def("use_fast_math", &CudaKernelExpression::Builder::useFastMath, "enabled"_a = true, nb::rv_policy::reference_internal)
+        .def("build", &CudaKernelExpression::Builder::build);
+
+    cuda_kernel_expression.def_static("builder", &CudaKernelExpression::builder, "name"_a)
+        .def_static("dim", &CudaKernelDimExpr::dim, "tensor_name"_a, "axis"_a)
+        .def_static("numel", &CudaKernelDimExpr::numel, "tensor_name"_a)
+        .def_static("constant_dim", &CudaKernelDimExpr::constant, "value"_a)
+        .def("name", &CudaKernelExpression::name)
+        .def("apply", &CudaKernelExpression::apply, "inputs"_a)
+        .def("__call__", &CudaKernelExpression::apply, "inputs"_a)
+        .def("as_dynamic_expression", &CudaKernelExpression::asDynamicExpression)
+        .def(
+            "stamp",
+            [](const CudaKernelExpression& self,
+               const std::unordered_map<std::string, Tensor>& inputs,
+               const std::unordered_map<std::string, Tensor>& preallocated_outputs,
+               Stream& stream,
+               const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) {
+                return self.stamp(inputs, preallocated_outputs, stream, tensor_scalar_inputs);
+            },
+            "inputs"_a,
+            "preallocated_outputs"_a,
+            "stream"_a,
+            "tensor_scalar_inputs"_a = std::unordered_map<std::string, TensorScalarBinding>{},
+            R"nbdoc(
+Compile, bind, and stamp this CUDA kernel expression directly.
+
+Most users should use ``apply(...)`` to stitch the custom kernel into a normal
+Thor expression graph. This direct path is useful for low-level tests and
+standalone custom kernels.
 )nbdoc");
 
     auto expr = nb::class_<Expression>(physical, "Expression");
@@ -297,10 +522,9 @@ fused kernel when no dtype conversion is requested.
 
     expr.def(
         "strided_view",
-        [](const Expression& self,
-           const std::vector<uint64_t>& dims,
-           const std::vector<uint64_t>& strides,
-           uint64_t element_offset) { return self.stridedView(dims, strides, element_offset); },
+        [](const Expression& self, const std::vector<uint64_t>& dims, const std::vector<uint64_t>& strides, uint64_t element_offset) {
+            return self.stridedView(dims, strides, element_offset);
+        },
         "shape"_a,
         "strides"_a,
         "element_offset"_a = 0,
@@ -483,30 +707,30 @@ Shorthand for ``self.transpose()``.
     };
 
     auto build_attention_from_python_args = [parse_optional_dtype](const Expression& q,
-                                                                 const Expression& k,
-                                                                 const Expression& v,
-                                                                 AttentionTensorLayout q_layout,
-                                                                 AttentionTensorLayout k_layout,
-                                                                 AttentionTensorLayout v_layout,
-                                                                 AttentionTensorLayout o_layout,
-                                                                 AttentionMaskKind mask_kind,
-                                                                 int64_t diagonal_left_bound,
-                                                                 int64_t diagonal_right_bound,
-                                                                 nb::object attention_scale_obj,
-                                                                 bool use_alibi_mask,
-                                                                 nb::object output_dtype_obj,
-                                                                 nb::object compute_dtype_obj,
-                                                                 nb::object bias_obj,
-                                                                 nb::object q_seq_len_obj,
-                                                                 nb::object kv_seq_len_obj,
-                                                                 nb::object q_ragged_offsets_obj,
-                                                                 nb::object kv_ragged_offsets_obj,
-                                                                 nb::object page_table_k_obj,
-                                                                 nb::object page_table_v_obj,
-                                                                 int64_t paged_kv_max_sequence_length,
-                                                                 float dropout_probability,
-                                                                 nb::object dropout_seed_obj,
-                                                                 nb::object dropout_offset_obj) -> Expression {
+                                                                   const Expression& k,
+                                                                   const Expression& v,
+                                                                   AttentionTensorLayout q_layout,
+                                                                   AttentionTensorLayout k_layout,
+                                                                   AttentionTensorLayout v_layout,
+                                                                   AttentionTensorLayout o_layout,
+                                                                   AttentionMaskKind mask_kind,
+                                                                   int64_t diagonal_left_bound,
+                                                                   int64_t diagonal_right_bound,
+                                                                   nb::object attention_scale_obj,
+                                                                   bool use_alibi_mask,
+                                                                   nb::object output_dtype_obj,
+                                                                   nb::object compute_dtype_obj,
+                                                                   nb::object bias_obj,
+                                                                   nb::object q_seq_len_obj,
+                                                                   nb::object kv_seq_len_obj,
+                                                                   nb::object q_ragged_offsets_obj,
+                                                                   nb::object kv_ragged_offsets_obj,
+                                                                   nb::object page_table_k_obj,
+                                                                   nb::object page_table_v_obj,
+                                                                   int64_t paged_kv_max_sequence_length,
+                                                                   float dropout_probability,
+                                                                   nb::object dropout_seed_obj,
+                                                                   nb::object dropout_offset_obj) -> Expression {
         AttentionOptions options;
         options.q_layout = q_layout;
         options.k_layout = k_layout;
@@ -582,7 +806,8 @@ Shorthand for ``self.transpose()``.
             const Expression& kv_seq_len = nb::cast<Expression>(kv_seq_len_obj);
             const Expression& page_table_k = nb::cast<Expression>(page_table_k_obj);
             const Expression& page_table_v = nb::cast<Expression>(page_table_v_obj);
-            return Expression::scaledDotProductAttentionPagedKv(q, k, v, q_seq_len, kv_seq_len, page_table_k, page_table_v, std::move(options));
+            return Expression::scaledDotProductAttentionPagedKv(
+                q, k, v, q_seq_len, kv_seq_len, page_table_k, page_table_v, std::move(options));
         }
 
         if (has_q_ragged_offsets) {
@@ -623,15 +848,8 @@ Shorthand for ``self.transpose()``.
                 const Expression& q_seq_len = nb::cast<Expression>(q_seq_len_obj);
                 const Expression& kv_seq_len = nb::cast<Expression>(kv_seq_len_obj);
                 if (has_bias) {
-                    return Expression::scaledDotProductAttention(q,
-                                                                 k,
-                                                                 v,
-                                                                 nb::cast<Expression>(bias_obj),
-                                                                 q_seq_len,
-                                                                 kv_seq_len,
-                                                                 dropout_seed,
-                                                                 dropout_offset,
-                                                                 std::move(options));
+                    return Expression::scaledDotProductAttention(
+                        q, k, v, nb::cast<Expression>(bias_obj), q_seq_len, kv_seq_len, dropout_seed, dropout_offset, std::move(options));
                 }
                 return Expression::scaledDotProductAttention(
                     q, k, v, q_seq_len, kv_seq_len, dropout_seed, dropout_offset, std::move(options));
@@ -657,7 +875,6 @@ Shorthand for ``self.transpose()``.
         }
         return Expression::scaledDotProductAttention(q, k, v, std::move(options));
     };
-
 
     expr.def_static(
         "rotary_position_embedding",
@@ -1788,8 +2005,9 @@ outputs: dict[str, PhysicalTensor]
                         return "unknown";
                     };
                     std::ostringstream oss;
-                    oss << label << "(op=" << ThorImplementation::opName(stage.matmul->op) << ",lhsT=" << (stage.matmul->transpose_lhs ? 1 : 0)
-                        << ",rhsT=" << (stage.matmul->transpose_rhs ? 1 : 0) << ",auxT=" << (stage.matmul->transpose_aux ? 1 : 0);
+                    oss << label << "(op=" << ThorImplementation::opName(stage.matmul->op)
+                        << ",lhsT=" << (stage.matmul->transpose_lhs ? 1 : 0) << ",rhsT=" << (stage.matmul->transpose_rhs ? 1 : 0)
+                        << ",auxT=" << (stage.matmul->transpose_aux ? 1 : 0);
                     if (stage.matmul->epilogue != ThorImplementation::MatmulEpilogue::Default) {
                         oss << ",epilogue=" << epilogue_name(stage.matmul->epilogue);
                     }
@@ -1850,16 +2068,13 @@ outputs: dict[str, PhysicalTensor]
                 }
 
                 std::ostringstream oss;
-                oss << "FusedKernel(stage=" << stage_idx
-                    << ",launch=" << launch_kind_name(launch_equation->launch_kind)
-                    << ",outputs=" << stage.outputs.size()
-                    << ",elements_per_thread=" << launch_equation->elements_per_thread
+                oss << "FusedKernel(stage=" << stage_idx << ",launch=" << launch_kind_name(launch_equation->launch_kind)
+                    << ",outputs=" << stage.outputs.size() << ",elements_per_thread=" << launch_equation->elements_per_thread
                     << ",tiled_pack=" << launch_equation->tiled_transpose_pack_scalars
                     << ",logical_transpose=" << (launch_equation->uses_tiled_logical_transpose_consumer ? 1 : 0)
                     << ",logical_slot_bytes=" << launch_equation->tiled_logical_transpose_slot_bytes
                     << ",logical_dense_packed_loads=" << launch_equation->tiled_logical_transpose_dense_packed_input_load_count
-                    << ",logical_vectorized_outputs=" << launch_equation->tiled_logical_transpose_vectorized_output_count
-                    << ")";
+                    << ",logical_vectorized_outputs=" << launch_equation->tiled_logical_transpose_vectorized_output_count << ")";
                 result.push_back(oss.str());
             }
             return result;

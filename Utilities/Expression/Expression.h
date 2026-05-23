@@ -22,6 +22,7 @@
 
 namespace ThorImplementation {
 struct PhysicalExecutionStage;
+class CudaKernelExpression;
 class Outputs;
 
 enum class ExprOp : uint16_t {
@@ -87,6 +88,7 @@ enum class ExprOp : uint16_t {
     ATTENTION_BACKWARD_K,
     ATTENTION_BACKWARD_V,
     ATTENTION_BACKWARD_BIAS,
+    CUDA_KERNEL_OUTPUT,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -267,6 +269,14 @@ struct ExprNode {
     std::vector<uint64_t> squeeze_axes;
     std::vector<uint64_t> unsqueeze_axes;
     std::vector<uint64_t> fill_dims;
+
+    // For CUDA_KERNEL_OUTPUT nodes only. All output nodes for one custom CUDA
+    // kernel application share cuda_kernel_spec_index and differ by
+    // cuda_kernel_output_index. cuda_kernel_input_nodes contains the graph
+    // inputs to the kernel in the user-declared ABI order.
+    uint32_t cuda_kernel_spec_index = UINT32_MAX;
+    uint32_t cuda_kernel_output_index = UINT32_MAX;
+    std::vector<uint32_t> cuda_kernel_input_nodes;
 };
 
 struct NamedInput {
@@ -289,6 +299,7 @@ struct NamedOutput {
 struct PhysicalExpression {
     std::vector<ExprNode> nodes;
     std::vector<NamedInput> inputs;
+    std::vector<std::shared_ptr<const CudaKernelExpression>> cuda_kernel_expressions;
     uint32_t output_node = UINT32_MAX;
 
     uint32_t numInputs() const { return static_cast<uint32_t>(inputs.size()); }
@@ -735,6 +746,9 @@ class Expression {
     [[nodiscard]] static Expression quaternaryOp(
         const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, const Expression& fourthExpr, ExprOp op);
     [[nodiscard]] static Expression unaryOp(const Expression& inputExpr, ExprOp op);
+    [[nodiscard]] static uint32_t cloneInto(const PhysicalExpression& src,
+                                            PhysicalExpression& dst,
+                                            std::unordered_map<std::string, uint32_t>& dst_input_slots_by_name);
 
     [[nodiscard]] static Expression attentionWithOptionalMetadata(const Expression& q,
                                                                   const Expression& k,
@@ -757,6 +771,8 @@ class Expression {
                                                                   const Expression* scale_o = nullptr,
                                                                   const Expression* amax_s = nullptr,
                                                                   const Expression* amax_o = nullptr);
+
+    friend class CudaKernelExpression;
 
     static uint32_t encodeLowerableGemmScaleExpression(const Expression& scale_expr,
                                                        PhysicalExpression& dst,
