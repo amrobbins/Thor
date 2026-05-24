@@ -258,10 +258,40 @@ class EmbeddingLookupPerfCase:
 
 CASES = [
     EmbeddingLookupPerfCase(
+        name="d1_tiny_packed_warp",
+        num_tokens=1_048_576,
+        embedding_dim=1,
+        description="Ultra-tiny row width: the generated kernel packs thirty-two independent token lookups into each warp.",
+    ),
+    EmbeddingLookupPerfCase(
+        name="d2_tiny_packed_warp",
+        num_tokens=1_048_576,
+        embedding_dim=2,
+        description="Ultra-tiny row width: the generated kernel packs sixteen independent token lookups into each warp.",
+    ),
+    EmbeddingLookupPerfCase(
+        name="d4_tiny_packed_warp",
+        num_tokens=524_288,
+        embedding_dim=4,
+        description="Ultra-tiny row width: the generated kernel packs eight independent token lookups into each warp.",
+    ),
+    EmbeddingLookupPerfCase(
+        name="d8_tiny_packed_warp",
+        num_tokens=262_144,
+        embedding_dim=8,
+        description="Tiny row width: the generated kernel packs four independent token lookups into each warp.",
+    ),
+    EmbeddingLookupPerfCase(
+        name="d16_tiny_packed_warp",
+        num_tokens=262_144,
+        embedding_dim=16,
+        description="Tiny row width: the generated kernel packs two independent token lookups into each warp.",
+    ),
+    EmbeddingLookupPerfCase(
         name="d32_many_tokens",
         num_tokens=131_072,
         embedding_dim=32,
-        description="Small row width: one lane normally copies one element for fp32 and two elements for fp16/bf16.",
+        description="Small row width: one logical token group uses a full warp but only one lane loads the row index.",
     ),
     EmbeddingLookupPerfCase(
         name="d128_llm_token_width",
