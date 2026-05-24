@@ -107,6 +107,34 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
     compiled = true;
 }
 
+SparseRowGradient Sgd::compileSparseRows(const Tensor& weights, uint64_t maxSparseRows, Stream& gradientUpdateStream) {
+    THOR_THROW_IF_FALSE(!compiled);
+    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
+    THOR_THROW_IF_FALSE(weights.isInitialized());
+    THOR_THROW_IF_FALSE(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    const std::vector<uint64_t> weightDims = weights.getDimensions();
+    if (weightDims.size() != 2 || weightDims[0] == 0 || weightDims[1] == 0) {
+        throw std::invalid_argument("Sparse SGD weights tensor must have shape [vocabulary_size, embedding_dim].");
+    }
+    if (maxSparseRows == 0) {
+        throw std::invalid_argument("Sparse SGD maxSparseRows must be non-zero.");
+    }
+    if (maxSparseRows > weightDims[0]) {
+        throw std::invalid_argument("Sparse SGD maxSparseRows cannot exceed the embedding vocabulary size.");
+    }
+
+    this->gradientUpdateStream = gradientUpdateStream;
+    this->weights = weights;
+    this->sparseRowGradient =
+        SparseRowGradient::allocate(weights.getPlacement(), maxSparseRows, weightDims[0], weightDims[1], DataType::FP32, DataType::UINT64);
+
+    // Step 1 only installs the optimizer-owned reduced sparse-gradient sink. The sparse expression update plan is the
+    // next slice, so sparse update calls fail explicitly rather than silently doing nothing.
+    compiled = true;
+    return sparseRowGradient.value();
+}
+
 void Sgd::updateWeights(uint32_t batchSize) {
     THOR_THROW_IF_FALSE(compiled);
     THOR_THROW_IF_FALSE(weightsGradient.has_value());
@@ -122,6 +150,15 @@ void Sgd::updateWeights(uint32_t batchSize) {
     updateEquationStamped->run({
         {"step", step},
     });
+}
+
+void Sgd::updateSparseRows(uint32_t batchSize) {
+    (void)batchSize;
+    THOR_THROW_IF_FALSE(compiled);
+    THOR_THROW_IF_FALSE(sparseRowGradient.has_value());
+    throw std::runtime_error(
+        "Sparse SGD update has an optimizer-owned reduced sparse-gradient sink, but the sparse row expression update stage is not "
+        "implemented yet.");
 }
 
 unordered_map<string, float> Sgd::updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {

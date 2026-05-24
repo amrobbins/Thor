@@ -364,33 +364,48 @@ void py_serializable_scale_kernel(const float* x, float* y, float alpha, int64_t
         kernel.apply({"x": ex.input("x", output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32)})
     )
     payload = definition_to_save.to_json()
-    signing_public_keys = definition_to_save.cuda_kernel_signing_public_keys()
-    assert len(signing_public_keys) == 1
-    trusted_public_key = signing_public_keys[0]
+    key_sets = thor.physical.cuda_kernel_out_of_band_keys_from_json(payload)
+    assert len(key_sets) == 1
+    trusted_public_key = key_sets[0]["signing_public_key"]
+    trusted_source_decryption_key = key_sets[0]["source_decryption_key"]
 
     payload_json = json.loads(payload)
     assert payload_json["cuda_kernels"][0]["name"] == "py_serializable_scale"
-    assert "py_serializable_scale_kernel" in payload_json["cuda_kernels"][0]["source"]
+    assert "source" not in payload_json["cuda_kernels"][0]
+    assert payload_json["cuda_kernels"][0]["encrypted_source"]
+    assert payload_json["cuda_kernels"][0]["source_encryption"]["algorithm"] == "aes-256-gcm"
+    # Entrypoint names remain plaintext ABI metadata; the CUDA source body must not.
+    assert "y[i] = alpha * x[i]" not in payload
     signature_json = payload_json["cuda_kernel_manifest_signature"]
     assert signature_json["algorithm"] == "ed25519"
     assert "public_key" not in signature_json
     assert signature_json["public_key_fingerprint"]
     assert trusted_public_key
+    assert trusted_source_decryption_key
     assert signature_json["public_key_fingerprint"] != trusted_public_key
-    assert thor.physical.cuda_kernel_signing_public_keys_from_json(payload) == signing_public_keys
+    assert payload_json["cuda_kernels"][0]["source_encryption"]["source_decryption_key_fingerprint"] != trusted_source_decryption_key
+    assert thor.physical.cuda_kernel_signing_public_keys_from_json(payload) == [trusted_public_key]
 
     serialized_source_info = thor.physical.cuda_kernel_source_info_from_json(payload)
     assert len(serialized_source_info) == 1
     assert serialized_source_info[0]["name"] == "py_serializable_scale"
     assert serialized_source_info[0]["entrypoint"] == "py_serializable_scale_kernel"
-    assert "py_serializable_scale_kernel" in serialized_source_info[0]["source"]
-    assert "THOR_CUDA_KERNEL_EXPRESSION_FIXED_WIDTH_TYPES" in serialized_source_info[0]["compiled_source"]
-    assert "py_serializable_scale_kernel" in serialized_source_info[0]["compiled_source"]
+    assert serialized_source_info[0]["source_encrypted"] is True
+    assert serialized_source_info[0]["source"] == ""
+    assert serialized_source_info[0]["compiled_source"] == ""
+    assert serialized_source_info[0]["source_encryption_algorithm"] == "aes-256-gcm"
     assert serialized_source_info[0]["loaded_source_compilation_allowed"] is False
     assert serialized_source_info[0]["signing_public_key_fingerprint"] == signature_json["public_key_fingerprint"]
     assert "signing_public_key" not in serialized_source_info[0]
 
-    definition = thor.physical.ExpressionDefinition.from_json(payload)
+    with pytest.raises(RuntimeError, match="trusted Ed25519 public key|required to load encrypted|source decryption key"):
+        thor.physical.ExpressionDefinition.from_json(payload)
+
+    definition = thor.physical.ExpressionDefinition.from_json(
+        payload,
+        trusted_cuda_kernel_public_key=trusted_public_key,
+        trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
+    )
     first_class_source_info = definition.cuda_kernel_source_info()
     assert len(first_class_source_info) == 1
     assert first_class_source_info[0]["name"] == "py_serializable_scale"
@@ -415,6 +430,8 @@ void py_serializable_scale_kernel(const float* x, float* y, float alpha, int64_t
 
     with pytest.raises(RuntimeError, match="trusted Ed25519 public key"):
         thor.physical.ExpressionDefinition.from_json(payload, allow_unsafe_loaded_cuda_kernel_source=True)
+    with pytest.raises(RuntimeError, match="source decryption key"):
+        thor.physical.ExpressionDefinition.from_json(payload, trusted_cuda_kernel_public_key=trusted_public_key)
 
     missing_signature_payload_json = json.loads(payload)
     del missing_signature_payload_json["cuda_kernel_manifest_signature"]
@@ -423,6 +440,7 @@ void py_serializable_scale_kernel(const float* x, float* y, float alpha, int64_t
             json.dumps(missing_signature_payload_json),
             allow_unsafe_loaded_cuda_kernel_source=True,
             trusted_cuda_kernel_public_key=trusted_public_key,
+            trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
         )
 
     public_key_in_fingerprint_payload_json = json.loads(payload)
@@ -432,6 +450,7 @@ void py_serializable_scale_kernel(const float* x, float* y, float alpha, int64_t
             json.dumps(public_key_in_fingerprint_payload_json),
             allow_unsafe_loaded_cuda_kernel_source=True,
             trusted_cuda_kernel_public_key=trusted_public_key,
+            trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
         )
 
     wrong_key_kernel = (
@@ -459,24 +478,26 @@ void py_wrong_key_source_kernel(const float* x, float* y, int64_t n) {
     wrong_key_payload = wrong_key_definition.to_json()
     wrong_key_payload_json = json.loads(wrong_key_payload)
     assert "public_key" not in wrong_key_payload_json["cuda_kernel_manifest_signature"]
-    wrong_signing_public_keys = wrong_key_definition.cuda_kernel_signing_public_keys()
-    assert len(wrong_signing_public_keys) == 1
-    wrong_trusted_public_key = wrong_signing_public_keys[0]
+    wrong_key_sets = thor.physical.cuda_kernel_out_of_band_keys_from_json(wrong_key_payload)
+    assert len(wrong_key_sets) == 1
+    wrong_trusted_public_key = wrong_key_sets[0]["signing_public_key"]
     assert wrong_trusted_public_key != trusted_public_key
     with pytest.raises(RuntimeError, match="does not match"):
         thor.physical.ExpressionDefinition.from_json(
             payload,
             allow_unsafe_loaded_cuda_kernel_source=True,
             trusted_cuda_kernel_public_key=wrong_trusted_public_key,
+            trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
         )
 
     tampered_payload_json = json.loads(payload)
-    tampered_payload_json["cuda_kernels"][0]["source"] += "\n// tampered\n"
+    tampered_payload_json["cuda_kernels"][0]["encrypted_source"] += "00"
     with pytest.raises(RuntimeError, match="signature verification failed|SHA-256 hash"):
         thor.physical.ExpressionDefinition.from_json(
             json.dumps(tampered_payload_json),
             allow_unsafe_loaded_cuda_kernel_source=True,
             trusted_cuda_kernel_public_key=trusted_public_key,
+            trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
         )
 
     tampered_launch_payload_json = json.loads(payload)
@@ -486,12 +507,14 @@ void py_wrong_key_source_kernel(const float* x, float* y, int64_t n) {
             json.dumps(tampered_launch_payload_json),
             allow_unsafe_loaded_cuda_kernel_source=True,
             trusted_cuda_kernel_public_key=trusted_public_key,
+            trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
         )
 
     allowed_definition = thor.physical.ExpressionDefinition.from_json(
         payload,
         allow_unsafe_loaded_cuda_kernel_source=True,
         trusted_cuda_kernel_public_key=trusted_public_key,
+        trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
     )
     allowed_source_info = json.loads(allowed_definition.cuda_kernel_source_info_json())
     assert allowed_source_info[0]["loaded_source_compilation_allowed"] is True
@@ -531,18 +554,24 @@ void py_custom_layer_serializable_scale_kernel(const float* feature_input, float
 
     architecture_payload = network.get_architecture_json()
     architecture = json.loads(architecture_payload)
+    key_sets = thor.physical.cuda_kernel_out_of_band_keys_from_json(architecture_payload)
+    assert len(key_sets) == 1
     signing_public_keys = network.cuda_kernel_signing_public_keys()
-    assert len(signing_public_keys) == 1
+    assert signing_public_keys == [key_sets[0]["signing_public_key"]]
     assert thor.physical.cuda_kernel_signing_public_keys_from_json(architecture_payload) == signing_public_keys
     assert network.get_architecture_json() == architecture_payload
     assert network.cuda_kernel_signing_public_keys() == signing_public_keys
-    trusted_public_key = signing_public_keys[0]
+    trusted_public_key = key_sets[0]["signing_public_key"]
+    trusted_source_decryption_key = key_sets[0]["source_decryption_key"]
     custom_layers = [layer_json for layer_json in architecture["layers"] if layer_json["layer_type"] == "custom_layer"]
     assert len(custom_layers) == 1
 
     expression_json = custom_layers[0]["expression"]
     assert expression_json["cuda_kernels"][0]["name"] == "py_custom_layer_serializable_scale"
-    assert "py_custom_layer_serializable_scale_kernel" in expression_json["cuda_kernels"][0]["source"]
+    assert "source" not in expression_json["cuda_kernels"][0]
+    assert expression_json["cuda_kernels"][0]["encrypted_source"]
+    # Entrypoint names remain plaintext ABI metadata; the CUDA source body must not.
+    assert "feature_output[i] = 2.0f * feature_input[i]" not in architecture_payload
     assert expression_json["cuda_kernel_manifest_signature"]["algorithm"] == "ed25519"
     assert "public_key" not in expression_json["cuda_kernel_manifest_signature"]
     assert expression_json["cuda_kernel_manifest_signature"]["public_key_fingerprint"]
@@ -558,6 +587,7 @@ void py_custom_layer_serializable_scale_kernel(const float* feature_input, float
         payload,
         allow_unsafe_loaded_cuda_kernel_source=True,
         trusted_cuda_kernel_public_key=trusted_public_key,
+        trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
     )
     assert definition.has_cuda_kernel_expressions is True
 

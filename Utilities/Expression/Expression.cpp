@@ -1488,9 +1488,6 @@ json ExpressionDefinition::architectureJson() const {
 
     const std::string computed_hash = expressionHash(outputs);
     j["canonical_hash"] = computed_hash;
-    if (j.contains("cuda_kernels") && !j.at("cuda_kernels").empty() && !cuda_kernel_manifest_signature.is_null()) {
-        j["cuda_kernel_manifest_signature"] = cuda_kernel_manifest_signature;
-    }
     return j;
 }
 
@@ -1498,14 +1495,11 @@ json ExpressionDefinition::architectureJsonWithCudaKernelManifestSignature() con
     if (!hasCudaKernelExpressions()) {
         return architectureJson();
     }
-    if (!cuda_kernel_manifest_signature.is_null()) {
-        return architectureJson();
-    }
 
     json signed_payload = architectureJson();
-    const std::vector<std::string> signing_public_keys = cudaKernelGenerateAndAttachManifestSignatures(signed_payload);
-    if (signing_public_keys.empty()) {
-        throw std::runtime_error("ExpressionDefinition has CUDA kernels but CUDA manifest signing produced no public key.");
+    const std::vector<CudaKernelOutOfBandKeys> out_of_band_keys = cudaKernelGenerateAndAttachManifestSignatures(signed_payload);
+    if (out_of_band_keys.empty()) {
+        throw std::runtime_error("ExpressionDefinition has CUDA kernels but CUDA source protection produced no out-of-band keys.");
     }
 
     auto sig_it = signed_payload.find("cuda_kernel_manifest_signature");
@@ -1519,10 +1513,19 @@ json ExpressionDefinition::architectureJsonWithCudaKernelManifestSignature() con
 bool ExpressionDefinition::hasCudaKernelExpressions() const { return outputs.expr && !outputs.expr->cuda_kernel_expressions.empty(); }
 
 std::vector<std::string> ExpressionDefinition::cudaKernelSigningPublicKeys() const {
-    if (hasCudaKernelExpressions() && cuda_kernel_manifest_signature.is_null()) {
-        (void)architectureJsonWithCudaKernelManifestSignature();
+    if (!hasCudaKernelExpressions()) {
+        return {};
     }
-    return collectCudaKernelSigningPublicKeys(architectureJson());
+    const json signed_payload = architectureJsonWithCudaKernelManifestSignature();
+    return collectCudaKernelSigningPublicKeys(signed_payload);
+}
+
+std::vector<CudaKernelOutOfBandKeys> ExpressionDefinition::cudaKernelOutOfBandKeys() const {
+    if (!hasCudaKernelExpressions()) {
+        return {};
+    }
+    const json signed_payload = architectureJsonWithCudaKernelManifestSignature();
+    return collectCudaKernelOutOfBandKeys(signed_payload);
 }
 
 std::vector<CudaKernelSourceInspection> ExpressionDefinition::cudaKernelSourceInfo() const {
@@ -1564,12 +1567,13 @@ std::vector<std::string> ExpressionDefinition::cudaKernelSources() const {
 
 json ExpressionDefinition::cudaKernelSourceInfoJson() const { return cudaKernelSourceInspectionListToJson(cudaKernelSourceInfo()); }
 
-void ExpressionDefinition::allowUnsafeLoadedCudaKernelSourceCompilation(const std::string& trusted_ed25519_public_key) {
+void ExpressionDefinition::allowUnsafeLoadedCudaKernelSourceCompilation(const std::string& trusted_ed25519_public_key,
+                                                                           const std::string& trusted_source_decryption_key) {
     if (!outputs.expr || outputs.expr->cuda_kernel_expressions.empty()) {
         return;
     }
-    json j = architectureJson();
-    *this = deserialize(j, true, trusted_ed25519_public_key);
+    json j = architectureJsonWithCudaKernelManifestSignature();
+    *this = deserialize(j, true, trusted_ed25519_public_key, trusted_source_decryption_key);
 }
 
 ExpressionDefinition ExpressionDefinition::fromOutputs(const Outputs& outputs) {
@@ -1589,7 +1593,8 @@ ExpressionDefinition ExpressionDefinition::fromOutputs(const Outputs& outputs) {
 
 ExpressionDefinition ExpressionDefinition::deserialize(const json& j,
                                                        bool allow_unsafe_loaded_cuda_source,
-                                                       const std::string& trusted_ed25519_public_key) {
+                                                       const std::string& trusted_ed25519_public_key,
+                                                       const std::string& trusted_source_decryption_key) {
     if (j.at("type").get<std::string>() != "thor.expression") {
         throw std::runtime_error("ExpressionDefinition::deserialize type mismatch: " + j.at("type").get<std::string>());
     }
@@ -1598,16 +1603,27 @@ ExpressionDefinition ExpressionDefinition::deserialize(const json& j,
         throw std::runtime_error("Unsupported thor.expression schema_version: " + std::to_string(schema_version));
     }
 
+    json expression_json = j;
+    const bool has_cuda_kernels = j.contains("cuda_kernels") && !j.at("cuda_kernels").empty();
+    const bool has_encrypted_cuda_sources = has_cuda_kernels && cudaKernelExpressionJsonContainsEncryptedSources(j);
+    if (has_encrypted_cuda_sources) {
+        CudaKernelSignatureVerificationResult verification = cudaKernelVerifyManifestSignature(j, trusted_ed25519_public_key);
+        if (!verification.verified) {
+            throw std::runtime_error(verification.message);
+        }
+        expression_json = cudaKernelDecryptSerializedCudaSources(j, trusted_source_decryption_key);
+    }
+
     ExpressionDefinition definition;
     definition.outputs.expr = std::make_shared<PhysicalExpression>();
-    definition.expected_input_names = j.value("expected_input_names", std::vector<std::string>{});
-    definition.expected_output_names = j.value("expected_output_names", std::vector<std::string>{});
-    definition.canonical_hash = j.value("canonical_hash", std::string{});
+    definition.expected_input_names = expression_json.value("expected_input_names", std::vector<std::string>{});
+    definition.expected_output_names = expression_json.value("expected_output_names", std::vector<std::string>{});
+    definition.canonical_hash = expression_json.value("canonical_hash", std::string{});
     if (j.contains("cuda_kernel_manifest_signature")) {
         definition.cuda_kernel_manifest_signature = j.at("cuda_kernel_manifest_signature");
     }
 
-    for (const json& input_json : j.at("inputs")) {
+    for (const json& input_json : expression_json.at("inputs")) {
         definition.outputs.expr->inputs.push_back(NamedInput{
             .name = input_json.at("name").get<std::string>(),
             .slot = input_json.at("slot").get<uint32_t>(),
@@ -1616,26 +1632,28 @@ ExpressionDefinition ExpressionDefinition::deserialize(const json& j,
     }
 
     bool cuda_kernel_source_compilation_allowed = false;
-    if (j.contains("cuda_kernels") && !j.at("cuda_kernels").empty()) {
+    if (has_cuda_kernels) {
         if (allow_unsafe_loaded_cuda_source) {
-            CudaKernelSignatureVerificationResult verification = cudaKernelVerifyManifestSignature(j, trusted_ed25519_public_key);
-            if (!verification.verified) {
-                throw std::runtime_error(verification.message);
+            if (!has_encrypted_cuda_sources) {
+                CudaKernelSignatureVerificationResult verification = cudaKernelVerifyManifestSignature(j, trusted_ed25519_public_key);
+                if (!verification.verified) {
+                    throw std::runtime_error(verification.message);
+                }
             }
             cuda_kernel_source_compilation_allowed = true;
         }
 
-        for (const json& kernel_json : j.at("cuda_kernels")) {
+        for (const json& kernel_json : expression_json.at("cuda_kernels")) {
             definition.outputs.expr->cuda_kernel_expressions.push_back(std::make_shared<CudaKernelExpression>(
                 CudaKernelExpression::deserialize(kernel_json, cuda_kernel_source_compilation_allowed)));
         }
     }
 
-    for (const json& node_json : j.at("nodes")) {
+    for (const json& node_json : expression_json.at("nodes")) {
         definition.outputs.expr->nodes.push_back(exprNodeFromJson(node_json));
     }
 
-    for (const json& output_json : j.at("outputs")) {
+    for (const json& output_json : expression_json.at("outputs")) {
         definition.outputs.outputs.push_back(NamedOutput{
             .name = output_json.at("name").get<std::string>(),
             .node_idx = output_json.at("node").get<uint32_t>(),

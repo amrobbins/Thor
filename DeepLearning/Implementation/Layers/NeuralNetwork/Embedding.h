@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Layers/Optimizers/SparseRowGradient.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
@@ -35,13 +36,13 @@ class Embedding final : public TrainableLayer {
 
    private:
     Tensor weights() const;
-    float sparseSgdStep(uint32_t batchSize) const;
 
     uint64_t vocabularySize;
     uint64_t embeddingDim;
     TensorDescriptor::DataType weightsDataType;
     std::optional<uint64_t> paddingIndex;
     bool sparseGradients;
+    std::optional<SparseRowGradient> weightsSparseGradient;
 };
 
 }  // namespace ThorImplementation

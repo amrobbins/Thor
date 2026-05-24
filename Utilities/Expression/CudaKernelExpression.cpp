@@ -723,6 +723,11 @@ CudaKernelExpression CudaKernelExpression::deserialize(const json& j, bool allow
     }
 
     Builder builder(j.at("name").get<std::string>());
+    if (!j.contains("source")) {
+        throw std::runtime_error(
+            "CudaKernelExpression serialized kernel does not contain plaintext CUDA source. Encrypted CUDA source must be verified and "
+            "decrypted by ExpressionDefinition::deserialize before individual kernels are deserialized.");
+    }
     builder.source(j.at("source").get<std::string>());
     builder.entry(j.at("entry").get<std::string>());
     builder.useFastMath(j.value("use_fast_math", false));
@@ -839,8 +844,9 @@ std::shared_ptr<CompiledCudaKernel> CudaKernelExpression::compile(int device_num
             "Refusing to compile CudaKernelExpression '" + name_ +
             "' because its CUDA source was loaded from a serialized model. Custom CUDA source in loaded models is unsafe code execution. "
             "If you will be running it, you should inspect the serialized CUDA source/compiled source, then load it with "
-            "allow_unsafe_loaded_cuda_source=true and the trusted Ed25519 public key that was printed when the model was saved. Signature "
-            "verification provides evidence of the identity of the signed CUDA manifest.");
+            "allow_unsafe_loaded_cuda_source=true, the trusted Ed25519 public key, and when applicable the AES-256-GCM source decryption "
+            "key that were printed when the model was saved. Signature verification provides evidence of the identity of the signed CUDA "
+            "manifest; source decryption only restores the inspected code.");
     }
 
     EquationSignature sig =

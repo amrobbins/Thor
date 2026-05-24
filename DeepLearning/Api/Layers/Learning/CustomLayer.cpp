@@ -598,7 +598,8 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
     ThorImplementation::ExpressionDefinition expressionDefinition = ThorImplementation::ExpressionDefinition::deserialize(
         j.at("expression"),
         network != nullptr && network->allowUnsafeLoadedCudaKernelSourceCompilation(),
-        network != nullptr ? network->trustedLoadedCudaKernelPublicKey() : std::string{});
+        network != nullptr ? network->trustedLoadedCudaKernelPublicKey() : std::string{},
+        network != nullptr ? network->trustedLoadedCudaKernelSourceDecryptionKey() : std::string{});
 
     std::vector<TensorMap> inputInterfaces;
     for (const json& interfaceJson : j.at("input_interfaces")) {

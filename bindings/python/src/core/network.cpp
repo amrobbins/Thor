@@ -4,6 +4,8 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <utility>
+
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -23,6 +25,13 @@ nb::dict cudaKernelSourceInspectionToPython(const ThorImplementation::CudaKernel
     entry["compiled_source"] = info.compiled_source;
     entry["compiled_source_hash"] = info.compiled_source_hash;
     entry["loaded_source_compilation_allowed"] = info.loaded_source_compilation_allowed;
+    entry["source_encrypted"] = info.source_encrypted;
+    if (!info.source_encryption_algorithm.empty()) {
+        entry["source_encryption_algorithm"] = info.source_encryption_algorithm;
+    }
+    if (!info.source_decryption_key_fingerprint.empty()) {
+        entry["source_decryption_key_fingerprint"] = info.source_decryption_key_fingerprint;
+    }
     if (!info.signature_algorithm.empty()) {
         entry["signature_algorithm"] = info.signature_algorithm;
     }
@@ -39,6 +48,17 @@ nb::list cudaKernelSourceInspectionListToPython(const std::vector<ThorImplementa
     nb::list result;
     for (const ThorImplementation::CudaKernelSourceInspection& info : infos) {
         result.append(cudaKernelSourceInspectionToPython(info));
+    }
+    return result;
+}
+
+nb::list cudaKernelOutOfBandKeysToPython(const std::vector<ThorImplementation::CudaKernelOutOfBandKeys>& key_sets) {
+    nb::list result;
+    for (const ThorImplementation::CudaKernelOutOfBandKeys& keys : key_sets) {
+        nb::dict entry;
+        entry["signing_public_key"] = keys.signing_public_key;
+        entry["source_decryption_key"] = keys.source_decryption_key;
+        result.append(std::move(entry));
     }
     return result;
 }
@@ -79,26 +99,35 @@ A Network that contains layers. FIXME.
     network.def("save", nb::overload_cast<const std::string &, bool>(&Network::save), "directory"_a, "overwrite"_a = false);
     network.def(
         "load",
-        nb::overload_cast<const std::string &, bool, const std::string &>(&Network::load),
+        [](Network& self,
+           const std::string& directory,
+           bool allow_unsafe_loaded_cuda_kernel_source,
+           const std::string& trusted_cuda_kernel_public_key,
+           const std::string& trusted_cuda_kernel_source_decryption_key) {
+            self.load(directory,
+                      allow_unsafe_loaded_cuda_kernel_source,
+                      trusted_cuda_kernel_public_key,
+                      trusted_cuda_kernel_source_decryption_key);
+        },
         "directory"_a,
         "allow_unsafe_loaded_cuda_kernel_source"_a = false,
         "trusted_cuda_kernel_public_key"_a = "",
+        "trusted_cuda_kernel_source_decryption_key"_a = "",
         R"nbdoc(
 Load a saved Thor network.
 
-By default, loaded CudaKernelExpression CUDA source is inspectable but is not
-allowed to compile/run. Setting ``allow_unsafe_loaded_cuda_kernel_source=True``
-still requires a trusted Ed25519 public key supplied out-of-band through
-``trusted_cuda_kernel_public_key``. Signature verification proves only that the
-loaded CUDA source/ABI/launch policy matches what was signed; it does not make
-the CUDA code safe or sandboxed. Inspect the serialized CUDA source before
-providing the key and enabling compilation.
+CudaKernelExpression CUDA source saved by current Thor versions is encrypted in
+the model JSON. Loading such a model requires the out-of-band Ed25519 public
+signing key and AES-256-GCM source decryption key printed when the model was
+saved. Setting ``allow_unsafe_loaded_cuda_kernel_source=True`` additionally
+allows the decrypted source to compile/run after signature verification.
 )nbdoc");
 
     network.def("cuda_kernel_source_info", [](const Network& self) { return cudaKernelSourceInspectionListToPython(self.cudaKernelSourceInfo()); });
     network.def("cuda_kernel_sources", &Network::cudaKernelSources);
     network.def("cuda_kernel_source_info_json", &Network::cudaKernelSourceInfoJsonString);
     network.def("cuda_kernel_signing_public_keys", &Network::cudaKernelSigningPublicKeys);
+    network.def("cuda_kernel_out_of_band_keys", [](const Network& self) { return cudaKernelOutOfBandKeysToPython(self.cudaKernelOutOfBandKeys()); });
 
     network.def("get_default_optimizer", &Network::getDefaultOptimizer);
 
