@@ -51,6 +51,10 @@ class CudaDriverApi {
             function, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes, stream, kernelParams, extra);
     }
 
+    CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction function, void** kernelParams, void** extra) {
+        return p_cuLaunchKernelEx(config, function, kernelParams, extra);
+    }
+
     CUresult cuGetErrorName(CUresult error, const char** pStr) { return p_cuGetErrorName(error, pStr); }
 
     CUresult cuGetErrorString(CUresult error, const char** pStr) { return p_cuGetErrorString(error, pStr); }
@@ -78,6 +82,7 @@ class CudaDriverApi {
                                           CUstream,
                                           void**,
                                           void**);
+    using cuLaunchKernelEx_t = CUresult (*)(const CUlaunchConfig*, CUfunction, void**, void**);
     using cuGetErrorName_t = CUresult (*)(CUresult, const char**);
     using cuGetErrorString_t = CUresult (*)(CUresult, const char**);
 
@@ -91,6 +96,7 @@ class CudaDriverApi {
     cuModuleGetFunction_t p_cuModuleGetFunction = nullptr;
     cuModuleUnload_t p_cuModuleUnload = nullptr;
     cuLaunchKernel_t p_cuLaunchKernel = nullptr;
+    cuLaunchKernelEx_t p_cuLaunchKernelEx = nullptr;
     cuGetErrorName_t p_cuGetErrorName = nullptr;
     cuGetErrorString_t p_cuGetErrorString = nullptr;
 
@@ -111,6 +117,7 @@ class CudaDriverApi {
         p_cuModuleGetFunction = load<cuModuleGetFunction_t>("cuModuleGetFunction");
         p_cuModuleUnload = load<cuModuleUnload_t>("cuModuleUnload");
         p_cuLaunchKernel = load<cuLaunchKernel_t>("cuLaunchKernel");
+        p_cuLaunchKernelEx = load<cuLaunchKernelEx_t>("cuLaunchKernelEx");
 
         p_cuGetErrorName = load<cuGetErrorName_t>("cuGetErrorName");
         p_cuGetErrorString = load<cuGetErrorString_t>("cuGetErrorString");

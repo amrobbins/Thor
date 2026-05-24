@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -41,6 +42,37 @@ void writeCpuFp32Tensor(Tensor& tensor, const std::vector<float>& values) {
         ptr[i] = values[i];
 }
 
+
+void writeCpuUint16Tensor(Tensor& tensor, const std::vector<uint64_t>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensor.getDataType(), DataType::UINT16);
+    ASSERT_EQ(tensor.getTotalNumElements(), values.size());
+
+    uint16_t* ptr = tensor.getMemPtr<uint16_t>();
+    for (uint64_t i = 0; i < values.size(); ++i)
+        ptr[i] = static_cast<uint16_t>(values[i]);
+}
+
+void writeCpuUint32Tensor(Tensor& tensor, const std::vector<uint64_t>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensor.getDataType(), DataType::UINT32);
+    ASSERT_EQ(tensor.getTotalNumElements(), values.size());
+
+    uint32_t* ptr = tensor.getMemPtr<uint32_t>();
+    for (uint64_t i = 0; i < values.size(); ++i)
+        ptr[i] = static_cast<uint32_t>(values[i]);
+}
+
+void writeCpuUint64Tensor(Tensor& tensor, const std::vector<uint64_t>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensor.getDataType(), DataType::UINT64);
+    ASSERT_EQ(tensor.getTotalNumElements(), values.size());
+
+    uint64_t* ptr = tensor.getMemPtr<uint64_t>();
+    for (uint64_t i = 0; i < values.size(); ++i)
+        ptr[i] = values[i];
+}
+
 std::vector<float> readCpuFp32Tensor(const Tensor& tensor) {
     EXPECT_EQ(tensor.getPlacement(), cpuPlacement);
     EXPECT_EQ(tensor.getDataType(), DataType::FP32);
@@ -60,6 +92,29 @@ void copyValuesToGpuFp32Tensor(Tensor& gpuTensor, const std::vector<float>& valu
 
     Tensor host(cpuPlacement, gpuTensor.getDescriptor());
     writeCpuFp32Tensor(host, values);
+
+    gpuTensor.copyFromAsync(host, stream);
+    stream.synchronize();
+}
+
+void copyRowValuesToGpuTensor(Tensor& gpuTensor, const std::vector<uint64_t>& values, Stream& stream) {
+    ASSERT_EQ(gpuTensor.getPlacement(), gpuPlacement);
+    ASSERT_EQ(gpuTensor.getTotalNumElements(), values.size());
+
+    Tensor host(cpuPlacement, gpuTensor.getDescriptor());
+    switch (gpuTensor.getDataType()) {
+        case DataType::UINT16:
+            writeCpuUint16Tensor(host, values);
+            break;
+        case DataType::UINT32:
+            writeCpuUint32Tensor(host, values);
+            break;
+        case DataType::UINT64:
+            writeCpuUint64Tensor(host, values);
+            break;
+        default:
+            FAIL() << "Unsupported sparse row dtype in copyRowValuesToGpuTensor.";
+    }
 
     gpuTensor.copyFromAsync(host, stream);
     stream.synchronize();
@@ -130,6 +185,61 @@ void applyMomentumSgdReferenceStep(SgdReferenceState& state,
     }
 }
 
+void applySparseMomentumSgdReferenceStep(SgdReferenceState& state,
+                                         const std::vector<uint64_t>& rows,
+                                         const std::vector<float>& sparseGradientValues,
+                                         uint64_t numRows,
+                                         uint64_t embeddingDim,
+                                         uint32_t batchSize,
+                                         float currentLearningRate,
+                                         float momentum,
+                                         bool useNesterovMomentum) {
+    ASSERT_LE(numRows, rows.size());
+    ASSERT_GE(sparseGradientValues.size(), numRows * embeddingDim);
+    ASSERT_EQ(state.weights.size(), state.velocity.size());
+
+    const float step = computeStep(currentLearningRate, batchSize);
+    for (uint64_t u = 0; u < numRows; ++u) {
+        const uint64_t row = rows[u];
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            const uint64_t denseIndex = row * embeddingDim + d;
+            ASSERT_LT(denseIndex, state.weights.size());
+            const uint64_t sparseIndex = u * embeddingDim + d;
+            const float g = sparseGradientValues[sparseIndex];
+            const float vNext = momentum * state.velocity[denseIndex] - step * g;
+
+            if (useNesterovMomentum) {
+                state.weights[denseIndex] += momentum * vNext - step * g;
+            } else {
+                state.weights[denseIndex] += vNext;
+            }
+
+            state.velocity[denseIndex] = vNext;
+        }
+    }
+}
+
+void applySparsePlainSgdReferenceStep(SgdReferenceState& state,
+                                      const std::vector<uint64_t>& rows,
+                                      const std::vector<float>& sparseGradientValues,
+                                      uint64_t numRows,
+                                      uint64_t embeddingDim,
+                                      uint32_t batchSize,
+                                      float currentLearningRate) {
+    ASSERT_LE(numRows, rows.size());
+    ASSERT_GE(sparseGradientValues.size(), numRows * embeddingDim);
+
+    const float step = computeStep(currentLearningRate, batchSize);
+    for (uint64_t u = 0; u < numRows; ++u) {
+        const uint64_t row = rows[u];
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            const uint64_t denseIndex = row * embeddingDim + d;
+            ASSERT_LT(denseIndex, state.weights.size());
+            state.weights[denseIndex] -= step * sparseGradientValues[u * embeddingDim + d];
+        }
+    }
+}
+
 void runSgdStep(Sgd& sgd, const std::vector<float>& rawGradient, uint32_t batchSize, Stream& stream) {
     std::optional<Tensor> gradientOpt = sgd.getWeightsGradient();
     ASSERT_TRUE(gradientOpt.has_value());
@@ -138,6 +248,32 @@ void runSgdStep(Sgd& sgd, const std::vector<float>& rawGradient, uint32_t batchS
     copyValuesToGpuFp32Tensor(gradient, rawGradient, stream);
 
     sgd.updateWeights(batchSize);
+    stream.synchronize();
+}
+
+void writeSparseGradient(SparseRowGradient& gradient,
+                         const std::vector<uint64_t>& rows,
+                         const std::vector<float>& values,
+                         uint64_t numRows,
+                         Stream& stream) {
+    ASSERT_LE(numRows, gradient.capacity);
+    ASSERT_EQ(rows.size(), gradient.capacity);
+    ASSERT_EQ(values.size(), gradient.capacity * gradient.embeddingDim);
+
+    copyRowValuesToGpuTensor(gradient.rows, rows, stream);
+    copyValuesToGpuFp32Tensor(gradient.values, values, stream);
+    copyRowValuesToGpuTensor(gradient.numRows, {numRows}, stream);
+}
+
+void runSparseSgdStep(Sgd& sgd,
+                      SparseRowGradient& gradient,
+                      const std::vector<uint64_t>& rows,
+                      const std::vector<float>& values,
+                      uint64_t numRows,
+                      uint32_t batchSize,
+                      Stream& stream) {
+    writeSparseGradient(gradient, rows, values, numRows, stream);
+    sgd.updateSparseRows(batchSize);
     stream.synchronize();
 }
 
@@ -467,4 +603,301 @@ TEST(SgdTest, NesterovMomentumTwoStepsCarryVelocity) {
     expectMapHasValue(all, "currentLearningRate", currentLearningRate);
     expectMapHasValue(all, "momentum", momentum);
     expectMapHasValue(all, "useNesterovMomentum", 1.0f);
+}
+
+TEST(SgdTest, SparseRowGradientChoosesSmallestSafeRowStorageType) {
+    EXPECT_EQ(SparseRowGradient::chooseRowDataType(1), DataType::UINT16);
+    EXPECT_EQ(SparseRowGradient::chooseRowDataType(static_cast<uint64_t>(std::numeric_limits<uint16_t>::max())), DataType::UINT16);
+    EXPECT_EQ(SparseRowGradient::chooseRowDataType(static_cast<uint64_t>(std::numeric_limits<uint16_t>::max()) + 1ULL), DataType::UINT32);
+    EXPECT_EQ(SparseRowGradient::chooseRowDataType(static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())), DataType::UINT32);
+    EXPECT_EQ(SparseRowGradient::chooseRowDataType(static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1ULL), DataType::UINT64);
+}
+
+TEST(SgdTest, CompileSparseRowsWithoutMomentumCreatesSparseGradientAndWeightsOutputOnly) {
+    Stream stream(gpuPlacement);
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {4, 3}));
+
+    Sgd sgd(7,
+            /*initialLearningRate=*/0.05f,
+            /*decay=*/0.0f,
+            /*momentum=*/0.0f,
+            /*useNesterovMomentum=*/false);
+
+    EXPECT_TRUE(sgd.supportsSparseRowGradients());
+    SparseRowGradient gradient = sgd.compileSparseRows(weights, /*maxSparseRows=*/3, stream);
+    stream.synchronize();
+
+    EXPECT_TRUE(sgd.isCompiled());
+    EXPECT_FALSE(sgd.getWeightsGradient().has_value());
+    EXPECT_TRUE(sgd.getSparseRowGradient().has_value());
+    EXPECT_FALSE(sgd.hasParameter("momentum"));
+
+    gradient.validate();
+    EXPECT_EQ(gradient.capacity, 3u);
+    EXPECT_EQ(gradient.vocabularySize, 4u);
+    EXPECT_EQ(gradient.embeddingDim, 3u);
+    EXPECT_EQ(gradient.rows.getDataType(), DataType::UINT16);
+    EXPECT_EQ(gradient.rows.getDimensions(), (std::vector<uint64_t>{3}));
+    EXPECT_EQ(gradient.values.getDataType(), DataType::FP32);
+    EXPECT_EQ(gradient.values.getDimensions(), (std::vector<uint64_t>{3, 3}));
+    EXPECT_EQ(gradient.numRows.getDataType(), DataType::UINT16);
+    EXPECT_EQ(gradient.numRows.getDimensions(), (std::vector<uint64_t>{1}));
+
+    Tensor weightsOut = sgd.getOptimizerParameterTensor("weights");
+    EXPECT_EQ(weightsOut, weights);
+
+    std::vector<std::string> outputNames = sgd.getOptimizerParameterNames();
+    std::set<std::string> names(outputNames.begin(), outputNames.end());
+    EXPECT_EQ(names, (std::set<std::string>{"weights"}));
+
+    EXPECT_THROW((void)sgd.getOptimizerParameterTensor("velocity"), std::runtime_error);
+    EXPECT_THROW((void)sgd.getOptimizerParameterTensor("missing"), std::runtime_error);
+}
+
+TEST(SgdTest, CompileSparseRowsSelectsUint32RowsForLargeButUint32AddressableVocabulary) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = static_cast<uint64_t>(std::numeric_limits<uint16_t>::max()) + 1ULL;
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {vocabularySize, 1}));
+
+    Sgd sgd(71,
+            /*initialLearningRate=*/0.05f,
+            /*decay=*/0.0f,
+            /*momentum=*/0.0f,
+            /*useNesterovMomentum=*/false);
+
+    SparseRowGradient gradient = sgd.compileSparseRows(weights, /*maxSparseRows=*/3, stream);
+    stream.synchronize();
+
+    gradient.validate();
+    EXPECT_EQ(gradient.rows.getDataType(), DataType::UINT32);
+    EXPECT_EQ(gradient.numRows.getDataType(), DataType::UINT32);
+    EXPECT_EQ(gradient.capacity, 3u);
+    EXPECT_EQ(gradient.vocabularySize, vocabularySize);
+}
+
+TEST(SgdTest, SparsePlainSgdUpdateWorksWithUint32RowStorage) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = static_cast<uint64_t>(std::numeric_limits<uint16_t>::max()) + 1ULL;
+    constexpr uint64_t embeddingDim = 1;
+    constexpr uint64_t capacity = 3;
+    constexpr uint32_t batchSize = 2;
+    constexpr float initialLearningRate = 0.1f;
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {vocabularySize, embeddingDim}));
+    weights.memsetAsync(stream, 0);
+
+    Sgd sgd(72,
+            initialLearningRate,
+            /*decay=*/0.0f,
+            /*momentum=*/0.0f,
+            /*useNesterovMomentum=*/false);
+    SparseRowGradient gradient = sgd.compileSparseRows(weights, capacity, stream);
+    stream.synchronize();
+    ASSERT_EQ(gradient.rows.getDataType(), DataType::UINT32);
+
+    const std::vector<uint64_t> rows{static_cast<uint64_t>(std::numeric_limits<uint16_t>::max()), 2, 0};
+    const std::vector<float> sparseValues{4.0f, -6.0f, 1000.0f};
+    runSparseSgdStep(sgd, gradient, rows, sparseValues, /*numRows=*/2, batchSize, stream);
+
+
+    std::vector<float> hostWeights = copyGpuFp32TensorToValues(weights, stream);
+    const float step = computeStep(initialLearningRate, batchSize);
+    EXPECT_NEAR(hostWeights[rows[0]], -step * sparseValues[0], 1e-5f);
+    EXPECT_NEAR(hostWeights[rows[1]], -step * sparseValues[1], 1e-5f);
+}
+
+TEST(SgdTest, SparsePlainSgdUpdatesOnlyRuntimeActiveRows) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 4;
+    constexpr uint64_t embeddingDim = 3;
+    constexpr uint64_t capacity = 4;
+    constexpr uint64_t activeRows = 2;
+    constexpr uint32_t batchSize = 2;
+    constexpr float initialLearningRate = 0.1f;
+
+    const std::vector<float> initialWeights{
+        1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f,
+        7.0f, 8.0f, 9.0f,
+        10.0f, 11.0f, 12.0f,
+    };
+    const std::vector<uint64_t> rows{2, 0, 1, 3};
+    const std::vector<float> sparseValues{
+        1.0f, -2.0f, 3.0f,
+        -4.0f, 5.0f, -6.0f,
+        1000.0f, 1000.0f, 1000.0f,
+        -1000.0f, -1000.0f, -1000.0f,
+    };
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {vocabularySize, embeddingDim}));
+    copyValuesToGpuFp32Tensor(weights, initialWeights, stream);
+
+    Sgd sgd(8,
+            initialLearningRate,
+            /*decay=*/0.0f,
+            /*momentum=*/0.0f,
+            /*useNesterovMomentum=*/false);
+    SparseRowGradient gradient = sgd.compileSparseRows(weights, capacity, stream);
+    stream.synchronize();
+
+    SgdReferenceState expected;
+    expected.weights = initialWeights;
+    applySparsePlainSgdReferenceStep(expected, rows, sparseValues, activeRows, embeddingDim, batchSize, initialLearningRate);
+
+    runSparseSgdStep(sgd, gradient, rows, sparseValues, activeRows, batchSize, stream);
+
+    expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 2e-5f, 2e-5f);
+}
+
+TEST(SgdTest, SparseClassicalMomentumTwoStepsCarryVelocityOnlyForTouchedRows) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 4;
+    constexpr uint64_t embeddingDim = 2;
+    constexpr uint64_t capacity = 3;
+    constexpr float initialLearningRate = 0.12f;
+    constexpr float decay = 0.1f;
+    constexpr float momentum = 0.8f;
+
+    const std::vector<float> initialWeights{
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+        7.0f, 8.0f,
+    };
+    const std::vector<uint64_t> rows1{3, 1, 0};
+    const std::vector<float> sparseValues1{
+        2.0f, -4.0f,
+        -6.0f, 8.0f,
+        1000.0f, 1000.0f,
+    };
+    const std::vector<uint64_t> rows2{1, 0, 2};
+    const std::vector<float> sparseValues2{
+        1.5f, -2.5f,
+        3.5f, -4.5f,
+        -1000.0f, -1000.0f,
+    };
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {vocabularySize, embeddingDim}));
+    copyValuesToGpuFp32Tensor(weights, initialWeights, stream);
+
+    Sgd sgd(9,
+            initialLearningRate,
+            decay,
+            momentum,
+            /*useNesterovMomentum=*/false);
+    SparseRowGradient gradient = sgd.compileSparseRows(weights, capacity, stream);
+    stream.synchronize();
+
+    Tensor velocity = sgd.getOptimizerParameterTensor("velocity");
+
+    SgdReferenceState expected;
+    expected.weights = initialWeights;
+    expected.velocity.assign(initialWeights.size(), 0.0f);
+
+    sgd.updateHyperParameters(/*epoch=*/0, /*batch=*/0, /*batchesPerEpoch=*/10);
+    float currentLearningRate = computeCurrentLearningRate(initialLearningRate, decay, 0);
+    applySparseMomentumSgdReferenceStep(expected,
+                                        rows1,
+                                        sparseValues1,
+                                        /*numRows=*/2,
+                                        embeddingDim,
+                                        /*batchSize=*/2,
+                                        currentLearningRate,
+                                        momentum,
+                                        /*useNesterovMomentum=*/false);
+    runSparseSgdStep(sgd, gradient, rows1, sparseValues1, /*numRows=*/2, /*batchSize=*/2, stream);
+
+    sgd.updateHyperParameters(/*epoch=*/3, /*batch=*/1, /*batchesPerEpoch=*/10);
+    currentLearningRate = computeCurrentLearningRate(initialLearningRate, decay, 3);
+    applySparseMomentumSgdReferenceStep(expected,
+                                        rows2,
+                                        sparseValues2,
+                                        /*numRows=*/2,
+                                        embeddingDim,
+                                        /*batchSize=*/4,
+                                        currentLearningRate,
+                                        momentum,
+                                        /*useNesterovMomentum=*/false);
+    runSparseSgdStep(sgd, gradient, rows2, sparseValues2, /*numRows=*/2, /*batchSize=*/4, stream);
+
+    expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 3e-5f, 3e-5f);
+    expectAllClose(copyGpuFp32TensorToValues(velocity, stream), expected.velocity, 3e-5f, 3e-5f);
+}
+
+TEST(SgdTest, SparseNesterovMomentumTwoStepsCarryVelocityOnlyForTouchedRows) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 3;
+    constexpr uint64_t embeddingDim = 2;
+    constexpr uint64_t capacity = 2;
+    constexpr float initialLearningRate = 0.08f;
+    constexpr float decay = 0.2f;
+    constexpr float momentum = 0.6f;
+
+    const std::vector<float> initialWeights{
+        2.0f, -1.0f,
+        3.0f, -4.0f,
+        5.0f, -6.0f,
+    };
+    const std::vector<uint64_t> rows1{2, 0};
+    const std::vector<float> sparseValues1{
+        4.0f, -8.0f,
+        1.0f, -2.0f,
+    };
+    const std::vector<uint64_t> rows2{0, 1};
+    const std::vector<float> sparseValues2{
+        -5.0f, 6.0f,
+        -7.0f, 8.0f,
+    };
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {vocabularySize, embeddingDim}));
+    copyValuesToGpuFp32Tensor(weights, initialWeights, stream);
+
+    Sgd sgd(10,
+            initialLearningRate,
+            decay,
+            momentum,
+            /*useNesterovMomentum=*/true);
+    SparseRowGradient gradient = sgd.compileSparseRows(weights, capacity, stream);
+    stream.synchronize();
+
+    Tensor velocity = sgd.getOptimizerParameterTensor("velocity");
+
+    SgdReferenceState expected;
+    expected.weights = initialWeights;
+    expected.velocity.assign(initialWeights.size(), 0.0f);
+
+    sgd.updateHyperParameters(/*epoch=*/0, /*batch=*/0, /*batchesPerEpoch=*/10);
+    float currentLearningRate = computeCurrentLearningRate(initialLearningRate, decay, 0);
+    applySparseMomentumSgdReferenceStep(expected,
+                                        rows1,
+                                        sparseValues1,
+                                        /*numRows=*/2,
+                                        embeddingDim,
+                                        /*batchSize=*/1,
+                                        currentLearningRate,
+                                        momentum,
+                                        /*useNesterovMomentum=*/true);
+    runSparseSgdStep(sgd, gradient, rows1, sparseValues1, /*numRows=*/2, /*batchSize=*/1, stream);
+
+    sgd.updateHyperParameters(/*epoch=*/2, /*batch=*/5, /*batchesPerEpoch=*/10);
+    currentLearningRate = computeCurrentLearningRate(initialLearningRate, decay, 2);
+    applySparseMomentumSgdReferenceStep(expected,
+                                        rows2,
+                                        sparseValues2,
+                                        /*numRows=*/2,
+                                        embeddingDim,
+                                        /*batchSize=*/2,
+                                        currentLearningRate,
+                                        momentum,
+                                        /*useNesterovMomentum=*/true);
+    runSparseSgdStep(sgd, gradient, rows2, sparseValues2, /*numRows=*/2, /*batchSize=*/2, stream);
+
+    expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 3e-5f, 3e-5f);
+    expectAllClose(copyGpuFp32TensorToValues(velocity, stream), expected.velocity, 3e-5f, 3e-5f);
 }

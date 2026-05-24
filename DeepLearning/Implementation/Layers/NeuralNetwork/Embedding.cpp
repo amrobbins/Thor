@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
+#include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradient.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -109,8 +110,7 @@ void Embedding::compileImpl() {
 
     // Do not call PhysicalParameter::compileOptimizer here. The default optimizer path materializes a dense
     // weightsGradient tensor, which is exactly what Embedding must avoid for large vocabularies. Embedding instead
-    // asks the optimizer for an optimizer-owned reduced sparse-gradient sink. The actual sparse-row update expression
-    // plan is owned by the optimizer in a later slice.
+    // asks the optimizer for an optimizer-owned reduced sparse-gradient sink and sparse-row update plan.
     if (gradientUpdateStream.has_value()) {
         for (const auto& parameter : parameters) {
             if (!isInferenceOnly() && parameter->isTrainingEnabled()) {
@@ -124,9 +124,23 @@ void Embedding::compileImpl() {
                         "gradients. Dense-gradient fallback is intentionally forbidden.");
                 }
 
+                if (numBackwardConnections != 1) {
+                    throw std::invalid_argument(
+                        "Embedding sparse-gradient reduction currently supports exactly one backward connection. Multiple backward connections "
+                        "require merging reduced SparseRowGradient sinks before a single optimizer-state update, and silent per-connection "
+                        "updates are intentionally forbidden.");
+                }
+                std::optional<Tensor> aErrorInput = getFirstPresentTensor(errorInputs);
+                if (!aErrorInput.has_value()) {
+                    throw std::invalid_argument("Trainable Embedding requires an error input so it can produce sparse row gradients.");
+                }
+
                 const Tensor storage = parameter->getStorage().value();
                 const uint64_t maxSparseRows = std::min<uint64_t>(aFeatureInput.value().getTotalNumElements(), vocabularySize);
                 weightsSparseGradient = optimizer->compileSparseRows(storage, maxSparseRows, gradientUpdateStream.value());
+                THOR_THROW_IF_FALSE(weightsSparseGradient.has_value());
+                weightsSparseGradientProducer =
+                    prepareEmbeddingSparseGradient(aFeatureInput.value(), aErrorInput.value(), weightsSparseGradient.value(), paddingIndex);
             }
         }
     }
@@ -184,13 +198,15 @@ void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
     }
 
     if (!isInferenceOnly() && gradientUpdateStream.has_value() && parameters[0]->isTrainingEnabled()) {
-        (void)batchSize;
         Event errorInputReady = streams[connectionNumber].putEvent();
         gradientUpdateStream.value().waitEvent(errorInputReady);
         THOR_THROW_IF_FALSE(weightsSparseGradient.has_value());
-        throw std::runtime_error(
-            "Embedding backward reduced sparse-gradient production is not implemented yet. The phase-0 atomic sparse SGD update path has "
-            "been removed; the next slice should sort/RLE/segment-reduce into the optimizer-owned SparseRowGradient sink.");
+        THOR_THROW_IF_FALSE(weightsSparseGradientProducer != nullptr);
+        launchPreparedEmbeddingSparseGradient(*weightsSparseGradientProducer,
+                                              featureInputs[connectionNumber].value(),
+                                              errorInput.value(),
+                                              weightsSparseGradient.value(),
+                                              gradientUpdateStream.value());
     }
 
     numBackwardConnectionsMade += 1;
@@ -204,6 +220,7 @@ void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
     if (gradientComplete) {
         weightsAreUpToDateEvent.reset();
         if (!isInferenceOnly() && gradientUpdateStream.has_value() && parameters[0]->isTrainingEnabled()) {
+            parameters[0]->getOptimizer()->updateSparseRows(batchSize * numBackwardConnections);
             weightsAreUpToDateEvent = gradientUpdateStream.value().putEvent();
         }
         isStartOfForward = true;

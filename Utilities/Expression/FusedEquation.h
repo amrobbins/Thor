@@ -32,7 +32,22 @@ struct ParameterFanOverride {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind {
+        FusedKernel,
+        CudaKernel,
+        Reduction,
+        ArgMinMax,
+        Softmax,
+        RmsNorm,
+        EmbeddingLookup,
+        Matmul,
+        InPlaceRope,
+        Attention,
+        AttentionBackward,
+        Convolution,
+        ConvolutionBackward,
+        ReduceMinMaxBackward
+    };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -93,8 +108,8 @@ struct CompiledExecutionStage {
 
     [[nodiscard]] TensorDescriptor::DataType outputDType(size_t output_idx) const {
         if (output_idx >= outputs.size()) {
-            throw std::runtime_error("CompiledExecutionStage::outputDType output index out of range for stage kind " +
-                                     kindToString(kind) + ".");
+            throw std::runtime_error("CompiledExecutionStage::outputDType output index out of range for stage kind " + kindToString(kind) +
+                                     ".");
         }
 
         switch (kind) {
@@ -254,7 +269,6 @@ struct CompiledExecutionStage {
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
-
 
     CompiledExecutionStage(const std::shared_ptr<CompiledRmsNorm>& rms_norm,
                            std::vector<uint32_t> input_value_ids,
@@ -507,6 +521,8 @@ class FusedEquation {
         const std::unordered_map<std::string, float>& scalarInputs = {},
         const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs = {}) const;
 
+    [[nodiscard]] static EquationSignature buildSignature(uint32_t num_inputs, int device_num, bool use_fast_math);
+
    private:
     explicit FusedEquation(PhysicalOutputs outputs_template,
                            int device_num,
@@ -566,44 +582,42 @@ class FusedEquation {
                                                                const std::optional<Tensor>& preallocatedOutput,
                                                                const Stream& stream) const;
 
-    [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(
-        const std::shared_ptr<CompiledMatmul>& compiledStage,
-        Tensor& lhs,
-        Tensor& rhs,
-        const std::optional<Tensor>& preallocatedOutput,
-        const Stream& stream,
-        const std::optional<RuntimeInputValue>& alpha_input = std::nullopt,
-        const std::optional<RuntimeInputValue>& beta_input = std::nullopt,
-        const std::optional<std::string>& alpha_runtime_name = std::nullopt,
-        const std::optional<std::string>& beta_runtime_name = std::nullopt,
-        const std::optional<Tensor>& epilogue_aux = std::nullopt,
-        const std::optional<Tensor>& preallocatedBgradOutput = std::nullopt) const;
+    [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
+                                                             Tensor& lhs,
+                                                             Tensor& rhs,
+                                                             const std::optional<Tensor>& preallocatedOutput,
+                                                             const Stream& stream,
+                                                             const std::optional<RuntimeInputValue>& alpha_input = std::nullopt,
+                                                             const std::optional<RuntimeInputValue>& beta_input = std::nullopt,
+                                                             const std::optional<std::string>& alpha_runtime_name = std::nullopt,
+                                                             const std::optional<std::string>& beta_runtime_name = std::nullopt,
+                                                             const std::optional<Tensor>& epilogue_aux = std::nullopt,
+                                                             const std::optional<Tensor>& preallocatedBgradOutput = std::nullopt) const;
 
-    [[nodiscard]] std::shared_ptr<StampedAttention> stampAttention(
-        const std::shared_ptr<CompiledAttention>& compiledStage,
-        const Tensor& q,
-        const Tensor& k,
-        const Tensor& v,
-        const std::optional<Tensor>& bias,
-        const std::optional<Tensor>& seq_len_q,
-        const std::optional<Tensor>& seq_len_kv,
-        const std::optional<Tensor>& q_ragged_offsets,
-        const std::optional<Tensor>& kv_ragged_offsets,
-        const std::optional<Tensor>& page_table_k,
-        const std::optional<Tensor>& page_table_v,
-        const std::optional<Tensor>& dropout_seed,
-        const std::optional<Tensor>& dropout_offset,
-        const std::optional<Tensor>& descale_q,
-        const std::optional<Tensor>& descale_k,
-        const std::optional<Tensor>& descale_v,
-        const std::optional<Tensor>& descale_s,
-        const std::optional<Tensor>& scale_s,
-        const std::optional<Tensor>& scale_o,
-        const std::optional<Tensor>& amax_s,
-        const std::optional<Tensor>& amax_o,
-        std::optional<Tensor> preallocatedOutput,
-        const Stream& stream,
-        std::shared_ptr<AttentionForwardState> forward_state = nullptr) const;
+    [[nodiscard]] std::shared_ptr<StampedAttention> stampAttention(const std::shared_ptr<CompiledAttention>& compiledStage,
+                                                                   const Tensor& q,
+                                                                   const Tensor& k,
+                                                                   const Tensor& v,
+                                                                   const std::optional<Tensor>& bias,
+                                                                   const std::optional<Tensor>& seq_len_q,
+                                                                   const std::optional<Tensor>& seq_len_kv,
+                                                                   const std::optional<Tensor>& q_ragged_offsets,
+                                                                   const std::optional<Tensor>& kv_ragged_offsets,
+                                                                   const std::optional<Tensor>& page_table_k,
+                                                                   const std::optional<Tensor>& page_table_v,
+                                                                   const std::optional<Tensor>& dropout_seed,
+                                                                   const std::optional<Tensor>& dropout_offset,
+                                                                   const std::optional<Tensor>& descale_q,
+                                                                   const std::optional<Tensor>& descale_k,
+                                                                   const std::optional<Tensor>& descale_v,
+                                                                   const std::optional<Tensor>& descale_s,
+                                                                   const std::optional<Tensor>& scale_s,
+                                                                   const std::optional<Tensor>& scale_o,
+                                                                   const std::optional<Tensor>& amax_s,
+                                                                   const std::optional<Tensor>& amax_o,
+                                                                   std::optional<Tensor> preallocatedOutput,
+                                                                   const Stream& stream,
+                                                                   std::shared_ptr<AttentionForwardState> forward_state = nullptr) const;
 
     [[nodiscard]] std::shared_ptr<StampedAttentionBackward> stampAttentionBackward(
         const std::shared_ptr<CompiledAttentionBackward>& compiledStage,
@@ -635,19 +649,18 @@ class FusedEquation {
         const std::optional<Tensor>& preallocatedOutput,
         const Stream& stream) const;
 
-    [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(
-        const std::shared_ptr<CompiledMatmul>& compiledStage,
-        Tensor& lhs,
-        Tensor& rhs,
-        Tensor& addend,
-        const std::optional<Tensor>& preallocatedOutput,
-        const Stream& stream,
-        const std::optional<RuntimeInputValue>& alpha_input = std::nullopt,
-        const std::optional<RuntimeInputValue>& beta_input = std::nullopt,
-        const std::optional<std::string>& alpha_runtime_name = std::nullopt,
-        const std::optional<std::string>& beta_runtime_name = std::nullopt,
-        const std::optional<Tensor>& epilogue_aux = std::nullopt,
-        const std::optional<Tensor>& preallocatedBgradOutput = std::nullopt) const;
+    [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
+                                                             Tensor& lhs,
+                                                             Tensor& rhs,
+                                                             Tensor& addend,
+                                                             const std::optional<Tensor>& preallocatedOutput,
+                                                             const Stream& stream,
+                                                             const std::optional<RuntimeInputValue>& alpha_input = std::nullopt,
+                                                             const std::optional<RuntimeInputValue>& beta_input = std::nullopt,
+                                                             const std::optional<std::string>& alpha_runtime_name = std::nullopt,
+                                                             const std::optional<std::string>& beta_runtime_name = std::nullopt,
+                                                             const std::optional<Tensor>& epilogue_aux = std::nullopt,
+                                                             const std::optional<Tensor>& preallocatedBgradOutput = std::nullopt) const;
 
     [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
         const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
@@ -664,8 +677,6 @@ class FusedEquation {
     [[nodiscard]] PhysicalOutputs buildShapeSpecializedOutputs(const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const;
     [[nodiscard]] std::shared_ptr<PreparedConvenienceRunPlan> prepareConvenienceRunPlan(
         const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const;
-
-    [[nodiscard]] static EquationSignature buildSignature(uint32_t num_inputs, int device_num, bool use_fast_math);
 
     [[nodiscard]] std::unordered_map<uint32_t, RuntimeInputValue> bindRootInputs(
         const std::unordered_map<std::string, Tensor>& namedInputs,
