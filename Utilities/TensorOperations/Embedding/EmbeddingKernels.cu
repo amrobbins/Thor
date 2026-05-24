@@ -171,6 +171,17 @@ uint32_t gridForWarps(uint64_t tokens) {
     return static_cast<uint32_t>(std::min<uint64_t>(std::max<uint64_t>(blocks, 1), MAX_GRID_BLOCKS));
 }
 
+
+uint32_t gridForTinyEmbedding(uint64_t tokens, uint32_t groupSize) {
+    if (groupSize == 0 || groupSize > WARP_SIZE_EMBEDDING || (WARP_SIZE_EMBEDDING % groupSize) != 0) {
+        throw std::invalid_argument("Tiny EmbeddingLookup group size must divide the warp size.");
+    }
+    const uint32_t groupsPerWarp = WARP_SIZE_EMBEDDING / groupSize;
+    const uint64_t groupsPerBlock = static_cast<uint64_t>(WARPS_PER_BLOCK) * groupsPerWarp;
+    const uint64_t blocks = (tokens + groupsPerBlock - 1) / groupsPerBlock;
+    return static_cast<uint32_t>(std::min<uint64_t>(std::max<uint64_t>(blocks, 1), MAX_GRID_BLOCKS));
+}
+
 uint32_t gridForElements(uint64_t elements) {
     const uint64_t blocks = (elements + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
     return static_cast<uint32_t>(std::min<uint64_t>(std::max<uint64_t>(blocks, 1), MAX_GRID_BLOCKS));
@@ -366,6 +377,141 @@ std::string generatedEmbeddingExactSource(DataType indexDtype,
         indexDtype, valueDtype, elementsPerLane, numIndices, vocabularySize, embeddingDim, paddingIndex);
 }
 
+
+uint32_t tinyEmbeddingGroupSize(uint64_t embeddingDim) {
+    if (embeddingDim <= 1) return 1;
+    if (embeddingDim <= 2) return 2;
+    if (embeddingDim <= 4) return 4;
+    if (embeddingDim <= 8) return 8;
+    if (embeddingDim <= 16) return 16;
+    if (embeddingDim <= 32) return 32;
+    return 0;
+}
+
+std::string generatedEmbeddingTinyCommonPrefix(DataType indexDtype,
+                                               DataType valueDtype,
+                                               uint64_t numIndices,
+                                               uint64_t embeddingDim,
+                                               uint32_t groupSize) {
+    if (groupSize == 0 || groupSize > WARP_SIZE_EMBEDDING || (WARP_SIZE_EMBEDDING % groupSize) != 0) {
+        throw std::runtime_error("Generated tiny EmbeddingLookup kernel requires a power-of-two group size that divides warp size.");
+    }
+    if (embeddingDim == 0 || embeddingDim > groupSize) {
+        throw std::runtime_error("Generated tiny EmbeddingLookup kernel requires 0 < embedding_dim <= group_size.");
+    }
+
+    std::ostringstream src;
+    src << generatedEmbeddingValueIncludes(valueDtype);
+    src << R"cuda(
+extern "C" __global__ void embedding_lookup(
+    const )cuda" << generatedEmbeddingIndexTypeName(indexDtype) << R"cuda(* __restrict__ indices,
+    const )cuda" << generatedEmbeddingValueTypeName(valueDtype) << R"cuda(* __restrict__ weights,
+    )cuda" << generatedEmbeddingValueTypeName(valueDtype) << R"cuda(* __restrict__ output) {
+    using ValueT = )cuda" << generatedEmbeddingValueTypeName(valueDtype) << R"cuda(;
+    constexpr unsigned int WARP_SIZE_EMBEDDING = 32u;
+    constexpr unsigned int WARPS_PER_BLOCK = 8u;
+    constexpr unsigned int GROUP_SIZE = )cuda" << groupSize << R"cuda(u;
+    constexpr unsigned int GROUPS_PER_WARP = WARP_SIZE_EMBEDDING / GROUP_SIZE;
+    constexpr unsigned long long NUM_INDICES = )cuda" << numIndices << R"cuda(ull;
+    constexpr unsigned long long EMBEDDING_DIM = )cuda" << embeddingDim << R"cuda(ull;
+
+    const unsigned int lane = threadIdx.x & (WARP_SIZE_EMBEDDING - 1u);
+    const unsigned int warpInBlock = threadIdx.x >> 5;
+    const unsigned int logicalLane = lane % GROUP_SIZE;
+    const unsigned int groupInWarp = lane / GROUP_SIZE;
+    const unsigned long long globalGroup = static_cast<unsigned long long>(blockIdx.x) * WARPS_PER_BLOCK * GROUPS_PER_WARP +
+                                           static_cast<unsigned long long>(warpInBlock) * GROUPS_PER_WARP + groupInWarp;
+    const unsigned long long totalGroups = static_cast<unsigned long long>(gridDim.x) * WARPS_PER_BLOCK * GROUPS_PER_WARP;
+)cuda";
+    if (groupSize == WARP_SIZE_EMBEDDING) {
+        src << R"cuda(    const unsigned int groupMask = 0xffffffffu;
+)cuda";
+    } else {
+        src << R"cuda(    const unsigned int groupMask = ((1u << GROUP_SIZE) - 1u) << (groupInWarp * GROUP_SIZE);
+)cuda";
+    }
+    return src.str();
+}
+
+std::string generatedEmbeddingTinyUncheckedNoPaddingSource(DataType indexDtype,
+                                                           DataType valueDtype,
+                                                           uint64_t numIndices,
+                                                           uint64_t embeddingDim) {
+    const uint32_t groupSize = tinyEmbeddingGroupSize(embeddingDim);
+    if (groupSize == 0) {
+        throw std::runtime_error("Generated tiny EmbeddingLookup kernel requires embedding_dim <= 32.");
+    }
+
+    std::ostringstream src;
+    src << generatedEmbeddingTinyCommonPrefix(indexDtype, valueDtype, numIndices, embeddingDim, groupSize);
+    src << R"cuda(
+    for (unsigned long long token = globalGroup; token < NUM_INDICES; token += totalGroups) {
+        unsigned long long row = 0ull;
+        if (logicalLane == 0u) {
+            row = static_cast<unsigned long long>(indices[token]);
+        }
+        row = __shfl_sync(groupMask, row, groupInWarp * GROUP_SIZE);
+
+        if (logicalLane < EMBEDDING_DIM) {
+            output[token * EMBEDDING_DIM + logicalLane] = weights[row * EMBEDDING_DIM + logicalLane];
+        }
+    }
+}
+)cuda";
+    return src.str();
+}
+
+std::string generatedEmbeddingTinyPaddingSource(DataType indexDtype,
+                                                DataType valueDtype,
+                                                uint64_t numIndices,
+                                                uint64_t vocabularySize,
+                                                uint64_t embeddingDim,
+                                                uint64_t paddingIndex) {
+    const uint32_t groupSize = tinyEmbeddingGroupSize(embeddingDim);
+    if (groupSize == 0) {
+        throw std::runtime_error("Generated tiny EmbeddingLookup kernel requires embedding_dim <= 32.");
+    }
+
+    std::ostringstream src;
+    src << generatedEmbeddingTinyCommonPrefix(indexDtype, valueDtype, numIndices, embeddingDim, groupSize);
+    src << R"cuda(
+    constexpr unsigned long long VOCABULARY_SIZE = )cuda" << vocabularySize << R"cuda(ull;
+    constexpr unsigned long long PADDING_INDEX = )cuda" << paddingIndex << R"cuda(ull;
+
+    for (unsigned long long token = globalGroup; token < NUM_INDICES; token += totalGroups) {
+        unsigned long long row = 0ull;
+        if (logicalLane == 0u) {
+            row = static_cast<unsigned long long>(indices[token]);
+        }
+        row = __shfl_sync(groupMask, row, groupInWarp * GROUP_SIZE);
+
+        if (logicalLane < EMBEDDING_DIM) {
+            ValueT* __restrict__ outBase = output + token * EMBEDDING_DIM;
+            if (row == PADDING_INDEX || row >= VOCABULARY_SIZE) {
+                outBase[logicalLane] = ValueT{};
+            } else {
+                outBase[logicalLane] = weights[row * EMBEDDING_DIM + logicalLane];
+            }
+        }
+    }
+}
+)cuda";
+    return src.str();
+}
+
+std::string generatedEmbeddingTinySource(DataType indexDtype,
+                                         DataType valueDtype,
+                                         bool hasPaddingIndex,
+                                         uint64_t numIndices,
+                                         uint64_t vocabularySize,
+                                         uint64_t embeddingDim,
+                                         uint64_t paddingIndex) {
+    if (!hasPaddingIndex) {
+        return generatedEmbeddingTinyUncheckedNoPaddingSource(indexDtype, valueDtype, numIndices, embeddingDim);
+    }
+    return generatedEmbeddingTinyPaddingSource(indexDtype, valueDtype, numIndices, vocabularySize, embeddingDim, paddingIndex);
+}
+
 void checkNvrtc(nvrtcResult status, const char* call) {
     if (status != NVRTC_SUCCESS) {
         throw std::runtime_error(std::string(call) + " failed with " + nvrtcGetErrorString(status));
@@ -513,7 +659,48 @@ std::shared_ptr<GeneratedEmbeddingKernel> compileGeneratedEmbeddingExactKernel(D
         indexDtype, valueDtype, elementsPerLane, hasPaddingIndex, numIndices, vocabularySize, embeddingDim, paddingIndex);
 
     std::ostringstream key;
-    key << "embedding_lookup_generated_exact:v3\n";
+    key << "embedding_lookup_generated_exact:v4\n";
+    key << "sm=" << prop.major << prop.minor << "\n";
+    key << "device=" << deviceNum << "\n";
+    key << source;
+
+    const std::string cacheKey = key.str();
+    if (auto hit = lookupGeneratedEmbeddingKernel(cacheKey)) {
+        return hit;
+    }
+
+    ScopedGpu scopedGpu(deviceNum);
+    ensureCudaContextCurrentForGeneratedEmbedding(deviceNum);
+
+    std::vector<char> cubin = compileGeneratedEmbeddingSourceToCubin(source, deviceNum);
+
+    auto compiled = std::make_shared<GeneratedEmbeddingKernel>();
+    compiled->cache_key = cacheKey;
+    compiled->device_num = deviceNum;
+    CU_CHECK(cuModuleLoadData(&compiled->module, cubin.data()));
+    CU_CHECK(cuModuleGetFunction(&compiled->kernel, compiled->module, "embedding_lookup"));
+
+    insertGeneratedEmbeddingKernel(cacheKey, compiled);
+    return compiled;
+}
+
+
+std::shared_ptr<GeneratedEmbeddingKernel> compileGeneratedEmbeddingTinyKernel(DataType indexDtype,
+                                                                              DataType valueDtype,
+                                                                              bool hasPaddingIndex,
+                                                                              uint64_t numIndices,
+                                                                              uint64_t vocabularySize,
+                                                                              uint64_t embeddingDim,
+                                                                              uint64_t paddingIndex,
+                                                                              int deviceNum) {
+    cudaDeviceProp prop{};
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, deviceNum));
+
+    const std::string source =
+        generatedEmbeddingTinySource(indexDtype, valueDtype, hasPaddingIndex, numIndices, vocabularySize, embeddingDim, paddingIndex);
+
+    std::ostringstream key;
+    key << "embedding_lookup_generated_tiny:v1\n";
     key << "sm=" << prop.major << prop.minor << "\n";
     key << "device=" << deviceNum << "\n";
     key << source;
@@ -578,6 +765,48 @@ void launchPreparedScalarEmbeddingForward(const PreparedEmbeddingForward& prepar
             prepared.embedding_dim,
             prepared.padding_index);
     CUDA_CHECK(cudaPeekAtLastError());
+}
+
+template <typename IndexT, typename ValueT, bool HasPaddingIndex>
+std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardTinyTyped(const Tensor& indices,
+                                                                           const Tensor& weights,
+                                                                           const Tensor& output,
+                                                                           std::optional<uint64_t> paddingIndex) {
+    const uint64_t numIndices = indices.getTotalNumElements();
+    const std::vector<uint64_t> weightDims = weights.getDimensions();
+    const uint64_t vocabularySize = weightDims[0];
+    const uint64_t embeddingDim = weightDims[1];
+    const uint32_t groupSize = tinyEmbeddingGroupSize(embeddingDim);
+    if (groupSize == 0) {
+        throw std::invalid_argument("Tiny EmbeddingLookup generated path requires embedding_dim <= 32.");
+    }
+
+    static_assert(!std::is_signed_v<IndexT>, "Embedding indices are unsigned-only.");
+
+    auto prepared = std::make_shared<PreparedEmbeddingForward>();
+    prepared->launch = &launchPreparedGeneratedEmbeddingForward;
+    prepared->num_indices = numIndices;
+    prepared->vocabulary_size = vocabularySize;
+    prepared->embedding_dim = embeddingDim;
+    prepared->padding_index = paddingIndex.value_or(0);
+    prepared->has_padding_index = HasPaddingIndex;
+    prepared->elements_per_lane = 0;
+    prepared->grid_blocks = gridForTinyEmbedding(numIndices, groupSize);
+    prepared->device_num = output.getPlacement().getDeviceNum();
+    prepared->index_dtype = indices.getDataType();
+    prepared->weights_dtype = weights.getDataType();
+
+    if (numIndices != 0) {
+        prepared->generated_kernel = compileGeneratedEmbeddingTinyKernel(indices.getDataType(),
+                                                                         weights.getDataType(),
+                                                                         HasPaddingIndex,
+                                                                         numIndices,
+                                                                         vocabularySize,
+                                                                         embeddingDim,
+                                                                         prepared->padding_index,
+                                                                         prepared->device_num);
+    }
+    return prepared;
 }
 
 template <typename IndexT, typename ValueT, uint32_t ElementsPerLane, bool HasPaddingIndex>
@@ -662,6 +891,10 @@ std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardTypedWithPaddin
     constexpr uint32_t maxElementsPerLane = MAX_COALESCED_BYTES_PER_LANE / sizeof(ValueT);
     static_assert(maxElementsPerLane >= 1, "Embedding value dtype is too wide for the coalesced lane copy size.");
     static_assert(maxElementsPerLane <= 8, "Embedding forward intentionally caps lane copies to 16 bytes.");
+
+    if (embeddingDim <= WARP_SIZE_EMBEDDING) {
+        return prepareEmbeddingForwardTinyTyped<IndexT, ValueT, HasPaddingIndex>(indices, weights, output, paddingIndex);
+    }
 
     switch (selectExactElementsPerLane(embeddingDim, maxElementsPerLane)) {
         case 8:
