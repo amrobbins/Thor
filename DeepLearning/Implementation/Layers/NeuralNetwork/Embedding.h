@@ -11,6 +11,8 @@
 
 namespace ThorImplementation {
 
+struct PreparedEmbeddingSparseGradient;
+
 class Embedding final : public TrainableLayer {
    public:
     Embedding(TensorPlacement placement,
@@ -43,6 +45,7 @@ class Embedding final : public TrainableLayer {
     std::optional<uint64_t> paddingIndex;
     bool sparseGradients;
     std::optional<SparseRowGradient> weightsSparseGradient;
+    std::shared_ptr<PreparedEmbeddingSparseGradient> weightsSparseGradientProducer;
 };
 
 }  // namespace ThorImplementation

@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -25,6 +26,18 @@ struct SparseRowGradient {
 
     [[nodiscard]] bool isInitialized() const { return rows.isInitialized() && values.isInitialized() && numRows.isInitialized(); }
 
+    [[nodiscard]] static DataType chooseRowDataType(uint64_t vocabularySize) {
+        // The embedding sparse-gradient producer uses vocabularySize as the invalid-row sentinel during sort/RLE.
+        // Therefore the chosen row dtype must be able to represent both every valid row id and the sentinel itself.
+        if (vocabularySize <= static_cast<uint64_t>(std::numeric_limits<uint16_t>::max())) {
+            return DataType::UINT16;
+        }
+        if (vocabularySize <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+            return DataType::UINT32;
+        }
+        return DataType::UINT64;
+    }
+
     static SparseRowGradient allocate(const TensorPlacement& placement,
                                       uint64_t capacity,
                                       uint64_t vocabularySize,
@@ -41,7 +54,11 @@ struct SparseRowGradient {
             throw std::invalid_argument("SparseRowGradient embedding dimension must be non-zero.");
         }
         if (!isSupportedRowDataType(rowDataType)) {
-            throw std::invalid_argument("SparseRowGradient row dtype must be uint32 or uint64. Got " + dataTypeName(rowDataType) + ".");
+            throw std::invalid_argument("SparseRowGradient row dtype must be uint16, uint32, or uint64. Got " + dataTypeName(rowDataType) + ".");
+        }
+        if (!rowDataTypeCanRepresentVocabularySentinel(rowDataType, vocabularySize)) {
+            throw std::invalid_argument("SparseRowGradient row dtype " + dataTypeName(rowDataType) +
+                                        " cannot represent vocabulary_size as the invalid-row sentinel.");
         }
         if (!isSupportedAccumulationDataType(accumulationDataType)) {
             throw std::invalid_argument("SparseRowGradient accumulation dtype must be fp32. Got " + dataTypeName(accumulationDataType) + ".");
@@ -74,7 +91,11 @@ struct SparseRowGradient {
             throw std::invalid_argument("SparseRowGradient capacity cannot exceed the embedding vocabulary size.");
         }
         if (!isSupportedRowDataType(rowDataType)) {
-            throw std::invalid_argument("SparseRowGradient row dtype must be uint32 or uint64. Got " + dataTypeName(rowDataType) + ".");
+            throw std::invalid_argument("SparseRowGradient row dtype must be uint16, uint32, or uint64. Got " + dataTypeName(rowDataType) + ".");
+        }
+        if (!rowDataTypeCanRepresentVocabularySentinel(rowDataType, vocabularySize)) {
+            throw std::invalid_argument("SparseRowGradient row dtype " + dataTypeName(rowDataType) +
+                                        " cannot represent vocabulary_size as the invalid-row sentinel.");
         }
         if (!isSupportedAccumulationDataType(accumulationDataType)) {
             throw std::invalid_argument("SparseRowGradient accumulation dtype must be fp32. Got " + dataTypeName(accumulationDataType) + ".");
@@ -109,7 +130,22 @@ struct SparseRowGradient {
     }
 
    private:
-    static bool isSupportedRowDataType(DataType dtype) { return dtype == DataType::UINT32 || dtype == DataType::UINT64; }
+    static bool isSupportedRowDataType(DataType dtype) {
+        return dtype == DataType::UINT16 || dtype == DataType::UINT32 || dtype == DataType::UINT64;
+    }
+
+    static bool rowDataTypeCanRepresentVocabularySentinel(DataType dtype, uint64_t vocabularySize) {
+        switch (dtype) {
+            case DataType::UINT16:
+                return vocabularySize <= static_cast<uint64_t>(std::numeric_limits<uint16_t>::max());
+            case DataType::UINT32:
+                return vocabularySize <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max());
+            case DataType::UINT64:
+                return true;
+            default:
+                return false;
+        }
+    }
 
     static bool isSupportedAccumulationDataType(DataType dtype) {
         // Reduced embedding gradients should accumulate in fp32. Mixed-precision weight/state handling belongs to the optimizer update stage.

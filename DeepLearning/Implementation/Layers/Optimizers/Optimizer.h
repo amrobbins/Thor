@@ -10,6 +10,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/StampedEquation.h"
+#include "Utilities/Expression/SparseRowUpdate.h"
 
 // New Shape: an optimizer optimizes exactly 1 tensor.
 // Dense optimizers own dense gradient storage. Sparse-row optimizers own reduced sparse gradient storage.
@@ -69,15 +70,17 @@ class Optimizer : public Parameterizable {
     std::vector<std::string> getOptimizerParameterNames() {
         if (!compiled)
             throw std::runtime_error("getOptimizerParameterNames() called on an uncompiled optimizer. It must be compiled first.");
-        if (updateEquationStamped == nullptr)
-            return listParameters();
-        return updateEquationStamped->outputNames();
+        if (updateEquationStamped != nullptr)
+            return updateEquationStamped->outputNames();
+        if (sparseUpdatePlan != nullptr)
+            return sparseUpdatePlan->outputNames();
+        return listParameters();
     }
 
     Tensor getOptimizerParameterTensor(const std::string &parameterName) {
         if (!compiled)
             throw std::runtime_error("getOptimizerParameterTensor() called on an uncompiled optimizer. It must be compiled first.");
-        if (updateEquationStamped == nullptr) {
+        if (updateEquationStamped == nullptr && sparseUpdatePlan == nullptr) {
             if (!hasParameter(parameterName))
                 throw std::runtime_error("Request to get optimizer parameter " + parameterName +
                                          " but the optimizer has no parameter by that name."
@@ -85,7 +88,8 @@ class Optimizer : public Parameterizable {
                                          listOfStrings(getOptimizerParameterNames()));
             return getParameterStorage(parameterName);
         }
-        std::unordered_map<std::string, Tensor> optimizerParameters = updateEquationStamped->getFinalOutputs();
+        std::unordered_map<std::string, Tensor> optimizerParameters =
+            updateEquationStamped != nullptr ? updateEquationStamped->getFinalOutputs() : sparseUpdatePlan->getFinalOutputs();
         if (!optimizerParameters.contains(parameterName))
             throw std::runtime_error("Request to get optimizer parameter " + parameterName +
                                      " but the optimizer has no parameter by that name."
@@ -110,6 +114,7 @@ class Optimizer : public Parameterizable {
     std::optional<SparseRowGradient> sparseRowGradient;
 
     std::unique_ptr<StampedExecutionPlan> updateEquationStamped;
+    std::unique_ptr<SparseRowUpdatePlan> sparseUpdatePlan;
 
    private:
     const uint64_t id;

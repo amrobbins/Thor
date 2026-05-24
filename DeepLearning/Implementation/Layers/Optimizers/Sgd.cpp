@@ -127,10 +127,81 @@ SparseRowGradient Sgd::compileSparseRows(const Tensor& weights, uint64_t maxSpar
     this->gradientUpdateStream = gradientUpdateStream;
     this->weights = weights;
     this->sparseRowGradient =
-        SparseRowGradient::allocate(weights.getPlacement(), maxSparseRows, weightDims[0], weightDims[1], DataType::FP32, DataType::UINT64);
+        SparseRowGradient::allocate(weights.getPlacement(),
+                                    maxSparseRows,
+                                    weightDims[0],
+                                    weightDims[1],
+                                    DataType::FP32,
+                                    SparseRowGradient::chooseRowDataType(weightDims[0]));
+    THOR_THROW_IF_FALSE(sparseRowGradient.has_value());
 
-    // Step 1 only installs the optimizer-owned reduced sparse-gradient sink. The sparse expression update plan is the
-    // next slice, so sparse update calls fail explicitly rather than silently doing nothing.
+    const DataType weightsDType = weights.getDescriptor().getDataType();
+    const int32_t gpuNum = weights.getPlacement().getDeviceNum();
+
+    auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
+    auto g = Expression::input("gradient", DataType::FP32, DataType::FP32);
+    auto step = Expression::runtimeScalar("step", DataType::FP32, DataType::FP32);
+
+    std::unordered_map<std::string, SparseRowUpdateTensorBinding> sparseInputs;
+    std::unordered_map<std::string, Tensor> sparseIndexedOutputs;
+    sparseInputs["weights_in"] = SparseRowUpdateTensorBinding{weights, SparseRowUpdateTensorKind::IndexedRows};
+    sparseInputs["gradient"] = SparseRowUpdateTensorBinding{sparseRowGradient->values, SparseRowUpdateTensorKind::DenseLogicalRows};
+    sparseIndexedOutputs["weights"] = weights;
+
+    std::optional<Outputs> expressionOutputs;
+    if (momentum > 0.0f) {
+        if (!hasParameter("momentum")) {
+            shared_ptr<PhysicalParameter> momentumParameter =
+                make_shared<PhysicalParameter>("momentum", false, weights.getDimensions(), weightsDType);
+            shared_ptr<Initializer> paramInitializer = make_shared<ZerosInitializer>();
+            momentumParameter->setInitializer(paramInitializer->clone());
+            addParameter(momentumParameter);
+            momentumParameter->compileStorage(weights);
+            momentumParameter->compileInitializer();
+            momentumParameter->initialize(gradientUpdateStream);
+            THOR_THROW_IF_FALSE(momentumParameter->getStorage().has_value());
+        }
+        shared_ptr<PhysicalParameter> momentumParameter = getParameter("momentum");
+        Tensor momentumTensor = momentumParameter->getStorage().value();
+
+        Expression v = Expression::input("velocity_in", DataType::FP32, DataType::FP32);
+        std::optional<Expression> vNext;
+        std::optional<Expression> wNext;
+        if (useNesterovMomentum) {
+            // Nesterov:
+            // v_{t+1}[row, d] = mu * v_t[row, d] - step * g[row, d]
+            // w_{t+1}[row, d] = w_t[row, d] + mu * v_{t+1}[row, d] - step * g[row, d]
+            vNext.emplace((Expression::constantScalar(momentum) * v - step * g).withOutputDType(weightsDType));
+            wNext.emplace((w + Expression::constantScalar(momentum) * (*vNext) - step * g).withOutputDType(weightsDType));
+        } else {
+            // Classical momentum:
+            // v_{t+1}[row, d] = mu * v_t[row, d] - step * g[row, d]
+            // w_{t+1}[row, d] = w_t[row, d] + v_{t+1}[row, d]
+            vNext.emplace((Expression::constantScalar(momentum) * v - step * g).withOutputDType(weightsDType));
+            wNext.emplace((w + (*vNext)).withOutputDType(weightsDType));
+        }
+
+        expressionOutputs.emplace(Expression::outputs({
+            {"weights", *wNext},
+            {"velocity", *vNext},
+        }));
+        sparseInputs["velocity_in"] = SparseRowUpdateTensorBinding{momentumTensor, SparseRowUpdateTensorKind::IndexedRows};
+        sparseIndexedOutputs["velocity"] = momentumTensor;
+    } else {
+        if (hasParameter("momentum"))
+            dropParameter("momentum");
+
+        // Plain sparse SGD over the optimizer-owned reduced sparse-gradient rows:
+        // w_{t+1}[row, d] = w_t[row, d] - step * g[row, d]
+        auto wNext = (w - step * g).withOutputDType(weightsDType);
+        expressionOutputs.emplace(Expression::outputs({
+            {"weights", wNext},
+        }));
+    }
+
+    sparseUpdatePlan = SparseRowUpdatePlan::compile(expressionOutputs->physicalOutputs(), sparseRowGradient->rows, sparseRowGradient->numRows,
+                                                   sparseInputs, sparseIndexedOutputs, gpuNum);
+
     compiled = true;
     return sparseRowGradient.value();
 }
@@ -153,12 +224,20 @@ void Sgd::updateWeights(uint32_t batchSize) {
 }
 
 void Sgd::updateSparseRows(uint32_t batchSize) {
-    (void)batchSize;
     THOR_THROW_IF_FALSE(compiled);
     THOR_THROW_IF_FALSE(sparseRowGradient.has_value());
-    throw std::runtime_error(
-        "Sparse SGD update has an optimizer-owned reduced sparse-gradient sink, but the sparse row expression update stage is not "
-        "implemented yet.");
+    THOR_THROW_IF_FALSE(sparseUpdatePlan != nullptr);
+
+    sparseRowGradient->validate();
+
+    THOR_THROW_IF_FALSE(batchSize > 0);
+    const float lossScalingFactor = Loss::getLossScalingFactor();
+    THOR_THROW_IF_FALSE(lossScalingFactor > 0);
+
+    const float step = currentLearningRate / (static_cast<float>(batchSize) * lossScalingFactor);
+    sparseUpdatePlan->run({
+        {"step", step},
+    }, gradientUpdateStream);
 }
 
 unordered_map<string, float> Sgd::updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
