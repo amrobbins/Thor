@@ -22,6 +22,7 @@
 #include "Utilities/Expression/InPlaceRopeKernel.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
+#include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
 
 namespace cudnn_frontend {
 namespace graph {
@@ -246,6 +247,16 @@ struct CompiledAttention {
     std::string debug_name = "thor_expr_attention";
 
     CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o) const;
+};
+
+
+struct CompiledEmbeddingLookup {
+    bool has_padding_index = false;
+    uint64_t padding_index = 0;
+    TensorDescriptor::DataType index_dtype = TensorDescriptor::DataType::UINT32;
+    TensorDescriptor::DataType weights_dtype = TensorDescriptor::DataType::FP32;
+    TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP32;
+    std::string debug_name = "thor_expr_embedding_lookup";
 };
 
 struct CompiledCudaKernel {
@@ -546,6 +557,31 @@ class StampedRmsNorm {
     const std::shared_ptr<CompiledRmsNorm> compiled_rms_norm;
     const Tensor input;
     const Tensor scale;
+    Tensor output;
+    Stream stream;
+};
+
+
+class StampedEmbeddingLookup {
+   public:
+    void run() { runOn(stream); }
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+    Tensor getOutputTensor() const { return output; }
+
+    StampedEmbeddingLookup(std::shared_ptr<CompiledEmbeddingLookup> compiled,
+                           const Tensor& indices,
+                           const Tensor& weights,
+                           const Tensor& output,
+                           const Stream& stream)
+        : compiled_embedding_lookup(std::move(compiled)), indices(indices), weights(weights), output(output), stream(stream) {}
+
+   private:
+    const std::shared_ptr<CompiledEmbeddingLookup> compiled_embedding_lookup;
+    const Tensor indices;
+    const Tensor weights;
     Tensor output;
     Stream stream;
 };
@@ -872,7 +908,7 @@ class StampedInPlaceRope {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -887,6 +923,8 @@ struct StampedExecutionStage {
                 return "Softmax";
             case Kind::RmsNorm:
                 return "RmsNorm";
+            case Kind::EmbeddingLookup:
+                return "EmbeddingLookup";
             case Kind::Matmul:
                 return "Matmul";
             case Kind::InPlaceRope:
@@ -917,6 +955,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<StampedSoftmax> softmax = nullptr;
     const std::shared_ptr<StampedRmsNorm> rms_norm = nullptr;
+    const std::shared_ptr<StampedEmbeddingLookup> embedding_lookup = nullptr;
     const std::shared_ptr<StampedMatmul> matmul = nullptr;
     const std::shared_ptr<StampedInPlaceRope> in_place_rope = nullptr;
     const std::shared_ptr<StampedAttention> attention = nullptr;
@@ -979,6 +1018,15 @@ struct StampedExecutionStage {
           gpu_num(rms_norm->gpuNum()),
           flop_count(flop_count),
           rms_norm(rms_norm) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedEmbeddingLookup>& embedding_lookup,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::EmbeddingLookup),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(embedding_lookup->gpuNum()),
+          flop_count(flop_count),
+          embedding_lookup(embedding_lookup) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedMatmul>& matmul,
                                    std::vector<uint32_t> dependency_stage_indices = {},
@@ -1072,6 +1120,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::RmsNorm) {
             THOR_THROW_IF_FALSE(rms_norm != nullptr);
             rms_norm->runOn(run_stream);
+        } else if (kind == Kind::EmbeddingLookup) {
+            THOR_THROW_IF_FALSE(embedding_lookup != nullptr);
+            embedding_lookup->runOn(run_stream);
         } else if (kind == Kind::Matmul) {
             THOR_THROW_IF_FALSE(matmul != nullptr);
             if (runtime_scalars.empty())

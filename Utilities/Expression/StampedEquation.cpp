@@ -1134,6 +1134,21 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
     CudnnRmsNorm::instance().forward(descriptor, args, run_stream);
 }
 
+
+void StampedEmbeddingLookup::runOn(Stream& run_stream) const {
+    if (!compiled_embedding_lookup) {
+        throw std::runtime_error("StampedEmbeddingLookup::runOn called with null compiled payload.");
+    }
+    Tensor mutableOutput = output;
+    launchEmbeddingForward(indices,
+                           weights,
+                           mutableOutput,
+                           compiled_embedding_lookup->has_padding_index
+                               ? std::optional<uint64_t>(compiled_embedding_lookup->padding_index)
+                               : std::nullopt,
+                           run_stream);
+}
+
 StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                              std::shared_ptr<BuiltMatmul> built,
                              const Tensor& lhs,

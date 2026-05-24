@@ -916,6 +916,16 @@ static std::vector<uint64_t> inferRmsNormOutputDims(const ExprNode& node,
                                                     const std::vector<uint64_t>& input_dims,
                                                     const std::vector<uint64_t>& scale_dims);
 
+static std::vector<uint64_t> inferEmbeddingLookupOutputDims(const std::vector<uint64_t>& index_dims,
+                                                             const std::vector<uint64_t>& weights_dims) {
+    if (weights_dims.size() != 2 || weights_dims[0] == 0 || weights_dims[1] == 0) {
+        throw std::runtime_error("EmbeddingLookup shape inference requires weights shape [vocabulary_size, embedding_dim].");
+    }
+    std::vector<uint64_t> out = index_dims;
+    out.push_back(weights_dims[1]);
+    return out;
+}
+
 static std::vector<uint64_t> inferTransposeOutputDims(const std::vector<uint64_t>& input_dims) {
     if (input_dims.size() < 2) {
         throw std::runtime_error("Transpose shape inference requires rank >= 2 tensors.");
@@ -1075,6 +1085,9 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             }
             case ExprOp::RMSNORM:
                 node_dims[i] = inferRmsNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                break;
+            case ExprOp::EMBEDDING_LOOKUP:
+                node_dims[i] = inferEmbeddingLookupOutputDims(node_dims[node.lhs], node_dims[node.rhs]);
                 break;
             case ExprOp::TRANSPOSE:
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
@@ -3301,6 +3314,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             }
 
             case ExprOp::CUDA_KERNEL_OUTPUT:
+            case ExprOp::EMBEDDING_LOOKUP:
             case ExprOp::SOFTMAX:
             case ExprOp::ATTENTION:
             case ExprOp::ATTENTION_BACKWARD_Q:
@@ -3553,6 +3567,9 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
             return base_flops;
         }
 
+        case CompiledExecutionStage::Kind::EmbeddingLookup:
+            return 0;
+
         case CompiledExecutionStage::Kind::Matmul:
             if (!stage.matmul)
                 throw std::runtime_error("Matmul stage missing payload while computing FLOPs.");
@@ -3642,6 +3659,16 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 throw std::runtime_error("resolveOutputDimsForStageOutput RMSNorm stage expected input and scale shapes.");
             }
             return inferRmsNormOutputDims(*stage.rms_norm, stage_input_dims[0], stage_input_dims[1]);
+        }
+
+        case CompiledExecutionStage::Kind::EmbeddingLookup: {
+            if (!stage.embedding_lookup) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput EmbeddingLookup stage missing payload.");
+            }
+            if (stage_input_dims.size() != 2) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput EmbeddingLookup stage expected indices and weights shapes.");
+            }
+            return inferEmbeddingLookupOutputDims(stage_input_dims[0], stage_input_dims[1]);
         }
 
         case CompiledExecutionStage::Kind::ReduceMinMaxBackward: {
@@ -7077,6 +7104,34 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
                 stampedStages.emplace_back(stampedRmsNorm, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
+            case CompiledExecutionStage::Kind::EmbeddingLookup: {
+                if (!stage.embedding_lookup) {
+                    throw std::runtime_error("EmbeddingLookup stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 2) {
+                    throw std::runtime_error("EmbeddingLookup stage expects exactly two inputs: indices and weights.");
+                }
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("EmbeddingLookup stage expects exactly one output.");
+                }
+                Tensor indicesTensor = runtimeInputTensor(stageInputs[0]);
+                Tensor weightsTensor = runtimeInputTensor(stageInputs[1]);
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Tensor outputTensor;
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    outputTensor = preallocated_it->second;
+                } else {
+                    outputTensor = Tensor(weightsTensor.getPlacement(), TensorDescriptor(stage.embedding_lookup->output_dtype, output_dims));
+                }
+                std::shared_ptr<StampedEmbeddingLookup> stampedEmbeddingLookup =
+                    std::make_shared<StampedEmbeddingLookup>(stage.embedding_lookup, indicesTensor, weightsTensor, outputTensor, stream);
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedEmbeddingLookup, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
             case CompiledExecutionStage::Kind::Matmul: {

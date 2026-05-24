@@ -796,6 +796,25 @@ Shorthand for ``self.transpose()``.
         return nb::cast<DataType>(dtype_obj);
     };
 
+    expr.def_static(
+        "embedding_lookup",
+        [parse_optional_dtype](const Expression& indices, const Expression& weights, nb::object padding_index_obj, nb::object output_dtype_obj) {
+            std::optional<uint64_t> padding_index = std::nullopt;
+            if (!padding_index_obj.is_none()) {
+                padding_index = nb::cast<uint64_t>(padding_index_obj);
+            }
+            return Expression::embeddingLookup(indices, weights, padding_index, parse_optional_dtype(output_dtype_obj));
+        },
+        "indices"_a,
+        "weights"_a,
+        "padding_index"_a.none() = nb::none(),
+        "output_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Embedding lookup expression. The indices tensor must be uint32 or uint64. The weights tensor must have shape
+[vocabulary_size, embedding_dim], and the output shape is indices.shape + [embedding_dim]. When padding_index is set,
+matching rows are written as zeros without reading the weight table.
+)nbdoc");
+
     auto build_attention_from_python_args = [parse_optional_dtype](const Expression& q,
                                                                    const Expression& k,
                                                                    const Expression& v,

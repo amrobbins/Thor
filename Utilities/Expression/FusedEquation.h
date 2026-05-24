@@ -32,7 +32,7 @@ struct ParameterFanOverride {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Softmax, RmsNorm, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -47,6 +47,8 @@ struct CompiledExecutionStage {
                 return "Softmax";
             case Kind::RmsNorm:
                 return "RmsNorm";
+            case Kind::EmbeddingLookup:
+                return "EmbeddingLookup";
             case Kind::Matmul:
                 return "Matmul";
             case Kind::InPlaceRope:
@@ -77,6 +79,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
     const std::shared_ptr<CompiledRmsNorm> rms_norm = nullptr;
+    const std::shared_ptr<CompiledEmbeddingLookup> embedding_lookup = nullptr;
     const std::shared_ptr<CompiledMatmul> matmul = nullptr;
     const std::shared_ptr<CompiledInPlaceRope> in_place_rope = nullptr;
     const std::shared_ptr<CompiledAttention> attention = nullptr;
@@ -130,6 +133,12 @@ struct CompiledExecutionStage {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing RMSNorm stage.");
                 }
                 return rms_norm->output_dtype;
+
+            case Kind::EmbeddingLookup:
+                if (!embedding_lookup) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing EmbeddingLookup stage.");
+                }
+                return embedding_lookup->output_dtype;
 
             case Kind::Matmul:
                 if (!matmul) {
@@ -253,6 +262,16 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::RmsNorm),
           rms_norm(rms_norm),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledEmbeddingLookup>& embedding_lookup,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::EmbeddingLookup),
+          embedding_lookup(embedding_lookup),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}

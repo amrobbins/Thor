@@ -221,6 +221,13 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         return node.output_dtype.value();
     }
 
+    if (node.op == ExprOp::EMBEDDING_LOOKUP) {
+        if (node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("EmbeddingLookup weights node has index out of range in resolveNodeLogicalInputDType.");
+        }
+        return resolved_output_dtypes[node.rhs];
+    }
+
     std::vector<DataType> tensor_parent_dtypes;
     tensor_parent_dtypes.reserve(4);
 
@@ -279,6 +286,14 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
             throw std::runtime_error("CudaKernelExpression output node is missing output dtype.");
         }
         return node.output_dtype.value();
+    }
+
+    if (node.op == ExprOp::EMBEDDING_LOOKUP) {
+        if (node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("EmbeddingLookup weights node has index out of range in resolveNodeOutputDType.");
+        }
+        const DataType weights_dtype = resolved_output_dtypes[node.rhs];
+        return node.output_dtype.has_value() ? node.output_dtype.value() : weights_dtype;
     }
 
     if (node.op == ExprOp::RMSNORM) {
@@ -500,8 +515,13 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
         const DataType output_dtype = resolveNodeOutputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
         const DataType logical_input_dtype = resolveNodeLogicalInputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
-        DataType requested_compute_dtype =
-            node.compute_dtype.has_value() ? node.compute_dtype.value() : defaultComputeDType(logical_input_dtype, output_dtype);
+        DataType requested_compute_dtype;
+        if (node.op == ExprOp::EMBEDDING_LOOKUP) {
+            requested_compute_dtype = output_dtype;
+        } else {
+            requested_compute_dtype =
+                node.compute_dtype.has_value() ? node.compute_dtype.value() : defaultComputeDType(logical_input_dtype, output_dtype);
+        }
         if (isConvolutionOp(node.op) && !node.compute_dtype.has_value() &&
             (isFp8Type(logical_input_dtype) || isFp8Type(output_dtype))) {
             requested_compute_dtype = DataType::FP32;

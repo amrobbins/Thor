@@ -587,6 +587,7 @@ static bool isConvolutionOp(ExprOp op) { return isConvolutionForwardOp(op) || is
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
 static bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
 static bool isRmsNormOp(ExprOp op) { return op == ExprOp::RMSNORM; }
+static bool isEmbeddingLookupOp(ExprOp op) { return op == ExprOp::EMBEDDING_LOOKUP; }
 static bool isAttentionOp(ExprOp op) { return op == ExprOp::ATTENTION; }
 static bool isAttentionBackwardOp(ExprOp op) {
     return op == ExprOp::ATTENTION_BACKWARD_Q || op == ExprOp::ATTENTION_BACKWARD_K || op == ExprOp::ATTENTION_BACKWARD_V ||
@@ -602,7 +603,7 @@ static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
     return isCudnnReduceOp(op) || isSoftmaxOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) || isAttentionBackwardOp(op) ||
-           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
+           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) || op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
 
 static uint32_t peelExplicitTransposeChain(const PhysicalExpression& expr, uint32_t node_idx, bool& transpose_toggled) {
@@ -853,6 +854,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "RNORM2";
         case ExprOp::RMSNORM:
             return "RMSNORM";
+        case ExprOp::EMBEDDING_LOOKUP:
+            return "EMBEDDING_LOOKUP";
         case ExprOp::MATMUL:
             return "MATMUL";
         case ExprOp::GEMM:
@@ -1641,6 +1644,52 @@ shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpre
     descriptor.fusedActivation = compiled->fused_activation;
     descriptor.debugName = compiled->debug_name;
     descriptor.validateForward();
+    return compiled;
+}
+
+
+shared_ptr<CompiledEmbeddingLookup> EquationCompiler::compileEmbeddingLookup(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 2) {
+        throw std::runtime_error("EmbeddingLookup stage must have exactly two inputs: indices and weights.");
+    }
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("EmbeddingLookup stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isEmbeddingLookupOp(node.op)) {
+        throw std::runtime_error("EmbeddingLookup stage output node is not EMBEDDING_LOOKUP.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("EmbeddingLookup node is missing indices or weights.");
+    }
+
+    const ExprNode& indices_node = expr.nodes[node.lhs];
+    const ExprNode& weights_node = expr.nodes[node.rhs];
+    if (indices_node.op != ExprOp::INPUT || weights_node.op != ExprOp::INPUT) {
+        throw std::runtime_error("EmbeddingLookup stage inputs must be local INPUT nodes.");
+    }
+    if (!indices_node.input_tensor_dtype.has_value() || !weights_node.input_tensor_dtype.has_value() || !node.output_dtype.has_value()) {
+        throw std::runtime_error("EmbeddingLookup stage input/output nodes are missing resolved dtype metadata.");
+    }
+
+    auto compiled = make_shared<CompiledEmbeddingLookup>();
+    compiled->has_padding_index = node.embedding_has_padding_index;
+    compiled->padding_index = node.embedding_padding_index;
+    compiled->index_dtype = indices_node.input_tensor_dtype.value();
+    compiled->weights_dtype = weights_node.input_tensor_dtype.value();
+    compiled->output_dtype = node.output_dtype.value();
+    compiled->debug_name = "thor_expr_embedding_lookup";
+
+    if (compiled->index_dtype != DataType::UINT32 && compiled->index_dtype != DataType::UINT64) {
+        throw std::runtime_error("EmbeddingLookup indices dtype must be uint32 or uint64.");
+    }
+    if (compiled->weights_dtype != DataType::FP16 && compiled->weights_dtype != DataType::BF16 && compiled->weights_dtype != DataType::FP32) {
+        throw std::runtime_error("EmbeddingLookup weights dtype must be fp16, bf16, or fp32.");
+    }
+    if (compiled->output_dtype != compiled->weights_dtype) {
+        throw std::runtime_error("EmbeddingLookup output dtype must match weights dtype in this backend slice.");
+    }
     return compiled;
 }
 
@@ -3067,6 +3116,88 @@ static PhysicalExecutionStage buildRmsNormStage(const PhysicalExpression& expr,
         .input_value_ids = std::move(input_value_ids),
         .outputs = std::move(stage_outputs),
     };
+}
+
+
+static PhysicalExecutionStage buildEmbeddingLookupStage(const PhysicalExpression& expr,
+                                                        uint32_t node_idx,
+                                                        uint32_t output_value_id,
+                                                        const std::string& output_name,
+                                                        const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isEmbeddingLookupOp(node.op)) {
+        throw std::runtime_error("buildEmbeddingLookupStage called on non-EmbeddingLookup node.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("EmbeddingLookup node missing indices or weights input.");
+    }
+
+    PhysicalExpression stage_expr;
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(2);
+
+    auto add_local_input = [&](uint32_t parent_idx, uint32_t local_slot) {
+        const ExprNode& parent = expr.nodes[parent_idx];
+        uint32_t value_id = UINT32_MAX;
+        std::optional<DataType> actual_input_dtype = std::nullopt;
+        std::optional<DataType> output_dtype = std::nullopt;
+        std::optional<DataType> compute_dtype = std::nullopt;
+        std::optional<DataType> backward_output_dtype = std::nullopt;
+        std::optional<DataType> backward_compute_dtype = std::nullopt;
+
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            value_id = out_it->second;
+            actual_input_dtype = parent.output_dtype;
+            output_dtype = parent.output_dtype;
+            compute_dtype = parent.compute_dtype;
+            backward_output_dtype = parent.backward_output_dtype;
+            backward_compute_dtype = parent.backward_compute_dtype;
+        } else if (parent.op == ExprOp::INPUT) {
+            value_id = parent.input_slot;
+            actual_input_dtype = parent.input_tensor_dtype;
+            output_dtype = parent.output_dtype;
+            compute_dtype = parent.compute_dtype;
+            backward_output_dtype = parent.backward_output_dtype;
+            backward_compute_dtype = parent.backward_compute_dtype;
+        } else {
+            throw std::runtime_error("Missing value id for EmbeddingLookup input.");
+        }
+        if (!actual_input_dtype.has_value() || !output_dtype.has_value()) {
+            throw std::runtime_error("EmbeddingLookup parent is missing resolved dtype metadata.");
+        }
+
+        input_value_ids.push_back(value_id);
+        stage_expr.inputs.push_back(NamedInput{std::string("__arg") + std::to_string(local_slot), local_slot, NamedInput::Kind::Tensor});
+
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = actual_input_dtype.value();
+        input_node.output_dtype = output_dtype.value();
+        input_node.compute_dtype = compute_dtype.value_or(output_dtype.value());
+        input_node.backward_output_dtype = backward_output_dtype.value_or(output_dtype.value());
+        input_node.backward_compute_dtype = backward_compute_dtype.value_or(input_node.compute_dtype.value());
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+
+    add_local_input(node.lhs, 0);
+    add_local_input(node.rhs, 1);
+
+    ExprNode lookup = node;
+    lookup.lhs = 0;
+    lookup.rhs = 1;
+    lookup.aux = UINT32_MAX;
+    stage_expr.nodes.push_back(std::move(lookup));
+    stage_expr.output_node = 2;
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{.name = output_name, .local_node_idx = 2, .value_id = output_value_id});
+
+    return PhysicalExecutionStage{.kind = PhysicalExecutionStage::Kind::EmbeddingLookup,
+                                  .expr = std::move(stage_expr),
+                                  .input_value_ids = std::move(input_value_ids),
+                                  .outputs = std::move(stage_outputs)};
 }
 
 static PhysicalExecutionStage buildInputTransposedMaterializationStage(const PhysicalExpression& expr,
@@ -4868,7 +4999,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
                 ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             }
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
                 isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
@@ -5188,7 +5319,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
                 ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             }
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
                 isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
@@ -5260,6 +5391,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isRmsNormOp(root.op)) {
                 planned.stages.push_back(
                     buildRmsNormStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isEmbeddingLookupOp(root.op)) {
+                planned.stages.push_back(
+                    buildEmbeddingLookupStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isMatmulOp(root.op)) {
                 std::vector<PendingMatmulBgradOutput> bgrad_outputs = takePendingMatmulBgradOutputs(named_output.node_idx);
                 planned.stages.push_back(
@@ -5453,6 +5587,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::RmsNorm: {
                 std::shared_ptr<CompiledRmsNorm> rms_norm = compileRmsNorm(stage.expr);
                 compiled->stages.emplace_back(rms_norm, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::EmbeddingLookup: {
+                std::shared_ptr<CompiledEmbeddingLookup> embedding_lookup = compileEmbeddingLookup(stage.expr);
+                compiled->stages.emplace_back(embedding_lookup, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::Matmul: {
