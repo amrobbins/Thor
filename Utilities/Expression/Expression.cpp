@@ -219,6 +219,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "attention_backward_v";
         case ExprOp::ATTENTION_BACKWARD_BIAS:
             return "attention_backward_bias";
+        case ExprOp::EMBEDDING_LOOKUP:
+            return "embedding_lookup";
         case ExprOp::CUDA_KERNEL_OUTPUT:
             return "cuda_kernel_output";
         default:
@@ -293,6 +295,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"attention_backward_k", ExprOp::ATTENTION_BACKWARD_K},
         {"attention_backward_v", ExprOp::ATTENTION_BACKWARD_V},
         {"attention_backward_bias", ExprOp::ATTENTION_BACKWARD_BIAS},
+        {"embedding_lookup", ExprOp::EMBEDDING_LOOKUP},
         {"cuda_kernel_output", ExprOp::CUDA_KERNEL_OUTPUT},
     };
 
@@ -469,6 +472,8 @@ json exprNodeToJson(const ExprNode& node) {
     j["rms_norm_normalized_feature_count"] = node.rms_norm_normalized_feature_count;
     j["rms_norm_epsilon"] = node.rms_norm_epsilon;
     j["rms_norm_fused_activation"] = toString(node.rms_norm_fused_activation);
+    j["embedding_has_padding_index"] = node.embedding_has_padding_index;
+    j["embedding_padding_index"] = node.embedding_padding_index;
     setOptionalDTypeJson(j, "input_tensor_dtype", node.input_tensor_dtype);
     setOptionalDTypeJson(j, "output_dtype", node.output_dtype);
     setOptionalDTypeJson(j, "compute_dtype", node.compute_dtype);
@@ -574,6 +579,8 @@ ExprNode exprNodeFromJson(const json& j) {
     node.rms_norm_fused_activation = j.contains("rms_norm_fused_activation")
                                          ? cudnnRmsNormFusedActivationFromString(j.at("rms_norm_fused_activation").get<std::string>())
                                          : CudnnRmsNormFusedActivation::NONE;
+    node.embedding_has_padding_index = j.value("embedding_has_padding_index", false);
+    node.embedding_padding_index = j.value("embedding_padding_index", uint64_t{0});
     parseOptionalDTypeField(j, "input_tensor_dtype", node.input_tensor_dtype);
     parseOptionalDTypeField(j, "output_dtype", node.output_dtype);
     parseOptionalDTypeField(j, "compute_dtype", node.compute_dtype);
@@ -737,6 +744,8 @@ std::string opName(ExprOp op) {
             return "ATTN_BW_V";
         case ExprOp::ATTENTION_BACKWARD_BIAS:
             return "ATTN_BW_BIAS";
+        case ExprOp::EMBEDDING_LOOKUP:
+            return "EMBEDDING_LOOKUP";
         case ExprOp::CUDA_KERNEL_OUTPUT:
             return "CUDA_KERNEL";
         default:
@@ -914,6 +923,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::MAX_GRAD_RIGHT:
         case ExprOp::MATMUL:
         case ExprOp::RMSNORM:
+        case ExprOp::EMBEDDING_LOOKUP:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -939,6 +949,9 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 out += ";hidden=" + std::to_string(n.rms_norm_normalized_feature_count);
                 out += ";epsilon=" + formatFloatCanonical(n.rms_norm_epsilon);
                 out += ";fusedActivation=" + std::string(toString(n.rms_norm_fused_activation));
+            } else if (n.op == ExprOp::EMBEDDING_LOOKUP) {
+                out += ";padding=";
+                out += n.embedding_has_padding_index ? std::to_string(n.embedding_padding_index) : std::string("none");
             } else if (n.op == ExprOp::CONV2D || n.op == ExprOp::CONV2D_BACKWARD_DATA || n.op == ExprOp::CONV2D_BACKWARD_FILTER ||
                        n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
                 if (n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
@@ -1645,6 +1658,7 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::MAX_GRAD_RIGHT:
         case ExprOp::MATMUL:
         case ExprOp::RMSNORM:
+        case ExprOp::EMBEDDING_LOOKUP:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -3269,6 +3283,19 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
     out->nodes.push_back(std::move(node));
     out->output_node = new_index;
     return Expression(out, new_index);
+}
+
+
+Expression Expression::embeddingLookup(const Expression& indices,
+                                       const Expression& weights,
+                                       std::optional<uint64_t> padding_index,
+                                       std::optional<DataType> output_dtype) {
+    Expression out = binaryOp(indices, weights, ExprOp::EMBEDDING_LOOKUP);
+    ExprNode& node = out.expr->nodes.at(out.nodeIndex);
+    node.embedding_has_padding_index = padding_index.has_value();
+    node.embedding_padding_index = padding_index.value_or(0);
+    node.output_dtype = output_dtype;
+    return out;
 }
 
 Expression Expression::scaledDotProductAttention(const Expression& q, const Expression& k, const Expression& v, AttentionOptions options) {

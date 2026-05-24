@@ -89,6 +89,7 @@ enum class ExprOp : uint16_t {
     ATTENTION_BACKWARD_K,
     ATTENTION_BACKWARD_V,
     ATTENTION_BACKWARD_BIAS,
+    EMBEDDING_LOOKUP,
     CUDA_KERNEL_OUTPUT,
 };
 
@@ -251,6 +252,9 @@ struct ExprNode {
     uint64_t rms_norm_normalized_feature_count = 0;
     double rms_norm_epsilon = 1.0e-5;
     CudnnRmsNormFusedActivation rms_norm_fused_activation = CudnnRmsNormFusedActivation::NONE;
+
+    bool embedding_has_padding_index = false;
+    uint64_t embedding_padding_index = 0;
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     std::optional<TensorDescriptor::DataType> input_tensor_dtype = std::nullopt;
@@ -523,6 +527,11 @@ class Expression {
                                       std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt) const {
         return rmsNorm(*this, scale, normalized_feature_count, epsilon, compute_dtype, output_dtype);
     }
+
+    [[nodiscard]] static Expression embeddingLookup(const Expression& indices,
+                                                    const Expression& weights,
+                                                    std::optional<uint64_t> padding_index = std::nullopt,
+                                                    std::optional<TensorDescriptor::DataType> output_dtype = std::nullopt);
 
     [[nodiscard]] static Expression scaledDotProductAttention(const Expression& q,
                                                               const Expression& k,
