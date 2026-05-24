@@ -1,6 +1,6 @@
 #include "Utilities/Expression/EquationCompiler.h"
-#include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/CudaKernelExpression.h"
+#include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
 
 #include "CudaSourceEmitter.h"
@@ -8,14 +8,14 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 #include <functional>
 #include <map>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <string_view>
 
 using namespace std;
 
@@ -595,15 +595,15 @@ static bool isAttentionBackwardOp(ExprOp op) {
 }
 
 static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
-    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
-        return node.op == ExprOp::ROPE || node.op == ExprOp::TRANSPOSE;
-    });
+    return std::any_of(
+        expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return node.op == ExprOp::ROPE || node.op == ExprOp::TRANSPOSE; });
 }
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
     return isCudnnReduceOp(op) || isSoftmaxOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) || isAttentionBackwardOp(op) ||
-           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) || op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
+           isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) || op == ExprOp::STRIDED_VIEW ||
+           op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
 
 static uint32_t peelExplicitTransposeChain(const PhysicalExpression& expr, uint32_t node_idx, bool& transpose_toggled) {
@@ -915,7 +915,6 @@ static const char* matmulEpilogueSignatureName(MatmulEpilogue epilogue) {
     }
     throw std::runtime_error("Unknown MatmulEpilogue value.");
 }
-
 
 static const char* matmulBackwardEpilogueSignatureName(MatmulBackwardEpilogue epilogue) {
     switch (epilogue) {
@@ -1367,7 +1366,7 @@ vector<char> EquationCompiler::linkToCubin(const vector<char>& ltoir, const Equa
     return cubin;
 }
 
-constexpr bool PRINT_KERNELS = false;
+constexpr bool PRINT_KERNELS = true;
 
 vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& kernel_name, const EquationSignature& sig) {
     if (PRINT_KERNELS) {
@@ -1630,7 +1629,8 @@ shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpre
     compiled->output_dtype = output_dtype;
     compiled->compute_dtype = compute_dtype;
     compiled->fused_activation = node.rms_norm_fused_activation;
-    compiled->debug_name = node.rms_norm_fused_activation == CudnnRmsNormFusedActivation::SWISH ? "thor_expr_rms_norm_swish" : "thor_expr_rms_norm";
+    compiled->debug_name =
+        node.rms_norm_fused_activation == CudnnRmsNormFusedActivation::SWISH ? "thor_expr_rms_norm_swish" : "thor_expr_rms_norm";
 
     CudnnRmsNormDescriptor descriptor;
     descriptor.outerSize = 1;
@@ -1646,7 +1646,6 @@ shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpre
     descriptor.validateForward();
     return compiled;
 }
-
 
 shared_ptr<CompiledEmbeddingLookup> EquationCompiler::compileEmbeddingLookup(const PhysicalExpression& expr) {
     if (expr.numInputs() != 2) {
@@ -1684,7 +1683,8 @@ shared_ptr<CompiledEmbeddingLookup> EquationCompiler::compileEmbeddingLookup(con
     if (compiled->index_dtype != DataType::UINT32 && compiled->index_dtype != DataType::UINT64) {
         throw std::runtime_error("EmbeddingLookup indices dtype must be uint32 or uint64.");
     }
-    if (compiled->weights_dtype != DataType::FP16 && compiled->weights_dtype != DataType::BF16 && compiled->weights_dtype != DataType::FP32) {
+    if (compiled->weights_dtype != DataType::FP16 && compiled->weights_dtype != DataType::BF16 &&
+        compiled->weights_dtype != DataType::FP32) {
         throw std::runtime_error("EmbeddingLookup weights dtype must be fp16, bf16, or fp32.");
     }
     if (compiled->output_dtype != compiled->weights_dtype) {
@@ -1693,7 +1693,8 @@ shared_ptr<CompiledEmbeddingLookup> EquationCompiler::compileEmbeddingLookup(con
     return compiled;
 }
 
-shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs) {
+shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpression& expr,
+                                                           const std::vector<CompiledStageOutput>& outputs) {
     if (expr.output_node >= expr.nodes.size()) {
         throw std::runtime_error("Matmul stage output_node is out of range.");
     }
@@ -1897,11 +1898,10 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     if (!isAttentionOp(node.op)) {
         throw std::runtime_error("Attention stage output node is not ATTENTION.");
     }
-    const uint32_t expected_attention_inputs = 3u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u) +
-                                               (node.attention_use_ragged_offsets ? 2u : 0u) +
-                                               (node.attention_use_paged_kv_cache ? 2u : 0u) +
-                                               (node.attention_dropout_probability > 0.0f ? 2u : 0u) +
-                                               (node.attention_use_fp8_forward_scaling ? 8u : 0u);
+    const uint32_t expected_attention_inputs =
+        3u + (node.attention_use_bias ? 1u : 0u) + (node.attention_use_padding_mask ? 2u : 0u) +
+        (node.attention_use_ragged_offsets ? 2u : 0u) + (node.attention_use_paged_kv_cache ? 2u : 0u) +
+        (node.attention_dropout_probability > 0.0f ? 2u : 0u) + (node.attention_use_fp8_forward_scaling ? 8u : 0u);
     if (expr.numInputs() != expected_attention_inputs) {
         throw std::runtime_error(
             "Attention stage input count mismatch for q/k/v plus optional bias, optional q/kv sequence lengths, optional ragged offsets, "
@@ -1944,14 +1944,12 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
     const ExprNode& q_input = validate_local_input(node.lhs, "q");
     const ExprNode& k_input = validate_local_input(node.rhs, "k");
     const ExprNode& v_input = validate_local_input(node.aux, "v");
-    const bool has_fp8_tensor = q_input.input_tensor_dtype.value() == DataType::FP8_E4M3 ||
-                                q_input.input_tensor_dtype.value() == DataType::FP8_E5M2 ||
-                                k_input.input_tensor_dtype.value() == DataType::FP8_E4M3 ||
-                                k_input.input_tensor_dtype.value() == DataType::FP8_E5M2 ||
-                                v_input.input_tensor_dtype.value() == DataType::FP8_E4M3 ||
-                                v_input.input_tensor_dtype.value() == DataType::FP8_E5M2 ||
-                                (node.output_dtype.has_value() &&
-                                 (node.output_dtype.value() == DataType::FP8_E4M3 || node.output_dtype.value() == DataType::FP8_E5M2));
+    const bool has_fp8_tensor =
+        q_input.input_tensor_dtype.value() == DataType::FP8_E4M3 || q_input.input_tensor_dtype.value() == DataType::FP8_E5M2 ||
+        k_input.input_tensor_dtype.value() == DataType::FP8_E4M3 || k_input.input_tensor_dtype.value() == DataType::FP8_E5M2 ||
+        v_input.input_tensor_dtype.value() == DataType::FP8_E4M3 || v_input.input_tensor_dtype.value() == DataType::FP8_E5M2 ||
+        (node.output_dtype.has_value() &&
+         (node.output_dtype.value() == DataType::FP8_E4M3 || node.output_dtype.value() == DataType::FP8_E5M2));
     if (has_fp8_tensor && !node.attention_use_fp8_forward_scaling) {
         throw std::runtime_error(
             "FP8 attention tensors require explicit FP8 forward scale/descale/amax inputs; use scaledDotProductAttentionFp8Forward().");
@@ -2409,9 +2407,9 @@ static bool inputRequiresMaterialization(const ExprNode& node) {
 }
 
 static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
-                                            uint32_t root_idx,
-                                            const std::unordered_set<uint32_t>& forced_boundary_nodes,
-                                            std::unordered_set<uint32_t>& region_nodes) {
+                                           uint32_t root_idx,
+                                           const std::unordered_set<uint32_t>& forced_boundary_nodes,
+                                           std::unordered_set<uint32_t>& region_nodes) {
     if (forced_boundary_nodes.count(root_idx)) {
         throw std::runtime_error("collectFusableRegionStoppingAt root cannot be a forced boundary node.");
     }
@@ -2767,8 +2765,8 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
 }
 
 static PhysicalExecutionStage buildCudaKernelStage(const PhysicalExpression& expr,
-                                                  const std::vector<RequestedStageOutput>& requested_outputs,
-                                                  const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+                                                   const std::vector<RequestedStageOutput>& requested_outputs,
+                                                   const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
     if (requested_outputs.empty()) {
         throw std::runtime_error("buildCudaKernelStage requires at least one requested output.");
     }
@@ -2819,9 +2817,9 @@ static PhysicalExecutionStage buildCudaKernelStage(const PhysicalExpression& exp
         stage_expr.inputs.push_back(NamedInput{local_name, local_slot, input_kind});
 
         ExprNode local_input;
-        local_input.op = parent.op == ExprOp::TENSOR_RUNTIME_SCALAR   ? ExprOp::TENSOR_RUNTIME_SCALAR
-                         : parent.op == ExprOp::RUNTIME_SCALAR       ? ExprOp::RUNTIME_SCALAR
-                                                                      : ExprOp::INPUT;
+        local_input.op = parent.op == ExprOp::TENSOR_RUNTIME_SCALAR ? ExprOp::TENSOR_RUNTIME_SCALAR
+                         : parent.op == ExprOp::RUNTIME_SCALAR      ? ExprOp::RUNTIME_SCALAR
+                                                                    : ExprOp::INPUT;
         local_input.input_slot = local_slot;
         local_input.input_tensor_dtype = parent.output_dtype;
         local_input.output_dtype = parent.output_dtype;
@@ -2858,11 +2856,8 @@ static PhysicalExecutionStage buildCudaKernelStage(const PhysicalExpression& exp
         });
     }
 
-    return PhysicalExecutionStage{PhysicalExecutionStage::Kind::CudaKernel,
-                                  std::move(stage_expr),
-                                  std::move(stage_input_value_ids),
-                                  std::move(stage_outputs),
-                                  {}};
+    return PhysicalExecutionStage{
+        PhysicalExecutionStage::Kind::CudaKernel, std::move(stage_expr), std::move(stage_input_value_ids), std::move(stage_outputs), {}};
 }
 
 static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr,
@@ -3117,7 +3112,6 @@ static PhysicalExecutionStage buildRmsNormStage(const PhysicalExpression& expr,
         .outputs = std::move(stage_outputs),
     };
 }
-
 
 static PhysicalExecutionStage buildEmbeddingLookupStage(const PhysicalExpression& expr,
                                                         uint32_t node_idx,
@@ -3460,9 +3454,8 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
     };
 }
 
-
 std::shared_ptr<CompiledInPlaceRope> EquationCompiler::compileInPlaceRope(const PhysicalExpression& expr,
-                                                                           const std::vector<CompiledStageOutput>& outputs) {
+                                                                          const std::vector<CompiledStageOutput>& outputs) {
     if (outputs.empty()) {
         throw std::runtime_error("In-place RoPE stage requires at least one output.");
     }
@@ -3624,10 +3617,10 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
         }
 
         const bool is_tensor_runtime_scalar = parent.op == ExprOp::TENSOR_RUNTIME_SCALAR;
-        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot),
-                                               local_slot,
-                                               is_tensor_runtime_scalar ? NamedInput::Kind::TensorRuntimeScalar
-                                                                        : NamedInput::Kind::Tensor});
+        stage_expr.inputs.push_back(
+            NamedInput{inputNameForSlot(local_slot),
+                       local_slot,
+                       is_tensor_runtime_scalar ? NamedInput::Kind::TensorRuntimeScalar : NamedInput::Kind::Tensor});
 
         ExprNode input_node;
         input_node.op = is_tensor_runtime_scalar ? ExprOp::TENSOR_RUNTIME_SCALAR : ExprOp::INPUT;
@@ -3830,10 +3823,10 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
         }
 
         const bool is_tensor_runtime_scalar = parent.op == ExprOp::TENSOR_RUNTIME_SCALAR;
-        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot),
-                                               local_slot,
-                                               is_tensor_runtime_scalar ? NamedInput::Kind::TensorRuntimeScalar
-                                                                        : NamedInput::Kind::Tensor});
+        stage_expr.inputs.push_back(
+            NamedInput{inputNameForSlot(local_slot),
+                       local_slot,
+                       is_tensor_runtime_scalar ? NamedInput::Kind::TensorRuntimeScalar : NamedInput::Kind::Tensor});
 
         ExprNode input_node;
         input_node.op = is_tensor_runtime_scalar ? ExprOp::TENSOR_RUNTIME_SCALAR : ExprOp::INPUT;
@@ -4322,7 +4315,6 @@ static bool reshapeAliasPreservesDType(const PhysicalExpression& expr, uint32_t 
     return reshape_node.output_dtype.value() == source_node.output_dtype.value();
 }
 
-
 static bool isMatmulBiasGradientReduction(const PhysicalExpression& expr, uint32_t node_idx, uint32_t& matmul_idx) {
     if (node_idx >= expr.nodes.size()) {
         return false;
@@ -4341,7 +4333,6 @@ static bool isMatmulBiasGradientReduction(const PhysicalExpression& expr, uint32
     matmul_idx = node.lhs;
     return true;
 }
-
 
 static std::vector<uint32_t> computeNodeUseCounts(const PhysicalExpression& expr) {
     std::vector<uint32_t> use_counts(expr.nodes.size(), 0);
@@ -4425,7 +4416,8 @@ static std::optional<InPlaceRopeMaterializationCandidate> classifySplitProjectio
     return InPlaceRopeMaterializationCandidate{.rope_root = rope_root, .source_node = reshape.lhs, .logical_dims = reshape.reshape_dims};
 }
 
-static bool sameRopeOptionsForInPlaceGrouping(const PhysicalExpression& expr, const std::vector<InPlaceRopeMaterializationCandidate>& candidates) {
+static bool sameRopeOptionsForInPlaceGrouping(const PhysicalExpression& expr,
+                                              const std::vector<InPlaceRopeMaterializationCandidate>& candidates) {
     if (candidates.empty()) {
         return false;
     }
@@ -4451,11 +4443,10 @@ static bool sameRopeOptionsForInPlaceGrouping(const PhysicalExpression& expr, co
     return true;
 }
 
-static PhysicalExecutionStage buildInPlaceRopeStage(
-    const PhysicalExpression& expr,
-    const std::vector<InPlaceRopeMaterializationCandidate>& candidates,
-    const std::unordered_map<uint32_t, uint32_t>& node_output_value_id,
-    const std::unordered_map<uint32_t, uint32_t>& rope_output_value_ids) {
+static PhysicalExecutionStage buildInPlaceRopeStage(const PhysicalExpression& expr,
+                                                    const std::vector<InPlaceRopeMaterializationCandidate>& candidates,
+                                                    const std::unordered_map<uint32_t, uint32_t>& node_output_value_id,
+                                                    const std::unordered_map<uint32_t, uint32_t>& rope_output_value_ids) {
     if (candidates.empty()) {
         throw std::runtime_error("buildInPlaceRopeStage requires at least one candidate.");
     }
@@ -4643,7 +4634,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         if (reshape_node.lhs == UINT32_MAX || reshape_node.lhs >= expr.nodes.size()) {
             throw std::runtime_error("Reshape alias node is missing a valid source.");
         }
-        const std::vector<uint64_t>& alias_dims = reshape_node.op == ExprOp::STRIDED_VIEW ? reshape_node.view_dims : reshape_node.reshape_dims;
+        const std::vector<uint64_t>& alias_dims =
+            reshape_node.op == ExprOp::STRIDED_VIEW ? reshape_node.view_dims : reshape_node.reshape_dims;
         if (alias_dims.empty()) {
             throw std::runtime_error("Storage alias node is missing output dimensions.");
         }
@@ -4999,8 +4991,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
                 ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             }
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
-                isConvolutionOp(root.op)) {
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) || isAttentionOp(root.op) ||
+                isAttentionBackwardOp(root.op) || isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
                 }
@@ -5319,8 +5311,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (!grouped_rope_roots.contains(lhs_dependency_idx)) {
                 ensureBoundaryParentEmitted(lhs_dependency_idx, "lhs", isCudnnReduceOp(root.op));
             }
-            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
-                isConvolutionOp(root.op)) {
+            if (isReduceMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) || isAttentionOp(root.op) ||
+                isAttentionBackwardOp(root.op) || isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs", false);
                 }
@@ -5428,7 +5420,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             continue;
         }
 
-        std::unordered_set<uint32_t> forced_transpose_boundaries = collectUnsupportedLogicalTransposeBoundaries(expr, named_output.node_idx);
+        std::unordered_set<uint32_t> forced_transpose_boundaries =
+            collectUnsupportedLogicalTransposeBoundaries(expr, named_output.node_idx);
         for (uint32_t forced_transpose_idx : forced_transpose_boundaries) {
             emitForDependency(forced_transpose_idx);
         }
