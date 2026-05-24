@@ -61,6 +61,10 @@ struct StageStats {
     RunningStats sparseSgdUpdate;
     RunningStats totalBackwardAndUpdate;
     RunningStats graphSparseGradientTotal;
+    RunningStats activeRows;
+    RunningStats singletonRows;
+    RunningStats duplicateRows;
+    RunningStats maxRunCount;
 };
 
 std::string dtypeName(DataType dtype);
@@ -445,6 +449,7 @@ void printCsvHeader() {
     std::cout << "case,vocab,dim,tokens,upstream_dtype,row_dtype,dup_mode,optimizer,pool_slots,pool_bytes,l2_bytes,"
                  "materialize_ms,sort_ms,clear_counts_ms,rle_ms,finalize_ms,scan_ms,reduce_ms,"
                  "sparse_gradient_ms,sparse_update_ms,total_backward_update_ms,graph_sparse_gradient_ms,"
+                 "active_rows,singleton_rows,duplicate_rows,max_run_count,"
                  "sort_temp_bytes,rle_temp_bytes,scan_temp_bytes\n";
 }
 
@@ -459,7 +464,8 @@ void printCsvRow(const CaseConfig& cfg,
               << stats.materialize.mean() << ',' << stats.sort.mean() << ',' << stats.clearCounts.mean() << ',' << stats.rle.mean() << ','
               << stats.finalize.mean() << ',' << stats.scan.mean() << ',' << stats.reduce.mean() << ',' << stats.sparseGradientTotal.mean() << ','
               << stats.sparseSgdUpdate.mean() << ',' << stats.totalBackwardAndUpdate.mean() << ',' << stats.graphSparseGradientTotal.mean() << ','
-              << meta.sortTempBytes << ',' << meta.rleTempBytes << ',' << meta.scanTempBytes << '\n';
+              << stats.activeRows.mean() << ',' << stats.singletonRows.mean() << ',' << stats.duplicateRows.mean() << ','
+              << stats.maxRunCount.mean() << ',' << meta.sortTempBytes << ',' << meta.rleTempBytes << ',' << meta.scanTempBytes << '\n';
 }
 
 bool keepCase(const Options& opts, const CaseConfig& cfg) {
@@ -510,6 +516,10 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
         stats.scan.add(profile.cubScanOffsetsMs);
         stats.reduce.add(profile.reduceValuesMs);
         stats.sparseGradientTotal.add(totalMs);
+        stats.activeRows.add(static_cast<double>(profile.activeRows));
+        stats.singletonRows.add(static_cast<double>(profile.singletonRows));
+        stats.duplicateRows.add(static_cast<double>(profile.duplicateRows));
+        stats.maxRunCount.add(static_cast<double>(profile.maxRunCount));
 
         float updateMs = 0.0f;
         if (opts.profileUpdate) {

@@ -107,46 +107,32 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
     compiled = true;
 }
 
-SparseRowGradient Sgd::compileSparseRows(const Tensor& weights, uint64_t maxSparseRows, Stream& gradientUpdateStream) {
-    THOR_THROW_IF_FALSE(!compiled);
-    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
+SparseRowOptimizerExpression Sgd::toSparseRowUpdateExpression(const Tensor& weights, SparseRowGradient& sparseRowGradient) {
     THOR_THROW_IF_FALSE(weights.isInitialized());
-    THOR_THROW_IF_FALSE(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    sparseRowGradient.validate();
+    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
 
     const std::vector<uint64_t> weightDims = weights.getDimensions();
     if (weightDims.size() != 2 || weightDims[0] == 0 || weightDims[1] == 0) {
         throw std::invalid_argument("Sparse SGD weights tensor must have shape [vocabulary_size, embedding_dim].");
     }
-    if (maxSparseRows == 0) {
-        throw std::invalid_argument("Sparse SGD maxSparseRows must be non-zero.");
+    if (sparseRowGradient.embeddingDim != weightDims[1]) {
+        throw std::invalid_argument("Sparse SGD sparse-gradient embedding dimension does not match weights.");
     }
-    if (maxSparseRows > weightDims[0]) {
-        throw std::invalid_argument("Sparse SGD maxSparseRows cannot exceed the embedding vocabulary size.");
+    if (sparseRowGradient.vocabularySize != weightDims[0]) {
+        throw std::invalid_argument("Sparse SGD sparse-gradient vocabulary size does not match weights.");
     }
-
-    this->gradientUpdateStream = gradientUpdateStream;
-    this->weights = weights;
-    this->sparseRowGradient =
-        SparseRowGradient::allocate(weights.getPlacement(),
-                                    maxSparseRows,
-                                    weightDims[0],
-                                    weightDims[1],
-                                    DataType::FP32,
-                                    SparseRowGradient::chooseRowDataType(weightDims[0]));
-    THOR_THROW_IF_FALSE(sparseRowGradient.has_value());
 
     const DataType weightsDType = weights.getDescriptor().getDataType();
-    const int32_t gpuNum = weights.getPlacement().getDeviceNum();
 
     auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
     auto g = Expression::input("gradient", DataType::FP32, DataType::FP32);
     auto step = Expression::runtimeScalar("step", DataType::FP32, DataType::FP32);
 
-    std::unordered_map<std::string, SparseRowUpdateTensorBinding> sparseInputs;
-    std::unordered_map<std::string, Tensor> sparseIndexedOutputs;
-    sparseInputs["weights_in"] = SparseRowUpdateTensorBinding{weights, SparseRowUpdateTensorKind::IndexedRows};
-    sparseInputs["gradient"] = SparseRowUpdateTensorBinding{sparseRowGradient->values, SparseRowUpdateTensorKind::DenseLogicalRows};
-    sparseIndexedOutputs["weights"] = weights;
+    SparseRowOptimizerExpression result;
+    result.inputs["weights_in"] = SparseRowUpdateTensorBinding{weights, SparseRowUpdateTensorKind::IndexedRows};
+    result.inputs["gradient"] = SparseRowUpdateTensorBinding{sparseRowGradient.values, SparseRowUpdateTensorKind::DenseLogicalRows};
+    result.indexedOutputs["weights"] = weights;
 
     std::optional<Outputs> expressionOutputs;
     if (momentum > 0.0f) {
@@ -185,8 +171,8 @@ SparseRowGradient Sgd::compileSparseRows(const Tensor& weights, uint64_t maxSpar
             {"weights", *wNext},
             {"velocity", *vNext},
         }));
-        sparseInputs["velocity_in"] = SparseRowUpdateTensorBinding{momentumTensor, SparseRowUpdateTensorKind::IndexedRows};
-        sparseIndexedOutputs["velocity"] = momentumTensor;
+        result.inputs["velocity_in"] = SparseRowUpdateTensorBinding{momentumTensor, SparseRowUpdateTensorKind::IndexedRows};
+        result.indexedOutputs["velocity"] = momentumTensor;
     } else {
         if (hasParameter("momentum"))
             dropParameter("momentum");
@@ -199,8 +185,47 @@ SparseRowGradient Sgd::compileSparseRows(const Tensor& weights, uint64_t maxSpar
         }));
     }
 
-    sparseUpdatePlan = SparseRowUpdatePlan::compile(expressionOutputs->physicalOutputs(), sparseRowGradient->rows, sparseRowGradient->numRows,
-                                                   sparseInputs, sparseIndexedOutputs, gpuNum);
+    result.outputs = expressionOutputs->physicalOutputs();
+    return result;
+}
+
+SparseRowGradient Sgd::compileSparseRows(const Tensor& weights, uint64_t maxSparseRows, Stream& gradientUpdateStream) {
+    THOR_THROW_IF_FALSE(!compiled);
+    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
+    THOR_THROW_IF_FALSE(weights.isInitialized());
+    THOR_THROW_IF_FALSE(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    const std::vector<uint64_t> weightDims = weights.getDimensions();
+    if (weightDims.size() != 2 || weightDims[0] == 0 || weightDims[1] == 0) {
+        throw std::invalid_argument("Sparse SGD weights tensor must have shape [vocabulary_size, embedding_dim].");
+    }
+    if (maxSparseRows == 0) {
+        throw std::invalid_argument("Sparse SGD maxSparseRows must be non-zero.");
+    }
+    if (maxSparseRows > weightDims[0]) {
+        throw std::invalid_argument("Sparse SGD maxSparseRows cannot exceed the embedding vocabulary size.");
+    }
+
+    this->gradientUpdateStream = gradientUpdateStream;
+    this->weights = weights;
+    this->sparseRowGradient =
+        SparseRowGradient::allocate(weights.getPlacement(),
+                                    maxSparseRows,
+                                    weightDims[0],
+                                    weightDims[1],
+                                    DataType::FP32,
+                                    SparseRowGradient::chooseRowDataType(weightDims[0]));
+    THOR_THROW_IF_FALSE(sparseRowGradient.has_value());
+
+    const int32_t gpuNum = weights.getPlacement().getDeviceNum();
+    SparseRowOptimizerExpression updateExpression = toSparseRowUpdateExpression(weights, sparseRowGradient.value());
+
+    sparseUpdatePlan = SparseRowUpdatePlan::compile(updateExpression.outputs,
+                                                   sparseRowGradient->rows,
+                                                   sparseRowGradient->numRows,
+                                                   updateExpression.inputs,
+                                                   updateExpression.indexedOutputs,
+                                                   gpuNum);
 
     compiled = true;
     return sparseRowGradient.value();
