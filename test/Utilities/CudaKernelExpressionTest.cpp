@@ -353,6 +353,26 @@ void serializable_scale_kernel(const float* x, float* y, float alpha, int64_t n)
     missingSignature.erase("cuda_kernel_manifest_signature");
     EXPECT_THROW((void)ExpressionDefinition::deserialize(missingSignature, true, trustedPublicKey, trustedSourceDecryptionKey), std::runtime_error);
 
+    nlohmann::json encryptedWithExtraPlaintextSource = payload;
+    encryptedWithExtraPlaintextSource["cuda_kernels"][0]["source"] = directInfo.source;
+    try {
+        (void)ExpressionDefinition::deserialize(encryptedWithExtraPlaintextSource, true, trustedPublicKey, trustedSourceDecryptionKey);
+        FAIL() << "Expected encrypted serialized kernel carrying plaintext source to be rejected";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("plaintext CUDA source"), std::string::npos);
+    }
+
+    nlohmann::json plaintextOnlySource = payload;
+    plaintextOnlySource["cuda_kernels"][0]["source"] = directInfo.source;
+    plaintextOnlySource["cuda_kernels"][0].erase("encrypted_source");
+    plaintextOnlySource["cuda_kernels"][0].erase("source_encryption");
+    try {
+        (void)ExpressionDefinition::deserialize(plaintextOnlySource, true, trustedPublicKey, trustedSourceDecryptionKey);
+        FAIL() << "Expected serialized plaintext CUDA source to be rejected";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("plaintext CUDA source"), std::string::npos);
+    }
+
     nlohmann::json publicKeyInFingerprint = payload;
     publicKeyInFingerprint["cuda_kernel_manifest_signature"]["public_key_fingerprint"] = trustedPublicKey;
     try {
@@ -441,10 +461,16 @@ void unsigned_inspection_scale_kernel(const float* x, float* y, int64_t n) {
 
     nlohmann::json loadedUnsignedPayload = signedPayload;
     loadedUnsignedPayload.erase("cuda_kernel_manifest_signature");
-    ExpressionDefinition loadedUnsigned = ExpressionDefinition::deserialize(loadedUnsignedPayload);
-    EXPECT_FALSE(loadedUnsigned.architectureJson().contains("cuda_kernel_manifest_signature"));
-    EXPECT_THROW((void)loadedUnsigned.cudaKernelSigningPublicKeys(), std::runtime_error);
-    EXPECT_THROW((void)loadedUnsigned.architectureJsonWithCudaKernelManifestSignature(), std::runtime_error);
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(loadedUnsignedPayload), std::runtime_error);
+
+    nlohmann::json plaintextSavedModelPayload = unsignedPayload;
+    EXPECT_TRUE(plaintextSavedModelPayload.at("cuda_kernels").at(0).contains("source"));
+    try {
+        (void)ExpressionDefinition::deserialize(plaintextSavedModelPayload, true, "ed25519:" + std::string(64, '0'), "aes256-gcm:" + std::string(64, '0'));
+        FAIL() << "Expected plaintext saved-model CUDA source to be rejected";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("plaintext CUDA source"), std::string::npos);
+    }
 }
 
 TEST(CudaKernelExpression, RecursiveModelSigningUsesOnePublicKeyForAllCudaExpressions) {

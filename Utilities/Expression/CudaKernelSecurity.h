@@ -41,6 +41,7 @@ struct CudaKernelSourceInspection {
 [[nodiscard]] std::vector<CudaKernelOutOfBandKeys> cudaKernelGenerateAndAttachManifestSignatures(nlohmann::json& root_json);
 [[nodiscard]] std::vector<CudaKernelOutOfBandKeys> collectCudaKernelOutOfBandKeys(const nlohmann::json& j);
 [[nodiscard]] bool cudaKernelExpressionJsonContainsEncryptedSources(const nlohmann::json& expression_json);
+[[nodiscard]] bool cudaKernelExpressionJsonContainsPlaintextSources(const nlohmann::json& expression_json);
 [[nodiscard]] nlohmann::json cudaKernelDecryptSerializedCudaSources(
     const nlohmann::json& expression_json,
     const std::string& trusted_source_decryption_key);

@@ -443,6 +443,28 @@ void py_serializable_scale_kernel(const float* x, float* y, float alpha, int64_t
             trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
         )
 
+    encrypted_with_extra_plaintext_source_json = json.loads(payload)
+    encrypted_with_extra_plaintext_source_json["cuda_kernels"][0]["source"] = kernel_source_info["source"]
+    with pytest.raises(RuntimeError, match="plaintext CUDA source"):
+        thor.physical.ExpressionDefinition.from_json(
+            json.dumps(encrypted_with_extra_plaintext_source_json),
+            allow_unsafe_loaded_cuda_kernel_source=True,
+            trusted_cuda_kernel_public_key=trusted_public_key,
+            trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
+        )
+
+    plaintext_only_source_json = json.loads(payload)
+    plaintext_only_source_json["cuda_kernels"][0]["source"] = kernel_source_info["source"]
+    del plaintext_only_source_json["cuda_kernels"][0]["encrypted_source"]
+    del plaintext_only_source_json["cuda_kernels"][0]["source_encryption"]
+    with pytest.raises(RuntimeError, match="plaintext CUDA source"):
+        thor.physical.ExpressionDefinition.from_json(
+            json.dumps(plaintext_only_source_json),
+            allow_unsafe_loaded_cuda_kernel_source=True,
+            trusted_cuda_kernel_public_key=trusted_public_key,
+            trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
+        )
+
     public_key_in_fingerprint_payload_json = json.loads(payload)
     public_key_in_fingerprint_payload_json["cuda_kernel_manifest_signature"]["public_key_fingerprint"] = trusted_public_key
     with pytest.raises(RuntimeError, match="public_key_fingerprint contains public key material"):
