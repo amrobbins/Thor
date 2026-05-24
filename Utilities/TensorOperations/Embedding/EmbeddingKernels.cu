@@ -95,7 +95,7 @@ constexpr uint32_t MAX_COALESCED_BYTES_PER_LANE = 16;
 static_assert(THREADS_PER_BLOCK == 256);
 static_assert(MAX_COALESCED_BYTES_PER_LANE == 16);
 
-constexpr bool PRINT_GENERATED_EMBEDDING_KERNELS = false;
+constexpr bool PRINT_GENERATED_EMBEDDING_KERNELS = true;
 
 template <typename T, uint32_t Elements>
 struct alignas((Elements * sizeof(T) >= MAX_COALESCED_BYTES_PER_LANE) ? MAX_COALESCED_BYTES_PER_LANE : Elements * sizeof(T)) LaneVector {

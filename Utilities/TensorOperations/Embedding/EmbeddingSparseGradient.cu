@@ -1,6 +1,7 @@
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradient.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Common/Event.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradientCudaCompile.h"
@@ -196,42 +197,109 @@ __global__ void finalizeEmbeddingSparseGradientRowsKernel(const RowT* __restrict
     }
 }
 
-template <typename RowT, typename GradT>
-__global__ void reduceEmbeddingSparseGradientValuesKernel(const uint32_t* __restrict__ sortedTokenIds,
-                                                          const uint32_t* __restrict__ runOffsets,
-                                                          const uint32_t* __restrict__ runCounts,
-                                                          const RowT* __restrict__ numValidRows,
-                                                          const GradT* __restrict__ upstreamGradient,
-                                                          float* __restrict__ outputValues,
-                                                          uint64_t embeddingDim) {
-    const uint64_t row = blockIdx.x;
+template <uint32_t EmbeddingDim>
+struct IsFixedEmbeddingReducerDim {
+    static constexpr bool value = EmbeddingDim == 16U || EmbeddingDim == 32U || EmbeddingDim == 64U || EmbeddingDim == 128U ||
+                                  EmbeddingDim == 256U;
+};
+
+template <typename RowT, typename GradT, uint32_t EmbeddingDim>
+__global__ void reduceEmbeddingSparseGradientValuesFixedDimKernel(const uint32_t* __restrict__ sortedTokenIds,
+                                                                  const uint32_t* __restrict__ runOffsets,
+                                                                  const uint32_t* __restrict__ runCounts,
+                                                                  const RowT* __restrict__ numValidRows,
+                                                                  const GradT* __restrict__ upstreamGradient,
+                                                                  float* __restrict__ outputValues) {
+    static_assert(IsFixedEmbeddingReducerDim<EmbeddingDim>::value, "Unsupported fixed embedding sparse-gradient reducer dimension.");
+    static_assert(THREADS_PER_BLOCK % EmbeddingDim == 0U, "Fixed embedding sparse-gradient reducer requires D to divide block size.");
+
+    const uint64_t row = static_cast<uint64_t>(blockIdx.x);
     if (row >= static_cast<uint64_t>(numValidRows[0])) {
         return;
     }
 
-    const uint32_t lane = threadIdx.x & (WARP_SIZE_EMBEDDING - 1);
-    const uint32_t warpInBlock = threadIdx.x >> 5;
-    const uint64_t dim = static_cast<uint64_t>(blockIdx.y) * WARPS_PER_BLOCK + warpInBlock;
+    constexpr uint32_t LANES_PER_DIM = THREADS_PER_BLOCK / EmbeddingDim;
+    const uint32_t dim = threadIdx.x % EmbeddingDim;
+    const uint32_t lane = threadIdx.x / EmbeddingDim;
+    const uint64_t begin = static_cast<uint64_t>(runOffsets[row]);
+    const uint64_t count = static_cast<uint64_t>(runCounts[row]);
+
+    // The common low-duplication path is a gather/cast/write, not a reduction.  Keep it out of the shared-memory
+    // reduction path so all-unique batches use one block per row instead of the old one-warp-per-output-scalar shape.
+    if (count == 1ULL) {
+        if (lane == 0U) {
+            const uint64_t token = static_cast<uint64_t>(sortedTokenIds[begin]);
+            outputValues[row * EmbeddingDim + dim] = thor_embedding_grad_to_float(upstreamGradient[token * EmbeddingDim + dim]);
+        }
+        return;
+    }
+
+    float sum = 0.0f;
+    for (uint64_t i = static_cast<uint64_t>(lane); i < count; i += LANES_PER_DIM) {
+        const uint64_t token = static_cast<uint64_t>(sortedTokenIds[begin + i]);
+        sum += thor_embedding_grad_to_float(upstreamGradient[token * EmbeddingDim + dim]);
+    }
+
+    if constexpr (LANES_PER_DIM == 1U) {
+        outputValues[row * EmbeddingDim + dim] = sum;
+    } else {
+        __shared__ float partials[THREADS_PER_BLOCK];
+        partials[threadIdx.x] = sum;
+        __syncthreads();
+
+        if (lane == 0U) {
+#pragma unroll
+            for (uint32_t otherLane = 1U; otherLane < LANES_PER_DIM; ++otherLane) {
+                sum += partials[otherLane * EmbeddingDim + dim];
+            }
+            outputValues[row * EmbeddingDim + dim] = sum;
+        }
+    }
+}
+
+template <typename RowT, typename GradT>
+__global__ void reduceEmbeddingSparseGradientValuesTiledKernel(const uint32_t* __restrict__ sortedTokenIds,
+                                                               const uint32_t* __restrict__ runOffsets,
+                                                               const uint32_t* __restrict__ runCounts,
+                                                               const RowT* __restrict__ numValidRows,
+                                                               const GradT* __restrict__ upstreamGradient,
+                                                               float* __restrict__ outputValues,
+                                                               uint64_t embeddingDim) {
+    const uint64_t row = static_cast<uint64_t>(blockIdx.x);
+    if (row >= static_cast<uint64_t>(numValidRows[0])) {
+        return;
+    }
+
+    const uint64_t dim = static_cast<uint64_t>(blockIdx.y) * THREADS_PER_BLOCK + threadIdx.x;
     if (dim >= embeddingDim) {
         return;
     }
 
     const uint64_t begin = static_cast<uint64_t>(runOffsets[row]);
     const uint64_t count = static_cast<uint64_t>(runCounts[row]);
+    if (count == 1ULL) {
+        const uint64_t token = static_cast<uint64_t>(sortedTokenIds[begin]);
+        outputValues[row * embeddingDim + dim] = thor_embedding_grad_to_float(upstreamGradient[token * embeddingDim + dim]);
+        return;
+    }
+
     float sum = 0.0f;
-    for (uint64_t i = lane; i < count; i += WARP_SIZE_EMBEDDING) {
+    for (uint64_t i = 0; i < count; ++i) {
         const uint64_t token = static_cast<uint64_t>(sortedTokenIds[begin + i]);
         sum += thor_embedding_grad_to_float(upstreamGradient[token * embeddingDim + dim]);
     }
+    outputValues[row * embeddingDim + dim] = sum;
+}
 
-#pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(0xffffffffu, sum, offset);
-    }
+bool hasFixedDimEmbeddingSparseGradientReducer(uint64_t embeddingDim) {
+    return embeddingDim == 16ULL || embeddingDim == 32ULL || embeddingDim == 64ULL || embeddingDim == 128ULL || embeddingDim == 256ULL;
+}
 
-    if (lane == 0) {
-        outputValues[row * embeddingDim + dim] = sum;
+uint32_t reduceGridDimYForEmbeddingSparseGradient(uint64_t embeddingDim) {
+    if (hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
+        return 1U;
     }
+    return static_cast<uint32_t>((embeddingDim + THREADS_PER_BLOCK - 1ULL) / THREADS_PER_BLOCK);
 }
 
 template <typename RowT>
@@ -299,23 +367,62 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType, DataType gra
     ss << "const " << rowType << "* numValidRows, const " << gradType << "* upstreamGradient, float* outputValues) {\n";
     ss << "  const unsigned long long row = static_cast<unsigned long long>(blockIdx.x);\n";
     ss << "  if (row >= static_cast<unsigned long long>(numValidRows[0])) return;\n";
-    ss << "  const unsigned int lane = threadIdx.x & 31U;\n";
-    ss << "  const unsigned int warpInBlock = threadIdx.x >> 5;\n";
-    ss << "  const unsigned long long embeddingDim = " << embeddingDim << "ULL;\n";
-    ss << "  const unsigned long long dim = static_cast<unsigned long long>(blockIdx.y) * " << WARPS_PER_BLOCK << "ULL + warpInBlock;\n";
-    ss << "  if (dim >= embeddingDim) return;\n";
-    ss << "  const unsigned long long begin = static_cast<unsigned long long>(runOffsets[row]);\n";
-    ss << "  const unsigned long long count = static_cast<unsigned long long>(runCounts[row]);\n";
-    ss << "  float sum = 0.0f;\n";
-    ss << "  for (unsigned long long i = lane; i < count; i += 32ULL) {\n";
-    ss << "    const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin + i]);\n";
-    ss << "    sum += thor_embedding_grad_to_float(upstreamGradient[token * embeddingDim + dim]);\n";
-    ss << "  }\n";
-    ss << "#pragma unroll\n";
-    ss << "  for (int offset = 16; offset > 0; offset >>= 1) {\n";
-    ss << "    sum += __shfl_down_sync(0xffffffffu, sum, offset);\n";
-    ss << "  }\n";
-    ss << "  if (lane == 0U) outputValues[row * embeddingDim + dim] = sum;\n";
+
+    if (hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
+        const uint64_t lanesPerDim = THREADS_PER_BLOCK / embeddingDim;
+        ss << "  constexpr unsigned int THREADS_PER_BLOCK_LOCAL = " << THREADS_PER_BLOCK << "U;\n";
+        ss << "  constexpr unsigned int embeddingDim = " << embeddingDim << "U;\n";
+        ss << "  constexpr unsigned int lanesPerDim = " << lanesPerDim << "U;\n";
+        ss << "  const unsigned int dim = threadIdx.x % embeddingDim;\n";
+        ss << "  const unsigned int lane = threadIdx.x / embeddingDim;\n";
+        ss << "  const unsigned long long begin = static_cast<unsigned long long>(runOffsets[row]);\n";
+        ss << "  const unsigned long long count = static_cast<unsigned long long>(runCounts[row]);\n";
+        ss << "  if (count == 1ULL) {\n";
+        ss << "    if (lane == 0U) {\n";
+        ss << "      const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin]);\n";
+        ss << "      outputValues[row * embeddingDim + dim] = thor_embedding_grad_to_float(upstreamGradient[token * embeddingDim + dim]);\n";
+        ss << "    }\n";
+        ss << "    return;\n";
+        ss << "  }\n";
+        ss << "  float sum = 0.0f;\n";
+        ss << "  for (unsigned long long i = static_cast<unsigned long long>(lane); i < count; i += lanesPerDim) {\n";
+        ss << "    const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin + i]);\n";
+        ss << "    sum += thor_embedding_grad_to_float(upstreamGradient[token * embeddingDim + dim]);\n";
+        ss << "  }\n";
+        if (lanesPerDim == 1ULL) {
+            ss << "  outputValues[row * embeddingDim + dim] = sum;\n";
+        } else {
+            ss << "  __shared__ float partials[THREADS_PER_BLOCK_LOCAL];\n";
+            ss << "  partials[threadIdx.x] = sum;\n";
+            ss << "  __syncthreads();\n";
+            ss << "  if (lane == 0U) {\n";
+            ss << "#pragma unroll\n";
+            ss << "    for (unsigned int otherLane = 1U; otherLane < lanesPerDim; ++otherLane) {\n";
+            ss << "      sum += partials[otherLane * embeddingDim + dim];\n";
+            ss << "    }\n";
+            ss << "    outputValues[row * embeddingDim + dim] = sum;\n";
+            ss << "  }\n";
+        }
+    } else {
+        ss << "  constexpr unsigned int THREADS_PER_BLOCK_LOCAL = " << THREADS_PER_BLOCK << "U;\n";
+        ss << "  const unsigned long long embeddingDim = " << embeddingDim << "ULL;\n";
+        ss << "  const unsigned long long dim = static_cast<unsigned long long>(blockIdx.y) * THREADS_PER_BLOCK_LOCAL + threadIdx.x;\n";
+        ss << "  if (dim >= embeddingDim) return;\n";
+        ss << "  const unsigned long long begin = static_cast<unsigned long long>(runOffsets[row]);\n";
+        ss << "  const unsigned long long count = static_cast<unsigned long long>(runCounts[row]);\n";
+        ss << "  if (count == 1ULL) {\n";
+        ss << "    const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin]);\n";
+        ss << "    outputValues[row * embeddingDim + dim] = thor_embedding_grad_to_float(upstreamGradient[token * embeddingDim + dim]);\n";
+        ss << "    return;\n";
+        ss << "  }\n";
+        ss << "  float sum = 0.0f;\n";
+        ss << "  for (unsigned long long i = 0ULL; i < count; ++i) {\n";
+        ss << "    const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin + i]);\n";
+        ss << "    sum += thor_embedding_grad_to_float(upstreamGradient[token * embeddingDim + dim]);\n";
+        ss << "  }\n";
+        ss << "  outputValues[row * embeddingDim + dim] = sum;\n";
+    }
+
     ss << "}\n";
     return ss.str();
 }
@@ -461,6 +568,22 @@ void launchMaterializeSortPairs(const Tensor& indices, PreparedEmbeddingSparseGr
     }
 }
 
+template <typename RowT, typename GradT, uint32_t EmbeddingDim>
+void launchReduceValuesFixedDim(PreparedEmbeddingSparseGradient& prepared,
+                                const Tensor& upstreamGradient,
+                                SparseRowGradient& outputGradient,
+                                Stream stream) {
+    const dim3 block(THREADS_PER_BLOCK);
+    const dim3 grid(static_cast<uint32_t>(outputGradient.capacity), 1U);
+    reduceEmbeddingSparseGradientValuesFixedDimKernel<RowT, GradT, EmbeddingDim><<<grid, block, 0, stream.getStream()>>>(
+        prepared.sortedTokenIds.getMemPtr<uint32_t>(),
+        prepared.runOffsets.getMemPtr<uint32_t>(),
+        prepared.runCounts.getMemPtr<uint32_t>(),
+        outputGradient.numRows.getMemPtr<RowT>(),
+        upstreamGradient.getMemPtr<GradT>(),
+        outputGradient.values.getMemPtr<float>());
+}
+
 template <typename RowT, typename GradT>
 void launchReduceValuesTyped(PreparedEmbeddingSparseGradient& prepared,
                              const Tensor& upstreamGradient,
@@ -470,16 +593,37 @@ void launchReduceValuesTyped(PreparedEmbeddingSparseGradient& prepared,
     if (maxRows == 0) {
         return;
     }
-    const dim3 block(THREADS_PER_BLOCK);
-    const dim3 grid(static_cast<uint32_t>(maxRows), static_cast<uint32_t>((prepared.embeddingDim + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK));
-    reduceEmbeddingSparseGradientValuesKernel<RowT, GradT><<<grid, block, 0, stream.getStream()>>>(
-        prepared.sortedTokenIds.getMemPtr<uint32_t>(),
-        prepared.runOffsets.getMemPtr<uint32_t>(),
-        prepared.runCounts.getMemPtr<uint32_t>(),
-        outputGradient.numRows.getMemPtr<RowT>(),
-        upstreamGradient.getMemPtr<GradT>(),
-        outputGradient.values.getMemPtr<float>(),
-        prepared.embeddingDim);
+
+    switch (prepared.embeddingDim) {
+        case 16:
+            launchReduceValuesFixedDim<RowT, GradT, 16U>(prepared, upstreamGradient, outputGradient, stream);
+            break;
+        case 32:
+            launchReduceValuesFixedDim<RowT, GradT, 32U>(prepared, upstreamGradient, outputGradient, stream);
+            break;
+        case 64:
+            launchReduceValuesFixedDim<RowT, GradT, 64U>(prepared, upstreamGradient, outputGradient, stream);
+            break;
+        case 128:
+            launchReduceValuesFixedDim<RowT, GradT, 128U>(prepared, upstreamGradient, outputGradient, stream);
+            break;
+        case 256:
+            launchReduceValuesFixedDim<RowT, GradT, 256U>(prepared, upstreamGradient, outputGradient, stream);
+            break;
+        default: {
+            const dim3 block(THREADS_PER_BLOCK);
+            const dim3 grid(static_cast<uint32_t>(maxRows), reduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim));
+            reduceEmbeddingSparseGradientValuesTiledKernel<RowT, GradT><<<grid, block, 0, stream.getStream()>>>(
+                prepared.sortedTokenIds.getMemPtr<uint32_t>(),
+                prepared.runOffsets.getMemPtr<uint32_t>(),
+                prepared.runCounts.getMemPtr<uint32_t>(),
+                outputGradient.numRows.getMemPtr<RowT>(),
+                upstreamGradient.getMemPtr<GradT>(),
+                outputGradient.values.getMemPtr<float>(),
+                prepared.embeddingDim);
+            break;
+        }
+    }
     CUDA_CHECK(cudaPeekAtLastError());
 }
 
@@ -765,6 +909,77 @@ void launchPreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prep
     launchReduceValues(prepared, upstreamGradient, outputGradient, stream);
 }
 
+EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prepared,
+                                                                           const Tensor& indices,
+                                                                           const Tensor& upstreamGradient,
+                                                                           SparseRowGradient& outputGradient,
+                                                                           Stream stream) {
+    validatePreparedEmbeddingSparseGradientInvocation(prepared, indices, upstreamGradient, outputGradient);
+
+    ScopedGpu scopedGpu(prepared.deviceNum);
+
+    EmbeddingSparseGradientProfileResult result;
+    result.numTokens = prepared.numTokens;
+    result.vocabularySize = prepared.vocabularySize;
+    result.embeddingDim = prepared.embeddingDim;
+    result.capacity = outputGradient.capacity;
+    result.indexDataType = prepared.indexDataType;
+    result.gradientDataType = prepared.gradientDataType;
+    result.rowDataType = prepared.rowDataType;
+    result.sortTempBytes = prepared.sortTempBytes;
+    result.rleTempBytes = prepared.rleTempBytes;
+    result.scanTempBytes = prepared.scanTempBytes;
+
+    Event totalStart(prepared.deviceNum, /*enableTiming=*/true);
+    Event materializeEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event sortEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event clearCountsEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event rleEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event finalizeEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event scanEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event reduceEnd(prepared.deviceNum, /*enableTiming=*/true);
+
+    totalStart.record(stream);
+
+    launchMaterializeSortPairs(indices, prepared, stream);
+    materializeEnd.record(stream);
+
+    const int cubItems = checkedCubItems(prepared.numTokens, "token count");
+    sortPairs(prepared, cubItems, stream);
+    sortEnd.record(stream);
+
+    // RLE writes only the first numRuns counts. Clear the full counts buffer so the full-capacity prefix scan below is deterministic.
+    prepared.runCounts.memsetAsync(stream, 0);
+    clearCountsEnd.record(stream);
+
+    rleRows(prepared, outputGradient, cubItems, stream);
+    rleEnd.record(stream);
+
+    launchFinalizeRows(prepared, outputGradient, stream);
+    finalizeEnd.record(stream);
+
+    CUDA_CHECK(cub::DeviceScan::ExclusiveSum(prepared.scanTempStorage.getMemPtr<void>(),
+                                             prepared.scanTempBytes,
+                                             prepared.runCounts.getMemPtr<uint32_t>(),
+                                             prepared.runOffsets.getMemPtr<uint32_t>(),
+                                             cubItems,
+                                             stream.getStream()));
+    scanEnd.record(stream);
+
+    launchReduceValues(prepared, upstreamGradient, outputGradient, stream);
+    reduceEnd.record(stream);
+
+    result.materializeSortPairsMs = materializeEnd.synchronizeAndReportElapsedTimeInMilliseconds(totalStart);
+    result.cubSortMs = sortEnd.synchronizeAndReportElapsedTimeInMilliseconds(materializeEnd);
+    result.clearRunCountsMs = clearCountsEnd.synchronizeAndReportElapsedTimeInMilliseconds(sortEnd);
+    result.cubRleMs = rleEnd.synchronizeAndReportElapsedTimeInMilliseconds(clearCountsEnd);
+    result.finalizeRowsMs = finalizeEnd.synchronizeAndReportElapsedTimeInMilliseconds(rleEnd);
+    result.cubScanOffsetsMs = scanEnd.synchronizeAndReportElapsedTimeInMilliseconds(finalizeEnd);
+    result.reduceValuesMs = reduceEnd.synchronizeAndReportElapsedTimeInMilliseconds(scanEnd);
+    result.totalMs = reduceEnd.synchronizeAndReportElapsedTimeInMilliseconds(totalStart);
+    return result;
+}
+
 void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
                                             PreparedEmbeddingSparseGradient& prepared,
                                             const Tensor& indices,
@@ -797,8 +1012,8 @@ void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
     prepared.runCounts.memsetAsync(stream, 0);
     rleRows(prepared, outputGradient, cubItems, stream);
 
-    const uint32_t dimTiles = static_cast<uint32_t>((prepared.embeddingDim + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK);
-    if (dimTiles == 0) {
+    const uint32_t reduceGridDimY = reduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim);
+    if (reduceGridDimY == 0) {
         throw std::runtime_error("Prepared Embedding sparse-gradient graph reducer requires a non-empty embedding dimension.");
     }
 
@@ -806,10 +1021,10 @@ void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
                        outputGradient,
                        stream,
                        OptionalReduceGridUpdate{&captured.reduceNodeHandle,
-                                                dimTiles,
+                                                reduceGridDimY,
                                                 /*minReduceGridDimX=*/1,
                                                 static_cast<uint32_t>(outputGradient.capacity),
-                                                dimTiles});
+                                                reduceGridDimY});
 
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(prepared.scanTempStorage.getMemPtr<void>(),
                                              prepared.scanTempBytes,
@@ -827,7 +1042,7 @@ void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
     void* args[] = {&sortedTokenIdsPtr, &runOffsetsPtr, &runCountsPtr, &numRowsPtr, &upstreamPtr, &outputValuesPtr};
 
     captured.reduceNode = builder.captureDeviceUpdatableKernel(
-        CudaGraphKernelLaunch{prepared.reduceKernel, dim3(1, dimTiles, 1), dim3(THREADS_PER_BLOCK, 1, 1), 0, args, nullptr});
+        CudaGraphKernelLaunch{prepared.reduceKernel, dim3(1, reduceGridDimY, 1), dim3(THREADS_PER_BLOCK, 1, 1), 0, args, nullptr});
 }
 
 void launchEmbeddingSparseGradient(const Tensor& indices,
