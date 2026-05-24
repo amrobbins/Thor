@@ -3,11 +3,11 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "Utilities/TensorOperations/Embedding/EmbeddingForwardCudaCompile.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <nvrtc.h>
 
 #include <algorithm>
 #include <array>
@@ -95,7 +95,7 @@ constexpr uint32_t MAX_COALESCED_BYTES_PER_LANE = 16;
 static_assert(THREADS_PER_BLOCK == 256);
 static_assert(MAX_COALESCED_BYTES_PER_LANE == 16);
 
-constexpr bool PRINT_GENERATED_EMBEDDING_KERNELS = true;
+constexpr bool PRINT_GENERATED_EMBEDDING_KERNELS = false;
 
 template <typename T, uint32_t Elements>
 struct alignas((Elements * sizeof(T) >= MAX_COALESCED_BYTES_PER_LANE) ? MAX_COALESCED_BYTES_PER_LANE : Elements * sizeof(T)) LaneVector {
@@ -708,51 +708,6 @@ std::string generatedEmbeddingTinySource(DataType indexDtype,
     return generatedEmbeddingTinyPaddingSource(indexDtype, valueDtype, numIndices, vocabularySize, embeddingDim, paddingIndex, epilogue);
 }
 
-void checkNvrtc(nvrtcResult status, const char* call) {
-    if (status != NVRTC_SUCCESS) {
-        throw std::runtime_error(std::string(call) + " failed with " + nvrtcGetErrorString(status));
-    }
-}
-
-void checkNvrtcCompile(nvrtcProgram prog, const std::vector<const char*>& options) {
-    const nvrtcResult status = nvrtcCompileProgram(prog, static_cast<int>(options.size()), options.data());
-    if (status == NVRTC_SUCCESS) {
-        return;
-    }
-
-    size_t logSize = 0;
-    (void)nvrtcGetProgramLogSize(prog, &logSize);
-    std::string log;
-    if (logSize > 1) {
-        log.resize(logSize);
-        (void)nvrtcGetProgramLog(prog, log.data());
-    }
-    throw std::runtime_error(std::string("Generated EmbeddingLookup NVRTC compile failed with ") + nvrtcGetErrorString(status) +
-                             (log.empty() ? std::string{} : std::string("\n") + log));
-}
-
-void addUniqueIncludeDir(std::vector<std::string>& dirs, const std::string& dir) {
-    if (dir.empty()) {
-        return;
-    }
-    if (std::find(dirs.begin(), dirs.end(), dir) == dirs.end()) {
-        dirs.push_back(dir);
-    }
-}
-
-std::vector<std::string> generatedEmbeddingCudaIncludeDirs() {
-    std::vector<std::string> dirs;
-    if (const char* p = std::getenv("THOR_CUDA_INCLUDE_DIR")) {
-        addUniqueIncludeDir(dirs, p);
-    }
-    addUniqueIncludeDir(dirs, THOR_CUDA_INCLUDE_DIR);
-    if (const char* p = std::getenv("THOR_CUDA_CCCL_INCLUDE_DIR")) {
-        addUniqueIncludeDir(dirs, p);
-    }
-    addUniqueIncludeDir(dirs, THOR_CUDA_CCCL_INCLUDE_DIR);
-    return dirs;
-}
-
 void ensureCudaContextCurrentForGeneratedEmbedding(int deviceNum) {
     CU_CHECK(cuInit(0));
 
@@ -778,7 +733,10 @@ void ensureCudaContextCurrentForGeneratedEmbedding(int deviceNum) {
     }
 }
 
-std::vector<char> compileGeneratedEmbeddingSourceToCubin(const std::string& source, int deviceNum) {
+std::vector<char> compileGeneratedEmbeddingSourceToCubin(const std::string& source,
+                                                         const std::string& kernelName,
+                                                         int deviceNum,
+                                                         uint32_t numKernelInputs) {
     if constexpr (PRINT_GENERATED_EMBEDDING_KERNELS) {
         std::fprintf(
             stdout,
@@ -787,42 +745,7 @@ std::vector<char> compileGeneratedEmbeddingSourceToCubin(const std::string& sour
         std::fflush(stdout);
     }
 
-    cudaDeviceProp prop{};
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, deviceNum));
-
-    nvrtcProgram prog = nullptr;
-    checkNvrtc(nvrtcCreateProgram(&prog, source.c_str(), "embedding_lookup.cu", 0, nullptr, nullptr), "nvrtcCreateProgram");
-
-    const std::string arch = "--gpu-architecture=sm_" + std::to_string(prop.major) + std::to_string(prop.minor);
-    std::vector<std::string> includeArgs;
-    for (const std::string& dir : generatedEmbeddingCudaIncludeDirs()) {
-        includeArgs.emplace_back("--include-path=" + dir);
-    }
-
-    std::vector<const char*> options;
-    options.reserve(3 + includeArgs.size());
-    options.push_back(arch.c_str());
-    options.push_back("--std=c++17");
-    options.push_back("-fmad=true");
-    for (const std::string& includeArg : includeArgs) {
-        options.push_back(includeArg.c_str());
-    }
-
-    try {
-        checkNvrtcCompile(prog, options);
-
-        size_t cubinSize = 0;
-        checkNvrtc(nvrtcGetCUBINSize(prog, &cubinSize), "nvrtcGetCUBINSize");
-        std::vector<char> cubin(cubinSize);
-        checkNvrtc(nvrtcGetCUBIN(prog, cubin.data()), "nvrtcGetCUBIN");
-        checkNvrtc(nvrtcDestroyProgram(&prog), "nvrtcDestroyProgram");
-        return cubin;
-    } catch (...) {
-        if (prog != nullptr) {
-            (void)nvrtcDestroyProgram(&prog);
-        }
-        throw;
-    }
+    return compileEmbeddingForwardCudaKernelToCubin(source, kernelName, deviceNum, numKernelInputs);
 }
 
 std::mutex generated_embedding_kernel_cache_mutex;
@@ -859,7 +782,7 @@ std::shared_ptr<GeneratedEmbeddingKernel> compileGeneratedEmbeddingExactKernel(D
         indexDtype, valueDtype, elementsPerLane, hasPaddingIndex, numIndices, vocabularySize, embeddingDim, paddingIndex, epilogue);
 
     std::ostringstream key;
-    key << "embedding_lookup_generated_exact:v5\n";
+    key << "embedding_lookup_generated_exact:v6\n";
     key << "sm=" << prop.major << prop.minor << "\n";
     key << "device=" << deviceNum << "\n";
     key << source;
@@ -872,7 +795,8 @@ std::shared_ptr<GeneratedEmbeddingKernel> compileGeneratedEmbeddingExactKernel(D
     ScopedGpu scopedGpu(deviceNum);
     ensureCudaContextCurrentForGeneratedEmbedding(deviceNum);
 
-    std::vector<char> cubin = compileGeneratedEmbeddingSourceToCubin(source, deviceNum);
+    std::vector<char> cubin = compileGeneratedEmbeddingSourceToCubin(
+        source, "embedding_lookup", deviceNum, static_cast<uint32_t>(3 + epilogue.extra_input_dtypes.size()));
 
     auto compiled = std::make_shared<GeneratedEmbeddingKernel>();
     compiled->cache_key = cacheKey;
@@ -900,7 +824,7 @@ std::shared_ptr<GeneratedEmbeddingKernel> compileGeneratedEmbeddingTinyKernel(Da
         indexDtype, valueDtype, hasPaddingIndex, numIndices, vocabularySize, embeddingDim, paddingIndex, epilogue);
 
     std::ostringstream key;
-    key << "embedding_lookup_generated_tiny:v3\n";
+    key << "embedding_lookup_generated_tiny:v4\n";
     key << "sm=" << prop.major << prop.minor << "\n";
     key << "device=" << deviceNum << "\n";
     key << source;
@@ -913,7 +837,8 @@ std::shared_ptr<GeneratedEmbeddingKernel> compileGeneratedEmbeddingTinyKernel(Da
     ScopedGpu scopedGpu(deviceNum);
     ensureCudaContextCurrentForGeneratedEmbedding(deviceNum);
 
-    std::vector<char> cubin = compileGeneratedEmbeddingSourceToCubin(source, deviceNum);
+    std::vector<char> cubin = compileGeneratedEmbeddingSourceToCubin(
+        source, "embedding_lookup", deviceNum, static_cast<uint32_t>(3 + epilogue.extra_input_dtypes.size()));
 
     auto compiled = std::make_shared<GeneratedEmbeddingKernel>();
     compiled->cache_key = cacheKey;

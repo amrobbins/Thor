@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -29,6 +30,7 @@ namespace {
 using DataType = TensorDescriptor::DataType;
 
 constexpr uint32_t THREADS_PER_BLOCK = 256;
+constexpr bool PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS = true;
 constexpr uint32_t WARP_SIZE_EMBEDDING = 32;
 constexpr uint32_t WARPS_PER_BLOCK = THREADS_PER_BLOCK / WARP_SIZE_EMBEDDING;
 static_assert(THREADS_PER_BLOCK == 256);
@@ -118,6 +120,112 @@ __device__ __forceinline__ float thor_embedding_grad_to_float<__nv_bfloat16>(__n
     return __bfloat162float(v);
 }
 
+
+__device__ __forceinline__ float2 thor_embedding_half2_bits_to_float2(uint32_t bits) {
+    const __half2 packed = *reinterpret_cast<const __half2*>(&bits);
+    return __half22float2(packed);
+}
+
+__device__ __forceinline__ float2 thor_embedding_bfloat162_bits_to_float2(uint32_t bits) {
+    const __nv_bfloat162 packed = *reinterpret_cast<const __nv_bfloat162*>(&bits);
+    return __bfloat1622float2(packed);
+}
+
+
+template <typename GradT, uint32_t EmbeddingDim>
+struct EmbeddingSparseGradientVectorOps {
+    static_assert(EmbeddingDim % 4U == 0U, "Fixed embedding sparse-gradient vector reducer requires D divisible by 4.");
+    static constexpr uint32_t DIMS_PER_THREAD = 4U;
+    static constexpr uint32_t THREADS_PER_ROW = EmbeddingDim / DIMS_PER_THREAD;
+    static constexpr uint32_t ROWS_PER_BLOCK = THREADS_PER_BLOCK / THREADS_PER_ROW;
+
+    __device__ __forceinline__ static float4 load(uint64_t token,
+                                                  uint32_t vectorIndex,
+                                                  const GradT* __restrict__ upstreamGradient) {
+        const uint64_t base = token * static_cast<uint64_t>(EmbeddingDim) +
+                              static_cast<uint64_t>(vectorIndex) * DIMS_PER_THREAD;
+        return make_float4(thor_embedding_grad_to_float(upstreamGradient[base + 0ULL]),
+                           thor_embedding_grad_to_float(upstreamGradient[base + 1ULL]),
+                           thor_embedding_grad_to_float(upstreamGradient[base + 2ULL]),
+                           thor_embedding_grad_to_float(upstreamGradient[base + 3ULL]));
+    }
+
+    __device__ __forceinline__ static void store(uint64_t row, uint32_t vectorIndex, float4 value, float* __restrict__ outputValues) {
+        float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * static_cast<uint64_t>(EmbeddingDim));
+        output[vectorIndex] = value;
+    }
+};
+
+template <uint32_t EmbeddingDim>
+struct EmbeddingSparseGradientVectorOps<float, EmbeddingDim> {
+    static_assert(EmbeddingDim % 4U == 0U, "FP32 vector reducer requires D divisible by 4.");
+    static constexpr uint32_t DIMS_PER_THREAD = 4U;
+    static constexpr uint32_t THREADS_PER_ROW = EmbeddingDim / DIMS_PER_THREAD;
+    static constexpr uint32_t ROWS_PER_BLOCK = THREADS_PER_BLOCK / THREADS_PER_ROW;
+
+    __device__ __forceinline__ static float4 load(uint64_t token,
+                                                  uint32_t vectorIndex,
+                                                  const float* __restrict__ upstreamGradient) {
+        const float4* __restrict__ input = reinterpret_cast<const float4*>(upstreamGradient + token * static_cast<uint64_t>(EmbeddingDim));
+        return input[vectorIndex];
+    }
+
+    __device__ __forceinline__ static void store(uint64_t row, uint32_t vectorIndex, float4 value, float* __restrict__ outputValues) {
+        float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * static_cast<uint64_t>(EmbeddingDim));
+        output[vectorIndex] = value;
+    }
+};
+
+template <uint32_t EmbeddingDim>
+struct EmbeddingSparseGradientVectorOps<__half, EmbeddingDim> {
+    static_assert(EmbeddingDim % 4U == 0U, "FP16 vector reducer requires D divisible by 4.");
+    static constexpr uint32_t DIMS_PER_THREAD = 4U;
+    static constexpr uint32_t THREADS_PER_ROW = EmbeddingDim / DIMS_PER_THREAD;
+    static constexpr uint32_t ROWS_PER_BLOCK = THREADS_PER_BLOCK / THREADS_PER_ROW;
+
+    __device__ __forceinline__ static float4 load(uint64_t token,
+                                                  uint32_t vectorIndex,
+                                                  const __half* __restrict__ upstreamGradient) {
+        const unsigned long long* __restrict__ input = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * static_cast<uint64_t>(EmbeddingDim));
+        const unsigned long long packed = input[vectorIndex];
+        const float2 lo = thor_embedding_half2_bits_to_float2(static_cast<uint32_t>(packed));
+        const float2 hi = thor_embedding_half2_bits_to_float2(static_cast<uint32_t>(packed >> 32U));
+        return make_float4(lo.x, lo.y, hi.x, hi.y);
+    }
+
+    __device__ __forceinline__ static void store(uint64_t row, uint32_t vectorIndex, float4 value, float* __restrict__ outputValues) {
+        float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * static_cast<uint64_t>(EmbeddingDim));
+        output[vectorIndex] = value;
+    }
+};
+
+template <uint32_t EmbeddingDim>
+struct EmbeddingSparseGradientVectorOps<__nv_bfloat16, EmbeddingDim> {
+    static_assert(EmbeddingDim % 4U == 0U, "BF16 vector reducer requires D divisible by 4.");
+    static constexpr uint32_t DIMS_PER_THREAD = 4U;
+    static constexpr uint32_t THREADS_PER_ROW = EmbeddingDim / DIMS_PER_THREAD;
+    static constexpr uint32_t ROWS_PER_BLOCK = THREADS_PER_BLOCK / THREADS_PER_ROW;
+
+    __device__ __forceinline__ static float4 load(uint64_t token,
+                                                  uint32_t vectorIndex,
+                                                  const __nv_bfloat16* __restrict__ upstreamGradient) {
+        const unsigned long long* __restrict__ input = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * static_cast<uint64_t>(EmbeddingDim));
+        const unsigned long long packed = input[vectorIndex];
+        const float2 lo = thor_embedding_bfloat162_bits_to_float2(static_cast<uint32_t>(packed));
+        const float2 hi = thor_embedding_bfloat162_bits_to_float2(static_cast<uint32_t>(packed >> 32U));
+        return make_float4(lo.x, lo.y, hi.x, hi.y);
+    }
+
+    __device__ __forceinline__ static void store(uint64_t row, uint32_t vectorIndex, float4 value, float* __restrict__ outputValues) {
+        float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * static_cast<uint64_t>(EmbeddingDim));
+        output[vectorIndex] = value;
+    }
+};
+
+__device__ __forceinline__ float4 thor_embedding_add_float4(float4 a, float4 b) {
+    return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
+}
+
 template <typename IndexT, typename RowT>
 __global__ void materializeEmbeddingSparseGradientSortPairsKernel(const IndexT* __restrict__ indices,
                                                                   RowT* __restrict__ rowKeys,
@@ -171,6 +279,7 @@ __global__ void finalizeEmbeddingSparseGradientRowsKernel(const RowT* __restrict
                                                           RowT* __restrict__ outputNumRows,
                                                           uint64_t vocabularySize,
                                                           const cudaGraphDeviceNode_t* reduceNode,
+                                                          uint32_t reduceRowsPerGridX,
                                                           uint32_t reduceGridDimY,
                                                           uint32_t minReduceGridDimX,
                                                           uint32_t maxReduceGridDimX,
@@ -183,10 +292,11 @@ __global__ void finalizeEmbeddingSparseGradientRowsKernel(const RowT* __restrict
     outputNumRows[0] = static_cast<RowT>(validRuns);
 
     if (reduceNode != nullptr) {
-        if (reduceGridDimY == 0U || reduceGridDimY > maxReduceGridDimY) {
+        if (reduceRowsPerGridX == 0U || reduceGridDimY == 0U || reduceGridDimY > maxReduceGridDimY) {
             asm("trap;");
         }
-        const uint32_t gridX = checkedEmbeddingSparseGradientGridDim(static_cast<uint64_t>(validRuns),
+        const uint64_t packedGridX = (static_cast<uint64_t>(validRuns) + reduceRowsPerGridX - 1ULL) / reduceRowsPerGridX;
+        const uint32_t gridX = checkedEmbeddingSparseGradientGridDim(packedGridX,
                                                                      minReduceGridDimX,
                                                                      maxReduceGridDimX);
         cudaError_t status = cudaGraphKernelNodeSetGridDim(loadEmbeddingSparseGradientTargetNode(reduceNode),
@@ -211,50 +321,36 @@ __global__ void reduceEmbeddingSparseGradientValuesFixedDimKernel(const uint32_t
                                                                   const GradT* __restrict__ upstreamGradient,
                                                                   float* __restrict__ outputValues) {
     static_assert(IsFixedEmbeddingReducerDim<EmbeddingDim>::value, "Unsupported fixed embedding sparse-gradient reducer dimension.");
-    static_assert(THREADS_PER_BLOCK % EmbeddingDim == 0U, "Fixed embedding sparse-gradient reducer requires D to divide block size.");
+    static_assert(EmbeddingDim % 4U == 0U, "Fixed embedding sparse-gradient vector reducer requires D divisible by 4.");
 
-    const uint64_t row = static_cast<uint64_t>(blockIdx.x);
+    using VecOps = EmbeddingSparseGradientVectorOps<GradT, EmbeddingDim>;
+    constexpr uint32_t THREADS_PER_ROW = VecOps::THREADS_PER_ROW;
+    constexpr uint32_t ROWS_PER_BLOCK = VecOps::ROWS_PER_BLOCK;
+    static_assert(THREADS_PER_ROW >= 1U, "Fixed embedding sparse-gradient vector reducer requires at least one thread per row.");
+    static_assert(ROWS_PER_BLOCK >= 1U, "Fixed embedding sparse-gradient vector reducer requires at least one row per block.");
+    static_assert(THREADS_PER_ROW * ROWS_PER_BLOCK == THREADS_PER_BLOCK,
+                  "Fixed embedding sparse-gradient vector reducer must use the whole block.");
+
+    const uint32_t rowInBlock = threadIdx.x / THREADS_PER_ROW;
+    const uint32_t vectorIndex = threadIdx.x - rowInBlock * THREADS_PER_ROW;
+    const uint64_t row = static_cast<uint64_t>(blockIdx.x) * ROWS_PER_BLOCK + rowInBlock;
     if (row >= static_cast<uint64_t>(numValidRows[0])) {
         return;
     }
 
-    constexpr uint32_t LANES_PER_DIM = THREADS_PER_BLOCK / EmbeddingDim;
-    const uint32_t dim = threadIdx.x % EmbeddingDim;
-    const uint32_t lane = threadIdx.x / EmbeddingDim;
     const uint64_t begin = static_cast<uint64_t>(runOffsets[row]);
     const uint64_t count = static_cast<uint64_t>(runCounts[row]);
+    const uint64_t firstToken = static_cast<uint64_t>(sortedTokenIds[begin]);
 
-    // The common low-duplication path is a gather/cast/write, not a reduction.  Keep it out of the shared-memory
-    // reduction path so all-unique batches use one block per row instead of the old one-warp-per-output-scalar shape.
-    if (count == 1ULL) {
-        if (lane == 0U) {
-            const uint64_t token = static_cast<uint64_t>(sortedTokenIds[begin]);
-            outputValues[row * EmbeddingDim + dim] = thor_embedding_grad_to_float(upstreamGradient[token * EmbeddingDim + dim]);
-        }
-        return;
-    }
-
-    float sum = 0.0f;
-    for (uint64_t i = static_cast<uint64_t>(lane); i < count; i += LANES_PER_DIM) {
+    // The larger side of the singleton/reduce copy is the FP32 output, so each active thread writes exactly one
+    // coalesced 16-byte float4. FP32 upstream also reads 16 bytes; FP16/BF16 upstream read the corresponding 8 bytes.
+    // Packing ROWS_PER_BLOCK rows into one CTA keeps all 256 threads useful for the fixed D={16,32,64,128,256} cases.
+    float4 sum = VecOps::load(firstToken, vectorIndex, upstreamGradient);
+    for (uint64_t i = 1ULL; i < count; ++i) {
         const uint64_t token = static_cast<uint64_t>(sortedTokenIds[begin + i]);
-        sum += thor_embedding_grad_to_float(upstreamGradient[token * EmbeddingDim + dim]);
+        sum = thor_embedding_add_float4(sum, VecOps::load(token, vectorIndex, upstreamGradient));
     }
-
-    if constexpr (LANES_PER_DIM == 1U) {
-        outputValues[row * EmbeddingDim + dim] = sum;
-    } else {
-        __shared__ float partials[THREADS_PER_BLOCK];
-        partials[threadIdx.x] = sum;
-        __syncthreads();
-
-        if (lane == 0U) {
-#pragma unroll
-            for (uint32_t otherLane = 1U; otherLane < LANES_PER_DIM; ++otherLane) {
-                sum += partials[otherLane * EmbeddingDim + dim];
-            }
-            outputValues[row * EmbeddingDim + dim] = sum;
-        }
-    }
+    VecOps::store(row, vectorIndex, sum, outputValues);
 }
 
 template <typename RowT, typename GradT>
@@ -293,6 +389,20 @@ __global__ void reduceEmbeddingSparseGradientValuesTiledKernel(const uint32_t* _
 
 bool hasFixedDimEmbeddingSparseGradientReducer(uint64_t embeddingDim) {
     return embeddingDim == 16ULL || embeddingDim == 32ULL || embeddingDim == 64ULL || embeddingDim == 128ULL || embeddingDim == 256ULL;
+}
+
+uint32_t reduceRowsPerGridXForEmbeddingSparseGradient(uint64_t embeddingDim) {
+    if (!hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
+        return 1U;
+    }
+    // Fixed-D reducers use one 16-byte FP32 output vector per thread, so each row consumes D / 4 threads.
+    // Pack as many rows as possible into one 256-thread CTA so every lane has useful row work.
+    return static_cast<uint32_t>(THREADS_PER_BLOCK / (embeddingDim / 4ULL));
+}
+
+uint32_t reduceGridDimXForEmbeddingSparseGradient(uint64_t numRows, uint64_t embeddingDim) {
+    const uint32_t rowsPerGridX = reduceRowsPerGridXForEmbeddingSparseGradient(embeddingDim);
+    return static_cast<uint32_t>((numRows + rowsPerGridX - 1ULL) / rowsPerGridX);
 }
 
 uint32_t reduceGridDimYForEmbeddingSparseGradient(uint64_t embeddingDim) {
@@ -361,62 +471,98 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType, DataType gra
     ss << "#include <cuda_bf16.h>\n\n";
     ss << "__device__ __forceinline__ float thor_embedding_grad_to_float(float v) { return v; }\n";
     ss << "__device__ __forceinline__ float thor_embedding_grad_to_float(__half v) { return __half2float(v); }\n";
-    ss << "__device__ __forceinline__ float thor_embedding_grad_to_float(__nv_bfloat16 v) { return __bfloat162float(v); }\n\n";
+    ss << "__device__ __forceinline__ float thor_embedding_grad_to_float(__nv_bfloat16 v) { return __bfloat162float(v); }\n";
+    ss << "__device__ __forceinline__ float2 thor_embedding_half2_bits_to_float2(unsigned int bits) {\n";
+    ss << "  const __half2 packed = *reinterpret_cast<const __half2*>(&bits);\n";
+    ss << "  return __half22float2(packed);\n";
+    ss << "}\n";
+    ss << "__device__ __forceinline__ float2 thor_embedding_bfloat162_bits_to_float2(unsigned int bits) {\n";
+    ss << "  const __nv_bfloat162 packed = *reinterpret_cast<const __nv_bfloat162*>(&bits);\n";
+    ss << "  return __bfloat1622float2(packed);\n";
+    ss << "}\n\n";
+    ss << "__device__ __forceinline__ float4 thor_embedding_add_float4(float4 a, float4 b) {\n";
+    ss << "  return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);\n";
+    ss << "}\n\n";
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernelName << "(const unsigned int* sortedTokenIds, const unsigned int* runOffsets, const unsigned int* runCounts, ";
     ss << "const " << rowType << "* numValidRows, const " << gradType << "* upstreamGradient, float* outputValues) {\n";
-    ss << "  const unsigned long long row = static_cast<unsigned long long>(blockIdx.x);\n";
-    ss << "  if (row >= static_cast<unsigned long long>(numValidRows[0])) return;\n";
 
     if (hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
-        const uint64_t lanesPerDim = THREADS_PER_BLOCK / embeddingDim;
+        const uint64_t threadsPerRow = embeddingDim / 4ULL;
+        const uint64_t rowsPerBlock = THREADS_PER_BLOCK / threadsPerRow;
         ss << "  constexpr unsigned int THREADS_PER_BLOCK_LOCAL = " << THREADS_PER_BLOCK << "U;\n";
         ss << "  constexpr unsigned int embeddingDim = " << embeddingDim << "U;\n";
-        ss << "  constexpr unsigned int lanesPerDim = " << lanesPerDim << "U;\n";
-        ss << "  const unsigned int dim = threadIdx.x % embeddingDim;\n";
-        ss << "  const unsigned int lane = threadIdx.x / embeddingDim;\n";
+        ss << "  constexpr unsigned int dimsPerThread = 4U;\n";
+        ss << "  constexpr unsigned int threadsPerRow = " << threadsPerRow << "U;\n";
+        ss << "  constexpr unsigned int rowsPerBlock = " << rowsPerBlock << "U;\n";
+        ss << "  const unsigned int rowInBlock = threadIdx.x / threadsPerRow;\n";
+        ss << "  const unsigned int vectorIndex = threadIdx.x - rowInBlock * threadsPerRow;\n";
+        ss << "  const unsigned long long row = static_cast<unsigned long long>(blockIdx.x) * rowsPerBlock + rowInBlock;\n";
+        ss << "  if (row >= static_cast<unsigned long long>(numValidRows[0])) return;\n";
         ss << "  const unsigned long long begin = static_cast<unsigned long long>(runOffsets[row]);\n";
         ss << "  const unsigned long long count = static_cast<unsigned long long>(runCounts[row]);\n";
-        ss << "  if (count == 1ULL) {\n";
-        ss << "    if (lane == 0U) {\n";
-        ss << "      const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin]);\n";
-        ss << "      outputValues[row * embeddingDim + dim] = thor_embedding_grad_to_float(upstreamGradient[token * embeddingDim + dim]);\n";
-        ss << "    }\n";
-        ss << "    return;\n";
-        ss << "  }\n";
-        ss << "  float sum = 0.0f;\n";
-        ss << "  for (unsigned long long i = static_cast<unsigned long long>(lane); i < count; i += lanesPerDim) {\n";
+        ss << "  const unsigned long long firstToken = static_cast<unsigned long long>(sortedTokenIds[begin]);\n";
+
+        auto emitLoad = [&](const std::string& tokenExpr, const std::string& valueName) {
+            if (gradDType == DataType::FP32) {
+                ss << "  const float4* __restrict__ input_" << valueName << " = reinterpret_cast<const float4*>(upstreamGradient + (" << tokenExpr << ") * embeddingDim);\n";
+                ss << "  " << (valueName == "sum" ? "float4 " : "const float4 ") << valueName << " = input_" << valueName << "[vectorIndex];\n";
+            } else if (gradDType == DataType::FP16) {
+                ss << "  const unsigned long long* __restrict__ input_" << valueName << " = reinterpret_cast<const unsigned long long*>(upstreamGradient + (" << tokenExpr << ") * embeddingDim);\n";
+                ss << "  const unsigned long long packed_" << valueName << " = input_" << valueName << "[vectorIndex];\n";
+                ss << "  const float2 lo_" << valueName << " = thor_embedding_half2_bits_to_float2(static_cast<unsigned int>(packed_" << valueName << "));\n";
+                ss << "  const float2 hi_" << valueName << " = thor_embedding_half2_bits_to_float2(static_cast<unsigned int>(packed_" << valueName << " >> 32U));\n";
+                ss << "  " << (valueName == "sum" ? "float4 " : "const float4 ") << valueName << " = make_float4(lo_" << valueName << ".x, lo_" << valueName << ".y, hi_" << valueName << ".x, hi_" << valueName << ".y);\n";
+            } else if (gradDType == DataType::BF16) {
+                ss << "  const unsigned long long* __restrict__ input_" << valueName << " = reinterpret_cast<const unsigned long long*>(upstreamGradient + (" << tokenExpr << ") * embeddingDim);\n";
+                ss << "  const unsigned long long packed_" << valueName << " = input_" << valueName << "[vectorIndex];\n";
+                ss << "  const float2 lo_" << valueName << " = thor_embedding_bfloat162_bits_to_float2(static_cast<unsigned int>(packed_" << valueName << "));\n";
+                ss << "  const float2 hi_" << valueName << " = thor_embedding_bfloat162_bits_to_float2(static_cast<unsigned int>(packed_" << valueName << " >> 32U));\n";
+                ss << "  " << (valueName == "sum" ? "float4 " : "const float4 ") << valueName << " = make_float4(lo_" << valueName << ".x, lo_" << valueName << ".y, hi_" << valueName << ".x, hi_" << valueName << ".y);\n";
+            } else {
+                ss << "  const unsigned long long base_" << valueName << " = (" << tokenExpr << ") * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long long>(vectorIndex) * dimsPerThread;\n";
+                ss << "  " << (valueName == "sum" ? "float4 " : "const float4 ") << valueName << " = make_float4(thor_embedding_grad_to_float(upstreamGradient[base_" << valueName << " + 0ULL]), thor_embedding_grad_to_float(upstreamGradient[base_" << valueName << " + 1ULL]), thor_embedding_grad_to_float(upstreamGradient[base_" << valueName << " + 2ULL]), thor_embedding_grad_to_float(upstreamGradient[base_" << valueName << " + 3ULL]));\n";
+            }
+        };
+
+        emitLoad("firstToken", "sum");
+        ss << "  for (unsigned long long i = 1ULL; i < count; ++i) {\n";
         ss << "    const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin + i]);\n";
-        ss << "    sum += thor_embedding_grad_to_float(upstreamGradient[token * embeddingDim + dim]);\n";
-        ss << "  }\n";
-        if (lanesPerDim == 1ULL) {
-            ss << "  outputValues[row * embeddingDim + dim] = sum;\n";
+        if (gradDType == DataType::FP32) {
+            ss << "    const float4* __restrict__ input_v = reinterpret_cast<const float4*>(upstreamGradient + token * embeddingDim);\n";
+            ss << "    const float4 v = input_v[vectorIndex];\n";
+        } else if (gradDType == DataType::FP16) {
+            ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * embeddingDim);\n";
+            ss << "    const unsigned long long packed_v = input_v[vectorIndex];\n";
+            ss << "    const float2 lo_v = thor_embedding_half2_bits_to_float2(static_cast<unsigned int>(packed_v));\n";
+            ss << "    const float2 hi_v = thor_embedding_half2_bits_to_float2(static_cast<unsigned int>(packed_v >> 32U));\n";
+            ss << "    const float4 v = make_float4(lo_v.x, lo_v.y, hi_v.x, hi_v.y);\n";
+        } else if (gradDType == DataType::BF16) {
+            ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * embeddingDim);\n";
+            ss << "    const unsigned long long packed_v = input_v[vectorIndex];\n";
+            ss << "    const float2 lo_v = thor_embedding_bfloat162_bits_to_float2(static_cast<unsigned int>(packed_v));\n";
+            ss << "    const float2 hi_v = thor_embedding_bfloat162_bits_to_float2(static_cast<unsigned int>(packed_v >> 32U));\n";
+            ss << "    const float4 v = make_float4(lo_v.x, lo_v.y, hi_v.x, hi_v.y);\n";
         } else {
-            ss << "  __shared__ float partials[THREADS_PER_BLOCK_LOCAL];\n";
-            ss << "  partials[threadIdx.x] = sum;\n";
-            ss << "  __syncthreads();\n";
-            ss << "  if (lane == 0U) {\n";
-            ss << "#pragma unroll\n";
-            ss << "    for (unsigned int otherLane = 1U; otherLane < lanesPerDim; ++otherLane) {\n";
-            ss << "      sum += partials[otherLane * embeddingDim + dim];\n";
-            ss << "    }\n";
-            ss << "    outputValues[row * embeddingDim + dim] = sum;\n";
-            ss << "  }\n";
+            ss << "    const unsigned long long base_v = token * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long long>(vectorIndex) * dimsPerThread;\n";
+            ss << "    const float4 v = make_float4(thor_embedding_grad_to_float(upstreamGradient[base_v + 0ULL]), thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]), thor_embedding_grad_to_float(upstreamGradient[base_v + 2ULL]), thor_embedding_grad_to_float(upstreamGradient[base_v + 3ULL]));\n";
         }
+        ss << "    sum = thor_embedding_add_float4(sum, v);\n";
+        ss << "  }\n";
+        ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * embeddingDim);\n";
+        ss << "  output[vectorIndex] = sum;\n";
     } else {
         ss << "  constexpr unsigned int THREADS_PER_BLOCK_LOCAL = " << THREADS_PER_BLOCK << "U;\n";
+        ss << "  const unsigned long long row = static_cast<unsigned long long>(blockIdx.x);\n";
+        ss << "  if (row >= static_cast<unsigned long long>(numValidRows[0])) return;\n";
         ss << "  const unsigned long long embeddingDim = " << embeddingDim << "ULL;\n";
         ss << "  const unsigned long long dim = static_cast<unsigned long long>(blockIdx.y) * THREADS_PER_BLOCK_LOCAL + threadIdx.x;\n";
         ss << "  if (dim >= embeddingDim) return;\n";
         ss << "  const unsigned long long begin = static_cast<unsigned long long>(runOffsets[row]);\n";
         ss << "  const unsigned long long count = static_cast<unsigned long long>(runCounts[row]);\n";
-        ss << "  if (count == 1ULL) {\n";
-        ss << "    const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin]);\n";
-        ss << "    outputValues[row * embeddingDim + dim] = thor_embedding_grad_to_float(upstreamGradient[token * embeddingDim + dim]);\n";
-        ss << "    return;\n";
-        ss << "  }\n";
-        ss << "  float sum = 0.0f;\n";
-        ss << "  for (unsigned long long i = 0ULL; i < count; ++i) {\n";
+        ss << "  const unsigned long long firstToken = static_cast<unsigned long long>(sortedTokenIds[begin]);\n";
+        ss << "  float sum = thor_embedding_grad_to_float(upstreamGradient[firstToken * embeddingDim + dim]);\n";
+        ss << "  for (unsigned long long i = 1ULL; i < count; ++i) {\n";
         ss << "    const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin + i]);\n";
         ss << "    sum += thor_embedding_grad_to_float(upstreamGradient[token * embeddingDim + dim]);\n";
         ss << "  }\n";
@@ -480,6 +626,14 @@ void compileGraphReduceKernel(PreparedEmbeddingSparseGradient& prepared) {
                                                                  prepared.gradientDataType,
                                                                  prepared.embeddingDim,
                                                                  prepared.reduceKernelName);
+    if constexpr (PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS) {
+        std::fprintf(stderr,
+                     "\n===== Generated Embedding sparse-gradient reducer CUDA source begin: %s =====\n%s\n===== Generated Embedding sparse-gradient reducer CUDA source end: %s =====\n",
+                     prepared.reduceKernelName.c_str(),
+                     src.c_str(),
+                     prepared.reduceKernelName.c_str());
+        std::fflush(stderr);
+    }
     CUDA_CHECK(cudaFree(nullptr));
     CompiledEmbeddingSparseGradientCudaKernel compiled =
         compileEmbeddingSparseGradientCudaKernel(src, prepared.reduceKernelName, prepared.deviceNum);
@@ -574,7 +728,7 @@ void launchReduceValuesFixedDim(PreparedEmbeddingSparseGradient& prepared,
                                 SparseRowGradient& outputGradient,
                                 Stream stream) {
     const dim3 block(THREADS_PER_BLOCK);
-    const dim3 grid(static_cast<uint32_t>(outputGradient.capacity), 1U);
+    const dim3 grid(reduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, EmbeddingDim), 1U);
     reduceEmbeddingSparseGradientValuesFixedDimKernel<RowT, GradT, EmbeddingDim><<<grid, block, 0, stream.getStream()>>>(
         prepared.sortedTokenIds.getMemPtr<uint32_t>(),
         prepared.runOffsets.getMemPtr<uint32_t>(),
@@ -612,7 +766,8 @@ void launchReduceValuesTyped(PreparedEmbeddingSparseGradient& prepared,
             break;
         default: {
             const dim3 block(THREADS_PER_BLOCK);
-            const dim3 grid(static_cast<uint32_t>(maxRows), reduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim));
+            const dim3 grid(reduceGridDimXForEmbeddingSparseGradient(maxRows, prepared.embeddingDim),
+                            reduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim));
             reduceEmbeddingSparseGradientValuesTiledKernel<RowT, GradT><<<grid, block, 0, stream.getStream()>>>(
                 prepared.sortedTokenIds.getMemPtr<uint32_t>(),
                 prepared.runOffsets.getMemPtr<uint32_t>(),
@@ -668,6 +823,7 @@ void launchReduceValues(PreparedEmbeddingSparseGradient& prepared,
 
 struct OptionalReduceGridUpdate {
     const DeviceUpdatableKernelNodeDeviceHandle* reduceNodeHandle = nullptr;
+    uint32_t reduceRowsPerGridX = 1;
     uint32_t reduceGridDimY = 0;
     uint32_t minReduceGridDimX = 1;
     uint32_t maxReduceGridDimX = 1;
@@ -686,6 +842,7 @@ void launchFinalizeRowsTyped(PreparedEmbeddingSparseGradient& prepared,
                                                                                     outputGradient.numRows.getMemPtr<RowT>(),
                                                                                     prepared.vocabularySize,
                                                                                     reduceNodePtr,
+                                                                                    reduceGridUpdate.reduceRowsPerGridX,
                                                                                     reduceGridUpdate.reduceGridDimY,
                                                                                     reduceGridUpdate.minReduceGridDimX,
                                                                                     reduceGridUpdate.maxReduceGridDimX,
@@ -1012,8 +1169,9 @@ void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
     prepared.runCounts.memsetAsync(stream, 0);
     rleRows(prepared, outputGradient, cubItems, stream);
 
+    const uint32_t reduceRowsPerGridX = reduceRowsPerGridXForEmbeddingSparseGradient(prepared.embeddingDim);
     const uint32_t reduceGridDimY = reduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim);
-    if (reduceGridDimY == 0) {
+    if (reduceRowsPerGridX == 0 || reduceGridDimY == 0) {
         throw std::runtime_error("Prepared Embedding sparse-gradient graph reducer requires a non-empty embedding dimension.");
     }
 
@@ -1021,9 +1179,10 @@ void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
                        outputGradient,
                        stream,
                        OptionalReduceGridUpdate{&captured.reduceNodeHandle,
+                                                reduceRowsPerGridX,
                                                 reduceGridDimY,
                                                 /*minReduceGridDimX=*/1,
-                                                static_cast<uint32_t>(outputGradient.capacity),
+                                                reduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim),
                                                 reduceGridDimY});
 
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(prepared.scanTempStorage.getMemPtr<void>(),
