@@ -13,7 +13,11 @@ class Sgd final : public Optimizer {
     Sgd(uint64_t id, float initialLearningRate, float decay, float momentum, bool useNesterovMomentum, uint64_t startResumeEpoch = 0);
 
     void compile(const Tensor &weights, Stream &gradientUpdateStream) override;
+    SparseRowGradient compileSparseRows(const Tensor &weights, uint64_t maxSparseRows, Stream &gradientUpdateStream) override;
+    [[nodiscard]] bool supportsSparseRowGradients() const override { return true; }
+
     void updateWeights(uint32_t batchSize) override;
+    void updateSparseRows(uint32_t batchSize) override;
 
     std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) override;
     std::unordered_map<std::string, float> getAllHyperParameters() override;

@@ -42,11 +42,5 @@ void launchEmbeddingForward(const Tensor& indices,
                             std::optional<uint64_t> paddingIndex,
                             Stream stream);
 
-void launchEmbeddingSparseSgdUpdate(const Tensor& indices,
-                                    const Tensor& outputGradient,
-                                    Tensor& weights,
-                                    float step,
-                                    std::optional<uint64_t> paddingIndex,
-                                    Stream stream);
 
 }  // namespace ThorImplementation

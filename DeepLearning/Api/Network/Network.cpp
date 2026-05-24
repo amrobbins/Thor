@@ -13,21 +13,20 @@ using ThorImplementation::TensorPlacement;
 
 namespace {
 
-void printCudaKernelSigningPublicKeys(const std::vector<std::string>& cudaKernelPublicKeys) {
-    if (cudaKernelPublicKeys.empty()) {
+void printCudaKernelOutOfBandKeys(const std::vector<ThorImplementation::CudaKernelOutOfBandKeys>& cudaKernelKeys) {
+    if (cudaKernelKeys.empty()) {
         return;
     }
     std::cout << "\nThor saved a model containing CudaKernelExpression custom CUDA source.\n";
     std::cout << ThorImplementation::cudaKernelLoadedModelSafetyDisclaimer() << "\n";
-    std::cout << "Loaded custom CUDA source is inspectable by loading the model without enabling compilation, "
-              << "or by inspecting cuda_kernels[].source / cuda_kernel_manifest_signature in the saved JSON.\n";
-    std::cout << "The serialized model records only the signing public-key fingerprint, not the public key. "
-              << "Persist the out-of-band public key below separately if this saved model should be loadable with custom CUDA "
-              << "source compilation enabled.\n";
-    std::cout << "To allow a loaded model to compile these kernels, provide the trusted Ed25519 public key below "
-              << "to the load API only after applying your own security policy.\n";
-    for (const std::string& key : cudaKernelPublicKeys) {
-        std::cout << "CudaKernelExpression Ed25519 public key: " << key << "\n";
+    std::cout << "The serialized model stores encrypted CUDA source and records only key fingerprints, not keys. "
+              << "Persist the out-of-band keys below separately if this saved model should be loadable.\n";
+    std::cout << "The Ed25519 public key verifies the signed encrypted CUDA manifest. The AES-256-GCM source decryption key "
+              << "decrypts the CUDA source after signature verification. Provide both keys to the load API; enable compilation only "
+              << "after inspecting the decrypted CUDA source and applying your own security policy.\n";
+    for (const ThorImplementation::CudaKernelOutOfBandKeys& keys : cudaKernelKeys) {
+        std::cout << "CudaKernelExpression Ed25519 public key: " << keys.signing_public_key << "\n";
+        std::cout << "CudaKernelExpression AES-256-GCM source decryption key: " << keys.source_decryption_key << "\n";
     }
     std::cout << std::endl;
 }
@@ -262,8 +261,9 @@ void Network::save(const string &directory, const bool overwrite) {
     json modelJson = architectureJson();
     if (defaultOptimizer != nullptr)
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
-    const std::vector<std::string> signingPublicKeys = ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
-    printCudaKernelSigningPublicKeys(signingPublicKeys);
+    const std::vector<ThorImplementation::CudaKernelOutOfBandKeys> cudaKernelKeys =
+        ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
+    printCudaKernelOutOfBandKeys(cudaKernelKeys);
     string modelJsonDump = modelJson.dump(4);
 
     string qualifiedModelName = networkName + ".thor.json";
@@ -300,8 +300,9 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
 
     string qualifiedModelName = networkName + ".thor.json";
-    const std::vector<std::string> signingPublicKeys = ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
-    printCudaKernelSigningPublicKeys(signingPublicKeys);
+    const std::vector<ThorImplementation::CudaKernelOutOfBandKeys> cudaKernelKeys =
+        ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
+    printCudaKernelOutOfBandKeys(cudaKernelKeys);
 
     string jsonDump = modelJson.dump(4);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -335,6 +336,12 @@ string Network::architectureJsonString() const {
 
 std::vector<std::string> Network::cudaKernelSigningPublicKeys() const {
     json modelJson = architectureJson();
+    (void)ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
+    return ThorImplementation::collectCudaKernelSigningPublicKeys(modelJson);
+}
+
+std::vector<ThorImplementation::CudaKernelOutOfBandKeys> Network::cudaKernelOutOfBandKeys() const {
+    json modelJson = architectureJson();
     return ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
 }
 
@@ -354,13 +361,21 @@ std::string Network::cudaKernelSourceInfoJsonString() const {
     return ThorImplementation::cudaKernelSourceInspectionListToJson(cudaKernelSourceInfo()).dump(4);
 }
 
-void Network::load(const string &directory) { load(directory, false, ""); }
+void Network::load(const string &directory) { load(directory, false, "", ""); }
 
-void Network::load(const string &directory, bool allowUnsafeLoadedCudaKernelSource) { load(directory, allowUnsafeLoadedCudaKernelSource, ""); }
+void Network::load(const string &directory, bool allowUnsafeLoadedCudaKernelSource) { load(directory, allowUnsafeLoadedCudaKernelSource, "", ""); }
 
 void Network::load(const string &directory, bool allowUnsafeLoadedCudaKernelSource, const string &trustedCudaKernelPublicKey) {
+    load(directory, allowUnsafeLoadedCudaKernelSource, trustedCudaKernelPublicKey, "");
+}
+
+void Network::load(const string &directory,
+                   bool allowUnsafeLoadedCudaKernelSource,
+                   const string &trustedCudaKernelPublicKey,
+                   const string &trustedCudaKernelSourceDecryptionKey) {
     allowUnsafeLoadedCudaKernelSourceCompilation_ = allowUnsafeLoadedCudaKernelSource;
     trustedLoadedCudaKernelPublicKey_ = trustedCudaKernelPublicKey;
+    trustedLoadedCudaKernelSourceDecryptionKey_ = trustedCudaKernelSourceDecryptionKey;
     // Read the model json from the archive
     archiveReader = make_shared<thor_file::TarReader>(networkName, directory);
     string modelJsonFileName = networkName + ".thor.json";

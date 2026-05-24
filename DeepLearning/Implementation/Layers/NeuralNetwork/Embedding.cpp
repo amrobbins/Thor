@@ -1,10 +1,9 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Embedding.h"
 
-#include "DeepLearning/Implementation/Layers/Loss.h"
-#include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -109,30 +108,25 @@ void Embedding::compileImpl() {
     attachGradientUpdateStream();
 
     // Do not call PhysicalParameter::compileOptimizer here. The default optimizer path materializes a dense
-    // weightsGradient tensor, which is exactly what Embedding must avoid for large vocabularies. Sparse optimizer
-    // kernels consume the incoming output gradient and index tensor directly.
+    // weightsGradient tensor, which is exactly what Embedding must avoid for large vocabularies. Embedding instead
+    // asks the optimizer for an optimizer-owned reduced sparse-gradient sink. The actual sparse-row update expression
+    // plan is owned by the optimizer in a later slice.
     if (gradientUpdateStream.has_value()) {
         for (const auto& parameter : parameters) {
             if (!isInferenceOnly() && parameter->isTrainingEnabled()) {
                 if (!parameter->hasOptimizer()) {
                     throw std::invalid_argument("Embedding trainable weights require an optimizer.");
                 }
-                auto sgd = std::dynamic_pointer_cast<Sgd>(parameter->getOptimizer());
-                if (sgd == nullptr) {
+                std::shared_ptr<Optimizer> optimizer = parameter->getOptimizer();
+                if (!optimizer->supportsSparseRowGradients()) {
                     throw std::invalid_argument(
-                        "Embedding sparse updates currently support plain SGD only. Adam/AdaGrad sparse row-state updates are the next "
-                        "optimizer slice; dense-gradient fallback is intentionally forbidden.");
+                        "Embedding weights produce reduced sparse row gradients, but the attached optimizer does not support sparse row "
+                        "gradients. Dense-gradient fallback is intentionally forbidden.");
                 }
-                if (sgd->getMomentum() != 0.0f || sgd->getUseNesterovMomentum()) {
-                    throw std::invalid_argument(
-                        "Embedding sparse SGD currently requires momentum=0 and use_nesterov_momentum=false. Momentum needs sparse "
-                        "row-state storage before it can be enabled without dense gradients.");
-                }
-                if (weightsDataType != TensorDescriptor::DataType::FP32) {
-                    throw std::invalid_argument(
-                        "Embedding sparse SGD currently supports fp32 trainable weights. fp16/bf16 embedding tables are supported for "
-                        "forward/inference; mixed precision sparse optimizer state is the next slice.");
-                }
+
+                const Tensor storage = parameter->getStorage().value();
+                const uint64_t maxSparseRows = std::min<uint64_t>(aFeatureInput.value().getTotalNumElements(), vocabularySize);
+                weightsSparseGradient = optimizer->compileSparseRows(storage, maxSparseRows, gradientUpdateStream.value());
             }
         }
     }
@@ -171,19 +165,6 @@ void Embedding::computeFeatureOut(uint32_t connectionNumber) {
                            streams[connectionNumber]);
 }
 
-float Embedding::sparseSgdStep(uint32_t batchSize) const {
-    THOR_THROW_IF_FALSE(batchSize > 0);
-    THOR_THROW_IF_FALSE(numBackwardConnections > 0);
-
-    auto sgd = std::dynamic_pointer_cast<Sgd>(parameters[0]->getOptimizer());
-    THOR_THROW_IF_FALSE(sgd != nullptr);
-
-    const float lossScalingFactor = Loss::getLossScalingFactor();
-    THOR_THROW_IF_FALSE(lossScalingFactor > 0.0f);
-    return sgd->getCurrentLearningRate() /
-           (static_cast<float>(batchSize) * static_cast<float>(numBackwardConnections) * lossScalingFactor);
-}
-
 void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
     THOR_THROW_IF_FALSE(running);
     if (!errorInput.has_value()) {
@@ -203,11 +184,13 @@ void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
     }
 
     if (!isInferenceOnly() && gradientUpdateStream.has_value() && parameters[0]->isTrainingEnabled()) {
+        (void)batchSize;
         Event errorInputReady = streams[connectionNumber].putEvent();
         gradientUpdateStream.value().waitEvent(errorInputReady);
-        Tensor weightsTensor = weights();
-        launchEmbeddingSparseSgdUpdate(featureInputs[connectionNumber].value(), errorInput.value(), weightsTensor, sparseSgdStep(batchSize),
-                                       paddingIndex, gradientUpdateStream.value());
+        THOR_THROW_IF_FALSE(weightsSparseGradient.has_value());
+        throw std::runtime_error(
+            "Embedding backward reduced sparse-gradient production is not implemented yet. The phase-0 atomic sparse SGD update path has "
+            "been removed; the next slice should sort/RLE/segment-reduce into the optimizer-owned SparseRowGradient sink.");
     }
 
     numBackwardConnectionsMade += 1;

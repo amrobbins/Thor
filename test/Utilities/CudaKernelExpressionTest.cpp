@@ -296,28 +296,39 @@ void serializable_scale_kernel(const float* x, float* y, float alpha, int64_t n)
     ASSERT_TRUE(payload.contains("cuda_kernel_manifest_signature"));
     ASSERT_EQ(payload.at("cuda_kernels").size(), 1u);
     EXPECT_EQ(payload.at("cuda_kernels").at(0).at("name").get<std::string>(), "serializable_scale");
-    EXPECT_NE(payload.at("cuda_kernels").at(0).at("source").get<std::string>().find("serializable_scale_kernel"),
-              std::string::npos);
+    EXPECT_FALSE(payload.at("cuda_kernels").at(0).contains("source"));
+    // Entrypoint names remain plaintext ABI metadata; the CUDA source body must not.
+    EXPECT_EQ(payload.dump().find("y[i] = alpha * x[i]"), std::string::npos);
+    EXPECT_TRUE(payload.at("cuda_kernels").at(0).contains("encrypted_source"));
+    EXPECT_TRUE(payload.at("cuda_kernels").at(0).contains("source_encryption"));
+    EXPECT_EQ(payload.at("cuda_kernels").at(0).at("source_encryption").at("algorithm").get<std::string>(), "aes-256-gcm");
     const nlohmann::json& signatureJson = payload.at("cuda_kernel_manifest_signature");
     EXPECT_EQ(signatureJson.at("algorithm").get<std::string>(), "ed25519");
     EXPECT_FALSE(signatureJson.contains("public_key"));
     EXPECT_FALSE(signatureJson.at("public_key_fingerprint").get<std::string>().empty());
-    std::vector<std::string> signingPublicKeys = definition.cudaKernelSigningPublicKeys();
-    ASSERT_EQ(signingPublicKeys.size(), 1u);
-    const std::string trustedPublicKey = signingPublicKeys.front();
+    std::vector<CudaKernelOutOfBandKeys> outOfBandKeys = collectCudaKernelOutOfBandKeys(payload);
+    ASSERT_EQ(outOfBandKeys.size(), 1u);
+    const std::string trustedPublicKey = outOfBandKeys.front().signing_public_key;
+    const std::string trustedSourceDecryptionKey = outOfBandKeys.front().source_decryption_key;
     EXPECT_FALSE(trustedPublicKey.empty());
+    EXPECT_FALSE(trustedSourceDecryptionKey.empty());
     EXPECT_NE(signatureJson.at("public_key_fingerprint").get<std::string>(), trustedPublicKey);
+    EXPECT_NE(payload.at("cuda_kernels").at(0).at("source_encryption").at("source_decryption_key_fingerprint").get<std::string>(),
+              trustedSourceDecryptionKey);
 
     std::vector<CudaKernelSourceInspection> serializedInfo = collectCudaKernelSourceInfo(payload);
     ASSERT_EQ(serializedInfo.size(), 1u);
     EXPECT_EQ(serializedInfo.front().name, "serializable_scale");
-    EXPECT_NE(serializedInfo.front().source.find("serializable_scale_kernel"), std::string::npos);
-    EXPECT_NE(serializedInfo.front().compiled_source.find("THOR_CUDA_KERNEL_EXPRESSION_FIXED_WIDTH_TYPES"), std::string::npos);
-    EXPECT_NE(serializedInfo.front().compiled_source.find("serializable_scale_kernel"), std::string::npos);
+    EXPECT_TRUE(serializedInfo.front().source_encrypted);
+    EXPECT_TRUE(serializedInfo.front().source.empty());
+    EXPECT_TRUE(serializedInfo.front().compiled_source.empty());
+    EXPECT_EQ(serializedInfo.front().source_encryption_algorithm, "aes-256-gcm");
     EXPECT_FALSE(serializedInfo.front().loaded_source_compilation_allowed);
     EXPECT_EQ(serializedInfo.front().signing_public_key_fingerprint, signatureJson.at("public_key_fingerprint").get<std::string>());
 
-    ExpressionDefinition loadedDefault = ExpressionDefinition::deserialize(payload);
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(payload), std::runtime_error);
+
+    ExpressionDefinition loadedDefault = ExpressionDefinition::deserialize(payload, false, trustedPublicKey, trustedSourceDecryptionKey);
     std::vector<CudaKernelSourceInspection> firstClassSourceInfo = loadedDefault.cudaKernelSourceInfo();
     ASSERT_EQ(firstClassSourceInfo.size(), 1u);
     EXPECT_EQ(firstClassSourceInfo.front().name, "serializable_scale");
@@ -336,15 +347,16 @@ void serializable_scale_kernel(const float* x, float* y, float alpha, int64_t n)
     EXPECT_THROW((void)DynamicExpression::fromExpressionDefinition(loadedDefault).stamp({{"x", x}}, {}, stream), std::runtime_error);
 
     EXPECT_THROW((void)ExpressionDefinition::deserialize(payload, true), std::runtime_error);
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(payload, false, trustedPublicKey), std::runtime_error);
 
     nlohmann::json missingSignature = payload;
     missingSignature.erase("cuda_kernel_manifest_signature");
-    EXPECT_THROW((void)ExpressionDefinition::deserialize(missingSignature, true, trustedPublicKey), std::runtime_error);
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(missingSignature, true, trustedPublicKey, trustedSourceDecryptionKey), std::runtime_error);
 
     nlohmann::json publicKeyInFingerprint = payload;
     publicKeyInFingerprint["cuda_kernel_manifest_signature"]["public_key_fingerprint"] = trustedPublicKey;
     try {
-        (void)ExpressionDefinition::deserialize(publicKeyInFingerprint, true, trustedPublicKey);
+        (void)ExpressionDefinition::deserialize(publicKeyInFingerprint, true, trustedPublicKey, trustedSourceDecryptionKey);
         FAIL() << "Expected manifest public_key_fingerprint containing public key material to be rejected";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("public_key_fingerprint contains public key material"), std::string::npos);
@@ -368,22 +380,25 @@ void wrong_key_source_kernel(const float* x, float* y, int64_t n) {
         ExpressionDefinition::fromOutputs(wrongKeyOp.apply({{"x", Expression::input("x", DataType::FP32, DataType::FP32)}}));
     nlohmann::json wrongKeyPayload = wrongKeyDefinition.architectureJsonWithCudaKernelManifestSignature();
     EXPECT_FALSE(wrongKeyPayload.at("cuda_kernel_manifest_signature").contains("public_key"));
-    std::vector<std::string> wrongSigningPublicKeys = wrongKeyDefinition.cudaKernelSigningPublicKeys();
-    ASSERT_EQ(wrongSigningPublicKeys.size(), 1u);
-    const std::string wrongTrustedPublicKey = wrongSigningPublicKeys.front();
+    std::vector<CudaKernelOutOfBandKeys> wrongOutOfBandKeys = collectCudaKernelOutOfBandKeys(wrongKeyPayload);
+    ASSERT_EQ(wrongOutOfBandKeys.size(), 1u);
+    const std::string wrongTrustedPublicKey = wrongOutOfBandKeys.front().signing_public_key;
     ASSERT_FALSE(wrongTrustedPublicKey.empty());
     ASSERT_NE(wrongTrustedPublicKey, trustedPublicKey);
-    EXPECT_THROW((void)ExpressionDefinition::deserialize(payload, true, wrongTrustedPublicKey), std::runtime_error);
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(payload, true, wrongTrustedPublicKey, trustedSourceDecryptionKey),
+                 std::runtime_error);
 
     nlohmann::json tampered = payload;
-    tampered["cuda_kernels"][0]["source"] = tampered["cuda_kernels"][0]["source"].get<std::string>() + "\n// tampered\n";
-    EXPECT_THROW((void)ExpressionDefinition::deserialize(tampered, true, trustedPublicKey), std::runtime_error);
+    tampered["cuda_kernels"][0]["encrypted_source"] = tampered["cuda_kernels"][0]["encrypted_source"].get<std::string>() + "00";
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(tampered, true, trustedPublicKey, trustedSourceDecryptionKey),
+                 std::runtime_error);
 
     nlohmann::json tamperedLaunch = payload;
     tamperedLaunch["cuda_kernels"][0]["launch"]["block"] = 256;
-    EXPECT_THROW((void)ExpressionDefinition::deserialize(tamperedLaunch, true, trustedPublicKey), std::runtime_error);
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(tamperedLaunch, true, trustedPublicKey, trustedSourceDecryptionKey),
+                 std::runtime_error);
 
-    ExpressionDefinition loadedAllowed = ExpressionDefinition::deserialize(payload, true, trustedPublicKey);
+    ExpressionDefinition loadedAllowed = ExpressionDefinition::deserialize(payload, true, trustedPublicKey, trustedSourceDecryptionKey);
     nlohmann::json allowedSourceInfo = loadedAllowed.cudaKernelSourceInfoJson();
     EXPECT_TRUE(allowedSourceInfo.at(0).at("loaded_source_compilation_allowed").get<bool>());
 
@@ -472,10 +487,11 @@ void model_signing_scale_b_kernel(const float* x, float* y, int64_t n) {
     modelJson["layers"].push_back(nlohmann::json{{"expression", definitionB.architectureJson()}});
     nlohmann::json unsignedModelJson = modelJson;
 
-    std::vector<std::string> signingPublicKeys = cudaKernelGenerateAndAttachManifestSignatures(modelJson);
-    ASSERT_EQ(signingPublicKeys.size(), 1u);
-    const std::string& trustedPublicKey = signingPublicKeys.front();
+    std::vector<CudaKernelOutOfBandKeys> outOfBandKeys = cudaKernelGenerateAndAttachManifestSignatures(modelJson);
+    ASSERT_EQ(outOfBandKeys.size(), 1u);
+    const std::string& trustedPublicKey = outOfBandKeys.front().signing_public_key;
     ASSERT_FALSE(trustedPublicKey.empty());
+    ASSERT_FALSE(outOfBandKeys.front().source_decryption_key.empty());
 
     const nlohmann::json& expressionA = modelJson.at("layers").at(0).at("expression");
     const nlohmann::json& expressionB = modelJson.at("layers").at(1).at("expression");
@@ -490,8 +506,10 @@ void model_signing_scale_b_kernel(const float* x, float* y, int64_t n) {
     EXPECT_TRUE(verificationB.verified) << verificationB.message;
 
     nlohmann::json modelJsonAgain = unsignedModelJson;
-    std::vector<std::string> signingPublicKeysAgain = cudaKernelGenerateAndAttachManifestSignatures(modelJsonAgain);
-    EXPECT_EQ(signingPublicKeysAgain, signingPublicKeys);
+    std::vector<CudaKernelOutOfBandKeys> outOfBandKeysAgain = cudaKernelGenerateAndAttachManifestSignatures(modelJsonAgain);
+    ASSERT_EQ(outOfBandKeysAgain.size(), outOfBandKeys.size());
+    EXPECT_EQ(outOfBandKeysAgain.front().signing_public_key, outOfBandKeys.front().signing_public_key);
+    EXPECT_EQ(outOfBandKeysAgain.front().source_decryption_key, outOfBandKeys.front().source_decryption_key);
     EXPECT_EQ(modelJsonAgain.dump(), modelJson.dump());
 }
 

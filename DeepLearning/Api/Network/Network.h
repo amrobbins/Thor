@@ -90,10 +90,18 @@ class Network {
 
     virtual void load(const std::string &directory);
     virtual void load(const std::string &directory, bool allowUnsafeLoadedCudaKernelSource);
-    virtual void load(const std::string &directory, bool allowUnsafeLoadedCudaKernelSource, const std::string &trustedCudaKernelPublicKey);
+    virtual void load(const std::string &directory,
+                      bool allowUnsafeLoadedCudaKernelSource,
+                      const std::string &trustedCudaKernelPublicKey);
+    virtual void load(const std::string &directory,
+                      bool allowUnsafeLoadedCudaKernelSource,
+                      const std::string &trustedCudaKernelPublicKey,
+                      const std::string &trustedCudaKernelSourceDecryptionKey);
     bool allowUnsafeLoadedCudaKernelSourceCompilation() const { return allowUnsafeLoadedCudaKernelSourceCompilation_; }
     const std::string& trustedLoadedCudaKernelPublicKey() const { return trustedLoadedCudaKernelPublicKey_; }
+    const std::string& trustedLoadedCudaKernelSourceDecryptionKey() const { return trustedLoadedCudaKernelSourceDecryptionKey_; }
     std::vector<std::string> cudaKernelSigningPublicKeys() const;
+    std::vector<ThorImplementation::CudaKernelOutOfBandKeys> cudaKernelOutOfBandKeys() const;
     std::vector<ThorImplementation::CudaKernelSourceInspection> cudaKernelSourceInfo() const;
     std::vector<std::string> cudaKernelSources() const;
     std::string cudaKernelSourceInfoJsonString() const;
@@ -193,6 +201,7 @@ class Network {
 
     bool allowUnsafeLoadedCudaKernelSourceCompilation_ = false;
     std::string trustedLoadedCudaKernelPublicKey_;
+    std::string trustedLoadedCudaKernelSourceDecryptionKey_;
 
     std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
 
