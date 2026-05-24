@@ -499,9 +499,10 @@ std::unique_ptr<SparseRowUpdatePlan> SparseRowUpdatePlan::compile(
     }
     const std::vector<uint64_t> rowsDims = rows.getDimensions();
     if (rowsDims.size() != 1 || rowsDims[0] == 0) {
-        throw std::invalid_argument("Sparse row update rows tensor must have non-empty shape [capacity].");
+        throw std::invalid_argument("Sparse row update rows tensor must have non-empty shape [row_storage_capacity].");
     }
-    const uint64_t capacity = rowsDims[0];
+    const uint64_t rowsStorageCapacity = rowsDims[0];
+    uint64_t capacity = 0;
 
     std::vector<DataType> inputDTypes = rootInputDTypes(*outputs.expr, inputs);
     resolveOutputsDTypesInPlace(outputs, inputDTypes);
@@ -532,16 +533,21 @@ std::unique_ptr<SparseRowUpdatePlan> SparseRowUpdatePlan::compile(
                                             ". Supported dtypes are fp16, bf16, and fp32.");
             }
             const std::vector<uint64_t> dims = slot.tensor.getDimensions();
-            if (dims.size() != 2 || dims[1] == 0) {
-                throw std::invalid_argument("Sparse row update input '" + input.name + "' must have rank-2 shape.");
+            if (dims.size() != 2 || dims[0] == 0 || dims[1] == 0) {
+                throw std::invalid_argument("Sparse row update input '" + input.name + "' must have non-empty rank-2 shape.");
             }
             if (slot.tensorKind == SparseRowUpdateTensorKind::DenseLogicalRows) {
-                if (dims[0] != capacity) {
-                    throw std::invalid_argument("Sparse row update dense logical input '" + input.name + "' first dimension must equal rows capacity.");
+                if (capacity == 0) {
+                    capacity = dims[0];
+                } else if (dims[0] != capacity) {
+                    throw std::invalid_argument("Sparse row update dense logical inputs must have matching first dimensions.");
+                }
+                if (rowsStorageCapacity < capacity) {
+                    throw std::invalid_argument("Sparse row update rows tensor storage is smaller than the dense logical row capacity.");
                 }
             } else {
-                if (dims[0] < capacity) {
-                    throw std::invalid_argument("Sparse row update indexed input '" + input.name + "' vocabulary dimension cannot be smaller than capacity.");
+                if (capacity != 0 && dims[0] < capacity) {
+                    throw std::invalid_argument("Sparse row update indexed input '" + input.name + "' vocabulary dimension cannot be smaller than dense logical row capacity.");
                 }
                 if (vocabularySize == 0) {
                     vocabularySize = dims[0];
@@ -607,6 +613,16 @@ std::unique_ptr<SparseRowUpdatePlan> SparseRowUpdatePlan::compile(
         }
         outputSlots.push_back(RuntimeOutputSlot{namedOutput.name, tensor, tensor.getDataType()});
         finalOutputs[namedOutput.name] = tensor;
+    }
+
+    if (capacity == 0) {
+        capacity = rowsStorageCapacity;
+    }
+    if (rowsStorageCapacity < capacity) {
+        throw std::invalid_argument("Sparse row update rows tensor storage is smaller than the logical sparse-row capacity.");
+    }
+    if (vocabularySize != 0 && vocabularySize < capacity) {
+        throw std::invalid_argument("Sparse row update indexed tensor vocabulary dimension cannot be smaller than logical sparse-row capacity.");
     }
 
     if (vocabularySize == 0 || embeddingDim == 0) {

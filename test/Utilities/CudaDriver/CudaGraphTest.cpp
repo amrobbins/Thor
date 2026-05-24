@@ -463,4 +463,18 @@ TEST(CudaGraphTest, CapturedEmbeddingSparseGradientUsesRuntimeReducedRowCountAcr
     values = readGpuFp32Tensor(gradient.values, stream);
     values.resize(numRows[0] * embeddingDim);
     expectFloatVectorNear(values, {12.0f});
+
+    // Expand again without recapture; the fused finalize+grid-update node must resize the reduce grid upward too.
+    writeGpuUint32Tensor(indices, {3, 2, 1, 0, 3, 2}, stream);
+    writeGpuFp32Tensor(upstream, {4.0f, 5.0f, 6.0f, 100.0f, -1.0f, 7.0f}, stream);
+    executable.launch(stream);
+
+    numRows = readGpuRowTensor(gradient.numRows, stream);
+    ASSERT_EQ(numRows[0], 3u);
+    rows = readGpuRowTensor(gradient.rows, stream);
+    rows.resize(numRows[0]);
+    EXPECT_EQ(rows, (std::vector<uint64_t>{1, 2, 3}));
+    values = readGpuFp32Tensor(gradient.values, stream);
+    values.resize(numRows[0] * embeddingDim);
+    expectFloatVectorNear(values, {6.0f, 12.0f, 3.0f});
 }

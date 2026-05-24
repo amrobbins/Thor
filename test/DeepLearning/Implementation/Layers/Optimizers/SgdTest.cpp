@@ -257,10 +257,12 @@ void writeSparseGradient(SparseRowGradient& gradient,
                          uint64_t numRows,
                          Stream& stream) {
     ASSERT_LE(numRows, gradient.capacity);
-    ASSERT_EQ(rows.size(), gradient.capacity);
+    ASSERT_LE(rows.size(), gradient.rows.getTotalNumElements());
     ASSERT_EQ(values.size(), gradient.capacity * gradient.embeddingDim);
 
-    copyRowValuesToGpuTensor(gradient.rows, rows, stream);
+    std::vector<uint64_t> rowStorage(gradient.rows.getTotalNumElements(), 0);
+    std::copy(rows.begin(), rows.end(), rowStorage.begin());
+    copyRowValuesToGpuTensor(gradient.rows, rowStorage, stream);
     copyValuesToGpuFp32Tensor(gradient.values, values, stream);
     copyRowValuesToGpuTensor(gradient.numRows, {numRows}, stream);
 }
@@ -638,7 +640,7 @@ TEST(SgdTest, CompileSparseRowsWithoutMomentumCreatesSparseGradientAndWeightsOut
     EXPECT_EQ(gradient.vocabularySize, 4u);
     EXPECT_EQ(gradient.embeddingDim, 3u);
     EXPECT_EQ(gradient.rows.getDataType(), DataType::UINT16);
-    EXPECT_EQ(gradient.rows.getDimensions(), (std::vector<uint64_t>{3}));
+    EXPECT_EQ(gradient.rows.getDimensions(), (std::vector<uint64_t>{4}));
     EXPECT_EQ(gradient.values.getDataType(), DataType::FP32);
     EXPECT_EQ(gradient.values.getDimensions(), (std::vector<uint64_t>{3, 3}));
     EXPECT_EQ(gradient.numRows.getDataType(), DataType::UINT16);

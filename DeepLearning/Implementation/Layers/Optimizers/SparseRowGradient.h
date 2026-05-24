@@ -14,7 +14,9 @@ namespace ThorImplementation {
 struct SparseRowGradient {
     using DataType = TensorDescriptor::DataType;
 
-    Tensor rows;     // [capacity], row ids for the materialized unique rows.
+    // rows has one extra staging slot so CUB RLE can write the optional invalid-row sentinel directly into this tensor.
+    // Only the first numRows entries are valid sparse-gradient rows; values remains exactly [capacity, embeddingDim].
+    Tensor rows;     // [capacity + 1], row ids for the materialized unique rows plus optional sentinel scratch.
     Tensor values;   // [capacity, embeddingDim], accumulated gradient values for each unique row.
     Tensor numRows;  // [1], runtime count of valid entries in rows/values.
 
@@ -68,7 +70,7 @@ struct SparseRowGradient {
         }
 
         SparseRowGradient gradient;
-        gradient.rows = Tensor(placement, TensorDescriptor(rowDataType, {capacity}));
+        gradient.rows = Tensor(placement, TensorDescriptor(rowDataType, {rowStorageCapacityFor(capacity)}));
         gradient.values = Tensor(placement, TensorDescriptor(accumulationDataType, {capacity, embeddingDim}));
         gradient.numRows = Tensor(placement, TensorDescriptor(rowDataType, {1}));
         gradient.capacity = capacity;
@@ -114,8 +116,8 @@ struct SparseRowGradient {
         if (values.getDataType() != accumulationDataType) {
             throw std::invalid_argument("SparseRowGradient values tensor must match accumulationDataType.");
         }
-        if (rows.getDimensions() != std::vector<uint64_t>{capacity}) {
-            throw std::invalid_argument("SparseRowGradient rows tensor must have shape [capacity].");
+        if (rows.getDimensions() != std::vector<uint64_t>{rowStorageCapacityFor(capacity)}) {
+            throw std::invalid_argument("SparseRowGradient rows tensor must have shape [capacity + 1] for direct CUB RLE sentinel staging.");
         }
         if (values.getDimensions() != std::vector<uint64_t>{capacity, embeddingDim}) {
             throw std::invalid_argument("SparseRowGradient values tensor must have shape [capacity, embedding_dim].");
@@ -130,6 +132,13 @@ struct SparseRowGradient {
     }
 
    private:
+    static uint64_t rowStorageCapacityFor(uint64_t capacity) {
+        if (capacity == std::numeric_limits<uint64_t>::max()) {
+            throw std::overflow_error("SparseRowGradient row storage capacity exceeds uint64_t range.");
+        }
+        return capacity + 1;
+    }
+
     static bool isSupportedRowDataType(DataType dtype) {
         return dtype == DataType::UINT16 || dtype == DataType::UINT32 || dtype == DataType::UINT64;
     }
