@@ -1605,7 +1605,18 @@ ExpressionDefinition ExpressionDefinition::deserialize(const json& j,
 
     json expression_json = j;
     const bool has_cuda_kernels = j.contains("cuda_kernels") && !j.at("cuda_kernels").empty();
+    const bool has_plaintext_cuda_sources = has_cuda_kernels && cudaKernelExpressionJsonContainsPlaintextSources(j);
     const bool has_encrypted_cuda_sources = has_cuda_kernels && cudaKernelExpressionJsonContainsEncryptedSources(j);
+    if (has_plaintext_cuda_sources) {
+        throw std::runtime_error(
+            "Serialized CudaKernelExpression CUDA source must be encrypted. Refusing to load a saved model that contains plaintext CUDA "
+            "source, even if a signature or encrypted_source field is also present.");
+    }
+    if (has_cuda_kernels && !has_encrypted_cuda_sources) {
+        throw std::runtime_error(
+            "Serialized CudaKernelExpression kernels must contain encrypted_source/source_encryption metadata. Refusing plaintext or "
+            "unprotected CUDA source from a saved model.");
+    }
     if (has_encrypted_cuda_sources) {
         CudaKernelSignatureVerificationResult verification = cudaKernelVerifyManifestSignature(j, trusted_ed25519_public_key);
         if (!verification.verified) {
@@ -1634,12 +1645,6 @@ ExpressionDefinition ExpressionDefinition::deserialize(const json& j,
     bool cuda_kernel_source_compilation_allowed = false;
     if (has_cuda_kernels) {
         if (allow_unsafe_loaded_cuda_source) {
-            if (!has_encrypted_cuda_sources) {
-                CudaKernelSignatureVerificationResult verification = cudaKernelVerifyManifestSignature(j, trusted_ed25519_public_key);
-                if (!verification.verified) {
-                    throw std::runtime_error(verification.message);
-                }
-            }
             cuda_kernel_source_compilation_allowed = true;
         }
 

@@ -798,6 +798,18 @@ bool cudaKernelExpressionJsonContainsEncryptedSources(const json& expression_jso
     return false;
 }
 
+bool cudaKernelExpressionJsonContainsPlaintextSources(const json& expression_json) {
+    if (!expression_json.contains("cuda_kernels") || !expression_json.at("cuda_kernels").is_array()) {
+        return false;
+    }
+    for (const json& kernel : expression_json.at("cuda_kernels")) {
+        if (kernel.contains("source")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 json cudaKernelDecryptSerializedCudaSources(const json& expression_json, const std::string& trusted_source_decryption_key) {
     if (!cudaKernelExpressionJsonContainsEncryptedSources(expression_json)) {
         return expression_json;
@@ -854,8 +866,8 @@ CudaKernelSignatureVerificationResult cudaKernelVerifyManifestSignature(const js
     }
     if (trusted_public_key.empty()) {
         return {false,
-                "A trusted Ed25519 public key is required to load or compile CudaKernelExpression CUDA source from a saved model. Load "
-                "without opt-in only for legacy plaintext models; encrypted CUDA source requires the out-of-band signing public key and "
+                "A trusted Ed25519 public key is required to load or compile CudaKernelExpression CUDA source from a saved model. "
+                "Serialized CudaKernelExpression CUDA source must be encrypted and requires the out-of-band signing public key and "
                 "source decryption key printed when the model was saved."};
     }
     if (!expression_json.contains("cuda_kernel_manifest_signature")) {
