@@ -2,7 +2,6 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
-#include "Utilities/CudaDriver/CudaGraphDynamicGrid.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradientCudaCompile.h"
 
@@ -140,24 +139,60 @@ __global__ void materializeEmbeddingSparseGradientSortPairsKernel(const IndexT* 
     tokenIds[token] = static_cast<uint32_t>(token);
 }
 
+__device__ __forceinline__ cudaGraphDeviceNode_t loadEmbeddingSparseGradientTargetNode(const cudaGraphDeviceNode_t* targetNode) {
+    if (targetNode == nullptr) {
+        asm("trap;");
+    }
+    cudaGraphDeviceNode_t node = *targetNode;
+    if (node == nullptr) {
+        asm("trap;");
+    }
+    return node;
+}
+
+__device__ __forceinline__ uint32_t checkedEmbeddingSparseGradientGridDim(uint64_t value, uint32_t minGrid, uint32_t maxGrid) {
+    if (minGrid == 0U || maxGrid == 0U || minGrid > maxGrid) {
+        asm("trap;");
+    }
+    uint64_t clamped = value;
+    if (clamped < static_cast<uint64_t>(minGrid)) {
+        clamped = static_cast<uint64_t>(minGrid);
+    }
+    if (clamped > static_cast<uint64_t>(maxGrid) || clamped > 0xffffffffULL) {
+        asm("trap;");
+    }
+    return static_cast<uint32_t>(clamped);
+}
+
 template <typename RowT>
-__global__ void finalizeEmbeddingSparseGradientRowsKernel(const RowT* __restrict__ uniqueRows,
+__global__ void finalizeEmbeddingSparseGradientRowsKernel(const RowT* __restrict__ outputRows,
                                                           const uint32_t* __restrict__ numRuns,
-                                                          RowT* __restrict__ outputRows,
                                                           RowT* __restrict__ outputNumRows,
-                                                          uint64_t vocabularySize) {
+                                                          uint64_t vocabularySize,
+                                                          const cudaGraphDeviceNode_t* reduceNode,
+                                                          uint32_t reduceGridDimY,
+                                                          uint32_t minReduceGridDimX,
+                                                          uint32_t maxReduceGridDimX,
+                                                          uint32_t maxReduceGridDimY) {
     uint32_t validRuns = numRuns[0];
-    if (validRuns != 0 && static_cast<uint64_t>(uniqueRows[validRuns - 1]) == vocabularySize) {
+    if (validRuns != 0 && static_cast<uint64_t>(outputRows[validRuns - 1]) == vocabularySize) {
         validRuns -= 1;
     }
 
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        outputNumRows[0] = static_cast<RowT>(validRuns);
-    }
+    outputNumRows[0] = static_cast<RowT>(validRuns);
 
-    for (uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < static_cast<uint64_t>(validRuns);
-         i += static_cast<uint64_t>(gridDim.x) * blockDim.x) {
-        outputRows[i] = uniqueRows[i];
+    if (reduceNode != nullptr) {
+        if (reduceGridDimY == 0U || reduceGridDimY > maxReduceGridDimY) {
+            asm("trap;");
+        }
+        const uint32_t gridX = checkedEmbeddingSparseGradientGridDim(static_cast<uint64_t>(validRuns),
+                                                                     minReduceGridDimX,
+                                                                     maxReduceGridDimX);
+        cudaError_t status = cudaGraphKernelNodeSetGridDim(loadEmbeddingSparseGradientTargetNode(reduceNode),
+                                                           dim3(gridX, reduceGridDimY, 1U));
+        if (status != cudaSuccess) {
+            asm("trap;");
+        }
     }
 }
 
@@ -304,7 +339,6 @@ struct PreparedEmbeddingSparseGradient {
     Tensor tokenIds;
     Tensor sortedRowKeys;
     Tensor sortedTokenIds;
-    Tensor uniqueRows;
     Tensor runCounts;
     Tensor runOffsets;
     Tensor numRuns;
@@ -347,7 +381,11 @@ void compileGraphReduceKernel(PreparedEmbeddingSparseGradient& prepared) {
 }
 
 template <typename RowT>
-void allocateTypedPreparedBuffers(PreparedEmbeddingSparseGradient& prepared, const TensorPlacement& placement, uint64_t numTokens, int cubItems) {
+void allocateTypedPreparedBuffers(PreparedEmbeddingSparseGradient& prepared,
+                                  const TensorPlacement& placement,
+                                  SparseRowGradient& outputGradient,
+                                  uint64_t numTokens,
+                                  int cubItems) {
     if (!rowTypeCanRepresentVocabularySentinel<RowT>(prepared.vocabularySize)) {
         throw std::invalid_argument("Embedding sparse-gradient row dtype " + dtypeName(rowDTypeForCppType<RowT>()) +
                                     " cannot represent vocabulary_size as the invalid-row sentinel.");
@@ -357,7 +395,6 @@ void allocateTypedPreparedBuffers(PreparedEmbeddingSparseGradient& prepared, con
     prepared.tokenIds = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
     prepared.sortedRowKeys = Tensor(placement, TensorDescriptor(rowDTypeForCppType<RowT>(), {numTokens}));
     prepared.sortedTokenIds = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
-    prepared.uniqueRows = Tensor(placement, TensorDescriptor(rowDTypeForCppType<RowT>(), {numTokens}));
     prepared.runCounts = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
     prepared.runOffsets = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
     prepared.numRuns = Tensor(placement, TensorDescriptor(DataType::UINT32, {1}));
@@ -368,7 +405,7 @@ void allocateTypedPreparedBuffers(PreparedEmbeddingSparseGradient& prepared, con
                                                 prepared.sortedTokenIds.getMemPtr<uint32_t>(),
                                                 cubItems);
     prepared.rleTempBytes = queryRleTempBytes(prepared.sortedRowKeys.getMemPtr<RowT>(),
-                                              prepared.uniqueRows.getMemPtr<RowT>(),
+                                              outputGradient.rows.getMemPtr<RowT>(),
                                               prepared.runCounts.getMemPtr<uint32_t>(),
                                               prepared.numRuns.getMemPtr<uint32_t>(),
                                               cubItems);
@@ -485,29 +522,46 @@ void launchReduceValues(PreparedEmbeddingSparseGradient& prepared,
     }
 }
 
+struct OptionalReduceGridUpdate {
+    const DeviceUpdatableKernelNodeDeviceHandle* reduceNodeHandle = nullptr;
+    uint32_t reduceGridDimY = 0;
+    uint32_t minReduceGridDimX = 1;
+    uint32_t maxReduceGridDimX = 1;
+    uint32_t maxReduceGridDimY = 1;
+};
+
 template <typename RowT>
-void launchFinalizeRowsTyped(PreparedEmbeddingSparseGradient& prepared, SparseRowGradient& outputGradient, Stream stream) {
-    const uint32_t finalizeBlock = THREADS_PER_BLOCK;
-    const uint32_t finalizeGrid = static_cast<uint32_t>((outputGradient.capacity + finalizeBlock - 1) / finalizeBlock);
-    finalizeEmbeddingSparseGradientRowsKernel<RowT><<<std::max<uint32_t>(finalizeGrid, 1u), finalizeBlock, 0, stream.getStream()>>>(
-        prepared.uniqueRows.getMemPtr<RowT>(),
-        prepared.numRuns.getMemPtr<uint32_t>(),
-        outputGradient.rows.getMemPtr<RowT>(),
-        outputGradient.numRows.getMemPtr<RowT>(),
-        prepared.vocabularySize);
+void launchFinalizeRowsTyped(PreparedEmbeddingSparseGradient& prepared,
+                             SparseRowGradient& outputGradient,
+                             Stream stream,
+                             OptionalReduceGridUpdate reduceGridUpdate) {
+    const cudaGraphDeviceNode_t* reduceNodePtr =
+        reduceGridUpdate.reduceNodeHandle != nullptr ? reduceGridUpdate.reduceNodeHandle->devicePtr() : nullptr;
+    finalizeEmbeddingSparseGradientRowsKernel<RowT><<<1, 1, 0, stream.getStream()>>>(outputGradient.rows.getMemPtr<RowT>(),
+                                                                                    prepared.numRuns.getMemPtr<uint32_t>(),
+                                                                                    outputGradient.numRows.getMemPtr<RowT>(),
+                                                                                    prepared.vocabularySize,
+                                                                                    reduceNodePtr,
+                                                                                    reduceGridUpdate.reduceGridDimY,
+                                                                                    reduceGridUpdate.minReduceGridDimX,
+                                                                                    reduceGridUpdate.maxReduceGridDimX,
+                                                                                    reduceGridUpdate.maxReduceGridDimY);
     CUDA_CHECK(cudaPeekAtLastError());
 }
 
-void launchFinalizeRows(PreparedEmbeddingSparseGradient& prepared, SparseRowGradient& outputGradient, Stream stream) {
+void launchFinalizeRows(PreparedEmbeddingSparseGradient& prepared,
+                        SparseRowGradient& outputGradient,
+                        Stream stream,
+                        OptionalReduceGridUpdate reduceGridUpdate = {}) {
     switch (prepared.rowDataType) {
         case DataType::UINT16:
-            launchFinalizeRowsTyped<uint16_t>(prepared, outputGradient, stream);
+            launchFinalizeRowsTyped<uint16_t>(prepared, outputGradient, stream, reduceGridUpdate);
             break;
         case DataType::UINT32:
-            launchFinalizeRowsTyped<uint32_t>(prepared, outputGradient, stream);
+            launchFinalizeRowsTyped<uint32_t>(prepared, outputGradient, stream, reduceGridUpdate);
             break;
         case DataType::UINT64:
-            launchFinalizeRowsTyped<uint64_t>(prepared, outputGradient, stream);
+            launchFinalizeRowsTyped<uint64_t>(prepared, outputGradient, stream, reduceGridUpdate);
             break;
         default:
             throw std::runtime_error("Prepared Embedding sparse-gradient producer has unsupported row dtype.");
@@ -545,27 +599,27 @@ void sortPairs(PreparedEmbeddingSparseGradient& prepared, int cubItems, Stream s
 }
 
 template <typename RowT>
-void rleRowsTyped(PreparedEmbeddingSparseGradient& prepared, int cubItems, Stream stream) {
+void rleRowsTyped(PreparedEmbeddingSparseGradient& prepared, SparseRowGradient& outputGradient, int cubItems, Stream stream) {
     CUDA_CHECK(cub::DeviceRunLengthEncode::Encode(prepared.rleTempStorage.getMemPtr<void>(),
                                                   prepared.rleTempBytes,
                                                   prepared.sortedRowKeys.getMemPtr<RowT>(),
-                                                  prepared.uniqueRows.getMemPtr<RowT>(),
+                                                  outputGradient.rows.getMemPtr<RowT>(),
                                                   prepared.runCounts.getMemPtr<uint32_t>(),
                                                   prepared.numRuns.getMemPtr<uint32_t>(),
                                                   cubItems,
                                                   stream.getStream()));
 }
 
-void rleRows(PreparedEmbeddingSparseGradient& prepared, int cubItems, Stream stream) {
+void rleRows(PreparedEmbeddingSparseGradient& prepared, SparseRowGradient& outputGradient, int cubItems, Stream stream) {
     switch (prepared.rowDataType) {
         case DataType::UINT16:
-            rleRowsTyped<uint16_t>(prepared, cubItems, stream);
+            rleRowsTyped<uint16_t>(prepared, outputGradient, cubItems, stream);
             break;
         case DataType::UINT32:
-            rleRowsTyped<uint32_t>(prepared, cubItems, stream);
+            rleRowsTyped<uint32_t>(prepared, outputGradient, cubItems, stream);
             break;
         case DataType::UINT64:
-            rleRowsTyped<uint64_t>(prepared, cubItems, stream);
+            rleRowsTyped<uint64_t>(prepared, outputGradient, cubItems, stream);
             break;
         default:
             throw std::runtime_error("Prepared Embedding sparse-gradient producer has unsupported row dtype.");
@@ -644,13 +698,13 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradient(
     ScopedGpu scopedGpu(placement.getDeviceNum());
     switch (prepared->rowDataType) {
         case DataType::UINT16:
-            allocateTypedPreparedBuffers<uint16_t>(*prepared, placement, numTokens, cubItems);
+            allocateTypedPreparedBuffers<uint16_t>(*prepared, placement, outputGradient, numTokens, cubItems);
             break;
         case DataType::UINT32:
-            allocateTypedPreparedBuffers<uint32_t>(*prepared, placement, numTokens, cubItems);
+            allocateTypedPreparedBuffers<uint32_t>(*prepared, placement, outputGradient, numTokens, cubItems);
             break;
         case DataType::UINT64:
-            allocateTypedPreparedBuffers<uint64_t>(*prepared, placement, numTokens, cubItems);
+            allocateTypedPreparedBuffers<uint64_t>(*prepared, placement, outputGradient, numTokens, cubItems);
             break;
         default:
             throw std::runtime_error("Prepared Embedding sparse-gradient producer has unsupported row dtype.");
@@ -697,7 +751,7 @@ void launchPreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prep
 
     // RLE writes only the first numRuns counts. Clear the full counts buffer so the full-capacity prefix scan below is deterministic.
     prepared.runCounts.memsetAsync(stream, 0);
-    rleRows(prepared, cubItems, stream);
+    rleRows(prepared, outputGradient, cubItems, stream);
 
     launchFinalizeRows(prepared, outputGradient, stream);
 
@@ -741,9 +795,21 @@ void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
 
     // RLE writes only the first numRuns counts. Clear the full counts buffer so the full-capacity prefix scan below is deterministic.
     prepared.runCounts.memsetAsync(stream, 0);
-    rleRows(prepared, cubItems, stream);
+    rleRows(prepared, outputGradient, cubItems, stream);
 
-    launchFinalizeRows(prepared, outputGradient, stream);
+    const uint32_t dimTiles = static_cast<uint32_t>((prepared.embeddingDim + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK);
+    if (dimTiles == 0) {
+        throw std::runtime_error("Prepared Embedding sparse-gradient graph reducer requires a non-empty embedding dimension.");
+    }
+
+    launchFinalizeRows(prepared,
+                       outputGradient,
+                       stream,
+                       OptionalReduceGridUpdate{&captured.reduceNodeHandle,
+                                                dimTiles,
+                                                /*minReduceGridDimX=*/1,
+                                                static_cast<uint32_t>(outputGradient.capacity),
+                                                dimTiles});
 
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(prepared.scanTempStorage.getMemPtr<void>(),
                                              prepared.scanTempBytes,
@@ -751,20 +817,6 @@ void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
                                              prepared.runOffsets.getMemPtr<uint32_t>(),
                                              cubItems,
                                              stream.getStream()));
-
-    const uint32_t dimTiles = static_cast<uint32_t>((prepared.embeddingDim + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK);
-    if (dimTiles == 0) {
-        throw std::runtime_error("Prepared Embedding sparse-gradient graph reducer requires a non-empty embedding dimension.");
-    }
-
-    launchUpdateDeviceGrid2DFromScalar(DynamicGrid2DFromScalarDescriptor{&captured.reduceNodeHandle,
-                                                                         outputGradient.numRows,
-                                                                         dimTiles,
-                                                                         /*gridDimXPerRow=*/1,
-                                                                         /*minGridDimX=*/1,
-                                                                         static_cast<uint32_t>(outputGradient.capacity),
-                                                                         dimTiles},
-                                       stream);
 
     const void* sortedTokenIdsPtr = prepared.sortedTokenIds.getMemPtr();
     const void* runOffsetsPtr = prepared.runOffsets.getMemPtr();
