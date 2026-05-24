@@ -1647,38 +1647,112 @@ shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpre
     return compiled;
 }
 
+
+static uint32_t findLocalEmbeddingLookupNode(const PhysicalExpression& expr) {
+    uint32_t found = UINT32_MAX;
+    for (uint32_t i = 0; i < expr.nodes.size(); ++i) {
+        if (isEmbeddingLookupOp(expr.nodes[i].op)) {
+            if (found != UINT32_MAX) {
+                throw std::runtime_error("EmbeddingLookup stage may contain only one embedding root.");
+            }
+            found = i;
+        }
+    }
+    if (found == UINT32_MAX) {
+        throw std::runtime_error("EmbeddingLookup stage is missing its embedding root.");
+    }
+    return found;
+}
+
+static std::string embeddingScalarLiteral(double value) {
+    std::ostringstream out;
+    out.setf(std::ios::scientific);
+    out.precision(17);
+    out << "ValueT(" << value << "f)";
+    return out.str();
+}
+
+static std::string compileEmbeddingEpilogueExpression(const PhysicalExpression& expr,
+                                                      uint32_t local_idx,
+                                                      uint32_t local_embedding_idx,
+                                                      std::unordered_set<uint32_t>& visiting) {
+    if (local_idx >= expr.nodes.size()) {
+        throw std::runtime_error("Embedding epilogue node index out of range.");
+    }
+    if (!visiting.insert(local_idx).second) {
+        throw std::runtime_error("Embedding epilogue expression contains a cycle.");
+    }
+
+    const ExprNode& node = expr.nodes[local_idx];
+    std::string result;
+    if (local_idx == local_embedding_idx) {
+        result = "v";
+    } else if (node.op == ExprOp::INPUT) {
+        if (node.input_slot < 2) {
+            throw std::runtime_error("Embedding epilogue may not reference raw indices or weights inputs.");
+        }
+        result = "arg" + std::to_string(node.input_slot - 2) + "[linear]";
+    } else if (node.op == ExprOp::SCALAR_FP) {
+        result = embeddingScalarLiteral(node.scalar_fp);
+    } else if (node.op == ExprOp::NEG) {
+        result = "(-" + compileEmbeddingEpilogueExpression(expr, node.lhs, local_embedding_idx, visiting) + ")";
+    } else if (node.op == ExprOp::ADD || node.op == ExprOp::SUB || node.op == ExprOp::MUL || node.op == ExprOp::DIV) {
+        const std::string lhs = compileEmbeddingEpilogueExpression(expr, node.lhs, local_embedding_idx, visiting);
+        const std::string rhs = compileEmbeddingEpilogueExpression(expr, node.rhs, local_embedding_idx, visiting);
+        const char* op = nullptr;
+        switch (node.op) {
+            case ExprOp::ADD: op = " + "; break;
+            case ExprOp::SUB: op = " - "; break;
+            case ExprOp::MUL: op = " * "; break;
+            case ExprOp::DIV: op = " / "; break;
+            default: break;
+        }
+        result = "(" + lhs + op + rhs + ")";
+    } else {
+        throw std::runtime_error("Embedding epilogue supports only add/sub/mul/div/neg with same-shape tensor inputs and scalar constants.");
+    }
+
+    visiting.erase(local_idx);
+    return result;
+}
+
 shared_ptr<CompiledEmbeddingLookup> EquationCompiler::compileEmbeddingLookup(const PhysicalExpression& expr) {
-    if (expr.numInputs() != 2) {
-        throw std::runtime_error("EmbeddingLookup stage must have exactly two inputs: indices and weights.");
+    if (expr.numInputs() < 2) {
+        throw std::runtime_error("EmbeddingLookup stage must have at least two inputs: indices and weights.");
     }
     if (expr.output_node >= expr.nodes.size()) {
         throw std::runtime_error("EmbeddingLookup stage output_node is out of range.");
     }
 
-    const ExprNode& node = expr.nodes[expr.output_node];
-    if (!isEmbeddingLookupOp(node.op)) {
-        throw std::runtime_error("EmbeddingLookup stage output node is not EMBEDDING_LOOKUP.");
-    }
-    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+    const uint32_t embedding_node_idx = findLocalEmbeddingLookupNode(expr);
+    const ExprNode& lookup_node = expr.nodes[embedding_node_idx];
+    if (lookup_node.lhs == UINT32_MAX || lookup_node.rhs == UINT32_MAX || lookup_node.lhs >= expr.nodes.size() ||
+        lookup_node.rhs >= expr.nodes.size()) {
         throw std::runtime_error("EmbeddingLookup node is missing indices or weights.");
     }
 
-    const ExprNode& indices_node = expr.nodes[node.lhs];
-    const ExprNode& weights_node = expr.nodes[node.rhs];
-    if (indices_node.op != ExprOp::INPUT || weights_node.op != ExprOp::INPUT) {
-        throw std::runtime_error("EmbeddingLookup stage inputs must be local INPUT nodes.");
+    const ExprNode& indices_node = expr.nodes[lookup_node.lhs];
+    const ExprNode& weights_node = expr.nodes[lookup_node.rhs];
+    if (indices_node.op != ExprOp::INPUT || weights_node.op != ExprOp::INPUT || indices_node.input_slot != 0 ||
+        weights_node.input_slot != 1) {
+        throw std::runtime_error("EmbeddingLookup stage inputs must begin with local INPUT nodes for indices and weights.");
     }
-    if (!indices_node.input_tensor_dtype.has_value() || !weights_node.input_tensor_dtype.has_value() || !node.output_dtype.has_value()) {
+    if (!indices_node.input_tensor_dtype.has_value() || !weights_node.input_tensor_dtype.has_value() ||
+        !lookup_node.output_dtype.has_value()) {
         throw std::runtime_error("EmbeddingLookup stage input/output nodes are missing resolved dtype metadata.");
+    }
+    const ExprNode& output_node = expr.nodes[expr.output_node];
+    if (!output_node.output_dtype.has_value()) {
+        throw std::runtime_error("EmbeddingLookup stage output node is missing dtype metadata.");
     }
 
     auto compiled = make_shared<CompiledEmbeddingLookup>();
-    compiled->has_padding_index = node.embedding_has_padding_index;
-    compiled->padding_index = node.embedding_padding_index;
+    compiled->has_padding_index = lookup_node.embedding_has_padding_index;
+    compiled->padding_index = lookup_node.embedding_padding_index;
     compiled->index_dtype = indices_node.input_tensor_dtype.value();
     compiled->weights_dtype = weights_node.input_tensor_dtype.value();
-    compiled->output_dtype = node.output_dtype.value();
-    compiled->debug_name = "thor_expr_embedding_lookup";
+    compiled->output_dtype = output_node.output_dtype.value();
+    compiled->debug_name = expr.output_node == embedding_node_idx ? "thor_expr_embedding_lookup" : "thor_expr_embedding_lookup_fused";
 
     if (compiled->index_dtype != DataType::UINT32 && compiled->index_dtype != DataType::UINT64) {
         throw std::runtime_error("EmbeddingLookup indices dtype must be uint32 or uint64.");
@@ -1687,9 +1761,39 @@ shared_ptr<CompiledEmbeddingLookup> EquationCompiler::compileEmbeddingLookup(con
         compiled->weights_dtype != DataType::FP32) {
         throw std::runtime_error("EmbeddingLookup weights dtype must be fp16, bf16, or fp32.");
     }
-    if (compiled->output_dtype != compiled->weights_dtype) {
-        throw std::runtime_error("EmbeddingLookup output dtype must match weights dtype in this backend slice.");
+    if (lookup_node.output_dtype.value() != compiled->weights_dtype || compiled->output_dtype != compiled->weights_dtype) {
+        throw std::runtime_error("EmbeddingLookup root fusion currently requires lookup, epilogue, and output dtypes to match weights dtype.");
     }
+
+    if (expr.output_node != embedding_node_idx) {
+        EmbeddingForwardEpilogue epilogue;
+        std::unordered_set<uint32_t> visiting;
+        epilogue.expression = compileEmbeddingEpilogueExpression(expr, expr.output_node, embedding_node_idx, visiting);
+        for (const NamedInput& input : expr.inputs) {
+            if (input.slot < 2) {
+                continue;
+            }
+            bool found = false;
+            for (const ExprNode& node : expr.nodes) {
+                if (node.op == ExprOp::INPUT && node.input_slot == input.slot) {
+                    if (!node.input_tensor_dtype.has_value()) {
+                        throw std::runtime_error("Embedding epilogue input is missing dtype metadata.");
+                    }
+                    if (node.input_tensor_dtype.value() != compiled->output_dtype) {
+                        throw std::runtime_error("Embedding epilogue tensor inputs must match output dtype.");
+                    }
+                    epilogue.extra_input_dtypes.push_back(node.input_tensor_dtype.value());
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                throw std::runtime_error("Embedding epilogue input slot missing local INPUT node.");
+            }
+        }
+        compiled->epilogue = std::move(epilogue);
+    }
+
     return compiled;
 }
 
@@ -3111,6 +3215,209 @@ static PhysicalExecutionStage buildRmsNormStage(const PhysicalExpression& expr,
         .input_value_ids = std::move(input_value_ids),
         .outputs = std::move(stage_outputs),
     };
+}
+
+
+static bool isEmbeddingRootFusionOp(ExprOp op) {
+    switch (op) {
+        case ExprOp::ADD:
+        case ExprOp::SUB:
+        case ExprOp::MUL:
+        case ExprOp::DIV:
+        case ExprOp::NEG:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool collectEmbeddingRootFusionNodes(const PhysicalExpression& expr,
+                                            uint32_t node_idx,
+                                            uint32_t& embedding_node_idx,
+                                            std::unordered_set<uint32_t>& region) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (isEmbeddingLookupOp(node.op)) {
+        if (embedding_node_idx != UINT32_MAX && embedding_node_idx != node_idx) {
+            return false;
+        }
+        embedding_node_idx = node_idx;
+        region.insert(node_idx);
+        return true;
+    }
+
+    if (node.op == ExprOp::INPUT || node.op == ExprOp::SCALAR_FP) {
+        return true;
+    }
+
+    if (!isEmbeddingRootFusionOp(node.op)) {
+        return false;
+    }
+
+    bool ok = true;
+    bool saw_embedding = false;
+    auto visit_parent = [&](uint32_t parent_idx) {
+        if (parent_idx == UINT32_MAX) {
+            ok = false;
+            return;
+        }
+        const uint32_t before = embedding_node_idx;
+        if (!collectEmbeddingRootFusionNodes(expr, parent_idx, embedding_node_idx, region)) {
+            ok = false;
+            return;
+        }
+        if (embedding_node_idx != UINT32_MAX && (before == UINT32_MAX || before == embedding_node_idx)) {
+            saw_embedding = true;
+        }
+    };
+
+    visit_parent(node.lhs);
+    if (node.op != ExprOp::NEG) {
+        visit_parent(node.rhs);
+    }
+    if (!ok || embedding_node_idx == UINT32_MAX || !saw_embedding) {
+        return false;
+    }
+
+    region.insert(node_idx);
+    return true;
+}
+
+static bool canBuildEmbeddingRootFusedStage(const PhysicalExpression& expr, uint32_t root_idx, uint32_t& embedding_node_idx) {
+    embedding_node_idx = UINT32_MAX;
+    std::unordered_set<uint32_t> region;
+    if (!collectEmbeddingRootFusionNodes(expr, root_idx, embedding_node_idx, region)) {
+        return false;
+    }
+    return embedding_node_idx != UINT32_MAX && embedding_node_idx != root_idx;
+}
+
+static PhysicalExecutionStage buildEmbeddingRootFusedStage(const PhysicalExpression& expr,
+                                                          uint32_t root_idx,
+                                                          uint32_t output_value_id,
+                                                          const std::string& output_name,
+                                                          const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    uint32_t embedding_node_idx = UINT32_MAX;
+    std::unordered_set<uint32_t> region;
+    if (!collectEmbeddingRootFusionNodes(expr, root_idx, embedding_node_idx, region) || embedding_node_idx == UINT32_MAX ||
+        embedding_node_idx == root_idx) {
+        throw std::runtime_error("buildEmbeddingRootFusedStage called for a non-fusible embedding-root expression.");
+    }
+
+    const ExprNode& embedding = expr.nodes[embedding_node_idx];
+    if (embedding.lhs == UINT32_MAX || embedding.rhs == UINT32_MAX || embedding.lhs >= expr.nodes.size() || embedding.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("Embedding-root fused stage has malformed EmbeddingLookup inputs.");
+    }
+
+    PhysicalExpression stage_expr;
+    std::vector<uint32_t> input_value_ids;
+    std::unordered_map<uint32_t, uint32_t> local_node_by_old;
+    std::unordered_map<uint32_t, uint32_t> local_input_slot_by_old;
+
+    auto add_local_input = [&](uint32_t parent_idx, uint32_t forced_slot) -> uint32_t {
+        auto existing = local_node_by_old.find(parent_idx);
+        if (existing != local_node_by_old.end()) {
+            return existing->second;
+        }
+        if (parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Embedding-root fused stage input parent is out of range.");
+        }
+        const ExprNode& parent = expr.nodes[parent_idx];
+        if (parent.op != ExprOp::INPUT) {
+            throw std::runtime_error("Embedding-root fusion currently supports only direct tensor inputs as external operands.");
+        }
+        if (!parent.input_tensor_dtype.has_value() || !parent.output_dtype.has_value()) {
+            throw std::runtime_error("Embedding-root fusion input is missing dtype metadata.");
+        }
+        const uint32_t local_slot = forced_slot == UINT32_MAX ? static_cast<uint32_t>(stage_expr.inputs.size()) : forced_slot;
+        if (local_slot != stage_expr.inputs.size()) {
+            throw std::runtime_error("Embedding-root fusion internal input slots must be appended in order.");
+        }
+        uint32_t value_id = parent.input_slot;
+        auto value_it = node_output_value_id.find(parent_idx);
+        if (value_it != node_output_value_id.end()) {
+            value_id = value_it->second;
+        }
+        input_value_ids.push_back(value_id);
+        stage_expr.inputs.push_back(NamedInput{std::string("__arg") + std::to_string(local_slot), local_slot, NamedInput::Kind::Tensor});
+
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = parent.input_tensor_dtype.value();
+        input_node.output_dtype = parent.output_dtype.value();
+        input_node.compute_dtype = parent.compute_dtype.value_or(parent.output_dtype.value());
+        input_node.backward_output_dtype = parent.backward_output_dtype.value_or(parent.output_dtype.value());
+        input_node.backward_compute_dtype = parent.backward_compute_dtype.value_or(input_node.compute_dtype.value());
+        const uint32_t local_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+        stage_expr.nodes.push_back(std::move(input_node));
+        local_node_by_old[parent_idx] = local_idx;
+        local_input_slot_by_old[parent_idx] = local_slot;
+        return local_idx;
+    };
+
+    add_local_input(embedding.lhs, 0);
+    add_local_input(embedding.rhs, 1);
+
+    std::function<uint32_t(uint32_t)> copy_node = [&](uint32_t old_idx) -> uint32_t {
+        auto existing = local_node_by_old.find(old_idx);
+        if (existing != local_node_by_old.end()) {
+            return existing->second;
+        }
+        if (old_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Embedding-root fusion node index out of range.");
+        }
+        const ExprNode& old = expr.nodes[old_idx];
+        if (old.op == ExprOp::INPUT) {
+            return add_local_input(old_idx, UINT32_MAX);
+        }
+        if (old.op == ExprOp::SCALAR_FP) {
+            ExprNode scalar = old;
+            const uint32_t local_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+            stage_expr.nodes.push_back(std::move(scalar));
+            local_node_by_old[old_idx] = local_idx;
+            return local_idx;
+        }
+        if (old_idx == embedding_node_idx) {
+            ExprNode lookup = old;
+            lookup.lhs = local_node_by_old.at(embedding.lhs);
+            lookup.rhs = local_node_by_old.at(embedding.rhs);
+            lookup.aux = UINT32_MAX;
+            const uint32_t local_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+            stage_expr.nodes.push_back(std::move(lookup));
+            local_node_by_old[old_idx] = local_idx;
+            return local_idx;
+        }
+        if (!isEmbeddingRootFusionOp(old.op)) {
+            throw std::runtime_error("Embedding-root fusion encountered an unsupported epilogue op.");
+        }
+        ExprNode copy = old;
+        copy.lhs = copy_node(old.lhs);
+        if (old.op != ExprOp::NEG) {
+            copy.rhs = copy_node(old.rhs);
+        } else {
+            copy.rhs = UINT32_MAX;
+        }
+        copy.aux = UINT32_MAX;
+        const uint32_t local_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+        stage_expr.nodes.push_back(std::move(copy));
+        local_node_by_old[old_idx] = local_idx;
+        return local_idx;
+    };
+
+    const uint32_t local_root = copy_node(root_idx);
+    stage_expr.output_node = local_root;
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{.name = output_name, .local_node_idx = local_root, .value_id = output_value_id});
+
+    return PhysicalExecutionStage{.kind = PhysicalExecutionStage::Kind::EmbeddingLookup,
+                                  .expr = std::move(stage_expr),
+                                  .input_value_ids = std::move(input_value_ids),
+                                  .outputs = std::move(stage_outputs)};
 }
 
 static PhysicalExecutionStage buildEmbeddingLookupStage(const PhysicalExpression& expr,
@@ -4939,6 +5246,14 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             return;
         }
 
+        uint32_t embedding_root_idx = UINT32_MAX;
+        if (canBuildEmbeddingRootFusedStage(expr, root_idx, embedding_root_idx)) {
+            const uint32_t out_id = next_value_id++;
+            node_output_value_id[root_idx] = out_id;
+            planned.stages.push_back(buildEmbeddingRootFusedStage(expr, root_idx, out_id, "", node_output_value_id));
+            return;
+        }
+
         if (isStageBoundaryOp(root.op)) {
             const std::string boundary_sig = fusedRegionSignature(expr, root_idx);
             auto emitted_boundary_it = stage_boundary_value_id.find(boundary_sig);
@@ -5250,6 +5565,20 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 .name = named_output.name,
                 .local_node_idx = UINT32_MAX,
                 .value_id = value_it->second,
+            });
+            continue;
+        }
+
+        uint32_t embedding_root_idx = UINT32_MAX;
+        if (canBuildEmbeddingRootFusedStage(expr, named_output.node_idx, embedding_root_idx)) {
+            const uint32_t out_id = next_value_id++;
+            node_output_value_id[named_output.node_idx] = out_id;
+            planned.stages.push_back(
+                buildEmbeddingRootFusedStage(expr, named_output.node_idx, out_id, named_output.name, node_output_value_id));
+            planned.final_outputs.push_back(CompiledStageOutput{
+                .name = named_output.name,
+                .local_node_idx = UINT32_MAX,
+                .value_id = out_id,
             });
             continue;
         }

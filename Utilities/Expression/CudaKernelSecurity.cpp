@@ -1,13 +1,16 @@
 #include "Utilities/Expression/CudaKernelSecurity.h"
+#include "Utilities/Expression/CudaKernelExpression.h"
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -15,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 using json = nlohmann::json;
@@ -23,7 +27,6 @@ namespace ThorImplementation {
 namespace {
 
 using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
-using EvpPkeyCtxPtr = std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>;
 using EvpMdCtxPtr = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
 
 std::string opensslErrorPrefix(const std::string& what) { return what + " failed while handling CudaKernelExpression Ed25519 signatures."; }
@@ -89,6 +92,37 @@ std::string sha256Hex(const std::string& bytes) { return sha256Hex(reinterpret_c
 
 std::string sha256Hex(const std::vector<unsigned char>& bytes) { return sha256Hex(bytes.data(), bytes.size()); }
 
+const std::vector<unsigned char>& processEphemeralSigningSecret() {
+    static const std::vector<unsigned char> secret = [] {
+        if (RAND_status() != 1) {
+            throw std::runtime_error("OpenSSL CSPRNG is not seeded; refusing to initialize CudaKernelExpression signing secret.");
+        }
+        std::vector<unsigned char> value(32);
+        if (RAND_bytes(value.data(), static_cast<int>(value.size())) != 1) {
+            throw std::runtime_error(opensslErrorPrefix("RAND_bytes"));
+        }
+        return value;
+    }();
+    return secret;
+}
+
+std::vector<unsigned char> hmacSha256(const std::vector<unsigned char>& key, const std::string& message) {
+    std::vector<unsigned char> digest(EVP_MAX_MD_SIZE);
+    unsigned int digest_len = 0;
+    unsigned char* result = HMAC(EVP_sha256(),
+                                 key.data(),
+                                 static_cast<int>(key.size()),
+                                 reinterpret_cast<const unsigned char*>(message.data()),
+                                 message.size(),
+                                 digest.data(),
+                                 &digest_len);
+    if (result == nullptr || digest_len != 32) {
+        throw std::runtime_error(opensslErrorPrefix("HMAC-SHA256"));
+    }
+    digest.resize(digest_len);
+    return digest;
+}
+
 std::string normalizeEd25519PublicKey(const std::string& public_key) {
     std::vector<unsigned char> raw = hexDecodeRaw(public_key);
     if (raw.size() != 32) {
@@ -137,6 +171,99 @@ void rememberEphemeralSigningPublicKey(const std::string& public_key_text) {
     signingPublicKeyRegistry()[fingerprint] = public_key_text;
 }
 
+struct CudaKernelManifestSigningKey {
+    EvpPkeyPtr key;
+    std::vector<unsigned char> public_key;
+    std::string public_key_text;
+    std::string public_key_fingerprint;
+
+    CudaKernelManifestSigningKey(EvpPkeyPtr&& key_in,
+                                 std::vector<unsigned char>&& public_key_in,
+                                 std::string public_key_text_in,
+                                 std::string public_key_fingerprint_in)
+        : key(std::move(key_in)),
+          public_key(std::move(public_key_in)),
+          public_key_text(std::move(public_key_text_in)),
+          public_key_fingerprint(std::move(public_key_fingerprint_in)) {}
+};
+
+CudaKernelManifestSigningKey cudaKernelSigningKeyFromSeed(const std::vector<unsigned char>& seed) {
+    if (seed.size() != 32) {
+        throw std::logic_error("Internal CudaKernelExpression signing error: Ed25519 seed must be 32 bytes.");
+    }
+
+    EvpPkeyPtr key(EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, seed.data(), seed.size()), EVP_PKEY_free);
+    if (!key) {
+        throw std::runtime_error(opensslErrorPrefix("EVP_PKEY_new_raw_private_key"));
+    }
+
+    std::vector<unsigned char> public_key(32);
+    size_t public_key_len = public_key.size();
+    if (EVP_PKEY_get_raw_public_key(key.get(), public_key.data(), &public_key_len) <= 0 || public_key_len != public_key.size()) {
+        throw std::runtime_error(opensslErrorPrefix("EVP_PKEY_get_raw_public_key"));
+    }
+
+    const std::string public_key_text = "ed25519:" + hexEncode(public_key.data(), public_key.size());
+    const std::string public_key_fingerprint = publicKeyFingerprintFromRaw(public_key);
+    requirePublicKeyFingerprintDoesNotContainPublicKeyMaterial(
+        public_key_fingerprint,
+        public_key,
+        "Internal CudaKernelExpression signing error: public_key_fingerprint contains public key material instead of a SHA-256 digest.");
+    rememberEphemeralSigningPublicKey(public_key_text);
+
+    return CudaKernelManifestSigningKey(std::move(key), std::move(public_key), public_key_text, public_key_fingerprint);
+}
+
+CudaKernelManifestSigningKey cudaKernelDeriveManifestSigningKey(const std::string& signing_context) {
+    // The private signing key is derived from a process-local CSPRNG secret and
+    // the unsigned serialization payload. This keeps the key ephemeral and not
+    // user-provided, while making repeated serialization/key queries for the
+    // same in-process model deterministic without any Network-level cache.
+    constexpr const char* kDomain = "thor.cuda_kernel_expression.manifest_signing_key.v1\n";
+    const std::vector<unsigned char> seed = hmacSha256(processEphemeralSigningSecret(), std::string(kDomain) + signing_context);
+    return cudaKernelSigningKeyFromSeed(seed);
+}
+
+std::string cudaKernelAttachManifestSignatureWithKey(json& expression_json, const CudaKernelManifestSigningKey& signing_key) {
+    if (!expression_json.contains("cuda_kernels") || expression_json.at("cuda_kernels").empty()) {
+        return {};
+    }
+    for (const json& kernel_json : expression_json.at("cuda_kernels")) {
+        if (!kernel_json.value("loaded_source_compilation_allowed", false)) {
+            throw std::runtime_error(
+                "Refusing to sign CudaKernelExpression CUDA source that was loaded from a serialized model without trusted-key "
+                "compilation enabled. Inspecting or saving an untrusted loaded expression must not mint a new signature.");
+        }
+    }
+
+    const json manifest = cudaKernelManifestFromExpressionJson(expression_json);
+    const std::string manifest_bytes = cudaKernelManifestCanonicalBytes(manifest);
+
+    EvpMdCtxPtr md_ctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!md_ctx || EVP_DigestSignInit(md_ctx.get(), nullptr, nullptr, nullptr, signing_key.key.get()) <= 0) {
+        throw std::runtime_error(opensslErrorPrefix("EVP_DigestSignInit"));
+    }
+
+    std::vector<unsigned char> signature(64);
+    size_t signature_len = signature.size();
+    if (EVP_DigestSign(md_ctx.get(),
+                       signature.data(),
+                       &signature_len,
+                       reinterpret_cast<const unsigned char*>(manifest_bytes.data()),
+                       manifest_bytes.size()) <= 0) {
+        throw std::runtime_error(opensslErrorPrefix("EVP_DigestSign"));
+    }
+    signature.resize(signature_len);
+
+    expression_json["cuda_kernel_manifest_signature"] = json{{"schema_version", 1},
+                                                             {"algorithm", "ed25519"},
+                                                             {"public_key_fingerprint", signing_key.public_key_fingerprint},
+                                                             {"manifest_sha256", sha256Hex(manifest_bytes)},
+                                                             {"signature", "ed25519:" + hexEncode(signature.data(), signature.size())},
+                                                             {"disclaimer", cudaKernelLoadedModelSafetyDisclaimer()}};
+    return signing_key.public_key_text;
+}
+
 std::string lookupEphemeralSigningPublicKeyByFingerprint(const std::string& fingerprint) {
     std::lock_guard<std::mutex> lock(signingPublicKeyRegistryMutex());
     auto it = signingPublicKeyRegistry().find(fingerprint);
@@ -144,6 +271,24 @@ std::string lookupEphemeralSigningPublicKeyByFingerprint(const std::string& fing
         return {};
     }
     return it->second;
+}
+
+json cudaKernelJsonWithoutManifestSignatures(json value) {
+    if (value.is_object()) {
+        value.erase("cuda_kernel_manifest_signature");
+        for (auto iter = value.begin(); iter != value.end(); ++iter) {
+            iter.value() = cudaKernelJsonWithoutManifestSignatures(iter.value());
+        }
+    } else if (value.is_array()) {
+        for (json& item : value) {
+            item = cudaKernelJsonWithoutManifestSignatures(item);
+        }
+    }
+    return value;
+}
+
+std::string cudaKernelSigningContextForRootJson(const json& root_json) {
+    return cudaKernelJsonWithoutManifestSignatures(root_json).dump();
 }
 
 json canonicalKernelJson(const json& kernel_json) {
@@ -216,7 +361,11 @@ void collectCudaKernelSourceInfoRecursive(const json& j, std::vector<CudaKernelS
                 info.name = kernel.value("name", std::string{});
                 info.entrypoint = kernel.value("entry", std::string{});
                 info.source = kernel.value("source", std::string{});
+                info.compiled_source = cudaKernelExpressionCompiledSourceForInspection(info.source);
                 info.compiled_source_hash = kernel.value("compiled_source_hash", std::string{});
+                // Raw JSON inspection is conservative: a serialized field may reflect that the model was saved from a local,
+                // compilable expression, but loaded CUDA source is not actually compilable until the caller opts in with a trusted key.
+                info.loaded_source_compilation_allowed = false;
                 if (signature != nullptr) {
                     info.signature_algorithm = signature->value("algorithm", std::string{});
                     info.signing_public_key_fingerprint = signature->value("public_key_fingerprint", std::string{});
@@ -272,64 +421,42 @@ std::string cudaKernelGenerateAndAttachManifestSignature(json& expression_json) 
     if (!expression_json.contains("cuda_kernels") || expression_json.at("cuda_kernels").empty()) {
         return {};
     }
+    const CudaKernelManifestSigningKey signing_key = cudaKernelDeriveManifestSigningKey(cudaKernelSigningContextForRootJson(expression_json));
+    return cudaKernelAttachManifestSignatureWithKey(expression_json, signing_key);
+}
 
-    // Signing keys are intentionally generated internally and kept ephemeral. The private key is
-    // never accepted from users, serialized, returned, or stored outside this stack frame.
-    if (RAND_status() != 1) {
-        throw std::runtime_error("OpenSSL CSPRNG is not seeded; refusing to generate CudaKernelExpression signing key.");
+std::vector<std::string> cudaKernelGenerateAndAttachManifestSignatures(json& root_json) {
+    std::unique_ptr<CudaKernelManifestSigningKey> signing_key;
+    bool signed_any = false;
+    const std::string signing_context = cudaKernelSigningContextForRootJson(root_json);
+
+    std::function<void(json&)> visit = [&](json& value) {
+        if (value.is_object()) {
+            const bool is_expression_with_cuda = value.value("type", std::string{}) == "thor.expression" &&
+                                                 value.contains("cuda_kernels") && value.at("cuda_kernels").is_array() &&
+                                                 !value.at("cuda_kernels").empty();
+            if (is_expression_with_cuda) {
+                if (!signing_key) {
+                    signing_key = std::make_unique<CudaKernelManifestSigningKey>(cudaKernelDeriveManifestSigningKey(signing_context));
+                }
+                (void)cudaKernelAttachManifestSignatureWithKey(value, *signing_key);
+                signed_any = true;
+            }
+            for (auto iter = value.begin(); iter != value.end(); ++iter) {
+                visit(iter.value());
+            }
+        } else if (value.is_array()) {
+            for (json& item : value) {
+                visit(item);
+            }
+        }
+    };
+
+    visit(root_json);
+    if (!signed_any) {
+        return {};
     }
-
-    EvpPkeyCtxPtr keygen_ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr), EVP_PKEY_CTX_free);
-    if (!keygen_ctx || EVP_PKEY_keygen_init(keygen_ctx.get()) <= 0) {
-        throw std::runtime_error(opensslErrorPrefix("EVP_PKEY_keygen_init"));
-    }
-
-    EVP_PKEY* raw_key = nullptr;
-    if (EVP_PKEY_keygen(keygen_ctx.get(), &raw_key) <= 0 || raw_key == nullptr) {
-        throw std::runtime_error(opensslErrorPrefix("EVP_PKEY_keygen"));
-    }
-    EvpPkeyPtr key(raw_key, EVP_PKEY_free);
-
-    std::vector<unsigned char> public_key(32);
-    size_t public_key_len = public_key.size();
-    if (EVP_PKEY_get_raw_public_key(key.get(), public_key.data(), &public_key_len) <= 0 || public_key_len != public_key.size()) {
-        throw std::runtime_error(opensslErrorPrefix("EVP_PKEY_get_raw_public_key"));
-    }
-
-    const json manifest = cudaKernelManifestFromExpressionJson(expression_json);
-    const std::string manifest_bytes = cudaKernelManifestCanonicalBytes(manifest);
-
-    EvpMdCtxPtr md_ctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
-    if (!md_ctx || EVP_DigestSignInit(md_ctx.get(), nullptr, nullptr, nullptr, key.get()) <= 0) {
-        throw std::runtime_error(opensslErrorPrefix("EVP_DigestSignInit"));
-    }
-
-    std::vector<unsigned char> signature(64);
-    size_t signature_len = signature.size();
-    if (EVP_DigestSign(md_ctx.get(),
-                       signature.data(),
-                       &signature_len,
-                       reinterpret_cast<const unsigned char*>(manifest_bytes.data()),
-                       manifest_bytes.size()) <= 0) {
-        throw std::runtime_error(opensslErrorPrefix("EVP_DigestSign"));
-    }
-    signature.resize(signature_len);
-
-    const std::string public_key_text = "ed25519:" + hexEncode(public_key.data(), public_key.size());
-    const std::string public_key_fingerprint = publicKeyFingerprintFromRaw(public_key);
-    requirePublicKeyFingerprintDoesNotContainPublicKeyMaterial(
-        public_key_fingerprint,
-        public_key,
-        "Internal CudaKernelExpression signing error: public_key_fingerprint contains public key material instead of a SHA-256 digest.");
-    rememberEphemeralSigningPublicKey(public_key_text);
-
-    expression_json["cuda_kernel_manifest_signature"] = json{{"schema_version", 1},
-                                                             {"algorithm", "ed25519"},
-                                                             {"public_key_fingerprint", public_key_fingerprint},
-                                                             {"manifest_sha256", sha256Hex(manifest_bytes)},
-                                                             {"signature", "ed25519:" + hexEncode(signature.data(), signature.size())},
-                                                             {"disclaimer", cudaKernelLoadedModelSafetyDisclaimer()}};
-    return public_key_text;
+    return {signing_key->public_key_text};
 }
 
 CudaKernelSignatureVerificationResult cudaKernelVerifyManifestSignature(const json& expression_json,

@@ -1371,10 +1371,51 @@ void ExpressionDefinition::validate() const {
                 !outputs.expr->cuda_kernel_expressions[node.cuda_kernel_spec_index]) {
                 throw std::runtime_error("ExpressionDefinition CudaKernelExpression node references an invalid kernel spec.");
             }
-            for (uint32_t input_node : node.cuda_kernel_input_nodes) {
+            const auto& kernel = outputs.expr->cuda_kernel_expressions[node.cuda_kernel_spec_index];
+            if (node.cuda_kernel_output_index >= kernel->outputs().size()) {
+                throw std::runtime_error("ExpressionDefinition CudaKernelExpression node references an invalid output spec.");
+            }
+            const auto& output_spec = kernel->outputs()[node.cuda_kernel_output_index];
+            if (!node.output_dtype.has_value()) {
+                throw std::runtime_error("ExpressionDefinition CudaKernelExpression output node is missing output dtype.");
+            }
+            if (node.output_dtype.value() != output_spec.dtype) {
+                throw std::runtime_error("ExpressionDefinition CudaKernelExpression output node dtype does not match the kernel output spec.");
+            }
+            if (node.cuda_kernel_input_nodes.size() != kernel->inputs().size()) {
+                throw std::runtime_error("ExpressionDefinition CudaKernelExpression input node count does not match the kernel input spec.");
+            }
+            for (size_t input_idx = 0; input_idx < node.cuda_kernel_input_nodes.size(); ++input_idx) {
+                const uint32_t input_node = node.cuda_kernel_input_nodes[input_idx];
                 validateNodeIndex(input_node, "cuda kernel input");
                 if (input_node >= node_index_u32) {
                     throw std::runtime_error("ExpressionDefinition CudaKernelExpression input nodes must reference earlier nodes.");
+                }
+
+                const ExprNode& input_expr_node = outputs.expr->nodes[input_node];
+                const auto& input_spec = kernel->inputs()[input_idx];
+                switch (input_spec.kind) {
+                    case CudaKernelExpression::TensorParamSpec::Kind::Tensor:
+                        if (input_expr_node.op == ExprOp::RUNTIME_SCALAR || input_expr_node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
+                            throw std::runtime_error(
+                                "ExpressionDefinition CudaKernelExpression tensor input is wired to a runtime scalar node.");
+                        }
+                        break;
+                    case CudaKernelExpression::TensorParamSpec::Kind::TensorRuntimeScalar:
+                        if (input_expr_node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+                            throw std::runtime_error(
+                                "ExpressionDefinition CudaKernelExpression tensor runtime scalar input is wired to the wrong node kind.");
+                        }
+                        break;
+                    case CudaKernelExpression::TensorParamSpec::Kind::HostRuntimeScalar:
+                        if (input_expr_node.op != ExprOp::RUNTIME_SCALAR) {
+                            throw std::runtime_error(
+                                "ExpressionDefinition CudaKernelExpression host runtime scalar input is wired to the wrong node kind.");
+                        }
+                        break;
+                }
+                if (input_expr_node.output_dtype.has_value() && input_expr_node.output_dtype.value() != input_spec.dtype) {
+                    throw std::runtime_error("ExpressionDefinition CudaKernelExpression input node dtype does not match the kernel input spec.");
                 }
             }
         }
@@ -1447,20 +1488,40 @@ json ExpressionDefinition::architectureJson() const {
 
     const std::string computed_hash = expressionHash(outputs);
     j["canonical_hash"] = computed_hash;
-    if (j.contains("cuda_kernels") && !j.at("cuda_kernels").empty()) {
-        if (!cuda_kernel_manifest_signature.is_null()) {
-            j["cuda_kernel_manifest_signature"] = cuda_kernel_manifest_signature;
-        } else {
-            (void)cudaKernelGenerateAndAttachManifestSignature(j);
-            cuda_kernel_manifest_signature = j.at("cuda_kernel_manifest_signature");
-        }
+    if (j.contains("cuda_kernels") && !j.at("cuda_kernels").empty() && !cuda_kernel_manifest_signature.is_null()) {
+        j["cuda_kernel_manifest_signature"] = cuda_kernel_manifest_signature;
     }
     return j;
+}
+
+json ExpressionDefinition::architectureJsonWithCudaKernelManifestSignature() const {
+    if (!hasCudaKernelExpressions()) {
+        return architectureJson();
+    }
+    if (!cuda_kernel_manifest_signature.is_null()) {
+        return architectureJson();
+    }
+
+    json signed_payload = architectureJson();
+    const std::vector<std::string> signing_public_keys = cudaKernelGenerateAndAttachManifestSignatures(signed_payload);
+    if (signing_public_keys.empty()) {
+        throw std::runtime_error("ExpressionDefinition has CUDA kernels but CUDA manifest signing produced no public key.");
+    }
+
+    auto sig_it = signed_payload.find("cuda_kernel_manifest_signature");
+    if (sig_it == signed_payload.end() || !sig_it->is_object()) {
+        throw std::runtime_error("ExpressionDefinition CUDA manifest signing did not attach a manifest signature.");
+    }
+    cuda_kernel_manifest_signature = *sig_it;
+    return signed_payload;
 }
 
 bool ExpressionDefinition::hasCudaKernelExpressions() const { return outputs.expr && !outputs.expr->cuda_kernel_expressions.empty(); }
 
 std::vector<std::string> ExpressionDefinition::cudaKernelSigningPublicKeys() const {
+    if (hasCudaKernelExpressions() && cuda_kernel_manifest_signature.is_null()) {
+        (void)architectureJsonWithCudaKernelManifestSignature();
+    }
     return collectCudaKernelSigningPublicKeys(architectureJson());
 }
 

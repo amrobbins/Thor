@@ -83,3 +83,35 @@ def test_embedding_lookup_uint64_forward_without_padding():
     got = _copy_gpu_to_numpy(out_gpu, thor.DataType.fp32, stream)
 
     np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.cuda
+def test_embedding_lookup_root_fuses_same_shape_pointwise_epilogue():
+    indices_np = np.array([3, 1, 2], dtype=np.uint32)
+    weights_np = np.arange(20, dtype=np.float32).reshape(5, 4)
+    bias_np = np.array(
+        [
+            [0.5, 1.0, 1.5, 2.0],
+            [2.5, 3.0, 3.5, 4.0],
+            [4.5, 5.0, 5.5, 6.0],
+        ],
+        dtype=np.float32,
+    )
+    expected = (weights_np[indices_np] + bias_np) * np.float32(2.0)
+
+    lookup = ex.embedding_lookup(ex.input("indices"), ex.input("weights"))
+    expr = (lookup + ex.input("bias")) * 2.0
+    eq = ex.compile(expr, device_num=0)
+
+    stream = Stream(0)
+    indices_gpu = _copy_numpy_to_gpu(indices_np, stream, thor.DataType.uint32)
+    weights_gpu = _copy_numpy_to_gpu(weights_np, stream, thor.DataType.fp32)
+    bias_gpu = _copy_numpy_to_gpu(bias_np, stream, thor.DataType.fp32)
+    out_gpu = _gpu_tensor([3, 4], thor.DataType.fp32)
+
+    stamped = eq.stamp({"indices": indices_gpu, "weights": weights_gpu, "bias": bias_gpu}, stream, preallocated_output=out_gpu)
+    assert stamped._debug_stage_kinds() == ["EmbeddingLookup"]
+    stamped.run()
+    got = _copy_gpu_to_numpy(out_gpu, thor.DataType.fp32, stream)
+
+    np.testing.assert_allclose(got, expected, rtol=0, atol=0)

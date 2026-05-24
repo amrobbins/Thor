@@ -1765,7 +1765,7 @@ Args:
             },
             "device_num"_a = 0,
             "use_fast_math"_a = false)
-        .def("to_json", [](const Outputs& self) { return ExpressionDefinition::fromOutputs(self).architectureJson().dump(); })
+        .def("to_json", [](const Outputs& self) { return ExpressionDefinition::fromOutputs(self).architectureJsonWithCudaKernelManifestSignature().dump(); })
         .def_static(
             "from_json",
             [](const std::string& payload, bool allow_unsafe_loaded_cuda_kernel_source, const std::string& trusted_cuda_kernel_public_key) {
@@ -1788,7 +1788,7 @@ Args:
     auto expression_definition_type = nb::class_<ExpressionDefinition>(physical, "ExpressionDefinition");
     expression_definition_type.attr("__module__") = "thor.physical";
     expression_definition_type.def_static("from_outputs", &ExpressionDefinition::fromOutputs, "outputs"_a)
-        .def("to_json", [](const ExpressionDefinition& self) { return self.architectureJson().dump(); })
+        .def("to_json", [](const ExpressionDefinition& self) { return self.architectureJsonWithCudaKernelManifestSignature().dump(); })
         .def_static(
             "from_json",
             [](const std::string& payload, bool allow_unsafe_loaded_cuda_kernel_source, const std::string& trusted_cuda_kernel_public_key) {

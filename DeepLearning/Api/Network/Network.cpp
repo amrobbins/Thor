@@ -1,9 +1,9 @@
 #include "DeepLearning/Api/Network/Network.h"
+#include "Utilities/Expression/CudaKernelSecurity.h"
 #include <optional>
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/ThorError.h"
-#include "Utilities/Expression/CudaKernelSecurity.h"
 #include <iostream>
 
 using namespace std;
@@ -262,7 +262,8 @@ void Network::save(const string &directory, const bool overwrite) {
     json modelJson = architectureJson();
     if (defaultOptimizer != nullptr)
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
-    printCudaKernelSigningPublicKeys(ThorImplementation::collectCudaKernelSigningPublicKeys(modelJson));
+    const std::vector<std::string> signingPublicKeys = ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
+    printCudaKernelSigningPublicKeys(signingPublicKeys);
     string modelJsonDump = modelJson.dump(4);
 
     string qualifiedModelName = networkName + ".thor.json";
@@ -299,7 +300,8 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
 
     string qualifiedModelName = networkName + ".thor.json";
-    printCudaKernelSigningPublicKeys(ThorImplementation::collectCudaKernelSigningPublicKeys(modelJson));
+    const std::vector<std::string> signingPublicKeys = ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
+    printCudaKernelSigningPublicKeys(signingPublicKeys);
 
     string jsonDump = modelJson.dump(4);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -327,12 +329,13 @@ json Network::architectureJson() const {
 
 string Network::architectureJsonString() const {
     json modelJson = architectureJson();
-    string jsonDump = modelJson.dump(4);
-    return jsonDump;
+    (void)ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
+    return modelJson.dump(4);
 }
 
 std::vector<std::string> Network::cudaKernelSigningPublicKeys() const {
-    return ThorImplementation::collectCudaKernelSigningPublicKeys(architectureJson());
+    json modelJson = architectureJson();
+    return ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
 }
 
 std::vector<ThorImplementation::CudaKernelSourceInspection> Network::cudaKernelSourceInfo() const {
