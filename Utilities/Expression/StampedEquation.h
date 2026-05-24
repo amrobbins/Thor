@@ -575,15 +575,15 @@ class StampedEmbeddingLookup {
                            const Tensor& indices,
                            const Tensor& weights,
                            const Tensor& output,
-                           const Stream& stream)
-        : compiled_embedding_lookup(std::move(compiled)), indices(indices), weights(weights), output(output), stream(stream) {}
+                           const Stream& stream);
 
    private:
     const std::shared_ptr<CompiledEmbeddingLookup> compiled_embedding_lookup;
     const Tensor indices;
     const Tensor weights;
-    Tensor output;
+    mutable Tensor output;
     Stream stream;
+    std::shared_ptr<PreparedEmbeddingForward> prepared_forward;
 };
 
 class StampedMatmul {

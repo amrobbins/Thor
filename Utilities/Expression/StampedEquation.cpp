@@ -1135,18 +1135,28 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
 }
 
 
-void StampedEmbeddingLookup::runOn(Stream& run_stream) const {
+StampedEmbeddingLookup::StampedEmbeddingLookup(std::shared_ptr<CompiledEmbeddingLookup> compiled,
+                                                 const Tensor& indices,
+                                                 const Tensor& weights,
+                                                 const Tensor& output,
+                                                 const Stream& stream)
+    : compiled_embedding_lookup(std::move(compiled)), indices(indices), weights(weights), output(output), stream(stream) {
     if (!compiled_embedding_lookup) {
-        throw std::runtime_error("StampedEmbeddingLookup::runOn called with null compiled payload.");
+        throw std::runtime_error("StampedEmbeddingLookup constructed with null compiled payload.");
     }
-    Tensor mutableOutput = output;
-    launchEmbeddingForward(indices,
-                           weights,
-                           mutableOutput,
-                           compiled_embedding_lookup->has_padding_index
-                               ? std::optional<uint64_t>(compiled_embedding_lookup->padding_index)
-                               : std::nullopt,
-                           run_stream);
+    prepared_forward = prepareEmbeddingForward(indices,
+                                               weights,
+                                               output,
+                                               compiled_embedding_lookup->has_padding_index
+                                                   ? std::optional<uint64_t>(compiled_embedding_lookup->padding_index)
+                                                   : std::nullopt);
+}
+
+void StampedEmbeddingLookup::runOn(Stream& run_stream) const {
+    if (!prepared_forward) {
+        throw std::runtime_error("StampedEmbeddingLookup::runOn called with null prepared forward payload.");
+    }
+    launchPreparedEmbeddingForward(*prepared_forward, indices, weights, output, run_stream);
 }
 
 StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
