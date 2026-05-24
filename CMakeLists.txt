@@ -718,6 +718,21 @@ target_compile_options(thor_tests PRIVATE
         $<$<CONFIG:Debug>:-O0 -ggdb>
 )
 
+add_executable(thor_embedding_sparse_backward_profile EXCLUDE_FROM_ALL
+        benchmarks/EmbeddingSparseBackwardProfile.cpp
+)
+thor_apply_linker_settings(thor_embedding_sparse_backward_profile)
+target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE Thor CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
+target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE "${THOR_CUDNN_LIBRARY}")
+target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE Boost::boost)
+target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_embedding_sparse_backward_profile PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0 -ggdb>
+)
+
 # ============================================================
 # Install & Export for find_package()
 # ============================================================
