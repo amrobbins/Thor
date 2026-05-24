@@ -3665,8 +3665,8 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
             if (!stage.embedding_lookup) {
                 throw std::runtime_error("resolveOutputDimsForStageOutput EmbeddingLookup stage missing payload.");
             }
-            if (stage_input_dims.size() != 2) {
-                throw std::runtime_error("resolveOutputDimsForStageOutput EmbeddingLookup stage expected indices and weights shapes.");
+            if (stage_input_dims.size() < 2) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput EmbeddingLookup stage expected at least indices and weights shapes.");
             }
             return inferEmbeddingLookupOutputDims(stage_input_dims[0], stage_input_dims[1]);
         }
@@ -7110,14 +7110,20 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (!stage.embedding_lookup) {
                     throw std::runtime_error("EmbeddingLookup stage missing compiled payload.");
                 }
-                if (stageInputs.size() != 2) {
-                    throw std::runtime_error("EmbeddingLookup stage expects exactly two inputs: indices and weights.");
+                if (stageInputs.size() < 2) {
+                    throw std::runtime_error("EmbeddingLookup stage expects at least two inputs: indices and weights.");
                 }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("EmbeddingLookup stage expects exactly one output.");
                 }
                 Tensor indicesTensor = runtimeInputTensor(stageInputs[0]);
                 Tensor weightsTensor = runtimeInputTensor(stageInputs[1]);
+                std::vector<Tensor> epilogueInputs;
+                epilogueInputs.reserve(stageInputs.size() > 2 ? stageInputs.size() - 2 : 0);
+                for (size_t i = 2; i < stageInputs.size(); ++i) {
+                    Tensor epilogueTensor = runtimeInputTensor(stageInputs[i]);
+                    epilogueInputs.push_back(epilogueTensor);
+                }
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
                 auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
@@ -7127,8 +7133,21 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 } else {
                     outputTensor = Tensor(weightsTensor.getPlacement(), TensorDescriptor(stage.embedding_lookup->output_dtype, output_dims));
                 }
+                for (const Tensor& epilogueTensor : epilogueInputs) {
+                    if (epilogueTensor.getDimensions() != output_dims) {
+                        throw std::runtime_error("EmbeddingLookup fused epilogue tensor inputs must have exactly the output dimensions.");
+                    }
+                    if (epilogueTensor.getDataType() != stage.embedding_lookup->output_dtype) {
+                        throw std::runtime_error("EmbeddingLookup fused epilogue tensor inputs must match the output dtype.");
+                    }
+                }
                 std::shared_ptr<StampedEmbeddingLookup> stampedEmbeddingLookup =
-                    std::make_shared<StampedEmbeddingLookup>(stage.embedding_lookup, indicesTensor, weightsTensor, outputTensor, stream);
+                    std::make_shared<StampedEmbeddingLookup>(stage.embedding_lookup,
+                                                             indicesTensor,
+                                                             weightsTensor,
+                                                             outputTensor,
+                                                             stream,
+                                                             std::move(epilogueInputs));
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
                 stampedStages.emplace_back(stampedEmbeddingLookup, std::move(dependency_stage_indices), stage_flops);

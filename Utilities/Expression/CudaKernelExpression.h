@@ -18,6 +18,8 @@
 
 namespace ThorImplementation {
 
+[[nodiscard]] std::string cudaKernelExpressionCompiledSourceForInspection(const std::string& user_source);
+
 class CudaKernelExpression {
    public:
     class DimExpr {

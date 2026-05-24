@@ -87,6 +87,7 @@ class Network {
                       const std::string &directory,
                       const bool overwrite,
                       const bool saveOptimizerState) const;
+
     virtual void load(const std::string &directory);
     virtual void load(const std::string &directory, bool allowUnsafeLoadedCudaKernelSource);
     virtual void load(const std::string &directory, bool allowUnsafeLoadedCudaKernelSource, const std::string &trustedCudaKernelPublicKey);

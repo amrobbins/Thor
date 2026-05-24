@@ -333,6 +333,7 @@ struct ExpressionDefinition {
     mutable nlohmann::json cuda_kernel_manifest_signature;
 
     [[nodiscard]] nlohmann::json architectureJson() const;
+    [[nodiscard]] nlohmann::json architectureJsonWithCudaKernelManifestSignature() const;
     [[nodiscard]] bool hasCudaKernelExpressions() const;
     [[nodiscard]] std::vector<std::string> cudaKernelSigningPublicKeys() const;
     [[nodiscard]] std::vector<CudaKernelSourceInspection> cudaKernelSourceInfo() const;

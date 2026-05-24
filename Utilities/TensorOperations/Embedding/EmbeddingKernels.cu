@@ -55,7 +55,7 @@ struct GeneratedEmbeddingKernel {
 };
 
 struct PreparedEmbeddingForward {
-    using LaunchFn = void (*)(const PreparedEmbeddingForward&, const Tensor&, const Tensor&, Tensor&, Stream);
+    using LaunchFn = void (*)(const PreparedEmbeddingForward&, const Tensor&, const Tensor&, Tensor&, Stream, const std::vector<Tensor>&);
 
     LaunchFn launch = nullptr;
     std::shared_ptr<GeneratedEmbeddingKernel> generated_kernel;
@@ -69,6 +69,7 @@ struct PreparedEmbeddingForward {
     int device_num = 0;
     TensorDescriptor::DataType index_dtype = TensorDescriptor::DataType::UINT32;
     TensorDescriptor::DataType weights_dtype = TensorDescriptor::DataType::FP32;
+    EmbeddingForwardEpilogue epilogue;
 };
 
 namespace {
@@ -253,19 +254,35 @@ std::string generatedEmbeddingValueIncludes(DataType dtype) {
     }
 }
 
+std::string generatedEmbeddingExtraArgs(const EmbeddingForwardEpilogue& epilogue, DataType valueDtype) {
+    std::ostringstream src;
+    for (size_t i = 0; i < epilogue.extra_input_dtypes.size(); ++i) {
+        if (epilogue.extra_input_dtypes[i] != valueDtype) {
+            throw std::runtime_error("EmbeddingLookup epilogue tensor inputs must match the embedding output dtype in this backend slice.");
+        }
+        src << ",\n    const " << generatedEmbeddingValueTypeName(valueDtype) << "* __restrict__ arg" << i;
+    }
+    return src.str();
+}
+
+std::string generatedEmbeddingEpilogueValue(const EmbeddingForwardEpilogue& epilogue) {
+    return epilogue.enabled() ? epilogue.expression : std::string("v");
+}
+
 std::string generatedEmbeddingExactCommonPrefix(DataType indexDtype,
                                                       DataType valueDtype,
                                                       uint32_t elementsPerLane,
                                                       uint64_t numIndices,
                                                       uint64_t embeddingDim,
-                                                      uint64_t elementsPerWarpIteration) {
+                                                      uint64_t elementsPerWarpIteration,
+                                                      const EmbeddingForwardEpilogue& epilogue) {
     std::ostringstream src;
     src << generatedEmbeddingValueIncludes(valueDtype);
     src << R"cuda(
 extern "C" __global__ void embedding_lookup(
     const )cuda" << generatedEmbeddingIndexTypeName(indexDtype) << R"cuda(* __restrict__ indices,
     const )cuda" << generatedEmbeddingValueTypeName(valueDtype) << R"cuda(* __restrict__ weights,
-    )cuda" << generatedEmbeddingValueTypeName(valueDtype) << R"cuda(* __restrict__ output) {
+    )cuda" << generatedEmbeddingValueTypeName(valueDtype) << R"cuda(* __restrict__ output)cuda" << generatedEmbeddingExtraArgs(epilogue, valueDtype) << R"cuda() {
     using ValueT = )cuda" << generatedEmbeddingValueTypeName(valueDtype) << R"cuda(;
     constexpr unsigned int WARP_SIZE_EMBEDDING = 32u;
     constexpr unsigned int WARPS_PER_BLOCK = 8u;
@@ -290,15 +307,17 @@ std::string generatedEmbeddingExactUncheckedNoPaddingSource(DataType indexDtype,
                                                            DataType valueDtype,
                                                            uint32_t elementsPerLane,
                                                            uint64_t numIndices,
-                                                           uint64_t embeddingDim) {
+                                                           uint64_t embeddingDim,
+                                                           const EmbeddingForwardEpilogue& epilogue) {
     const uint64_t elementsPerWarpIteration = static_cast<uint64_t>(elementsPerLane) * WARP_SIZE_EMBEDDING;
     if (embeddingDim % elementsPerWarpIteration != 0) {
         throw std::runtime_error("Generated EmbeddingLookup exact kernel requires embedding_dim to be a multiple of the warp iteration width.");
     }
 
     std::ostringstream src;
-    src << generatedEmbeddingExactCommonPrefix(indexDtype, valueDtype, elementsPerLane, numIndices, embeddingDim, elementsPerWarpIteration);
-    src << R"cuda(
+    src << generatedEmbeddingExactCommonPrefix(indexDtype, valueDtype, elementsPerLane, numIndices, embeddingDim, elementsPerWarpIteration, epilogue);
+    if (!epilogue.enabled()) {
+        src << R"cuda(
     for (unsigned long long token = globalWarp; token < NUM_INDICES; token += totalWarps) {
         const unsigned long long row = static_cast<unsigned long long>(indices[token]);
         const ValueT* __restrict__ rowBase = weights + row * EMBEDDING_DIM;
@@ -314,6 +333,30 @@ std::string generatedEmbeddingExactUncheckedNoPaddingSource(DataType indexDtype,
     }
 }
 )cuda";
+    } else {
+        src << R"cuda(
+    for (unsigned long long token = globalWarp; token < NUM_INDICES; token += totalWarps) {
+        const unsigned long long row = static_cast<unsigned long long>(indices[token]);
+        const ValueT* __restrict__ rowBase = weights + row * EMBEDDING_DIM;
+        ValueT* __restrict__ outBase = output + token * EMBEDDING_DIM;
+
+        for (unsigned long long dimBase = 0; dimBase < EMBEDDING_DIM; dimBase += ELEMENTS_PER_WARP_ITERATION) {
+            const unsigned long long laneBase = dimBase + static_cast<unsigned long long>(lane) * ELEMENTS_PER_LANE;
+            const unsigned long long linearBase = token * EMBEDDING_DIM + laneBase;
+            const LaneVector tmp = *reinterpret_cast<const LaneVector*>(rowBase + laneBase);
+            LaneVector out{};
+            #pragma unroll
+            for (unsigned int i = 0; i < ELEMENTS_PER_LANE; ++i) {
+                const unsigned long long linear = linearBase + i;
+                ValueT v = tmp.value[i];
+                out.value[i] = static_cast<ValueT>()cuda" << generatedEmbeddingEpilogueValue(epilogue) << R"cuda();
+            }
+            *reinterpret_cast<LaneVector*>(outBase + laneBase) = out;
+        }
+    }
+}
+)cuda";
+    }
     return src.str();
 }
 
@@ -323,18 +366,21 @@ std::string generatedEmbeddingExactPaddingSource(DataType indexDtype,
                                                  uint64_t numIndices,
                                                  uint64_t vocabularySize,
                                                  uint64_t embeddingDim,
-                                                 uint64_t paddingIndex) {
+                                                 uint64_t paddingIndex,
+                                                 const EmbeddingForwardEpilogue& epilogue) {
     const uint64_t elementsPerWarpIteration = static_cast<uint64_t>(elementsPerLane) * WARP_SIZE_EMBEDDING;
     if (embeddingDim % elementsPerWarpIteration != 0) {
         throw std::runtime_error("Generated EmbeddingLookup exact kernel requires embedding_dim to be a multiple of the warp iteration width.");
     }
 
     std::ostringstream src;
-    src << generatedEmbeddingExactCommonPrefix(indexDtype, valueDtype, elementsPerLane, numIndices, embeddingDim, elementsPerWarpIteration);
+    src << generatedEmbeddingExactCommonPrefix(indexDtype, valueDtype, elementsPerLane, numIndices, embeddingDim, elementsPerWarpIteration, epilogue);
     src << R"cuda(
     constexpr unsigned long long VOCABULARY_SIZE = )cuda" << vocabularySize << R"cuda(ull;
     constexpr unsigned long long PADDING_INDEX = )cuda" << paddingIndex << R"cuda(ull;
-
+)cuda";
+    if (!epilogue.enabled()) {
+        src << R"cuda(
     for (unsigned long long token = globalWarp; token < NUM_INDICES; token += totalWarps) {
         const unsigned long long row = static_cast<unsigned long long>(indices[token]);
         ValueT* __restrict__ outBase = output + token * EMBEDDING_DIM;
@@ -359,6 +405,29 @@ std::string generatedEmbeddingExactPaddingSource(DataType indexDtype,
     }
 }
 )cuda";
+    } else {
+        src << R"cuda(
+    for (unsigned long long token = globalWarp; token < NUM_INDICES; token += totalWarps) {
+        const unsigned long long row = static_cast<unsigned long long>(indices[token]);
+        const bool zeroRow = (row == PADDING_INDEX || row >= VOCABULARY_SIZE);
+        ValueT* __restrict__ outBase = output + token * EMBEDDING_DIM;
+
+        for (unsigned long long dimBase = 0; dimBase < EMBEDDING_DIM; dimBase += ELEMENTS_PER_WARP_ITERATION) {
+            const unsigned long long laneBase = dimBase + static_cast<unsigned long long>(lane) * ELEMENTS_PER_LANE;
+            const unsigned long long linearBase = token * EMBEDDING_DIM + laneBase;
+            LaneVector out{};
+            #pragma unroll
+            for (unsigned int i = 0; i < ELEMENTS_PER_LANE; ++i) {
+                const unsigned long long linear = linearBase + i;
+                ValueT v = zeroRow ? ValueT{} : weights[row * EMBEDDING_DIM + laneBase + i];
+                out.value[i] = static_cast<ValueT>()cuda" << generatedEmbeddingEpilogueValue(epilogue) << R"cuda();
+            }
+            *reinterpret_cast<LaneVector*>(outBase + laneBase) = out;
+        }
+    }
+}
+)cuda";
+    }
     return src.str();
 }
 
@@ -369,12 +438,13 @@ std::string generatedEmbeddingExactSource(DataType indexDtype,
                                           uint64_t numIndices,
                                           uint64_t vocabularySize,
                                           uint64_t embeddingDim,
-                                          uint64_t paddingIndex) {
+                                          uint64_t paddingIndex,
+                                          const EmbeddingForwardEpilogue& epilogue) {
     if (!hasPaddingIndex) {
-        return generatedEmbeddingExactUncheckedNoPaddingSource(indexDtype, valueDtype, elementsPerLane, numIndices, embeddingDim);
+        return generatedEmbeddingExactUncheckedNoPaddingSource(indexDtype, valueDtype, elementsPerLane, numIndices, embeddingDim, epilogue);
     }
     return generatedEmbeddingExactPaddingSource(
-        indexDtype, valueDtype, elementsPerLane, numIndices, vocabularySize, embeddingDim, paddingIndex);
+        indexDtype, valueDtype, elementsPerLane, numIndices, vocabularySize, embeddingDim, paddingIndex, epilogue);
 }
 
 
@@ -408,7 +478,8 @@ std::string generatedEmbeddingTinyCommonPrefix(DataType indexDtype,
                                                uint64_t numIndices,
                                                uint64_t embeddingDim,
                                                uint32_t groupSize,
-                                               uint32_t elementsPerLane) {
+                                               uint32_t elementsPerLane,
+                                               const EmbeddingForwardEpilogue& epilogue) {
     if (groupSize == 0 || groupSize > WARP_SIZE_EMBEDDING || (WARP_SIZE_EMBEDDING % groupSize) != 0) {
         throw std::runtime_error("Generated tiny EmbeddingLookup kernel requires a power-of-two group size that divides warp size.");
     }
@@ -425,7 +496,7 @@ std::string generatedEmbeddingTinyCommonPrefix(DataType indexDtype,
 extern "C" __global__ void embedding_lookup(
     const )cuda" << generatedEmbeddingIndexTypeName(indexDtype) << R"cuda(* __restrict__ indices,
     const )cuda" << generatedEmbeddingValueTypeName(valueDtype) << R"cuda(* __restrict__ weights,
-    )cuda" << generatedEmbeddingValueTypeName(valueDtype) << R"cuda(* __restrict__ output) {
+    )cuda" << generatedEmbeddingValueTypeName(valueDtype) << R"cuda(* __restrict__ output)cuda" << generatedEmbeddingExtraArgs(epilogue, valueDtype) << R"cuda() {
     using ValueT = )cuda" << generatedEmbeddingValueTypeName(valueDtype) << R"cuda(;
     constexpr unsigned int WARP_SIZE_EMBEDDING = 32u;
     constexpr unsigned int WARPS_PER_BLOCK = 8u;
@@ -460,7 +531,8 @@ extern "C" __global__ void embedding_lookup(
 std::string generatedEmbeddingTinyUncheckedNoPaddingSource(DataType indexDtype,
                                                            DataType valueDtype,
                                                            uint64_t numIndices,
-                                                           uint64_t embeddingDim) {
+                                                           uint64_t embeddingDim,
+                                                           const EmbeddingForwardEpilogue& epilogue) {
     const uint32_t groupSize = tinyEmbeddingGroupSize(embeddingDim);
     const uint32_t elementsPerLane = tinyEmbeddingElementsPerLane(embeddingDim, groupSize);
     if (groupSize == 0 || elementsPerLane == 0) {
@@ -468,8 +540,9 @@ std::string generatedEmbeddingTinyUncheckedNoPaddingSource(DataType indexDtype,
     }
 
     std::ostringstream src;
-    src << generatedEmbeddingTinyCommonPrefix(indexDtype, valueDtype, numIndices, embeddingDim, groupSize, elementsPerLane);
-    src << R"cuda(
+    src << generatedEmbeddingTinyCommonPrefix(indexDtype, valueDtype, numIndices, embeddingDim, groupSize, elementsPerLane, epilogue);
+    if (!epilogue.enabled()) {
+        src << R"cuda(
     for (unsigned long long token = globalGroup; token < NUM_INDICES; token += totalGroups) {
         unsigned long long row = 0ull;
         if (logicalLane == 0u) {
@@ -492,6 +565,41 @@ std::string generatedEmbeddingTinyUncheckedNoPaddingSource(DataType indexDtype,
     }
 }
 )cuda";
+    } else {
+        src << R"cuda(
+    for (unsigned long long token = globalGroup; token < NUM_INDICES; token += totalGroups) {
+        unsigned long long row = 0ull;
+        if (logicalLane == 0u) {
+            row = static_cast<unsigned long long>(indices[token]);
+        }
+        row = __shfl_sync(groupMask, row, groupInWarp * GROUP_SIZE);
+
+        const unsigned long long laneBase = static_cast<unsigned long long>(logicalLane) * ELEMENTS_PER_LANE;
+        const unsigned long long linearBase = token * EMBEDDING_DIM + laneBase;
+        if constexpr (EMBEDDING_DIM == static_cast<unsigned long long>(GROUP_SIZE) * ELEMENTS_PER_LANE) {
+            const LaneVector tmp = *reinterpret_cast<const LaneVector*>(weights + row * EMBEDDING_DIM + laneBase);
+            LaneVector out{};
+            #pragma unroll
+            for (unsigned int i = 0; i < ELEMENTS_PER_LANE; ++i) {
+                const unsigned long long linear = linearBase + i;
+                ValueT v = tmp.value[i];
+                out.value[i] = static_cast<ValueT>()cuda" << generatedEmbeddingEpilogueValue(epilogue) << R"cuda();
+            }
+            *reinterpret_cast<LaneVector*>(output + token * EMBEDDING_DIM + laneBase) = out;
+        } else {
+            for (unsigned int i = 0; i < ELEMENTS_PER_LANE; ++i) {
+                const unsigned long long dim = laneBase + i;
+                if (dim < EMBEDDING_DIM) {
+                    const unsigned long long linear = token * EMBEDDING_DIM + dim;
+                    ValueT v = weights[row * EMBEDDING_DIM + dim];
+                    output[linear] = static_cast<ValueT>()cuda" << generatedEmbeddingEpilogueValue(epilogue) << R"cuda();
+                }
+            }
+        }
+    }
+}
+)cuda";
+    }
     return src.str();
 }
 
@@ -500,7 +608,8 @@ std::string generatedEmbeddingTinyPaddingSource(DataType indexDtype,
                                                 uint64_t numIndices,
                                                 uint64_t vocabularySize,
                                                 uint64_t embeddingDim,
-                                                uint64_t paddingIndex) {
+                                                uint64_t paddingIndex,
+                                                const EmbeddingForwardEpilogue& epilogue) {
     const uint32_t groupSize = tinyEmbeddingGroupSize(embeddingDim);
     const uint32_t elementsPerLane = tinyEmbeddingElementsPerLane(embeddingDim, groupSize);
     if (groupSize == 0 || elementsPerLane == 0) {
@@ -508,11 +617,13 @@ std::string generatedEmbeddingTinyPaddingSource(DataType indexDtype,
     }
 
     std::ostringstream src;
-    src << generatedEmbeddingTinyCommonPrefix(indexDtype, valueDtype, numIndices, embeddingDim, groupSize, elementsPerLane);
+    src << generatedEmbeddingTinyCommonPrefix(indexDtype, valueDtype, numIndices, embeddingDim, groupSize, elementsPerLane, epilogue);
     src << R"cuda(
     constexpr unsigned long long VOCABULARY_SIZE = )cuda" << vocabularySize << R"cuda(ull;
     constexpr unsigned long long PADDING_INDEX = )cuda" << paddingIndex << R"cuda(ull;
-
+)cuda";
+    if (!epilogue.enabled()) {
+        src << R"cuda(
     for (unsigned long long token = globalGroup; token < NUM_INDICES; token += totalGroups) {
         unsigned long long row = 0ull;
         if (logicalLane == 0u) {
@@ -548,6 +659,42 @@ std::string generatedEmbeddingTinyPaddingSource(DataType indexDtype,
     }
 }
 )cuda";
+    } else {
+        src << R"cuda(
+    for (unsigned long long token = globalGroup; token < NUM_INDICES; token += totalGroups) {
+        unsigned long long row = 0ull;
+        if (logicalLane == 0u) {
+            row = static_cast<unsigned long long>(indices[token]);
+        }
+        row = __shfl_sync(groupMask, row, groupInWarp * GROUP_SIZE);
+
+        const bool zeroRow = (row == PADDING_INDEX || row >= VOCABULARY_SIZE);
+        const unsigned long long laneBase = static_cast<unsigned long long>(logicalLane) * ELEMENTS_PER_LANE;
+        const unsigned long long linearBase = token * EMBEDDING_DIM + laneBase;
+        ValueT* __restrict__ outBase = output + token * EMBEDDING_DIM;
+        if constexpr (EMBEDDING_DIM == static_cast<unsigned long long>(GROUP_SIZE) * ELEMENTS_PER_LANE) {
+            LaneVector out{};
+            #pragma unroll
+            for (unsigned int i = 0; i < ELEMENTS_PER_LANE; ++i) {
+                const unsigned long long linear = linearBase + i;
+                ValueT v = zeroRow ? ValueT{} : weights[row * EMBEDDING_DIM + laneBase + i];
+                out.value[i] = static_cast<ValueT>()cuda" << generatedEmbeddingEpilogueValue(epilogue) << R"cuda();
+            }
+            *reinterpret_cast<LaneVector*>(outBase + laneBase) = out;
+        } else {
+            for (unsigned int i = 0; i < ELEMENTS_PER_LANE; ++i) {
+                const unsigned long long dim = laneBase + i;
+                if (dim < EMBEDDING_DIM) {
+                    const unsigned long long linear = token * EMBEDDING_DIM + dim;
+                    ValueT v = zeroRow ? ValueT{} : weights[row * EMBEDDING_DIM + dim];
+                    outBase[dim] = static_cast<ValueT>()cuda" << generatedEmbeddingEpilogueValue(epilogue) << R"cuda();
+                }
+            }
+        }
+    }
+}
+)cuda";
+    }
     return src.str();
 }
 
@@ -557,11 +704,12 @@ std::string generatedEmbeddingTinySource(DataType indexDtype,
                                          uint64_t numIndices,
                                          uint64_t vocabularySize,
                                          uint64_t embeddingDim,
-                                         uint64_t paddingIndex) {
+                                         uint64_t paddingIndex,
+                                         const EmbeddingForwardEpilogue& epilogue) {
     if (!hasPaddingIndex) {
-        return generatedEmbeddingTinyUncheckedNoPaddingSource(indexDtype, valueDtype, numIndices, embeddingDim);
+        return generatedEmbeddingTinyUncheckedNoPaddingSource(indexDtype, valueDtype, numIndices, embeddingDim, epilogue);
     }
-    return generatedEmbeddingTinyPaddingSource(indexDtype, valueDtype, numIndices, vocabularySize, embeddingDim, paddingIndex);
+    return generatedEmbeddingTinyPaddingSource(indexDtype, valueDtype, numIndices, vocabularySize, embeddingDim, paddingIndex, epilogue);
 }
 
 void checkNvrtc(nvrtcResult status, const char* call) {
@@ -703,15 +851,16 @@ std::shared_ptr<GeneratedEmbeddingKernel> compileGeneratedEmbeddingExactKernel(D
                                                                                uint64_t vocabularySize,
                                                                                uint64_t embeddingDim,
                                                                                uint64_t paddingIndex,
-                                                                               int deviceNum) {
+                                                                               int deviceNum,
+                                                                               const EmbeddingForwardEpilogue& epilogue) {
     cudaDeviceProp prop{};
     CUDA_CHECK(cudaGetDeviceProperties(&prop, deviceNum));
 
     const std::string source = generatedEmbeddingExactSource(
-        indexDtype, valueDtype, elementsPerLane, hasPaddingIndex, numIndices, vocabularySize, embeddingDim, paddingIndex);
+        indexDtype, valueDtype, elementsPerLane, hasPaddingIndex, numIndices, vocabularySize, embeddingDim, paddingIndex, epilogue);
 
     std::ostringstream key;
-    key << "embedding_lookup_generated_exact:v4\n";
+    key << "embedding_lookup_generated_exact:v5\n";
     key << "sm=" << prop.major << prop.minor << "\n";
     key << "device=" << deviceNum << "\n";
     key << source;
@@ -744,15 +893,16 @@ std::shared_ptr<GeneratedEmbeddingKernel> compileGeneratedEmbeddingTinyKernel(Da
                                                                               uint64_t vocabularySize,
                                                                               uint64_t embeddingDim,
                                                                               uint64_t paddingIndex,
-                                                                              int deviceNum) {
+                                                                              int deviceNum,
+                                                                              const EmbeddingForwardEpilogue& epilogue) {
     cudaDeviceProp prop{};
     CUDA_CHECK(cudaGetDeviceProperties(&prop, deviceNum));
 
     const std::string source =
-        generatedEmbeddingTinySource(indexDtype, valueDtype, hasPaddingIndex, numIndices, vocabularySize, embeddingDim, paddingIndex);
+        generatedEmbeddingTinySource(indexDtype, valueDtype, hasPaddingIndex, numIndices, vocabularySize, embeddingDim, paddingIndex, epilogue);
 
     std::ostringstream key;
-    key << "embedding_lookup_generated_tiny:v2\n";
+    key << "embedding_lookup_generated_tiny:v3\n";
     key << "sm=" << prop.major << prop.minor << "\n";
     key << "device=" << deviceNum << "\n";
     key << source;
@@ -781,11 +931,26 @@ void launchPreparedGeneratedEmbeddingForward(const PreparedEmbeddingForward& pre
                                              const Tensor& indices,
                                              const Tensor& weights,
                                              Tensor& output,
-                                             Stream stream) {
+                                             Stream stream,
+                                             const std::vector<Tensor>& epilogue_inputs) {
+    if (epilogue_inputs.size() != prepared.epilogue.extra_input_dtypes.size()) {
+        throw std::runtime_error("Prepared EmbeddingLookup epilogue received the wrong number of tensor inputs.");
+    }
+    if (epilogue_inputs.size() > 16) {
+        throw std::runtime_error("Prepared EmbeddingLookup epilogue supports at most 16 extra tensor inputs.");
+    }
     void* indicesPtr = const_cast<void*>(indices.getMemPtr<void>());
     void* weightsPtr = const_cast<void*>(weights.getMemPtr<void>());
     void* outputPtr = output.getMemPtr<void>();
-    void* kernelArgs[3] = {&indicesPtr, &weightsPtr, &outputPtr};
+    std::array<void*, 16> epiloguePtrs{};
+    std::array<void*, 19> kernelArgs{};
+    kernelArgs[0] = &indicesPtr;
+    kernelArgs[1] = &weightsPtr;
+    kernelArgs[2] = &outputPtr;
+    for (size_t i = 0; i < epilogue_inputs.size(); ++i) {
+        epiloguePtrs[i] = const_cast<void*>(epilogue_inputs[i].getMemPtr<void>());
+        kernelArgs[3 + i] = &epiloguePtrs[i];
+    }
 
     ScopedGpu scopedGpu(prepared.device_num);
     CU_CHECK(cuLaunchKernel(prepared.generated_kernel->kernel,
@@ -797,7 +962,7 @@ void launchPreparedGeneratedEmbeddingForward(const PreparedEmbeddingForward& pre
                             1,
                             0,
                             reinterpret_cast<CUstream>(stream.getStream()),
-                            kernelArgs,
+                            kernelArgs.data(),
                             nullptr));
 }
 
@@ -806,7 +971,8 @@ void launchPreparedScalarEmbeddingForward(const PreparedEmbeddingForward& prepar
                                           const Tensor& indices,
                                           const Tensor& weights,
                                           Tensor& output,
-                                          Stream stream) {
+                                          Stream stream,
+                                          const std::vector<Tensor>&) {
     embeddingForwardWarpScalarFallbackKernel<IndexT, ValueT, HasPaddingIndex>
         <<<prepared.grid_blocks, THREADS_PER_BLOCK, 0, stream.getStream()>>>(
             indices.getMemPtr<IndexT>(),
@@ -823,7 +989,8 @@ template <typename IndexT, typename ValueT, bool HasPaddingIndex>
 std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardTinyTyped(const Tensor& indices,
                                                                            const Tensor& weights,
                                                                            const Tensor& output,
-                                                                           std::optional<uint64_t> paddingIndex) {
+                                                                           std::optional<uint64_t> paddingIndex,
+                                                                           const EmbeddingForwardEpilogue& epilogue) {
     const uint64_t numIndices = indices.getTotalNumElements();
     const std::vector<uint64_t> weightDims = weights.getDimensions();
     const uint64_t vocabularySize = weightDims[0];
@@ -847,6 +1014,7 @@ std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardTinyTyped(const
     prepared->device_num = output.getPlacement().getDeviceNum();
     prepared->index_dtype = indices.getDataType();
     prepared->weights_dtype = weights.getDataType();
+    prepared->epilogue = epilogue;
 
     if (numIndices != 0) {
         prepared->generated_kernel = compileGeneratedEmbeddingTinyKernel(indices.getDataType(),
@@ -856,7 +1024,8 @@ std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardTinyTyped(const
                                                                          vocabularySize,
                                                                          embeddingDim,
                                                                          prepared->padding_index,
-                                                                         prepared->device_num);
+                                                                         prepared->device_num,
+                                                                         epilogue);
     }
     return prepared;
 }
@@ -865,7 +1034,8 @@ template <typename IndexT, typename ValueT, uint32_t ElementsPerLane, bool HasPa
 std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardWarpExactTyped(const Tensor& indices,
                                                                                const Tensor& weights,
                                                                                const Tensor& output,
-                                                                               std::optional<uint64_t> paddingIndex) {
+                                                                               std::optional<uint64_t> paddingIndex,
+                                                                               const EmbeddingForwardEpilogue& epilogue) {
     const uint64_t numIndices = indices.getTotalNumElements();
     const std::vector<uint64_t> weightDims = weights.getDimensions();
     const uint64_t vocabularySize = weightDims[0];
@@ -888,6 +1058,7 @@ std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardWarpExactTyped(
     prepared->device_num = output.getPlacement().getDeviceNum();
     prepared->index_dtype = indices.getDataType();
     prepared->weights_dtype = weights.getDataType();
+    prepared->epilogue = epilogue;
 
     if (numIndices != 0) {
         prepared->generated_kernel = compileGeneratedEmbeddingExactKernel(indices.getDataType(),
@@ -898,7 +1069,8 @@ std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardWarpExactTyped(
                                                                           vocabularySize,
                                                                           embeddingDim,
                                                                           prepared->padding_index,
-                                                                          prepared->device_num);
+                                                                          prepared->device_num,
+                                                                          epilogue);
     }
     return prepared;
 }
@@ -938,38 +1110,42 @@ template <typename IndexT, typename ValueT, bool HasPaddingIndex>
 std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardTypedWithPaddingMode(const Tensor& indices,
                                                                                      const Tensor& weights,
                                                                                      const Tensor& output,
-                                                                                     std::optional<uint64_t> paddingIndex) {
+                                                                                     std::optional<uint64_t> paddingIndex,
+                                                                                     const EmbeddingForwardEpilogue& epilogue) {
     const uint64_t embeddingDim = weights.getDimensions()[1];
     constexpr uint32_t maxElementsPerLane = MAX_COALESCED_BYTES_PER_LANE / sizeof(ValueT);
     static_assert(maxElementsPerLane >= 1, "Embedding value dtype is too wide for the coalesced lane copy size.");
     static_assert(maxElementsPerLane <= 8, "Embedding forward intentionally caps lane copies to 16 bytes.");
 
     if (embeddingDim <= WARP_SIZE_EMBEDDING) {
-        return prepareEmbeddingForwardTinyTyped<IndexT, ValueT, HasPaddingIndex>(indices, weights, output, paddingIndex);
+        return prepareEmbeddingForwardTinyTyped<IndexT, ValueT, HasPaddingIndex>(indices, weights, output, paddingIndex, epilogue);
     }
 
     switch (selectExactElementsPerLane(embeddingDim, maxElementsPerLane)) {
         case 8:
             if constexpr (maxElementsPerLane >= 8) {
-                return prepareEmbeddingForwardWarpExactTyped<IndexT, ValueT, 8, HasPaddingIndex>(indices, weights, output, paddingIndex);
+                return prepareEmbeddingForwardWarpExactTyped<IndexT, ValueT, 8, HasPaddingIndex>(indices, weights, output, paddingIndex, epilogue);
             } else {
                 THOR_UNREACHABLE();
             }
         case 4:
             if constexpr (maxElementsPerLane >= 4) {
-                return prepareEmbeddingForwardWarpExactTyped<IndexT, ValueT, 4, HasPaddingIndex>(indices, weights, output, paddingIndex);
+                return prepareEmbeddingForwardWarpExactTyped<IndexT, ValueT, 4, HasPaddingIndex>(indices, weights, output, paddingIndex, epilogue);
             } else {
                 THOR_UNREACHABLE();
             }
         case 2:
             if constexpr (maxElementsPerLane >= 2) {
-                return prepareEmbeddingForwardWarpExactTyped<IndexT, ValueT, 2, HasPaddingIndex>(indices, weights, output, paddingIndex);
+                return prepareEmbeddingForwardWarpExactTyped<IndexT, ValueT, 2, HasPaddingIndex>(indices, weights, output, paddingIndex, epilogue);
             } else {
                 THOR_UNREACHABLE();
             }
         case 1:
-            return prepareEmbeddingForwardWarpExactTyped<IndexT, ValueT, 1, HasPaddingIndex>(indices, weights, output, paddingIndex);
+            return prepareEmbeddingForwardWarpExactTyped<IndexT, ValueT, 1, HasPaddingIndex>(indices, weights, output, paddingIndex, epilogue);
         case 0:
+            if (epilogue.enabled()) {
+                throw std::runtime_error("EmbeddingLookup root fusion currently requires an exact generated embedding row width.");
+            }
             return prepareEmbeddingForwardWarpScalarFallbackTyped<IndexT, ValueT, HasPaddingIndex>(indices, weights, output, paddingIndex);
         default:
             THOR_UNREACHABLE();
@@ -980,11 +1156,12 @@ template <typename IndexT, typename ValueT>
 std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardTyped(const Tensor& indices,
                                                                        const Tensor& weights,
                                                                        const Tensor& output,
-                                                                       std::optional<uint64_t> paddingIndex) {
+                                                                       std::optional<uint64_t> paddingIndex,
+                                                                       const EmbeddingForwardEpilogue& epilogue) {
     if (paddingIndex.has_value()) {
-        return prepareEmbeddingForwardTypedWithPaddingMode<IndexT, ValueT, true>(indices, weights, output, paddingIndex);
+        return prepareEmbeddingForwardTypedWithPaddingMode<IndexT, ValueT, true>(indices, weights, output, paddingIndex, epilogue);
     }
-    return prepareEmbeddingForwardTypedWithPaddingMode<IndexT, ValueT, false>(indices, weights, output, paddingIndex);
+    return prepareEmbeddingForwardTypedWithPaddingMode<IndexT, ValueT, false>(indices, weights, output, paddingIndex, epilogue);
 }
 
 template <typename IndexT>
@@ -1020,14 +1197,15 @@ template <typename IndexT>
 std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardValueDtype(const Tensor& indices,
                                                                            const Tensor& weights,
                                                                            const Tensor& output,
-                                                                           std::optional<uint64_t> paddingIndex) {
+                                                                           std::optional<uint64_t> paddingIndex,
+                                                                           const EmbeddingForwardEpilogue& epilogue) {
     switch (weights.getDataType()) {
         case DataType::FP16:
-            return prepareEmbeddingForwardTyped<IndexT, __half>(indices, weights, output, paddingIndex);
+            return prepareEmbeddingForwardTyped<IndexT, __half>(indices, weights, output, paddingIndex, epilogue);
         case DataType::BF16:
-            return prepareEmbeddingForwardTyped<IndexT, __nv_bfloat16>(indices, weights, output, paddingIndex);
+            return prepareEmbeddingForwardTyped<IndexT, __nv_bfloat16>(indices, weights, output, paddingIndex, epilogue);
         case DataType::FP32:
-            return prepareEmbeddingForwardTyped<IndexT, float>(indices, weights, output, paddingIndex);
+            return prepareEmbeddingForwardTyped<IndexT, float>(indices, weights, output, paddingIndex, epilogue);
         default:
             throw std::invalid_argument("Embedding forward weights dtype must be fp16, bf16, or fp32. Got " +
                                         dataTypeName(weights.getDataType()) + ".");
@@ -1067,19 +1245,38 @@ void validateEmbeddingForwardInputs(const Tensor& indices, const Tensor& weights
     validateDenseContiguous(output, "output");
 }
 
+void validateEmbeddingForwardEpilogue(const EmbeddingForwardEpilogue& epilogue, const Tensor& output) {
+    if (!epilogue.enabled()) {
+        if (!epilogue.extra_input_dtypes.empty()) {
+            throw std::invalid_argument("Embedding epilogue input dtype list must be empty when no epilogue expression is provided.");
+        }
+        return;
+    }
+    if (epilogue.extra_input_dtypes.size() > 16) {
+        throw std::invalid_argument("Embedding epilogue supports at most 16 extra tensor inputs.");
+    }
+    for (DataType dtype : epilogue.extra_input_dtypes) {
+        if (dtype != output.getDataType()) {
+            throw std::invalid_argument("Embedding epilogue tensor input dtypes must match the output dtype.");
+        }
+    }
+}
+
 }  // namespace
 
 std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForward(const Tensor& indices,
                                                                  const Tensor& weights,
                                                                  const Tensor& output,
-                                                                 std::optional<uint64_t> paddingIndex) {
+                                                                 std::optional<uint64_t> paddingIndex,
+                                                                 const EmbeddingForwardEpilogue& epilogue) {
     validateEmbeddingForwardInputs(indices, weights, output);
+    validateEmbeddingForwardEpilogue(epilogue, output);
 
     switch (indices.getDataType()) {
         case DataType::UINT32:
-            return prepareEmbeddingForwardValueDtype<uint32_t>(indices, weights, output, paddingIndex);
+            return prepareEmbeddingForwardValueDtype<uint32_t>(indices, weights, output, paddingIndex, epilogue);
         case DataType::UINT64:
-            return prepareEmbeddingForwardValueDtype<uint64_t>(indices, weights, output, paddingIndex);
+            return prepareEmbeddingForwardValueDtype<uint64_t>(indices, weights, output, paddingIndex, epilogue);
         default:
             THOR_UNREACHABLE();
     }
@@ -1089,14 +1286,15 @@ void launchPreparedEmbeddingForward(const PreparedEmbeddingForward& prepared,
                                     const Tensor& indices,
                                     const Tensor& weights,
                                     Tensor& output,
-                                    Stream stream) {
+                                    Stream stream,
+                                    const std::vector<Tensor>& epilogue_inputs) {
     if (prepared.num_indices == 0) {
         return;
     }
     if (prepared.launch == nullptr) {
         throw std::runtime_error("PreparedEmbeddingForward is missing its launch function.");
     }
-    prepared.launch(prepared, indices, weights, output, stream);
+    prepared.launch(prepared, indices, weights, output, stream, epilogue_inputs);
 }
 
 void launchEmbeddingForward(const Tensor& indices,

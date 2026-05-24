@@ -30,6 +30,7 @@ struct CudaKernelSourceInspection {
 [[nodiscard]] nlohmann::json cudaKernelManifestFromExpressionJson(const nlohmann::json& expression_json);
 [[nodiscard]] std::string cudaKernelManifestCanonicalBytes(const nlohmann::json& manifest);
 [[nodiscard]] std::string cudaKernelGenerateAndAttachManifestSignature(nlohmann::json& expression_json);
+[[nodiscard]] std::vector<std::string> cudaKernelGenerateAndAttachManifestSignatures(nlohmann::json& root_json);
 [[nodiscard]] CudaKernelSignatureVerificationResult cudaKernelVerifyManifestSignature(
     const nlohmann::json& expression_json,
     const std::string& trusted_public_key);

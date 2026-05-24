@@ -257,6 +257,7 @@ struct CompiledEmbeddingLookup {
     TensorDescriptor::DataType weights_dtype = TensorDescriptor::DataType::FP32;
     TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP32;
     std::string debug_name = "thor_expr_embedding_lookup";
+    EmbeddingForwardEpilogue epilogue;
 };
 
 struct CompiledCudaKernel {
@@ -575,7 +576,8 @@ class StampedEmbeddingLookup {
                            const Tensor& indices,
                            const Tensor& weights,
                            const Tensor& output,
-                           const Stream& stream);
+                           const Stream& stream,
+                           std::vector<Tensor> epilogue_inputs = {});
 
    private:
     const std::shared_ptr<CompiledEmbeddingLookup> compiled_embedding_lookup;
@@ -583,6 +585,7 @@ class StampedEmbeddingLookup {
     const Tensor weights;
     mutable Tensor output;
     Stream stream;
+    std::vector<Tensor> epilogue_inputs;
     std::shared_ptr<PreparedEmbeddingForward> prepared_forward;
 };
 

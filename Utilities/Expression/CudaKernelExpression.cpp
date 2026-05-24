@@ -643,6 +643,8 @@ std::string CudaKernelExpression::cacheSignature() const {
     return oss.str();
 }
 
+std::string cudaKernelExpressionCompiledSourceForInspection(const std::string& user_source) { return customKernelCompiledSource(user_source); }
+
 std::string CudaKernelExpression::compiledSource() const { return customKernelCompiledSource(source_); }
 
 CudaKernelExpression::SourceInfo CudaKernelExpression::sourceInfo() const {
