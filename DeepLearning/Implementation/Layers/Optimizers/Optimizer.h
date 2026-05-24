@@ -1,6 +1,10 @@
 #pragma once
 
 #include <optional>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Parameter/Parameterizable.h"
@@ -16,6 +20,20 @@
 // Dense optimizers own dense gradient storage. Sparse-row optimizers own reduced sparse gradient storage.
 
 namespace ThorImplementation {
+
+// Expression-backed sparse-row optimizer update definition.
+//
+// This is intentionally analogous to API activations' toExpression() pattern, but lives on the
+// physical optimizer because optimizer expressions are stateful: they bind indexed parameter/state
+// tensors, dense logical sparse-gradient rows, and runtime scalar hyperparameters.  The same object
+// is consumed today by SparseRowUpdatePlan and can be consumed later by an embedding sparse-gradient
+// reducer that provides the `gradient` input as a local reduced value instead of a materialized
+// SparseRowGradient::values tensor.
+struct SparseRowOptimizerExpression {
+    PhysicalOutputs outputs;
+    std::unordered_map<std::string, SparseRowUpdateTensorBinding> inputs;
+    std::unordered_map<std::string, Tensor> indexedOutputs;
+};
 
 class Optimizer : public Parameterizable {
    public:
@@ -34,6 +52,25 @@ class Optimizer : public Parameterizable {
     bool isCompiled() const { return compiled; }
 
     [[nodiscard]] virtual bool supportsSparseRowGradients() const { return false; }
+
+    // Returns the expression equivalent of this optimizer's sparse-row update over an already-reduced
+    // SparseRowGradient. Optimizers that support sparse rows should build all sparse update math here
+    // instead of open-coding expressions inside compileSparseRows().
+    //
+    // The returned expression convention is:
+    //   - indexed inputs/outputs are addressed by SparseRowGradient::rows[logical_row]
+    //   - dense logical inputs are addressed by logical sparse row
+    //   - runtime scalar inputs are supplied by updateSparseRows()
+    //
+    // Keeping this optimizer math as an expression is the hook needed for future reducer/optimizer
+    // fusion: an embedding reducer can inline the same expression after computing the local reduced
+    // `gradient` value, avoiding the materialized SparseRowGradient::values round trip without
+    // inventing optimizer-specific CUDA code for every optimizer.
+    [[nodiscard]] virtual SparseRowOptimizerExpression toSparseRowUpdateExpression(const Tensor &weights, SparseRowGradient &sparseRowGradient) {
+        (void)weights;
+        (void)sparseRowGradient;
+        throw std::runtime_error("Optimizer does not support sparse-row update expressions.");
+    }
 
     // Note: It is the responsibility of the layer to ensure all dependencies are available at the start of gradient update stream,
     //       and that the data stream will be blocked until the end of the gradient update stream
