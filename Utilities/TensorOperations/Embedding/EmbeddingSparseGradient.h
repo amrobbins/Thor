@@ -17,6 +17,15 @@ namespace ThorImplementation {
 
 struct PreparedEmbeddingSparseGradient;
 
+struct EmbeddingSparseGradientRunBucketConfig {
+    uint32_t lowRunMax = 32U;
+    uint32_t ultraHighRunMin = 4096U;
+    uint32_t ultraHighTokensPerPartial = 1024U;
+};
+
+EmbeddingSparseGradientRunBucketConfig defaultEmbeddingSparseGradientRunBucketConfig();
+void setEmbeddingSparseGradientRunBucketConfigOverrideForTesting(std::optional<EmbeddingSparseGradientRunBucketConfig> config);
+
 struct EmbeddingSparseGradientProfileResult {
     uint64_t numTokens = 0;
     uint64_t vocabularySize = 0;

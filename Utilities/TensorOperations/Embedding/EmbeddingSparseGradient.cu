@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -33,14 +34,34 @@ constexpr uint32_t THREADS_PER_BLOCK = 256;
 constexpr bool PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS = true;
 constexpr uint32_t WARP_SIZE_EMBEDDING = 32;
 constexpr uint32_t WARPS_PER_BLOCK = THREADS_PER_BLOCK / WARP_SIZE_EMBEDDING;
-constexpr uint32_t EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX = 32U;
-constexpr uint32_t EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN = 4096U;
-constexpr uint32_t EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL = 1024U;
+constexpr uint32_t DEFAULT_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX = 16U;
+constexpr uint32_t DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN = 1024U;
+constexpr uint32_t DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL = 512U;
 static_assert(THREADS_PER_BLOCK == 256);
 static_assert(WARPS_PER_BLOCK == 8);
-static_assert(EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX + 1U < EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN);
-static_assert(EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL > 0U);
-static_assert(EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL <= EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN);
+static_assert(DEFAULT_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX + 1U < DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN);
+static_assert(DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL > 0U);
+static_assert(DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL <= DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN);
+
+std::mutex gEmbeddingSparseGradientRunBucketConfigMutex;
+std::optional<EmbeddingSparseGradientRunBucketConfig> gEmbeddingSparseGradientRunBucketConfigOverride;
+
+void validateEmbeddingSparseGradientRunBucketConfig(const EmbeddingSparseGradientRunBucketConfig& config) {
+    if (config.lowRunMax + 1U >= config.ultraHighRunMin) {
+        throw std::invalid_argument("Embedding sparse-gradient bucket config requires low_run_max + 1 < ultra_high_run_min.");
+    }
+    if (config.ultraHighTokensPerPartial == 0U) {
+        throw std::invalid_argument("Embedding sparse-gradient bucket config requires ultra_high_tokens_per_partial > 0.");
+    }
+}
+
+EmbeddingSparseGradientRunBucketConfig currentEmbeddingSparseGradientRunBucketConfig() {
+    std::lock_guard<std::mutex> lock(gEmbeddingSparseGradientRunBucketConfigMutex);
+    return gEmbeddingSparseGradientRunBucketConfigOverride.value_or(
+        EmbeddingSparseGradientRunBucketConfig{DEFAULT_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX,
+                                               DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN,
+                                               DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL});
+}
 
 std::string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
@@ -179,7 +200,8 @@ struct EmbeddingSparseGradientVectorOps {
     static constexpr uint32_t DIMS_PER_THREAD = 4U;
     static constexpr uint32_t THREADS_PER_ROW = EmbeddingDim / DIMS_PER_THREAD;
     static constexpr uint32_t ROWS_PER_BLOCK = BlockThreads / THREADS_PER_ROW;
-    static_assert(BlockThreads % THREADS_PER_ROW == 0U, "Fixed embedding sparse-gradient vector reducer block size must be divisible by threads per row.");
+    static_assert(BlockThreads % THREADS_PER_ROW == 0U,
+                  "Fixed embedding sparse-gradient vector reducer block size must be divisible by threads per row.");
 
     __device__ __forceinline__ static float4 load(uint64_t token, uint32_t vectorIndex, const GradT* __restrict__ upstreamGradient) {
         const uint64_t base = token * static_cast<uint64_t>(EmbeddingDim) + static_cast<uint64_t>(vectorIndex) * DIMS_PER_THREAD;
@@ -201,7 +223,8 @@ struct EmbeddingSparseGradientVectorOps<float, EmbeddingDim, BlockThreads> {
     static constexpr uint32_t DIMS_PER_THREAD = 4U;
     static constexpr uint32_t THREADS_PER_ROW = EmbeddingDim / DIMS_PER_THREAD;
     static constexpr uint32_t ROWS_PER_BLOCK = BlockThreads / THREADS_PER_ROW;
-    static_assert(BlockThreads % THREADS_PER_ROW == 0U, "Fixed embedding sparse-gradient vector reducer block size must be divisible by threads per row.");
+    static_assert(BlockThreads % THREADS_PER_ROW == 0U,
+                  "Fixed embedding sparse-gradient vector reducer block size must be divisible by threads per row.");
 
     __device__ __forceinline__ static float4 load(uint64_t token, uint32_t vectorIndex, const float* __restrict__ upstreamGradient) {
         const float4* __restrict__ input = reinterpret_cast<const float4*>(upstreamGradient + token * static_cast<uint64_t>(EmbeddingDim));
@@ -220,7 +243,8 @@ struct EmbeddingSparseGradientVectorOps<__half, EmbeddingDim, BlockThreads> {
     static constexpr uint32_t DIMS_PER_THREAD = 4U;
     static constexpr uint32_t THREADS_PER_ROW = EmbeddingDim / DIMS_PER_THREAD;
     static constexpr uint32_t ROWS_PER_BLOCK = BlockThreads / THREADS_PER_ROW;
-    static_assert(BlockThreads % THREADS_PER_ROW == 0U, "Fixed embedding sparse-gradient vector reducer block size must be divisible by threads per row.");
+    static_assert(BlockThreads % THREADS_PER_ROW == 0U,
+                  "Fixed embedding sparse-gradient vector reducer block size must be divisible by threads per row.");
 
     __device__ __forceinline__ static float4 load(uint64_t token, uint32_t vectorIndex, const __half* __restrict__ upstreamGradient) {
         const unsigned long long* __restrict__ input =
@@ -243,7 +267,8 @@ struct EmbeddingSparseGradientVectorOps<__nv_bfloat16, EmbeddingDim, BlockThread
     static constexpr uint32_t DIMS_PER_THREAD = 4U;
     static constexpr uint32_t THREADS_PER_ROW = EmbeddingDim / DIMS_PER_THREAD;
     static constexpr uint32_t ROWS_PER_BLOCK = BlockThreads / THREADS_PER_ROW;
-    static_assert(BlockThreads % THREADS_PER_ROW == 0U, "Fixed embedding sparse-gradient vector reducer block size must be divisible by threads per row.");
+    static_assert(BlockThreads % THREADS_PER_ROW == 0U,
+                  "Fixed embedding sparse-gradient vector reducer block size must be divisible by threads per row.");
 
     __device__ __forceinline__ static float4 load(uint64_t token,
                                                   uint32_t vectorIndex,
@@ -321,18 +346,16 @@ struct EmbeddingSparseGradientReduceGridUpdateConfig {
     uint32_t maxReduceGridDimY = 1U;
 };
 
-__device__ __forceinline__ void updateEmbeddingSparseGradientBucketReduceGrid(
-    const cudaGraphDeviceNode_t* reduceNode,
-    uint32_t numRows,
-    EmbeddingSparseGradientReduceGridUpdateConfig config) {
+__device__ __forceinline__ void updateEmbeddingSparseGradientBucketReduceGrid(const cudaGraphDeviceNode_t* reduceNode,
+                                                                              uint32_t numRows,
+                                                                              EmbeddingSparseGradientReduceGridUpdateConfig config) {
     if (reduceNode == nullptr) {
         return;
     }
     if (config.reduceRowsPerGridX == 0U || config.reduceGridDimY == 0U || config.reduceGridDimY > config.maxReduceGridDimY) {
         asm("trap;");
     }
-    const uint64_t packedGridX =
-        (static_cast<uint64_t>(numRows) + config.reduceRowsPerGridX - 1ULL) / config.reduceRowsPerGridX;
+    const uint64_t packedGridX = (static_cast<uint64_t>(numRows) + config.reduceRowsPerGridX - 1ULL) / config.reduceRowsPerGridX;
     const uint32_t gridX = checkedEmbeddingSparseGradientGridDim(packedGridX, config.minReduceGridDimX, config.maxReduceGridDimX);
     cudaError_t status =
         cudaGraphKernelNodeSetGridDim(loadEmbeddingSparseGradientTargetNode(reduceNode), dim3(gridX, config.reduceGridDimY, 1U));
@@ -342,28 +365,32 @@ __device__ __forceinline__ void updateEmbeddingSparseGradientBucketReduceGrid(
 }
 
 template <typename RowT>
-__global__ void finalizeAndBucketizeEmbeddingSparseGradientRowsKernel(const RowT* __restrict__ outputRows,
-                                                                      const uint32_t* __restrict__ numRuns,
-                                                                      RowT* __restrict__ outputNumRows,
-                                                                      const uint32_t* __restrict__ runCounts,
-                                                                      uint32_t* __restrict__ lowRunRows,
-                                                                      uint32_t* __restrict__ highRunRows,
-                                                                      uint32_t* __restrict__ ultraHighRunRows,
-                                                                      uint32_t* __restrict__ ultraHighRunPartialCounts,
-                                                                      uint32_t* __restrict__ ultraHighRunPartialOffsets,
-                                                                      uint32_t* __restrict__ numUltraHighPartials,
-                                                                      uint32_t* __restrict__ numLowRunRows,
-                                                                      uint32_t* __restrict__ numHighRunRows,
-                                                                      uint32_t* __restrict__ numUltraHighRunRows,
-                                                                      uint64_t vocabularySize,
-                                                                      const cudaGraphDeviceNode_t* lowReduceNode,
-                                                                      const cudaGraphDeviceNode_t* highReduceNode,
-                                                                      const cudaGraphDeviceNode_t* ultraHighPartialReduceNode,
-                                                                      const cudaGraphDeviceNode_t* ultraHighReduceNode,
-                                                                      EmbeddingSparseGradientReduceGridUpdateConfig lowReduceGridConfig,
-                                                                      EmbeddingSparseGradientReduceGridUpdateConfig highReduceGridConfig,
-                                                                      EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridConfig,
-                                                                      EmbeddingSparseGradientReduceGridUpdateConfig ultraHighReduceGridConfig) {
+__global__ void finalizeAndBucketizeEmbeddingSparseGradientRowsKernel(
+    const RowT* __restrict__ outputRows,
+    const uint32_t* __restrict__ numRuns,
+    RowT* __restrict__ outputNumRows,
+    const uint32_t* __restrict__ runCounts,
+    uint32_t* __restrict__ lowRunRows,
+    uint32_t* __restrict__ highRunRows,
+    uint32_t* __restrict__ ultraHighRunRows,
+    uint32_t* __restrict__ ultraHighRunPartialCounts,
+    uint32_t* __restrict__ ultraHighRunPartialOffsets,
+    uint32_t* __restrict__ numUltraHighPartials,
+    uint32_t* __restrict__ numLowRunRows,
+    uint32_t* __restrict__ numHighRunRows,
+    uint32_t* __restrict__ numUltraHighRunRows,
+    uint64_t vocabularySize,
+    uint32_t lowRunMax,
+    uint32_t ultraHighRunMin,
+    uint32_t ultraHighTokensPerPartial,
+    const cudaGraphDeviceNode_t* lowReduceNode,
+    const cudaGraphDeviceNode_t* highReduceNode,
+    const cudaGraphDeviceNode_t* ultraHighPartialReduceNode,
+    const cudaGraphDeviceNode_t* ultraHighReduceNode,
+    EmbeddingSparseGradientReduceGridUpdateConfig lowReduceGridConfig,
+    EmbeddingSparseGradientReduceGridUpdateConfig highReduceGridConfig,
+    EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridConfig,
+    EmbeddingSparseGradientReduceGridUpdateConfig ultraHighReduceGridConfig) {
     __shared__ uint32_t validRunsShared;
     __shared__ uint32_t lowCountShared;
     __shared__ uint32_t highCountShared;
@@ -387,17 +414,16 @@ __global__ void finalizeAndBucketizeEmbeddingSparseGradientRowsKernel(const RowT
     const uint32_t validRuns = validRunsShared;
     for (uint32_t run = threadIdx.x; run < validRuns; run += blockDim.x) {
         const uint32_t count = runCounts[run];
-        if (count <= EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX) {
+        if (count <= lowRunMax) {
             const uint32_t out = atomicAdd(&lowCountShared, 1U);
             lowRunRows[out] = run;
-        } else if (count < EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN) {
+        } else if (count < ultraHighRunMin) {
             const uint32_t out = atomicAdd(&highCountShared, 1U);
             highRunRows[out] = run;
         } else {
             const uint32_t out = atomicAdd(&ultraHighCountShared, 1U);
             ultraHighRunRows[out] = run;
-            const uint32_t partialCount = (count + EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL - 1U) /
-                                          EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL;
+            const uint32_t partialCount = (count + ultraHighTokensPerPartial - 1U) / ultraHighTokensPerPartial;
             ultraHighRunPartialCounts[out] = partialCount;
             ultraHighRunPartialOffsets[out] = atomicAdd(&ultraHighPartialCountShared, partialCount);
         }
@@ -475,7 +501,6 @@ __global__ void reduceEmbeddingSparseGradientValuesFixedDimKernel(const uint32_t
     }
     VecOps::store(row, vectorIndex, sum, outputValues);
 }
-
 
 template <typename RowT, typename GradT, uint32_t EmbeddingDim>
 __global__ void reduceEmbeddingSparseGradientValuesHighRunFixedDimKernel(const uint32_t* __restrict__ sortedTokenIds,
@@ -597,9 +622,7 @@ uint32_t reduceGridDimYForEmbeddingSparseGradient(uint64_t embeddingDim) {
     return static_cast<uint32_t>((embeddingDim + THREADS_PER_BLOCK - 1ULL) / THREADS_PER_BLOCK);
 }
 
-bool hasHighRunCtaEmbeddingSparseGradientReducer(uint64_t embeddingDim) {
-    return hasFixedDimEmbeddingSparseGradientReducer(embeddingDim);
-}
+bool hasHighRunCtaEmbeddingSparseGradientReducer(uint64_t embeddingDim) { return hasFixedDimEmbeddingSparseGradientReducer(embeddingDim); }
 
 uint32_t highRunReduceRowsPerGridXForEmbeddingSparseGradient(uint64_t embeddingDim) {
     if (!hasHighRunCtaEmbeddingSparseGradientReducer(embeddingDim)) {
@@ -651,13 +674,9 @@ uint32_t ultraHighFinalReduceGridDimYForEmbeddingSparseGradient(uint64_t embeddi
     return 1U;
 }
 
-uint64_t maxUltraHighPartialsForEmbeddingSparseGradient(uint64_t numTokens) {
-    const uint64_t byTokenChunks =
-        (numTokens + EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL - 1ULL) /
-        EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL;
-    const uint64_t byUltraRows =
-        (numTokens + EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN - 1ULL) /
-        EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN;
+uint64_t maxUltraHighPartialsForEmbeddingSparseGradient(uint64_t numTokens, const EmbeddingSparseGradientRunBucketConfig& config) {
+    const uint64_t byTokenChunks = (numTokens + config.ultraHighTokensPerPartial - 1ULL) / config.ultraHighTokensPerPartial;
+    const uint64_t byUltraRows = (numTokens + config.ultraHighRunMin - 1ULL) / config.ultraHighRunMin;
     return std::max<uint64_t>(1ULL, byTokenChunks + byUltraRows + 1ULL);
 }
 
@@ -668,7 +687,8 @@ uint32_t ultraHighPartialReduceGridDimXForEmbeddingSparseGradient(uint64_t maxUl
     return static_cast<uint32_t>(std::max<uint64_t>(1ULL, maxUltraHighPartials));
 }
 
-EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridUpdateConfigForEmbeddingSparseGradient(uint64_t maxUltraHighPartials) {
+EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridUpdateConfigForEmbeddingSparseGradient(
+    uint64_t maxUltraHighPartials) {
     EmbeddingSparseGradientReduceGridUpdateConfig config;
     config.reduceRowsPerGridX = 1U;
     config.reduceGridDimY = 1U;
@@ -700,7 +720,7 @@ EmbeddingSparseGradientReduceGridUpdateConfig highRunReduceGridUpdateConfigForEm
 }
 
 EmbeddingSparseGradientReduceGridUpdateConfig ultraHighFinalReduceGridUpdateConfigForEmbeddingSparseGradient(uint64_t maxRows,
-                                                                                                            uint64_t embeddingDim) {
+                                                                                                             uint64_t embeddingDim) {
     EmbeddingSparseGradientReduceGridUpdateConfig config;
     config.reduceRowsPerGridX = ultraHighFinalReduceRowsPerGridXForEmbeddingSparseGradient(embeddingDim);
     config.reduceGridDimY = ultraHighFinalReduceGridDimYForEmbeddingSparseGradient(embeddingDim);
@@ -765,8 +785,8 @@ std::string sparseGradientReduceKernelName(DataType rowDType, DataType gradDType
 
 std::string sparseGradientHighRunReduceKernelName(DataType rowDType, DataType gradDType, uint64_t embeddingDim, bool hasSparseRowUpdate) {
     std::ostringstream ss;
-    ss << "thor_embedding_sparse_high_run_reduce_r" << static_cast<uint64_t>(rowDType) << "_g" << static_cast<uint64_t>(gradDType)
-       << "_d" << embeddingDim;
+    ss << "thor_embedding_sparse_high_run_reduce_r" << static_cast<uint64_t>(rowDType) << "_g" << static_cast<uint64_t>(gradDType) << "_d"
+       << embeddingDim;
     if (hasSparseRowUpdate) {
         ss << "_sru";
     }
@@ -775,8 +795,8 @@ std::string sparseGradientHighRunReduceKernelName(DataType rowDType, DataType gr
 
 std::string sparseGradientUltraHighPartialReduceKernelName(DataType rowDType, DataType gradDType, uint64_t embeddingDim) {
     std::ostringstream ss;
-    ss << "thor_embedding_sparse_ultra_high_partial_reduce_r" << static_cast<uint64_t>(rowDType) << "_g"
-       << static_cast<uint64_t>(gradDType) << "_d" << embeddingDim;
+    ss << "thor_embedding_sparse_ultra_high_partial_reduce_r" << static_cast<uint64_t>(rowDType) << "_g" << static_cast<uint64_t>(gradDType)
+       << "_d" << embeddingDim;
     return ss.str();
 }
 
@@ -785,8 +805,8 @@ std::string sparseGradientUltraHighFinalReduceKernelName(DataType rowDType,
                                                          uint64_t embeddingDim,
                                                          bool hasSparseRowUpdate) {
     std::ostringstream ss;
-    ss << "thor_embedding_sparse_ultra_high_final_reduce_r" << static_cast<uint64_t>(rowDType) << "_g"
-       << static_cast<uint64_t>(gradDType) << "_d" << embeddingDim;
+    ss << "thor_embedding_sparse_ultra_high_final_reduce_r" << static_cast<uint64_t>(rowDType) << "_g" << static_cast<uint64_t>(gradDType)
+       << "_d" << embeddingDim;
     if (hasSparseRowUpdate) {
         ss << "_sru";
     }
@@ -953,7 +973,6 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType,
     return ss.str();
 }
 
-
 std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
                                                         DataType gradDType,
                                                         uint64_t embeddingDim,
@@ -1020,21 +1039,25 @@ std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
         ss << "    const float4* __restrict__ input_v = reinterpret_cast<const float4*>(upstreamGradient + token * embeddingDim);\n";
         ss << "    const float4 v = input_v[vectorIndex];\n";
     } else if (gradDType == DataType::FP16) {
-        ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * embeddingDim);\n";
+        ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * "
+              "embeddingDim);\n";
         ss << "    const unsigned long long packed_v = input_v[vectorIndex];\n";
         ss << "    const float2 lo_v = thor_embedding_half2_bits_to_float2(static_cast<unsigned int>(packed_v));\n";
         ss << "    const float2 hi_v = thor_embedding_half2_bits_to_float2(static_cast<unsigned int>(packed_v >> 32U));\n";
         ss << "    const float4 v = make_float4(lo_v.x, lo_v.y, hi_v.x, hi_v.y);\n";
     } else if (gradDType == DataType::BF16) {
-        ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * embeddingDim);\n";
+        ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * "
+              "embeddingDim);\n";
         ss << "    const unsigned long long packed_v = input_v[vectorIndex];\n";
         ss << "    const float2 lo_v = thor_embedding_bfloat162_bits_to_float2(static_cast<unsigned int>(packed_v));\n";
         ss << "    const float2 hi_v = thor_embedding_bfloat162_bits_to_float2(static_cast<unsigned int>(packed_v >> 32U));\n";
         ss << "    const float4 v = make_float4(lo_v.x, lo_v.y, hi_v.x, hi_v.y);\n";
     } else {
-        ss << "    const unsigned long long base_v = token * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long long>(vectorIndex) * dimsPerThread;\n";
+        ss << "    const unsigned long long base_v = token * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long "
+              "long>(vectorIndex) * dimsPerThread;\n";
         ss << "    const float4 v = make_float4(thor_embedding_grad_to_float(upstreamGradient[base_v + 0ULL]), "
-              "thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]), thor_embedding_grad_to_float(upstreamGradient[base_v + 2ULL]), "
+              "thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]), thor_embedding_grad_to_float(upstreamGradient[base_v + "
+              "2ULL]), "
               "thor_embedding_grad_to_float(upstreamGradient[base_v + 3ULL]));\n";
     }
     ss << "    sum = thor_embedding_add_float4(sum, v);\n";
@@ -1058,15 +1081,13 @@ std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
     return ss.str();
 }
 
-
-std::string emitSparseGradientUltraHighPartialReduceKernelSource(DataType rowDType,
-                                                                DataType gradDType,
-                                                                uint64_t embeddingDim,
-                                                                const std::string& kernelName) {
+std::string emitSparseGradientUltraHighPartialReduceKernelSource(
+    DataType rowDType, DataType gradDType, uint64_t embeddingDim, const std::string& kernelName, uint32_t tokensPerPartial) {
     (void)rowDType;
     if (!hasUltraHighTwoStageEmbeddingSparseGradientReducer(embeddingDim)) {
         throw std::invalid_argument(
-            "Embedding sparse-gradient ultra-high partial reducer currently requires a fixed D={4,8,16,32,64,128,256,512,768,1024} reducer.");
+            "Embedding sparse-gradient ultra-high partial reducer currently requires a fixed D={4,8,16,32,64,128,256,512,768,1024} "
+            "reducer.");
     }
 
     const std::string gradType = sparseGradientScalarType(gradDType);
@@ -1093,8 +1114,7 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(DataType rowDTy
     ss << "  return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);\n";
     ss << "}\n\n";
     ss << "extern \"C\" __global__\n";
-    ss << "void " << kernelName
-       << "(const unsigned int* sortedTokenIds, const unsigned int* runOffsets, const unsigned int* runCounts, ";
+    ss << "void " << kernelName << "(const unsigned int* sortedTokenIds, const unsigned int* runOffsets, const unsigned int* runCounts, ";
     ss << "const unsigned int* numUltraHighPartials, const unsigned int* partialRunRows, ";
     ss << "const unsigned int* partialTokenOffsets, const " << gradType << "* upstreamGradient, float* partialSums) {\n";
     ss << "  constexpr unsigned int THREADS_PER_BLOCK_LOCAL = " << threadsPerBlock << "U;\n";
@@ -1102,7 +1122,7 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(DataType rowDTy
     ss << "  constexpr unsigned int dimsPerThread = 4U;\n";
     ss << "  constexpr unsigned int numVectors = " << numVectors << "U;\n";
     ss << "  constexpr unsigned int duplicateLanes = " << duplicateLanes << "U;\n";
-    ss << "  constexpr unsigned int tokensPerPartial = " << EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL << "U;\n";
+    ss << "  constexpr unsigned int tokensPerPartial = " << tokensPerPartial << "U;\n";
     ss << "  __shared__ float4 partialSumsShared[THREADS_PER_BLOCK_LOCAL];\n";
     ss << "  const unsigned int vectorIndex = threadIdx.x % numVectors;\n";
     ss << "  const unsigned int duplicateLane = threadIdx.x / numVectors;\n";
@@ -1113,7 +1133,8 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(DataType rowDTy
     ss << "  const unsigned long long begin = static_cast<unsigned long long>(runOffsets[row]) + tokenOffset;\n";
     ss << "  const unsigned long long totalCount = static_cast<unsigned long long>(runCounts[row]);\n";
     ss << "  const unsigned long long remaining = totalCount - tokenOffset;\n";
-    ss << "  const unsigned long long count = remaining < static_cast<unsigned long long>(tokensPerPartial) ? remaining : static_cast<unsigned long long>(tokensPerPartial);\n";
+    ss << "  const unsigned long long count = remaining < static_cast<unsigned long long>(tokensPerPartial) ? remaining : "
+          "static_cast<unsigned long long>(tokensPerPartial);\n";
     ss << "  float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
     ss << "  for (unsigned long long i = static_cast<unsigned long long>(duplicateLane); i < count; i += duplicateLanes) {\n";
     ss << "    const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin + i]);\n";
@@ -1121,21 +1142,25 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(DataType rowDTy
         ss << "    const float4* __restrict__ input_v = reinterpret_cast<const float4*>(upstreamGradient + token * embeddingDim);\n";
         ss << "    const float4 v = input_v[vectorIndex];\n";
     } else if (gradDType == DataType::FP16) {
-        ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * embeddingDim);\n";
+        ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * "
+              "embeddingDim);\n";
         ss << "    const unsigned long long packed_v = input_v[vectorIndex];\n";
         ss << "    const float2 lo_v = thor_embedding_half2_bits_to_float2(static_cast<unsigned int>(packed_v));\n";
         ss << "    const float2 hi_v = thor_embedding_half2_bits_to_float2(static_cast<unsigned int>(packed_v >> 32U));\n";
         ss << "    const float4 v = make_float4(lo_v.x, lo_v.y, hi_v.x, hi_v.y);\n";
     } else if (gradDType == DataType::BF16) {
-        ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * embeddingDim);\n";
+        ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + token * "
+              "embeddingDim);\n";
         ss << "    const unsigned long long packed_v = input_v[vectorIndex];\n";
         ss << "    const float2 lo_v = thor_embedding_bfloat162_bits_to_float2(static_cast<unsigned int>(packed_v));\n";
         ss << "    const float2 hi_v = thor_embedding_bfloat162_bits_to_float2(static_cast<unsigned int>(packed_v >> 32U));\n";
         ss << "    const float4 v = make_float4(lo_v.x, lo_v.y, hi_v.x, hi_v.y);\n";
     } else {
-        ss << "    const unsigned long long base_v = token * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long long>(vectorIndex) * dimsPerThread;\n";
+        ss << "    const unsigned long long base_v = token * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long "
+              "long>(vectorIndex) * dimsPerThread;\n";
         ss << "    const float4 v = make_float4(thor_embedding_grad_to_float(upstreamGradient[base_v + 0ULL]), "
-              "thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]), thor_embedding_grad_to_float(upstreamGradient[base_v + 2ULL]), "
+              "thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]), thor_embedding_grad_to_float(upstreamGradient[base_v + "
+              "2ULL]), "
               "thor_embedding_grad_to_float(upstreamGradient[base_v + 3ULL]));\n";
     }
     ss << "    sum = thor_embedding_add_float4(sum, v);\n";
@@ -1146,17 +1171,18 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(DataType rowDTy
     ss << "  for (unsigned int lane = 1U; lane < duplicateLanes; ++lane) {\n";
     ss << "    sum = thor_embedding_add_float4(sum, partialSumsShared[lane * numVectors + vectorIndex]);\n";
     ss << "  }\n";
-    ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(partialSums + partialIndex * static_cast<unsigned long long>(embeddingDim));\n";
+    ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(partialSums + partialIndex * static_cast<unsigned long "
+          "long>(embeddingDim));\n";
     ss << "  output[vectorIndex] = sum;\n";
     ss << "}\n";
     return ss.str();
 }
 
 std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType,
-                                                              DataType gradDType,
-                                                              uint64_t embeddingDim,
-                                                              const std::string& kernelName,
-                                                              const SparseRowUpdateFusionSource* sparseRowUpdate) {
+                                                               DataType gradDType,
+                                                               uint64_t embeddingDim,
+                                                               const std::string& kernelName,
+                                                               const SparseRowUpdateFusionSource* sparseRowUpdate) {
     (void)gradDType;
     if (!hasUltraHighTwoStageEmbeddingSparseGradientReducer(embeddingDim)) {
         throw std::invalid_argument(
@@ -1202,7 +1228,8 @@ std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType
     ss << "  const unsigned long long partialCount = static_cast<unsigned long long>(ultraHighRunPartialCounts[bucketRow]);\n";
     ss << "  float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
     ss << "  for (unsigned long long p = static_cast<unsigned long long>(duplicateLane); p < partialCount; p += duplicateLanes) {\n";
-    ss << "    const float4* __restrict__ input = reinterpret_cast<const float4*>(partialSums + (partialBegin + p) * static_cast<unsigned long long>(embeddingDim));\n";
+    ss << "    const float4* __restrict__ input = reinterpret_cast<const float4*>(partialSums + (partialBegin + p) * static_cast<unsigned "
+          "long long>(embeddingDim));\n";
     ss << "    const float4 v = input[vectorIndex];\n";
     ss << "    sum = thor_embedding_add_float4(sum, v);\n";
     ss << "  }\n";
@@ -1218,7 +1245,8 @@ std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType
         ss << "  const unsigned long long sru_vector_index = static_cast<unsigned long long>(vectorIndex);\n";
         ss << sparseRowUpdate->bodySource;
     } else {
-        ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * static_cast<unsigned long long>(embeddingDim));\n";
+        ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * static_cast<unsigned long "
+              "long>(embeddingDim));\n";
         ss << "  output[vectorIndex] = sum;\n";
     }
     ss << "}\n";
@@ -1239,6 +1267,7 @@ struct PreparedEmbeddingSparseGradient {
     DataType indexDataType = DataType::UINT32;
     DataType gradientDataType = DataType::FP32;
     DataType rowDataType = DataType::UINT64;
+    EmbeddingSparseGradientRunBucketConfig runBucketConfig;
 
     Tensor rowKeys;
     Tensor tokenIds;
@@ -1310,12 +1339,13 @@ PreparedEmbeddingSparseGradient::~PreparedEmbeddingSparseGradient() {
 }
 
 __global__ void expandEmbeddingSparseGradientUltraHighPartialMetadataKernel(const uint32_t* __restrict__ numUltraHighRunRows,
-                                                                           const uint32_t* __restrict__ ultraHighRunRows,
-                                                                           const uint32_t* __restrict__ ultraHighRunPartialCounts,
-                                                                           const uint32_t* __restrict__ ultraHighRunPartialOffsets,
-                                                                           uint32_t* __restrict__ numUltraHighPartials,
-                                                                           uint32_t* __restrict__ ultraHighPartialRunRows,
-                                                                           uint32_t* __restrict__ ultraHighPartialTokenOffsets) {
+                                                                            const uint32_t* __restrict__ ultraHighRunRows,
+                                                                            const uint32_t* __restrict__ ultraHighRunPartialCounts,
+                                                                            const uint32_t* __restrict__ ultraHighRunPartialOffsets,
+                                                                            uint32_t* __restrict__ numUltraHighPartials,
+                                                                            uint32_t* __restrict__ ultraHighPartialRunRows,
+                                                                            uint32_t* __restrict__ ultraHighPartialTokenOffsets,
+                                                                            uint32_t ultraHighTokensPerPartial) {
     const uint32_t rows = numUltraHighRunRows[0];
     if (blockIdx.x == 0U && threadIdx.x == 0U) {
         uint32_t totalPartials = 0U;
@@ -1333,7 +1363,7 @@ __global__ void expandEmbeddingSparseGradientUltraHighPartialMetadataKernel(cons
         for (uint32_t p = 0U; p < partialCount; ++p) {
             const uint32_t out = partialOffset + p;
             ultraHighPartialRunRows[out] = runRow;
-            ultraHighPartialTokenOffsets[out] = p * EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL;
+            ultraHighPartialTokenOffsets[out] = p * ultraHighTokensPerPartial;
         }
     }
 }
@@ -1379,9 +1409,9 @@ void populateRunCountProfileStats(EmbeddingSparseGradientProfileResult& result,
         } else if (count > 1U) {
             ++duplicateRows;
         }
-        if (count <= EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX) {
+        if (count <= prepared.runBucketConfig.lowRunMax) {
             lowRunTokens += count;
-        } else if (count < EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN) {
+        } else if (count < prepared.runBucketConfig.ultraHighRunMin) {
             highRunTokens += count;
         } else {
             ultraHighRunTokens += count;
@@ -1430,12 +1460,12 @@ void compileGraphReduceKernel(PreparedEmbeddingSparseGradient& prepared) {
     if (hasHighRunCtaEmbeddingSparseGradientReducer(prepared.embeddingDim)) {
         prepared.highRunReduceKernelName = sparseGradientHighRunReduceKernelName(
             prepared.rowDataType, prepared.gradientDataType, prepared.embeddingDim, prepared.sparseRowUpdate.has_value());
-        const std::string highSrc = emitSparseGradientHighRunReduceKernelSource(
-            prepared.rowDataType,
-            prepared.gradientDataType,
-            prepared.embeddingDim,
-            prepared.highRunReduceKernelName,
-            prepared.sparseRowUpdate.has_value() ? &prepared.sparseRowUpdate.value() : nullptr);
+        const std::string highSrc =
+            emitSparseGradientHighRunReduceKernelSource(prepared.rowDataType,
+                                                        prepared.gradientDataType,
+                                                        prepared.embeddingDim,
+                                                        prepared.highRunReduceKernelName,
+                                                        prepared.sparseRowUpdate.has_value() ? &prepared.sparseRowUpdate.value() : nullptr);
         if constexpr (PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS) {
             std::fprintf(stderr,
                          "\n===== Generated Embedding sparse-gradient high-run reducer CUDA source begin: %s =====\n%s\n===== "
@@ -1454,8 +1484,12 @@ void compileGraphReduceKernel(PreparedEmbeddingSparseGradient& prepared) {
     if (hasUltraHighTwoStageEmbeddingSparseGradientReducer(prepared.embeddingDim)) {
         prepared.ultraHighPartialReduceKernelName =
             sparseGradientUltraHighPartialReduceKernelName(prepared.rowDataType, prepared.gradientDataType, prepared.embeddingDim);
-        const std::string ultraPartialSrc = emitSparseGradientUltraHighPartialReduceKernelSource(
-            prepared.rowDataType, prepared.gradientDataType, prepared.embeddingDim, prepared.ultraHighPartialReduceKernelName);
+        const std::string ultraPartialSrc =
+            emitSparseGradientUltraHighPartialReduceKernelSource(prepared.rowDataType,
+                                                                 prepared.gradientDataType,
+                                                                 prepared.embeddingDim,
+                                                                 prepared.ultraHighPartialReduceKernelName,
+                                                                 prepared.runBucketConfig.ultraHighTokensPerPartial);
         if constexpr (PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS) {
             std::fprintf(stderr,
                          "\n===== Generated Embedding sparse-gradient ultra-high partial reducer CUDA source begin: %s =====\n%s\n===== "
@@ -1465,8 +1499,8 @@ void compileGraphReduceKernel(PreparedEmbeddingSparseGradient& prepared) {
                          prepared.ultraHighPartialReduceKernelName.c_str());
             std::fflush(stderr);
         }
-        CompiledEmbeddingSparseGradientCudaKernel compiledUltraPartial = compileEmbeddingSparseGradientCudaKernel(
-            ultraPartialSrc, prepared.ultraHighPartialReduceKernelName, prepared.deviceNum);
+        CompiledEmbeddingSparseGradientCudaKernel compiledUltraPartial =
+            compileEmbeddingSparseGradientCudaKernel(ultraPartialSrc, prepared.ultraHighPartialReduceKernelName, prepared.deviceNum);
         prepared.ultraHighPartialReduceModule = compiledUltraPartial.module;
         prepared.ultraHighPartialReduceKernel = compiledUltraPartial.function;
 
@@ -1516,10 +1550,11 @@ void allocateTypedPreparedBuffers(PreparedEmbeddingSparseGradient& prepared,
     prepared.ultraHighRunRows = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
     prepared.ultraHighRunPartialCounts = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
     prepared.ultraHighRunPartialOffsets = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
-    prepared.maxUltraHighPartials = maxUltraHighPartialsForEmbeddingSparseGradient(numTokens);
+    prepared.maxUltraHighPartials = maxUltraHighPartialsForEmbeddingSparseGradient(numTokens, prepared.runBucketConfig);
     prepared.ultraHighPartialRunRows = Tensor(placement, TensorDescriptor(DataType::UINT32, {prepared.maxUltraHighPartials}));
     prepared.ultraHighPartialTokenOffsets = Tensor(placement, TensorDescriptor(DataType::UINT32, {prepared.maxUltraHighPartials}));
-    const uint64_t ultraHighScratchDim = hasUltraHighTwoStageEmbeddingSparseGradientReducer(prepared.embeddingDim) ? prepared.embeddingDim : 1ULL;
+    const uint64_t ultraHighScratchDim =
+        hasUltraHighTwoStageEmbeddingSparseGradientReducer(prepared.embeddingDim) ? prepared.embeddingDim : 1ULL;
     prepared.ultraHighPartialSums =
         Tensor(placement, TensorDescriptor(DataType::FP32, {prepared.maxUltraHighPartials, ultraHighScratchDim}));
     prepared.numLowRunRows = Tensor(placement, TensorDescriptor(DataType::UINT32, {1}));
@@ -1608,7 +1643,6 @@ void launchReduceValuesFixedDim(PreparedEmbeddingSparseGradient& prepared,
                                                  upstreamGradient.getMemPtr<GradT>(),
                                                  outputGradient.values.getMemPtr<float>());
 }
-
 
 template <typename RowT, typename GradT>
 void launchReduceValuesTyped(PreparedEmbeddingSparseGradient& prepared,
@@ -1903,9 +1937,9 @@ void launchReduceValuesWithSparseRowUpdateForRunRows(PreparedEmbeddingSparseGrad
 void prepareUltraHighPartialMetadata(PreparedEmbeddingSparseGradient& prepared, Stream stream) {
     const uint32_t block = THREADS_PER_BLOCK;
     const uint64_t maxUltraRows =
-        (prepared.numTokens + EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN - 1ULL) /
-        EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN;
-    const uint32_t grid = static_cast<uint32_t>(std::max<uint64_t>(1ULL, std::min<uint64_t>((maxUltraRows + block - 1ULL) / block, 4096ULL)));
+        (prepared.numTokens + prepared.runBucketConfig.ultraHighRunMin - 1ULL) / prepared.runBucketConfig.ultraHighRunMin;
+    const uint32_t grid =
+        static_cast<uint32_t>(std::max<uint64_t>(1ULL, std::min<uint64_t>((maxUltraRows + block - 1ULL) / block, 4096ULL)));
     expandEmbeddingSparseGradientUltraHighPartialMetadataKernel<<<grid, block, 0, stream.getStream()>>>(
         prepared.numUltraHighRunRows.getMemPtr<uint32_t>(),
         prepared.ultraHighRunRows.getMemPtr<uint32_t>(),
@@ -1913,7 +1947,8 @@ void prepareUltraHighPartialMetadata(PreparedEmbeddingSparseGradient& prepared, 
         prepared.ultraHighRunPartialOffsets.getMemPtr<uint32_t>(),
         prepared.numUltraHighPartials.getMemPtr<uint32_t>(),
         prepared.ultraHighPartialRunRows.getMemPtr<uint32_t>(),
-        prepared.ultraHighPartialTokenOffsets.getMemPtr<uint32_t>());
+        prepared.ultraHighPartialTokenOffsets.getMemPtr<uint32_t>(),
+        prepared.runBucketConfig.ultraHighTokensPerPartial);
     CUDA_CHECK(cudaPeekAtLastError());
 }
 
@@ -1967,7 +2002,8 @@ void launchUltraHighFinalReduceKernel(PreparedEmbeddingSparseGradient& prepared,
 
     std::optional<SparseRowUpdateFusionKernelArgs> updateArgs;
     std::vector<void*> args;
-    args.reserve(fusedSparseRowUpdate ? 6 + prepared.sparseRowUpdate->kernelInputSlots.size() + prepared.sparseRowUpdate->outputSlots.size() : 6);
+    args.reserve(fusedSparseRowUpdate ? 6 + prepared.sparseRowUpdate->kernelInputSlots.size() + prepared.sparseRowUpdate->outputSlots.size()
+                                      : 6);
     args.push_back((void*)&numRunRowsPtr);
     args.push_back((void*)&runRowsPtr);
     args.push_back((void*)&partialCountsPtr);
@@ -2050,20 +2086,18 @@ void launchReduceValuesWithSparseRowUpdateForRunRows(PreparedEmbeddingSparseGrad
     if (!prepared.sparseRowUpdate.has_value()) {
         throw std::invalid_argument("Prepared Embedding sparse-gradient producer does not have a fused sparse-row update.");
     }
-    CUfunction reduceKernel = highRunBucket && prepared.highRunReduceKernel != nullptr ? prepared.highRunReduceKernel : prepared.reduceKernel;
+    CUfunction reduceKernel =
+        highRunBucket && prepared.highRunReduceKernel != nullptr ? prepared.highRunReduceKernel : prepared.reduceKernel;
     if (reduceKernel == nullptr) {
         throw std::runtime_error("Prepared Embedding sparse-gradient fused reducer kernel was not compiled.");
     }
 
-    const uint32_t reduceGridDimY =
-        highRunBucket ? highRunReduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim)
-                      : reduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim);
-    const uint32_t reduceBlockThreads =
-        highRunBucket ? highRunReduceBlockThreadsForEmbeddingSparseGradient(prepared.embeddingDim)
-                      : reduceBlockThreadsForEmbeddingSparseGradient(prepared.embeddingDim);
-    const uint32_t gridX =
-        highRunBucket ? highRunReduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim)
-                      : reduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim);
+    const uint32_t reduceGridDimY = highRunBucket ? highRunReduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim)
+                                                  : reduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim);
+    const uint32_t reduceBlockThreads = highRunBucket ? highRunReduceBlockThreadsForEmbeddingSparseGradient(prepared.embeddingDim)
+                                                      : reduceBlockThreadsForEmbeddingSparseGradient(prepared.embeddingDim);
+    const uint32_t gridX = highRunBucket ? highRunReduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim)
+                                         : reduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim);
     const dim3 grid(gridX, reduceGridDimY, 1U);
     const dim3 block(reduceBlockThreads, 1U, 1U);
 
@@ -2140,8 +2174,8 @@ void launchFinalizeRowsTyped(PreparedEmbeddingSparseGradient& prepared,
     const cudaGraphDeviceNode_t* highReduceNodePtr =
         reduceGridUpdate.highReduceNodeHandle != nullptr ? reduceGridUpdate.highReduceNodeHandle->devicePtr() : nullptr;
     const cudaGraphDeviceNode_t* ultraHighPartialReduceNodePtr = reduceGridUpdate.ultraHighPartialReduceNodeHandle != nullptr
-                                                                    ? reduceGridUpdate.ultraHighPartialReduceNodeHandle->devicePtr()
-                                                                    : nullptr;
+                                                                     ? reduceGridUpdate.ultraHighPartialReduceNodeHandle->devicePtr()
+                                                                     : nullptr;
     const cudaGraphDeviceNode_t* ultraHighReduceNodePtr =
         reduceGridUpdate.ultraHighReduceNodeHandle != nullptr ? reduceGridUpdate.ultraHighReduceNodeHandle->devicePtr() : nullptr;
 
@@ -2160,6 +2194,9 @@ void launchFinalizeRowsTyped(PreparedEmbeddingSparseGradient& prepared,
                                                           prepared.numHighRunRows.getMemPtr<uint32_t>(),
                                                           prepared.numUltraHighRunRows.getMemPtr<uint32_t>(),
                                                           prepared.vocabularySize,
+                                                          prepared.runBucketConfig.lowRunMax,
+                                                          prepared.runBucketConfig.ultraHighRunMin,
+                                                          prepared.runBucketConfig.ultraHighTokensPerPartial,
                                                           lowReduceNodePtr,
                                                           highReduceNodePtr,
                                                           ultraHighPartialReduceNodePtr,
@@ -2319,6 +2356,8 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientI
     prepared->indexDataType = indices.getDataType();
     prepared->gradientDataType = upstreamGradient.getDataType();
     prepared->rowDataType = outputGradient.rowDataType;
+    prepared->runBucketConfig = currentEmbeddingSparseGradientRunBucketConfig();
+    validateEmbeddingSparseGradientRunBucketConfig(prepared->runBucketConfig);
     prepared->sparseRowUpdate = std::move(sparseRowUpdate);
 
     ScopedGpu scopedGpu(placement.getDeviceNum());
@@ -2728,12 +2767,7 @@ void capturePreparedEmbeddingSparseGradientImpl(CudaGraphCaptureBuilder& builder
         }
 
         return builder.captureDeviceUpdatableKernelOnStream(
-            CudaGraphKernelLaunch{reduceKernel,
-                                  dim3(1, reduceGridDimY, 1),
-                                  dim3(reduceBlockThreads, 1, 1),
-                                  0,
-                                  args.data(),
-                                  nullptr},
+            CudaGraphKernelLaunch{reduceKernel, dim3(1, reduceGridDimY, 1), dim3(reduceBlockThreads, 1, 1), 0, args.data(), nullptr},
             captureStream);
     };
 
@@ -2851,6 +2885,20 @@ void capturePreparedEmbeddingSparseGradientImpl(CudaGraphCaptureBuilder& builder
 
 }  // namespace
 
+EmbeddingSparseGradientRunBucketConfig defaultEmbeddingSparseGradientRunBucketConfig() {
+    return EmbeddingSparseGradientRunBucketConfig{DEFAULT_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX,
+                                                  DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN,
+                                                  DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL};
+}
+
+void setEmbeddingSparseGradientRunBucketConfigOverrideForTesting(std::optional<EmbeddingSparseGradientRunBucketConfig> config) {
+    if (config.has_value()) {
+        validateEmbeddingSparseGradientRunBucketConfig(config.value());
+    }
+    std::lock_guard<std::mutex> lock(gEmbeddingSparseGradientRunBucketConfigMutex);
+    gEmbeddingSparseGradientRunBucketConfigOverride = std::move(config);
+}
+
 void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
                                             PreparedEmbeddingSparseGradient& prepared,
                                             const Tensor& indices,
@@ -2869,6 +2917,5 @@ void capturePreparedEmbeddingSparseGradientWithSparseRowUpdate(CudaGraphCaptureB
                                                                CapturedEmbeddingSparseGradient& captured) {
     capturePreparedEmbeddingSparseGradientImpl(builder, prepared, indices, upstreamGradient, outputGradient, &runtimeScalars, captured);
 }
-
 
 }  // namespace ThorImplementation
