@@ -113,6 +113,7 @@ struct Options {
     int explicitPoolSlots = envInt("THOR_EMBEDDING_BACKWARD_PROFILE_POOL_SLOTS", 0);
     bool profileGraph = envBool("THOR_EMBEDDING_BACKWARD_PROFILE_GRAPH", true);
     bool profileUpdate = envBool("THOR_EMBEDDING_BACKWARD_PROFILE_UPDATE", true);
+    bool useFusedUpdate = envBool("THOR_EMBEDDING_BACKWARD_PROFILE_FUSED_UPDATE", true);
     bool initializeWeights = envBool("THOR_EMBEDDING_BACKWARD_PROFILE_INITIALIZE_WEIGHTS", false);
     uint32_t batchSize = static_cast<uint32_t>(envInt("THOR_EMBEDDING_BACKWARD_PROFILE_BATCH_SIZE", 1));
     std::string caseFilter = envString("THOR_EMBEDDING_BACKWARD_PROFILE_CASE_FILTER", "");
@@ -146,6 +147,7 @@ struct PoolSlot {
     std::unique_ptr<Sgd> optimizer;
     SparseRowGradient gradient;
     std::shared_ptr<PreparedEmbeddingSparseGradient> prepared;
+    bool fusedSparseRowUpdate = false;
     CapturedEmbeddingSparseGradient captured;
     std::optional<CudaGraphExecutable> graph;
 };
@@ -168,6 +170,11 @@ std::string dtypeName(DataType dtype) {
             return TensorDescriptor::getElementTypeName(dtype);
     }
 }
+
+bool hasFixedSparseOptimizerFusionReducer(uint64_t embeddingDim) {
+    return embeddingDim == 16ULL || embeddingDim == 32ULL || embeddingDim == 64ULL || embeddingDim == 128ULL || embeddingDim == 256ULL;
+}
+
 
 std::vector<std::string> parseStringList(const std::string& raw) {
     std::vector<std::string> out;
@@ -365,8 +372,18 @@ float timeCallableMs(Stream stream, const std::function<void()>& fn) {
     return end.synchronizeAndReportElapsedTimeInMilliseconds(start);
 }
 
-std::pair<float, EmbeddingSparseGradientProfileResult> profileSparseGradient(PoolSlot& slot, Stream stream) {
-    EmbeddingSparseGradientProfileResult result = profilePreparedEmbeddingSparseGradient(*slot.prepared, slot.indices, slot.upstream, slot.gradient, stream);
+std::pair<float, EmbeddingSparseGradientProfileResult> profileSparseGradient(PoolSlot& slot, Stream stream, uint32_t batchSize) {
+    EmbeddingSparseGradientProfileResult result;
+    if (slot.fusedSparseRowUpdate) {
+        result = profilePreparedEmbeddingSparseGradientWithSparseRowUpdate(*slot.prepared,
+                                                                          slot.indices,
+                                                                          slot.upstream,
+                                                                          slot.gradient,
+                                                                          slot.optimizer->sparseRowUpdateRuntimeScalars(batchSize),
+                                                                          stream);
+    } else {
+        result = profilePreparedEmbeddingSparseGradient(*slot.prepared, slot.indices, slot.upstream, slot.gradient, stream);
+    }
     return {result.totalMs, result};
 }
 
@@ -430,12 +447,36 @@ std::vector<PoolSlot> buildPool(const Options& opts, const CaseConfig& cfg, int 
         slot.optimizer = std::make_unique<Sgd>(static_cast<uint64_t>(i + 1), 0.01f, 0.0f, momentum, nesterov);
         slot.gradient = slot.optimizer->compileSparseRows(slot.weights, capacity, stream);
         stream.synchronize();
-        slot.prepared = prepareEmbeddingSparseGradient(slot.indices, slot.upstream, slot.gradient, std::nullopt);
+
+        slot.fusedSparseRowUpdate = opts.useFusedUpdate && slot.optimizer->supportsSparseRowUpdateFusion() &&
+                                    hasFixedSparseOptimizerFusionReducer(cfg.embeddingDim);
+        if (slot.fusedSparseRowUpdate) {
+            SparseRowOptimizerExpression updateExpression = slot.optimizer->toSparseRowUpdateExpression(slot.weights, slot.gradient);
+            slot.prepared = prepareEmbeddingSparseGradientWithSparseRowUpdate(slot.indices,
+                                                                             slot.upstream,
+                                                                             slot.gradient,
+                                                                             updateExpression.outputs,
+                                                                             updateExpression.inputs,
+                                                                             updateExpression.indexedOutputs,
+                                                                             std::nullopt);
+        } else {
+            slot.prepared = prepareEmbeddingSparseGradient(slot.indices, slot.upstream, slot.gradient, std::nullopt);
+        }
 
         if (opts.profileGraph) {
             slot.captured = CapturedEmbeddingSparseGradient(opts.gpu);
             CudaGraphCaptureBuilder builder(stream);
-            capturePreparedEmbeddingSparseGradient(builder, *slot.prepared, slot.indices, slot.upstream, slot.gradient, slot.captured);
+            if (slot.fusedSparseRowUpdate) {
+                capturePreparedEmbeddingSparseGradientWithSparseRowUpdate(builder,
+                                                                         *slot.prepared,
+                                                                         slot.indices,
+                                                                         slot.upstream,
+                                                                         slot.gradient,
+                                                                         slot.optimizer->sparseRowUpdateRuntimeScalars(opts.batchSize),
+                                                                         slot.captured);
+            } else {
+                capturePreparedEmbeddingSparseGradient(builder, *slot.prepared, slot.indices, slot.upstream, slot.gradient, slot.captured);
+            }
             slot.graph.emplace(builder.endCaptureAndInstantiate(stream));
             slot.captured.uploadTargetNodes(stream);
         }
@@ -446,7 +487,7 @@ std::vector<PoolSlot> buildPool(const Options& opts, const CaseConfig& cfg, int 
 }
 
 void printCsvHeader() {
-    std::cout << "case,vocab,dim,tokens,upstream_dtype,row_dtype,dup_mode,optimizer,pool_slots,pool_bytes,l2_bytes,"
+    std::cout << "case,vocab,dim,tokens,upstream_dtype,row_dtype,dup_mode,optimizer,update_path,pool_slots,pool_bytes,l2_bytes,"
                  "materialize_ms,sort_ms,clear_counts_ms,rle_ms,finalize_ms,scan_ms,reduce_ms,"
                  "sparse_gradient_ms,sparse_update_ms,total_backward_update_ms,graph_sparse_gradient_ms,"
                  "active_rows,singleton_rows,duplicate_rows,max_run_count,"
@@ -456,11 +497,12 @@ void printCsvHeader() {
 void printCsvRow(const CaseConfig& cfg,
                  const EmbeddingSparseGradientProfileResult& meta,
                  const StageStats& stats,
+                 const std::string& updatePath,
                  int poolSlots,
                  uint64_t poolBytes,
                  uint64_t l2Bytes) {
     std::cout << cfg.name() << ',' << cfg.vocabularySize << ',' << cfg.embeddingDim << ',' << cfg.numTokens << ',' << dtypeName(cfg.upstreamDType) << ','
-              << dtypeName(meta.rowDataType) << ',' << cfg.duplicateMode << ',' << cfg.optimizer << ',' << poolSlots << ',' << poolBytes << ',' << l2Bytes << ','
+              << dtypeName(meta.rowDataType) << ',' << cfg.duplicateMode << ',' << cfg.optimizer << ',' << updatePath << ',' << poolSlots << ',' << poolBytes << ',' << l2Bytes << ','
               << stats.materialize.mean() << ',' << stats.sort.mean() << ',' << stats.clearCounts.mean() << ',' << stats.rle.mean() << ','
               << stats.finalize.mean() << ',' << stats.scan.mean() << ',' << stats.reduce.mean() << ',' << stats.sparseGradientTotal.mean() << ','
               << stats.sparseSgdUpdate.mean() << ',' << stats.totalBackwardAndUpdate.mean() << ',' << stats.graphSparseGradientTotal.mean() << ','
@@ -492,9 +534,18 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
 
     for (int i = 0; i < opts.warmupIters; ++i) {
         PoolSlot& slot = pool[static_cast<size_t>(i % poolSlots)];
-        launchPreparedEmbeddingSparseGradient(*slot.prepared, slot.indices, slot.upstream, slot.gradient, stream);
-        if (opts.profileUpdate) {
-            slot.optimizer->updateSparseRows(opts.batchSize);
+        if (slot.fusedSparseRowUpdate) {
+            launchPreparedEmbeddingSparseGradientWithSparseRowUpdate(*slot.prepared,
+                                                                     slot.indices,
+                                                                     slot.upstream,
+                                                                     slot.gradient,
+                                                                     slot.optimizer->sparseRowUpdateRuntimeScalars(opts.batchSize),
+                                                                     stream);
+        } else {
+            launchPreparedEmbeddingSparseGradient(*slot.prepared, slot.indices, slot.upstream, slot.gradient, stream);
+            if (opts.profileUpdate) {
+                slot.optimizer->updateSparseRows(opts.batchSize);
+            }
         }
         if (opts.profileGraph && slot.graph.has_value()) {
             slot.graph->launch(stream);
@@ -506,7 +557,7 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
     EmbeddingSparseGradientProfileResult meta;
     for (int i = 0; i < opts.measureIters; ++i) {
         PoolSlot& slot = pool[static_cast<size_t>(i % poolSlots)];
-        const auto [totalMs, profile] = profileSparseGradient(slot, stream);
+        const auto [totalMs, profile] = profileSparseGradient(slot, stream, opts.batchSize);
         meta = profile;
         stats.materialize.add(profile.materializeSortPairsMs);
         stats.sort.add(profile.cubSortMs);
@@ -522,7 +573,10 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
         stats.maxRunCount.add(static_cast<double>(profile.maxRunCount));
 
         float updateMs = 0.0f;
-        if (opts.profileUpdate) {
+        if (slot.fusedSparseRowUpdate) {
+            // The production fused path performs the optimizer update inside the timed reducer stage.
+            stats.sparseSgdUpdate.add(0.0);
+        } else if (opts.profileUpdate) {
             updateMs = profileSparseUpdate(slot, stream, opts.batchSize);
             stats.sparseSgdUpdate.add(updateMs);
         }
@@ -533,7 +587,8 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
         }
     }
 
-    printCsvRow(cfg, meta, stats, poolSlots, poolBytes, l2Bytes);
+    const bool fusedUpdatePath = !pool.empty() && pool.front().fusedSparseRowUpdate;
+    printCsvRow(cfg, meta, stats, fusedUpdatePath ? "fused" : "materialized", poolSlots, poolBytes, l2Bytes);
 }
 
 std::vector<CaseConfig> makeCases(const Options& opts) {

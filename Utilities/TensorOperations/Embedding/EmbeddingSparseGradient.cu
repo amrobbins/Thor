@@ -84,6 +84,36 @@ int checkedCubItems(uint64_t n, const std::string& label) {
     return static_cast<int>(n);
 }
 
+uint64_t downloadSparseRowCountScalar(const Tensor& tensor, DataType dtype, Stream stream) {
+    uint64_t value = 0;
+    switch (dtype) {
+        case DataType::UINT16: {
+            uint16_t typed = 0;
+            CUDA_CHECK(cudaMemcpyAsync(&typed, tensor.getMemPtr<uint16_t>(), sizeof(typed), cudaMemcpyDeviceToHost, stream.getStream()));
+            stream.synchronize();
+            value = static_cast<uint64_t>(typed);
+            break;
+        }
+        case DataType::UINT32: {
+            uint32_t typed = 0;
+            CUDA_CHECK(cudaMemcpyAsync(&typed, tensor.getMemPtr<uint32_t>(), sizeof(typed), cudaMemcpyDeviceToHost, stream.getStream()));
+            stream.synchronize();
+            value = static_cast<uint64_t>(typed);
+            break;
+        }
+        case DataType::UINT64: {
+            uint64_t typed = 0;
+            CUDA_CHECK(cudaMemcpyAsync(&typed, tensor.getMemPtr<uint64_t>(), sizeof(typed), cudaMemcpyDeviceToHost, stream.getStream()));
+            stream.synchronize();
+            value = typed;
+            break;
+        }
+        default:
+            throw std::invalid_argument("Embedding sparse-gradient profile row count tensor must be uint16, uint32, or uint64.");
+    }
+    return value;
+}
+
 template <typename T>
 DataType rowDTypeForCppType();
 
@@ -645,6 +675,45 @@ PreparedEmbeddingSparseGradient::~PreparedEmbeddingSparseGradient() {
         } catch (...) {
         }
     }
+}
+
+void populateRunCountProfileStats(EmbeddingSparseGradientProfileResult& result,
+                                  const PreparedEmbeddingSparseGradient& prepared,
+                                  const SparseRowGradient& outputGradient,
+                                  Stream stream) {
+    result.activeRows = downloadSparseRowCountScalar(outputGradient.numRows, outputGradient.rowDataType, stream);
+    if (result.activeRows == 0) {
+        result.singletonRows = 0;
+        result.duplicateRows = 0;
+        result.maxRunCount = 0;
+        return;
+    }
+    if (result.activeRows > outputGradient.capacity) {
+        throw std::runtime_error("Embedding sparse-gradient profiler observed active row count larger than sparse-gradient capacity.");
+    }
+
+    std::vector<uint32_t> runCounts(static_cast<size_t>(result.activeRows));
+    CUDA_CHECK(cudaMemcpyAsync(runCounts.data(),
+                               prepared.runCounts.getMemPtr<uint32_t>(),
+                               runCounts.size() * sizeof(uint32_t),
+                               cudaMemcpyDeviceToHost,
+                               stream.getStream()));
+    stream.synchronize();
+
+    uint64_t singletonRows = 0;
+    uint64_t duplicateRows = 0;
+    uint32_t maxRunCount = 0;
+    for (uint32_t count : runCounts) {
+        if (count == 1U) {
+            ++singletonRows;
+        } else if (count > 1U) {
+            ++duplicateRows;
+        }
+        maxRunCount = std::max(maxRunCount, count);
+    }
+    result.singletonRows = singletonRows;
+    result.duplicateRows = duplicateRows;
+    result.maxRunCount = maxRunCount;
 }
 
 void compileGraphReduceKernel(PreparedEmbeddingSparseGradient& prepared) {
@@ -1323,6 +1392,8 @@ EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(Prep
     launchReduceValues(prepared, upstreamGradient, outputGradient, stream);
     reduceEnd.record(stream);
 
+    populateRunCountProfileStats(result, prepared, outputGradient, stream);
+
     result.materializeSortPairsMs = materializeEnd.synchronizeAndReportElapsedTimeInMilliseconds(totalStart);
     result.cubSortMs = sortEnd.synchronizeAndReportElapsedTimeInMilliseconds(materializeEnd);
     result.clearRunCountsMs = clearCountsEnd.synchronizeAndReportElapsedTimeInMilliseconds(sortEnd);
@@ -1334,15 +1405,103 @@ EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(Prep
     return result;
 }
 
-void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
-                                            PreparedEmbeddingSparseGradient& prepared,
-                                            const Tensor& indices,
-                                            const Tensor& upstreamGradient,
-                                            SparseRowGradient& outputGradient,
-                                            CapturedEmbeddingSparseGradient& captured) {
+
+EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradientWithSparseRowUpdate(
+    PreparedEmbeddingSparseGradient& prepared,
+    const Tensor& indices,
+    const Tensor& upstreamGradient,
+    SparseRowGradient& outputGradient,
+    const std::unordered_map<std::string, float>& runtimeScalars,
+    Stream stream) {
     validatePreparedEmbeddingSparseGradientInvocation(prepared, indices, upstreamGradient, outputGradient);
-    if (prepared.sparseRowUpdate.has_value()) {
-        throw std::invalid_argument("Embedding sparse-gradient graph capture does not support fused sparse-row updates yet.");
+    if (!prepared.sparseRowUpdate.has_value()) {
+        throw std::invalid_argument(
+            "Embedding sparse-gradient fused-update profiler requires a prepared producer with a fused sparse-row update.");
+    }
+
+    ScopedGpu scopedGpu(prepared.deviceNum);
+
+    EmbeddingSparseGradientProfileResult result;
+    result.numTokens = prepared.numTokens;
+    result.vocabularySize = prepared.vocabularySize;
+    result.embeddingDim = prepared.embeddingDim;
+    result.capacity = outputGradient.capacity;
+    result.indexDataType = prepared.indexDataType;
+    result.gradientDataType = prepared.gradientDataType;
+    result.rowDataType = prepared.rowDataType;
+    result.sortTempBytes = prepared.sortTempBytes;
+    result.rleTempBytes = prepared.rleTempBytes;
+    result.scanTempBytes = prepared.scanTempBytes;
+
+    Event totalStart(prepared.deviceNum, /*enableTiming=*/true);
+    Event materializeEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event sortEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event clearCountsEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event rleEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event finalizeEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event scanEnd(prepared.deviceNum, /*enableTiming=*/true);
+    Event reduceUpdateEnd(prepared.deviceNum, /*enableTiming=*/true);
+
+    totalStart.record(stream);
+
+    launchMaterializeSortPairs(indices, prepared, stream);
+    materializeEnd.record(stream);
+
+    const int cubItems = checkedCubItems(prepared.numTokens, "token count");
+    sortPairs(prepared, cubItems, stream);
+    sortEnd.record(stream);
+
+    // RLE writes only the first numRuns counts. Clear the full counts buffer so the full-capacity prefix scan below is deterministic.
+    prepared.runCounts.memsetAsync(stream, 0);
+    clearCountsEnd.record(stream);
+
+    rleRows(prepared, outputGradient, cubItems, stream);
+    rleEnd.record(stream);
+
+    launchFinalizeRows(prepared, outputGradient, stream);
+    finalizeEnd.record(stream);
+
+    CUDA_CHECK(cub::DeviceScan::ExclusiveSum(prepared.scanTempStorage.getMemPtr<void>(),
+                                             prepared.scanTempBytes,
+                                             prepared.runCounts.getMemPtr<uint32_t>(),
+                                             prepared.runOffsets.getMemPtr<uint32_t>(),
+                                             cubItems,
+                                             stream.getStream()));
+    scanEnd.record(stream);
+
+    launchReduceValuesWithSparseRowUpdate(prepared, upstreamGradient, outputGradient, runtimeScalars, stream);
+    reduceUpdateEnd.record(stream);
+
+    populateRunCountProfileStats(result, prepared, outputGradient, stream);
+
+    result.materializeSortPairsMs = materializeEnd.synchronizeAndReportElapsedTimeInMilliseconds(totalStart);
+    result.cubSortMs = sortEnd.synchronizeAndReportElapsedTimeInMilliseconds(materializeEnd);
+    result.clearRunCountsMs = clearCountsEnd.synchronizeAndReportElapsedTimeInMilliseconds(sortEnd);
+    result.cubRleMs = rleEnd.synchronizeAndReportElapsedTimeInMilliseconds(clearCountsEnd);
+    result.finalizeRowsMs = finalizeEnd.synchronizeAndReportElapsedTimeInMilliseconds(rleEnd);
+    result.cubScanOffsetsMs = scanEnd.synchronizeAndReportElapsedTimeInMilliseconds(finalizeEnd);
+    // In this profiler the "reduce" stage is the production fused reducer+optimizer-update kernel.
+    result.reduceValuesMs = reduceUpdateEnd.synchronizeAndReportElapsedTimeInMilliseconds(scanEnd);
+    result.totalMs = reduceUpdateEnd.synchronizeAndReportElapsedTimeInMilliseconds(totalStart);
+    return result;
+}
+
+namespace {
+
+void capturePreparedEmbeddingSparseGradientImpl(CudaGraphCaptureBuilder& builder,
+                                                PreparedEmbeddingSparseGradient& prepared,
+                                                const Tensor& indices,
+                                                const Tensor& upstreamGradient,
+                                                SparseRowGradient& outputGradient,
+                                                const std::unordered_map<std::string, float>* runtimeScalars,
+                                                CapturedEmbeddingSparseGradient& captured) {
+    validatePreparedEmbeddingSparseGradientInvocation(prepared, indices, upstreamGradient, outputGradient);
+    const bool fusedSparseRowUpdate = prepared.sparseRowUpdate.has_value();
+    if (fusedSparseRowUpdate && runtimeScalars == nullptr) {
+        throw std::invalid_argument("Prepared Embedding sparse-gradient graph capture with fused sparse-row update requires runtime scalar bindings.");
+    }
+    if (!fusedSparseRowUpdate && runtimeScalars != nullptr) {
+        throw std::invalid_argument("Prepared Embedding sparse-gradient graph capture received runtime scalar bindings for a non-fused sparse-gradient producer.");
     }
     if (!captured.reduceNodeHandle.isInitialized()) {
         throw std::invalid_argument("Prepared Embedding sparse-gradient graph capture requires a preallocated reduce-node handle. Allocate CapturedEmbeddingSparseGradient before stream capture begins.");
@@ -1397,11 +1556,52 @@ void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
     const void* runCountsPtr = prepared.runCounts.getMemPtr();
     const void* numRowsPtr = outputGradient.numRows.getMemPtr();
     const void* upstreamPtr = upstreamGradient.getMemPtr();
-    void* outputValuesPtr = outputGradient.values.getMemPtr();
-    void* args[] = {&sortedTokenIdsPtr, &runOffsetsPtr, &runCountsPtr, &numRowsPtr, &upstreamPtr, &outputValuesPtr};
+
+    std::vector<void*> args;
+    args.reserve(6);
+    args.push_back((void*)&sortedTokenIdsPtr);
+    args.push_back((void*)&runOffsetsPtr);
+    args.push_back((void*)&runCountsPtr);
+    args.push_back((void*)&numRowsPtr);
+    args.push_back((void*)&upstreamPtr);
+
+    std::optional<SparseRowUpdateFusionKernelArgs> updateArgs;
+    const void* outputRowsPtr = nullptr;
+    void* outputValuesPtr = nullptr;
+    if (fusedSparseRowUpdate) {
+        outputRowsPtr = outputGradient.rows.getMemPtr();
+        args.push_back((void*)&outputRowsPtr);
+        updateArgs.emplace(buildSparseRowUpdateFusionKernelArgs(prepared.sparseRowUpdate.value(), *runtimeScalars));
+        args.insert(args.end(), updateArgs->args.begin(), updateArgs->args.end());
+    } else {
+        outputValuesPtr = outputGradient.values.getMemPtr();
+        args.push_back((void*)&outputValuesPtr);
+    }
 
     captured.reduceNode = builder.captureDeviceUpdatableKernel(
-        CudaGraphKernelLaunch{prepared.reduceKernel, dim3(1, reduceGridDimY, 1), dim3(THREADS_PER_BLOCK, 1, 1), 0, args, nullptr});
+        CudaGraphKernelLaunch{prepared.reduceKernel, dim3(1, reduceGridDimY, 1), dim3(THREADS_PER_BLOCK, 1, 1), 0, args.data(), nullptr});
+}
+
+}  // namespace
+
+void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
+                                            PreparedEmbeddingSparseGradient& prepared,
+                                            const Tensor& indices,
+                                            const Tensor& upstreamGradient,
+                                            SparseRowGradient& outputGradient,
+                                            CapturedEmbeddingSparseGradient& captured) {
+    capturePreparedEmbeddingSparseGradientImpl(builder, prepared, indices, upstreamGradient, outputGradient, nullptr, captured);
+}
+
+void capturePreparedEmbeddingSparseGradientWithSparseRowUpdate(
+    CudaGraphCaptureBuilder& builder,
+    PreparedEmbeddingSparseGradient& prepared,
+    const Tensor& indices,
+    const Tensor& upstreamGradient,
+    SparseRowGradient& outputGradient,
+    const std::unordered_map<std::string, float>& runtimeScalars,
+    CapturedEmbeddingSparseGradient& captured) {
+    capturePreparedEmbeddingSparseGradientImpl(builder, prepared, indices, upstreamGradient, outputGradient, &runtimeScalars, captured);
 }
 
 void launchEmbeddingSparseGradient(const Tensor& indices,
