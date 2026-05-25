@@ -33,8 +33,8 @@ namespace ThorImplementation {
  */
 class Loss : public Layer {
    public:
-    Loss(TensorDescriptor::DataType lossDataType) {
-        THOR_THROW_IF_FALSE(lossDataType == TensorDescriptor::DataType::FP16 || lossDataType == TensorDescriptor::DataType::FP32);
+    Loss(DataType lossDataType) {
+        THOR_THROW_IF_FALSE(lossDataType == DataType::FP16 || lossDataType == DataType::FP32);
         this->lossDataType = lossDataType;
     }
 
@@ -222,7 +222,7 @@ class Loss : public Layer {
 
    protected:
     std::optional<Tensor> labelsInput;
-    TensorDescriptor::DataType lossDataType;
+    DataType lossDataType;
 
     // FIXME: only const for now for convenience
     static constexpr float lossScalingFactor = 4;  // 32;

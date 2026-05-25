@@ -95,7 +95,7 @@
 //         THOR_THROW_IF_FALSE(featureInputs.back().has_value());
 //
 //         return Tensor(featureInputs.back().value().getPlacement(),
-//                       TensorDescriptor(TensorDescriptor::DataType::FP16,
+//                       TensorDescriptor(DataType::FP16,
 //                                        {featureInputs[0].value().getDescriptor().getDimensions()[0], numOutputFeatures}));
 //     }
 //
@@ -108,10 +108,10 @@
 //             THOR_THROW_IF_FALSE(aFeatureInput.getDimensions().size() == 2);
 //             weightsDimensions.push_back(aFeatureInput.getDescriptor().getDimensions()[1]);
 //             weightsDimensions.push_back(numOutputFeatures);
-//             TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
+//             TensorDescriptor weightsDescriptor = TensorDescriptor(DataType::FP16, weightsDimensions);
 //             weights = Tensor(aFeatureInput.getPlacement(), weightsDescriptor);
 //             if (hasBias) {
-//                 biases = Tensor(aFeatureInput.getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP16, {numOutputFeatures}));
+//                 biases = Tensor(aFeatureInput.getPlacement(), TensorDescriptor(DataType::FP16, {numOutputFeatures}));
 //             }
 //         }
 //     }
@@ -170,8 +170,8 @@
 //                                                                            anErrorInput.value().getDimensions()[1],
 //                                                                            true,
 //                                                                            false,
-//                                                                            ThorImplementation::TensorDescriptor::DataType::FP16,
-//                                                                            ThorImplementation::TensorDescriptor::DataType::FP16,
+//                                                                            ThorImplementation::DataType::FP16,
+//                                                                            ThorImplementation::DataType::FP16,
 //                                                                            optimizer.value()->getGradientUpdateStream(),
 //                                                                            false));
 //         }
@@ -199,7 +199,7 @@
 //                                                   false,
 //                                                   false,
 //                                                   false,
-//                                                   TensorDescriptor::DataType::FP16,
+//                                                   DataType::FP16,
 //                                                   stream);
 //
 //         if (hasBias) {
@@ -242,7 +242,7 @@
 //                                                       true,
 //                                                       false,
 //                                                       false,
-//                                                       TensorDescriptor::DataType::FP16,
+//                                                       DataType::FP16,
 //                                                       dataStream);
 //         }
 //
@@ -308,7 +308,7 @@
 //                                                   false,
 //                                                   accumulateGradient,
 //                                                   false,
-//                                                   TensorDescriptor::DataType::FP16,
+//                                                   DataType::FP16,
 //                                                   gradientUpdateStream);
 //
 //         if (hasBias) {

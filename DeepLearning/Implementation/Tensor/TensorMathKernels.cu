@@ -1200,7 +1200,7 @@ void Tensor::pow(Tensor base, Tensor exponent, Stream stream) {
     THOR_THROW_IF_FALSE(base.getPlacement() == exponent.getPlacement());
     THOR_THROW_IF_FALSE(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE((base.getDataType() == TensorDescriptor::DataType::FP32 && exponent.getDataType() == TensorDescriptor::DataType::FP32));
+    THOR_THROW_IF_FALSE((base.getDataType() == DataType::FP32 && exponent.getDataType() == DataType::FP32));
     THOR_THROW_IF_FALSE(base.getTotalNumElements() == exponent.getTotalNumElements());
     THOR_THROW_IF_FALSE(base.getTotalNumElements() == getTotalNumElements());
 
@@ -1208,7 +1208,7 @@ void Tensor::pow(Tensor base, Tensor exponent, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = base.getTotalNumElements();
     void *baseMem = base.getMemPtr();
     void *exponentMem = exponent.getMemPtr();
@@ -1216,21 +1216,21 @@ void Tensor::pow(Tensor base, Tensor exponent, Stream stream) {
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         powElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (half *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         powElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (float *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+    } else if (destDataType == DataType::UINT8) {
         powElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint8_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+    } else if (destDataType == DataType::UINT16) {
         powElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint16_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+    } else if (destDataType == DataType::UINT32) {
         powElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint32_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT8) {
+    } else if (destDataType == DataType::INT8) {
         powElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int8_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT16) {
+    } else if (destDataType == DataType::INT16) {
         powElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int16_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT32) {
+    } else if (destDataType == DataType::INT32) {
         powElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int32_t *)destMem, (float *)exponentMem, numElements);
     } else {
         THOR_UNREACHABLE();
@@ -1245,35 +1245,35 @@ void Tensor::pow(Tensor base, Tensor exponent, Stream stream) {
 void Tensor::pow(Tensor base, float exponent, Stream stream) {
     THOR_THROW_IF_FALSE(base.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(base.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE(base.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(base.getDataType() == DataType::FP32);
     THOR_THROW_IF_FALSE(base.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = base.getTotalNumElements();
     void *baseMem = base.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         powScalarExponentDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (half *)destMem, exponent, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         powScalarExponentDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (float *)destMem, exponent, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+    } else if (destDataType == DataType::UINT8) {
         powScalarExponentDest1B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint8_t *)destMem, exponent, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+    } else if (destDataType == DataType::UINT16) {
         powScalarExponentDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint16_t *)destMem, exponent, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+    } else if (destDataType == DataType::UINT32) {
         powScalarExponentDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint32_t *)destMem, exponent, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT8) {
+    } else if (destDataType == DataType::INT8) {
         powScalarExponentDest1B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int8_t *)destMem, exponent, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT16) {
+    } else if (destDataType == DataType::INT16) {
         powScalarExponentDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int16_t *)destMem, exponent, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT32) {
+    } else if (destDataType == DataType::INT32) {
         powScalarExponentDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int32_t *)destMem, exponent, numElements);
     } else {
         THOR_UNREACHABLE();
@@ -1289,35 +1289,35 @@ void Tensor::pow(Tensor base, float exponent, Stream stream) {
 void Tensor::pow(float base, Tensor exponent, Stream stream) {
     THOR_THROW_IF_FALSE(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE(exponent.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(exponent.getDataType() == DataType::FP32);
     THOR_THROW_IF_FALSE(exponent.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = exponent.getTotalNumElements();
     void *exponentMem = exponent.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         powScalarBaseDest2B<<<gridSize, blockSize, 0, stream>>>(base, (half *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         powScalarBaseDest4B<<<gridSize, blockSize, 0, stream>>>(base, (float *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+    } else if (destDataType == DataType::UINT8) {
         powScalarBaseDest1B<<<gridSize, blockSize, 0, stream>>>(base, (uint8_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+    } else if (destDataType == DataType::UINT16) {
         powScalarBaseDest2B<<<gridSize, blockSize, 0, stream>>>(base, (uint16_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+    } else if (destDataType == DataType::UINT32) {
         powScalarBaseDest4B<<<gridSize, blockSize, 0, stream>>>(base, (uint32_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT8) {
+    } else if (destDataType == DataType::INT8) {
         powScalarBaseDest1B<<<gridSize, blockSize, 0, stream>>>(base, (int8_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT16) {
+    } else if (destDataType == DataType::INT16) {
         powScalarBaseDest2B<<<gridSize, blockSize, 0, stream>>>(base, (int16_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT32) {
+    } else if (destDataType == DataType::INT32) {
         powScalarBaseDest4B<<<gridSize, blockSize, 0, stream>>>(base, (int32_t *)destMem, (float *)exponentMem, numElements);
     } else {
         THOR_UNREACHABLE();
@@ -1334,35 +1334,35 @@ void Tensor::pow(float base, Tensor exponent, Stream stream) {
 void Tensor::exp(Tensor exponent, Stream stream) {
     THOR_THROW_IF_FALSE(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE(exponent.getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(exponent.getDataType() == DataType::FP32);
     THOR_THROW_IF_FALSE(exponent.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = exponent.getTotalNumElements();
     void *exponentMem = exponent.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         expDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         expDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+    } else if (destDataType == DataType::UINT8) {
         expDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+    } else if (destDataType == DataType::UINT16) {
         expDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+    } else if (destDataType == DataType::UINT32) {
         expDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT8) {
+    } else if (destDataType == DataType::INT8) {
         expDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT16) {
+    } else if (destDataType == DataType::INT16) {
         expDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)exponentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT32) {
+    } else if (destDataType == DataType::INT32) {
         expDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)exponentMem, numElements);
     } else {
         THOR_UNREACHABLE();
@@ -1379,56 +1379,56 @@ void Tensor::exp(Tensor exponent, Stream stream) {
 void Tensor::log(Tensor argument, Stream stream) {
     THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE((argument.getDataType() == DataType::FP32 || argument.getDataType() == DataType::FP16));
     THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
     void *argumentMem = argument.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (argument.getDataType() == DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             logDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             logDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             logDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             logDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             logDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             logDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             logDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             logDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
         }
     } else {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             logDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             logDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             logDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             logDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             logDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             logDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             logDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             logDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
@@ -3180,7 +3180,7 @@ __global__ void lgammaDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t num
 void Tensor::log(Tensor argument, float base, Stream stream) {
     THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE((argument.getDataType() == DataType::FP32 || argument.getDataType() == DataType::FP16));
     THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(base > 0.0f && base != 1.0f);
@@ -3189,7 +3189,7 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
     void *argumentMem = argument.getMemPtr();
     void *destMem = getMemPtr();
@@ -3198,84 +3198,84 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
     dim3 gridSize((numElements + 2047) / 2048);
 
     if (base == 2.0f) {
-        if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
-            if (destDataType == TensorDescriptor::DataType::FP16) {
+        if (argument.getDataType() == DataType::FP16) {
+            if (destDataType == DataType::FP16) {
                 log2Dest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+            } else if (destDataType == DataType::FP32) {
                 log2Dest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+            } else if (destDataType == DataType::UINT8) {
                 log2Dest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+            } else if (destDataType == DataType::UINT16) {
                 log2Dest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+            } else if (destDataType == DataType::UINT32) {
                 log2Dest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+            } else if (destDataType == DataType::INT8) {
                 log2Dest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+            } else if (destDataType == DataType::INT16) {
                 log2Dest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+            } else if (destDataType == DataType::INT32) {
                 log2Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
             } else {
                 THOR_UNREACHABLE();
             }
         } else {
-            if (destDataType == TensorDescriptor::DataType::FP16) {
+            if (destDataType == DataType::FP16) {
                 log2Dest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+            } else if (destDataType == DataType::FP32) {
                 log2Dest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+            } else if (destDataType == DataType::UINT8) {
                 log2Dest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+            } else if (destDataType == DataType::UINT16) {
                 log2Dest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+            } else if (destDataType == DataType::UINT32) {
                 log2Dest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+            } else if (destDataType == DataType::INT8) {
                 log2Dest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+            } else if (destDataType == DataType::INT16) {
                 log2Dest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+            } else if (destDataType == DataType::INT32) {
                 log2Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
             } else {
                 THOR_UNREACHABLE();
             }
         }
     } else if (base == 10.0f) {
-        if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
-            if (destDataType == TensorDescriptor::DataType::FP16) {
+        if (argument.getDataType() == DataType::FP16) {
+            if (destDataType == DataType::FP16) {
                 log10Dest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+            } else if (destDataType == DataType::FP32) {
                 log10Dest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+            } else if (destDataType == DataType::UINT8) {
                 log10Dest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+            } else if (destDataType == DataType::UINT16) {
                 log10Dest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+            } else if (destDataType == DataType::UINT32) {
                 log10Dest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+            } else if (destDataType == DataType::INT8) {
                 log10Dest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+            } else if (destDataType == DataType::INT16) {
                 log10Dest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+            } else if (destDataType == DataType::INT32) {
                 log10Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
             } else {
                 THOR_UNREACHABLE();
             }
         } else {
-            if (destDataType == TensorDescriptor::DataType::FP16) {
+            if (destDataType == DataType::FP16) {
                 log10Dest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+            } else if (destDataType == DataType::FP32) {
                 log10Dest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+            } else if (destDataType == DataType::UINT8) {
                 log10Dest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+            } else if (destDataType == DataType::UINT16) {
                 log10Dest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+            } else if (destDataType == DataType::UINT32) {
                 log10Dest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+            } else if (destDataType == DataType::INT8) {
                 log10Dest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+            } else if (destDataType == DataType::INT16) {
                 log10Dest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+            } else if (destDataType == DataType::INT32) {
                 log10Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
             } else {
                 THOR_UNREACHABLE();
@@ -3284,44 +3284,44 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
     } else {
         float log2ConversionFactor = getLog2ConversionFactor(base);
 
-        if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
-            if (destDataType == TensorDescriptor::DataType::FP16) {
+        if (argument.getDataType() == DataType::FP16) {
+            if (destDataType == DataType::FP16) {
                 logXDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+            } else if (destDataType == DataType::FP32) {
                 logXDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+            } else if (destDataType == DataType::UINT8) {
                 logXDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+            } else if (destDataType == DataType::UINT16) {
                 logXDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+            } else if (destDataType == DataType::UINT32) {
                 logXDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+            } else if (destDataType == DataType::INT8) {
                 logXDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+            } else if (destDataType == DataType::INT16) {
                 logXDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+            } else if (destDataType == DataType::INT32) {
                 logXDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
             } else {
                 THOR_UNREACHABLE();
             }
         } else {
-            if (destDataType == TensorDescriptor::DataType::FP16) {
+            if (destDataType == DataType::FP16) {
                 logXDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+            } else if (destDataType == DataType::FP32) {
                 logXDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+            } else if (destDataType == DataType::UINT8) {
                 logXDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+            } else if (destDataType == DataType::UINT16) {
                 logXDest2B<<<gridSize, blockSize, 0, stream>>>(
                     (uint16_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+            } else if (destDataType == DataType::UINT32) {
                 logXDest4B<<<gridSize, blockSize, 0, stream>>>(
                     (uint32_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+            } else if (destDataType == DataType::INT8) {
                 logXDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+            } else if (destDataType == DataType::INT16) {
                 logXDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
-            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+            } else if (destDataType == DataType::INT32) {
                 logXDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
             } else {
                 THOR_UNREACHABLE();
@@ -3340,56 +3340,56 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
 void Tensor::ceil(Tensor argument, Stream stream) {
     THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE((argument.getDataType() == DataType::FP32 || argument.getDataType() == DataType::FP16));
     THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
     void *argumentMem = argument.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (argument.getDataType() == DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             ceilDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             ceilDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             ceilDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             ceilDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             ceilDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             ceilDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             ceilDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             ceilDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
         }
     } else {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             ceilDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             ceilDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             ceilDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             ceilDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             ceilDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             ceilDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             ceilDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             ceilDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
@@ -3407,56 +3407,56 @@ void Tensor::ceil(Tensor argument, Stream stream) {
 void Tensor::floor(Tensor argument, Stream stream) {
     THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE((argument.getDataType() == DataType::FP32 || argument.getDataType() == DataType::FP16));
     THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
     void *argumentMem = argument.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (argument.getDataType() == DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             floorDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             floorDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             floorDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             floorDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             floorDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             floorDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             floorDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             floorDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
         }
     } else {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             floorDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             floorDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             floorDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             floorDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             floorDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             floorDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             floorDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             floorDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
@@ -3474,56 +3474,56 @@ void Tensor::floor(Tensor argument, Stream stream) {
 void Tensor::round(Tensor argument, Stream stream) {
     THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE((argument.getDataType() == DataType::FP32 || argument.getDataType() == DataType::FP16));
     THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
     void *argumentMem = argument.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (argument.getDataType() == DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             roundDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             roundDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             roundDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             roundDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             roundDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             roundDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             roundDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             roundDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
         }
     } else {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             roundDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             roundDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             roundDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             roundDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             roundDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             roundDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             roundDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             roundDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
@@ -3540,56 +3540,56 @@ void Tensor::round(Tensor argument, Stream stream) {
 void Tensor::truncateFloatingPoint(Tensor argument, Stream stream) {
     THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE((argument.getDataType() == DataType::FP32 || argument.getDataType() == DataType::FP16));
     THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
     void *argumentMem = argument.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (argument.getDataType() == DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             truncateFloatingPointDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             truncateFloatingPointDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             truncateFloatingPointDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             truncateFloatingPointDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             truncateFloatingPointDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             truncateFloatingPointDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             truncateFloatingPointDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             truncateFloatingPointDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
         }
     } else {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             truncateFloatingPointDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             truncateFloatingPointDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             truncateFloatingPointDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             truncateFloatingPointDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             truncateFloatingPointDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             truncateFloatingPointDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             truncateFloatingPointDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             truncateFloatingPointDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
@@ -3607,35 +3607,35 @@ void Tensor::truncateFloatingPoint(Tensor argument, Stream stream) {
 void Tensor::reciprocal(Tensor argument, Stream stream) {
     THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE(argument.getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(argument.getDataType() == DataType::FP16);
     THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
     void *argumentMem = argument.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         reciprocalDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         reciprocalDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+    } else if (destDataType == DataType::UINT8) {
         reciprocalDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+    } else if (destDataType == DataType::UINT16) {
         reciprocalDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+    } else if (destDataType == DataType::UINT32) {
         reciprocalDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT8) {
+    } else if (destDataType == DataType::INT8) {
         reciprocalDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT16) {
+    } else if (destDataType == DataType::INT16) {
         reciprocalDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::INT32) {
+    } else if (destDataType == DataType::INT32) {
         reciprocalDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
     } else {
         THOR_UNREACHABLE();
@@ -3652,56 +3652,56 @@ void Tensor::reciprocal(Tensor argument, Stream stream) {
 void Tensor::sqrt(Tensor argument, Stream stream) {
     THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE((argument.getDataType() == DataType::FP32 || argument.getDataType() == DataType::FP16));
     THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
     void *argumentMem = argument.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (argument.getDataType() == DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             sqrtDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             sqrtDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             sqrtDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             sqrtDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             sqrtDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             sqrtDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             sqrtDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             sqrtDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
         }
     } else {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             sqrtDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             sqrtDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             sqrtDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             sqrtDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             sqrtDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             sqrtDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             sqrtDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             sqrtDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
@@ -3719,56 +3719,56 @@ void Tensor::sqrt(Tensor argument, Stream stream) {
 void Tensor::reciprocalSqrt(Tensor argument, Stream stream) {
     THOR_THROW_IF_FALSE(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE((argument.getDataType() == DataType::FP32 || argument.getDataType() == DataType::FP16));
     THOR_THROW_IF_FALSE(argument.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
     void *argumentMem = argument.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (argument.getDataType() == DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             reciprocalSqrtDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             reciprocalSqrtDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             reciprocalSqrtDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             reciprocalSqrtDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             reciprocalSqrtDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             reciprocalSqrtDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             reciprocalSqrtDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             reciprocalSqrtDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
         }
     } else {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             reciprocalSqrtDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             reciprocalSqrtDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             reciprocalSqrtDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             reciprocalSqrtDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             reciprocalSqrtDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             reciprocalSqrtDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             reciprocalSqrtDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             reciprocalSqrtDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
         } else {
             THOR_UNREACHABLE();
@@ -3786,24 +3786,24 @@ void Tensor::reciprocalSqrt(Tensor argument, Stream stream) {
 void Tensor::erf(Tensor x, Stream stream) {
     THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
-    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == DataType::FP32 || getDataType() == DataType::FP16);
     THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
     void *xMem = x.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         erfDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         erfDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
         THOR_UNREACHABLE();
@@ -3820,24 +3820,24 @@ void Tensor::erf(Tensor x, Stream stream) {
 void Tensor::erfinv(Tensor x, Stream stream) {
     THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
-    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == DataType::FP32 || getDataType() == DataType::FP16);
     THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
     void *xMem = x.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         erfinvDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         erfinvDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
         THOR_UNREACHABLE();
@@ -3854,24 +3854,24 @@ void Tensor::erfinv(Tensor x, Stream stream) {
 void Tensor::erfc(Tensor x, Stream stream) {
     THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
-    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == DataType::FP32 || getDataType() == DataType::FP16);
     THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
     void *xMem = x.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         erfcDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         erfcDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
         THOR_UNREACHABLE();
@@ -3887,24 +3887,24 @@ void Tensor::erfc(Tensor x, Stream stream) {
 void Tensor::erfcinv(Tensor x, Stream stream) {
     THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
-    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == DataType::FP32 || getDataType() == DataType::FP16);
     THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
     void *xMem = x.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         erfcinvDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         erfcinvDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
         THOR_UNREACHABLE();
@@ -3921,24 +3921,24 @@ void Tensor::erfcinv(Tensor x, Stream stream) {
 void Tensor::erfcx(Tensor x, Stream stream) {
     THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
-    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == DataType::FP32 || getDataType() == DataType::FP16);
     THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
     void *xMem = x.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         erfcxDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         erfcxDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
         THOR_UNREACHABLE();
@@ -3954,24 +3954,24 @@ void Tensor::erfcx(Tensor x, Stream stream) {
 void Tensor::tgamma(Tensor x, Stream stream) {
     THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
-    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == DataType::FP32 || getDataType() == DataType::FP16);
     THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
     void *xMem = x.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         tgammaDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         tgammaDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
         THOR_UNREACHABLE();
@@ -3987,24 +3987,24 @@ void Tensor::tgamma(Tensor x, Stream stream) {
 void Tensor::lgamma(Tensor x, Stream stream) {
     THOR_THROW_IF_FALSE(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
-    THOR_THROW_IF_FALSE(x.getDataType() == TensorDescriptor::DataType::FP32);
-    THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(x.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(getDataType() == DataType::FP32 || getDataType() == DataType::FP16);
     THOR_THROW_IF_FALSE(x.getTotalNumElements() == getTotalNumElements());
 
     THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
     void *xMem = x.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (destDataType == DataType::FP16) {
         lgammaDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
-    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+    } else if (destDataType == DataType::FP32) {
         lgammaDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
         THOR_UNREACHABLE();

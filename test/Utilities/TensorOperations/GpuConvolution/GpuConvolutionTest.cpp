@@ -51,16 +51,16 @@ TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
 
         Tensor errorInputCpu(
             cpuPlacement,
-            TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns}));
+            TensorDescriptor(DataType::FP16, {batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns}));
         Tensor errorInputGpu(
             gpuPlacement,
-            TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns}));
+            TensorDescriptor(DataType::FP16, {batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns}));
 
-        Tensor biasesGradientCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numFeatureOutputChannels}));
-        Tensor biasesGradientGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numFeatureOutputChannels}));
-        Tensor biasesGradientGpu_h(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numFeatureOutputChannels}));
+        Tensor biasesGradientCpu(cpuPlacement, TensorDescriptor(DataType::FP16, {numFeatureOutputChannels}));
+        Tensor biasesGradientGpu(gpuPlacement, TensorDescriptor(DataType::FP16, {numFeatureOutputChannels}));
+        Tensor biasesGradientGpu_h(cpuPlacement, TensorDescriptor(DataType::FP16, {numFeatureOutputChannels}));
 
-        Tensor workspaceGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize * numFeatureOutputChannels}));
+        Tensor workspaceGpu(gpuPlacement, TensorDescriptor(DataType::FP32, {batchSize * numFeatureOutputChannels}));
 
         // Fill input tensors
         uint64_t errorInputNumElements = errorInputCpu.getDescriptor().getTotalNumElements();
@@ -144,28 +144,28 @@ TEST(GpuConvolution, ConvolutionForwardProducesCorrectResult) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor featureInputDescriptor(TensorDescriptor::DataType::FP16,
+        TensorDescriptor featureInputDescriptor(DataType::FP16,
                                                 {batchSize, numFeatureInputChannels, numInputRows, numInputColumns});
         Tensor featureInputCpu(cpuPlacement, featureInputDescriptor);
         Tensor featureInputGpu(gpuPlacement, featureInputDescriptor);
 
         uint64_t numOutputRows = convolutionKernelRequirement.getNumOutputRows();
         uint64_t numOutputColumns = convolutionKernelRequirement.getNumOutputColumns();
-        TensorDescriptor featureOutputDescriptor(TensorDescriptor::DataType::FP16,
+        TensorDescriptor featureOutputDescriptor(DataType::FP16,
                                                  {batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns});
         Tensor featureOutputCpu(cpuPlacement, featureOutputDescriptor);
         Tensor featureOutputGpu(gpuPlacement, featureOutputDescriptor);
         Tensor featureOutputGpu_h(cpuPlacement, featureOutputDescriptor);
 
-        Tensor biasCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numFeatureOutputChannels}));
-        Tensor biasGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numFeatureOutputChannels}));
+        Tensor biasCpu(cpuPlacement, TensorDescriptor(DataType::FP16, {numFeatureOutputChannels}));
+        Tensor biasGpu(gpuPlacement, TensorDescriptor(DataType::FP16, {numFeatureOutputChannels}));
 
         GpuConvolution::instance().chooseOptimalKernelForward(convolutionKernelRequirement, stream);
 
         uint64_t workspaceSizeInBytes = GpuConvolution::instance().getForwardWorkspaceSizeInBytes(convolutionKernelRequirement);
         std::optional<Tensor> workspace;
         if (workspaceSizeInBytes != 0)
-            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
+            workspace = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
 
         uint64_t totalNumFeatureInputElements = featureInputDescriptor.getTotalNumElements();
         half *featureInputMem = (half *)featureInputCpu.getMemPtr();
@@ -175,7 +175,7 @@ TEST(GpuConvolution, ConvolutionForwardProducesCorrectResult) {
         }
         featureInputGpu.copyFromAsync(featureInputCpu, stream);
 
-        TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16,
+        TensorDescriptor weightsDescriptor(DataType::FP16,
                                            {numFeatureOutputChannels, numFeatureInputChannels, filterHeight, filterWidth});
         Tensor weightsCpu(cpuPlacement, weightsDescriptor);
         Tensor weightsGpu(gpuPlacement, weightsDescriptor);
@@ -261,17 +261,17 @@ void backwardFilterTest(bool accumulate) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor featureInputDescriptor(TensorDescriptor::DataType::FP16,
+        TensorDescriptor featureInputDescriptor(DataType::FP16,
                                                 {batchSize, numFeatureInputChannels, numInputRows, numInputColumns});
         Tensor featureInputCpu(cpuPlacement, featureInputDescriptor);
         Tensor featureInputGpu(gpuPlacement, featureInputDescriptor);
 
-        TensorDescriptor featureOutputDescriptor(TensorDescriptor::DataType::FP16,
+        TensorDescriptor featureOutputDescriptor(DataType::FP16,
                                                  {batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns});
         Tensor errorInputCpu(cpuPlacement, featureOutputDescriptor);
         Tensor errorInputGpu(gpuPlacement, featureOutputDescriptor);
 
-        TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16,
+        TensorDescriptor weightsDescriptor(DataType::FP16,
                                            {numFeatureOutputChannels, numFeatureInputChannels, filterHeight, filterWidth});
         Tensor weightsGradientCpu(cpuPlacement, weightsDescriptor);
         Tensor weightsGradientGpu(gpuPlacement, weightsDescriptor);
@@ -308,7 +308,7 @@ void backwardFilterTest(bool accumulate) {
         uint64_t workspaceSizeInBytes = GpuConvolution::instance().getBackwardFilterWorkspaceSizeInBytes(convolutionKernelRequirement);
         std::optional<Tensor> workspace;
         if (workspaceSizeInBytes != 0)
-            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
+            workspace = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
 
         GpuConvolution::instance().convolutionBackwardFilter(
             convolutionKernelRequirement, featureInputGpu, errorInputGpu, weightsGradientGpu, workspace, stream, accumulate);
@@ -388,17 +388,17 @@ TEST(GpuConvolution, ConvolutionBackwardDataProducesCorrectResult) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor errorInputDescriptor(TensorDescriptor::DataType::FP16,
+        TensorDescriptor errorInputDescriptor(DataType::FP16,
                                               {batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns});
         Tensor errorInputCpu(cpuPlacement, errorInputDescriptor);
         Tensor errorInputGpu(gpuPlacement, errorInputDescriptor);
 
-        TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16,
+        TensorDescriptor weightsDescriptor(DataType::FP16,
                                            {numFeatureOutputChannels, numFeatureInputChannels, filterHeight, filterWidth});
         Tensor weightsCpu(cpuPlacement, weightsDescriptor);
         Tensor weightsGpu(gpuPlacement, weightsDescriptor);
 
-        TensorDescriptor errorOutputDescriptor(TensorDescriptor::DataType::FP16,
+        TensorDescriptor errorOutputDescriptor(DataType::FP16,
                                                {batchSize, numFeatureInputChannels, numInputRows, numInputColumns});
         Tensor errorOutputCpu(cpuPlacement, errorOutputDescriptor);
         Tensor errorOutputGpu(gpuPlacement, errorOutputDescriptor);
@@ -427,7 +427,7 @@ TEST(GpuConvolution, ConvolutionBackwardDataProducesCorrectResult) {
         uint64_t workspaceSizeInBytes = GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
         std::optional<Tensor> workspace;
         if (workspaceSizeInBytes != 0)
-            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
+            workspace = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
 
         GpuConvolution::instance().convolutionBackwardData(
             convolutionKernelRequirement, errorInputGpu, weightsGpu, errorOutputGpu, workspace, stream);

@@ -62,11 +62,11 @@ ImageProcessor::ImageProcessor(double minAspectRatio,
 uint64_t ImageProcessor::outputTensorSizeInPixels() { return outputImageRows * outputImageColumns; }
 uint64_t ImageProcessor::outputTensorSizeInBytes() { return 3 * outputTensorSizeInPixels() * bytesPerPixelChannel; }
 
-ThorImplementation::TensorDescriptor::DataType ImageProcessor::getDataType() {
+ThorImplementation::DataType ImageProcessor::getDataType() {
     if (bytesPerPixelChannel == 1)
-        return ThorImplementation::TensorDescriptor::DataType::UINT8;
+        return ThorImplementation::DataType::UINT8;
     else
-        return ThorImplementation::TensorDescriptor::DataType::FP16;
+        return ThorImplementation::DataType::FP16;
 }
 
 DataElement ImageProcessor::operator()(DataElement &input) {
@@ -89,7 +89,7 @@ DataElement ImageProcessor::operator()(DataElement &input) {
     unique_ptr<uint8_t[]> data = std::make_unique<uint8_t[]>(outputTensorSizeInBytes());
 
     if (bytesPerPixelChannel == 1) {
-        output.dataType = ThorImplementation::TensorDescriptor::DataType::UINT8;
+        output.dataType = ThorImplementation::DataType::UINT8;
 
         success = ImageLoader::toRgbArray(image, data.get(), ImageLoader::Layout::CHW);
         if (!success)
@@ -102,7 +102,7 @@ DataElement ImageProcessor::operator()(DataElement &input) {
                 return output;
         }
     } else {
-        output.dataType = ThorImplementation::TensorDescriptor::DataType::FP16;
+        output.dataType = ThorImplementation::DataType::FP16;
 
         success = ImageLoader::toRgbArray(image, (half *)data.get(), ImageLoader::Layout::CHW, centerAndScale);
         if (!success)

@@ -35,7 +35,6 @@ bool experimentalCudnnRaggedBiasBackwardProbeEnabled() {
 
 }  // namespace
 
-using DataType = TensorDescriptor::DataType;
 
 static bool isThorCudnnConvolutionFloatingDType(DataType dtype) {
     switch (dtype) {
@@ -1191,8 +1190,8 @@ shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey&
                                                          const string& kernel_name,
                                                          const vector<string>& input_names,
                                                          const std::vector<NamedInput::Kind>& input_kinds,
-                                                         const std::vector<TensorDescriptor::DataType>& input_dtypes,
-                                                         const std::vector<TensorDescriptor::DataType>& output_dtypes,
+                                                         const std::vector<DataType>& input_dtypes,
+                                                         const std::vector<DataType>& output_dtypes,
                                                          int device_num) {
     CUmodule module;
     CUfunction fn;

@@ -20,7 +20,7 @@ class AdaptiveLayerNorm : public Layer {
                       bool inferenceOnly,
                       std::vector<uint64_t> normalizedShape,
                       std::optional<double> epsilon = std::nullopt,
-                      std::optional<TensorDescriptor::DataType> scaleBiasDataType = std::nullopt,
+                      std::optional<DataType> scaleBiasDataType = std::nullopt,
                       int64_t stampedId = -1);
 
     std::string getLayerType() { return "AdaptiveLayerNorm"; }
@@ -29,7 +29,7 @@ class AdaptiveLayerNorm : public Layer {
     const std::vector<uint64_t>& getNormalizedShape() const { return normalizedShape; }
     uint64_t getNormalizedFeatureCount() const { return normalizedFeatureCount; }
     double getEpsilon() const { return epsilon; }
-    TensorDescriptor::DataType getScaleBiasDataType() const { return scaleBiasDataType; }
+    DataType getScaleBiasDataType() const { return scaleBiasDataType; }
 
     void setEpsilon(double value);
 
@@ -80,7 +80,7 @@ class AdaptiveLayerNorm : public Layer {
     uint64_t batchSize = 0;
     uint64_t leadingFeatureCount = 0;
     double epsilon = 1.0e-5;
-    TensorDescriptor::DataType scaleBiasDataType = TensorDescriptor::DataType::FP32;
+    DataType scaleBiasDataType = DataType::FP32;
 
     std::array<std::optional<Tensor>, NUM_INPUT_PORTS> adaptiveFeatureInputs;
     std::array<std::optional<Tensor>, NUM_INPUT_PORTS> adaptiveErrorOutputs;

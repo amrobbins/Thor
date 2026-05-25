@@ -60,7 +60,7 @@ bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataPro
     uint64_t numValidateExamplesPerShard = (numValidateExamples / numOutputShards) + numOutputShards;
     uint64_t numTestExamplesPerShard = (numTestExamples / numOutputShards) + numOutputShards;
     outputTensorSizeInBytes = dataProcessor->outputTensorSizeInBytes();
-    ThorImplementation::TensorDescriptor::DataType dataType = dataProcessor->getDataType();
+    ThorImplementation::DataType dataType = dataProcessor->getDataType();
 
     // set up work queue
     uint32_t numProcessors = omp_get_num_procs();

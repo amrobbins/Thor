@@ -12,7 +12,6 @@
 namespace ThorImplementation {
 
 struct SparseRowGradient {
-    using DataType = TensorDescriptor::DataType;
 
     // rows has one extra staging slot so CUB RLE can write the optional invalid-row sentinel directly into this tensor.
     // Only the first numRows entries are valid sparse-gradient rows; values remains exactly [capacity, embeddingDim].

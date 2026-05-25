@@ -52,7 +52,7 @@ class Tanh : public Activation {
    private:
     bool uninitialized;
 
-    TensorDescriptor::DataType dataType;
+    DataType dataType;
 };
 
 }  // namespace ThorImplementation

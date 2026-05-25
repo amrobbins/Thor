@@ -29,7 +29,6 @@ namespace {
 
 TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
 TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-using DataType = TensorDescriptor::DataType;
 
 const char* kCudaGraphTestKernels = R"CUDA(
 extern "C" __global__ void write_block_x(unsigned int* out) {

@@ -8,7 +8,7 @@ namespace nb = nanobind;
 
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 
 // Forward declarations for per-feature binders
 void bind_version(nb::module_ &thor);

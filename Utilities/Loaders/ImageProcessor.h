@@ -38,7 +38,7 @@ class ImageProcessor : public DataProcessor {
 
     virtual uint64_t outputTensorSizeInBytes();
     virtual uint64_t outputTensorSizeInPixels();
-    virtual ThorImplementation::TensorDescriptor::DataType getDataType();
+    virtual ThorImplementation::DataType getDataType();
 
     virtual DataElement operator()(DataElement &input);
 

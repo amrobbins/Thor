@@ -411,7 +411,7 @@ void runGroupedInPlaceRotaryPositionEmbedding(std::vector<Tensor>& tensors,
         throw std::runtime_error("Grouped in-place RoPE currently supports one or two tensors.");
     }
     validateSharedOptions(options);
-    const TensorDescriptor::DataType dtype = tensors[0].getDataType();
+    const DataType dtype = tensors[0].getDataType();
     for (const Tensor& tensor : tensors) {
         if (tensor.getDataType() != dtype) {
             throw std::runtime_error("Grouped in-place RoPE tensors must have identical dtypes.");
@@ -422,13 +422,13 @@ void runGroupedInPlaceRotaryPositionEmbedding(std::vector<Tensor>& tensors,
     }
 
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             launchGroupedInPlaceRope<half>(tensors, options, stream);
             break;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             launchGroupedInPlaceRope<__nv_bfloat16>(tensors, options, stream);
             break;
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             launchGroupedInPlaceRope<float>(tensors, options, stream);
             break;
         default:

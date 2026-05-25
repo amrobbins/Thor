@@ -82,7 +82,7 @@ class PhysicalParameter {
     PhysicalParameter(std::string name,
                       bool trainable,
                       const std::vector<uint64_t> &shape,
-                      const TensorDescriptor::DataType dtype);  // Later add constraint here
+                      const DataType dtype);  // Later add constraint here
 
     virtual void compileStorage(const StorageContext &context);
     virtual void compileStorage(const Tensor &inputTensor);
@@ -93,7 +93,7 @@ class PhysicalParameter {
     virtual void createStorage(const StorageContext &context);
     static Tensor allocateStorage(const TensorPlacement placement,
                                   const std::vector<uint64_t> &shape,
-                                  const TensorDescriptor::DataType dtype);
+                                  const DataType dtype);
     void clearStorage();
 
     void initialize(Stream initStream);
@@ -144,7 +144,7 @@ class PhysicalParameter {
     bool storageInitialized = false;
 
     std::optional<std::vector<uint64_t>> shape = std::nullopt;
-    std::optional<TensorDescriptor::DataType> dtype;
+    std::optional<DataType> dtype;
 };
 
 }  // namespace ThorImplementation

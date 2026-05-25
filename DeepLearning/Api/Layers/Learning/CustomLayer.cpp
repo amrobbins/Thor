@@ -14,7 +14,7 @@ using namespace std;
 using json = nlohmann::json;
 
 using DynamicExpression = ThorImplementation::DynamicExpression;
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 using PhysicalTensor = ThorImplementation::Tensor;
 using PhysicalTensorMap = std::unordered_map<std::string, PhysicalTensor>;
 using CompiledExecutionStage = ThorImplementation::CompiledExecutionStage;

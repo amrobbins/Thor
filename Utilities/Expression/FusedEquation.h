@@ -89,7 +89,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledEquation> flat = nullptr;
     const std::shared_ptr<const CudaKernelExpression> cuda_kernel_expression = nullptr;
     const std::shared_ptr<CompiledCudaKernel> cuda_kernel = nullptr;
-    const std::vector<TensorDescriptor::DataType> cuda_kernel_output_dtypes = {};
+    const std::vector<DataType> cuda_kernel_output_dtypes = {};
     const std::shared_ptr<CompiledReduction> reduction = nullptr;
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
@@ -106,7 +106,7 @@ struct CompiledExecutionStage {
     const std::vector<uint32_t> input_value_ids;
     const std::vector<CompiledStageOutput> outputs;
 
-    [[nodiscard]] TensorDescriptor::DataType outputDType(size_t output_idx) const {
+    [[nodiscard]] DataType outputDType(size_t output_idx) const {
         if (output_idx >= outputs.size()) {
             throw std::runtime_error("CompiledExecutionStage::outputDType output index out of range for stage kind " + kindToString(kind) +
                                      ".");
@@ -227,7 +227,7 @@ struct CompiledExecutionStage {
     CompiledExecutionStage(const PhysicalExpression& expr,
                            const std::shared_ptr<const CudaKernelExpression>& cuda_kernel_expression,
                            const std::shared_ptr<CompiledCudaKernel>& cuda_kernel,
-                           std::vector<TensorDescriptor::DataType> output_dtypes,
+                           std::vector<DataType> output_dtypes,
                            std::vector<uint32_t> input_value_ids,
                            std::vector<CompiledStageOutput> outputs,
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
@@ -383,7 +383,7 @@ struct CompiledOutputs {
 };
 
 struct RuntimeDTypeKey {
-    std::vector<TensorDescriptor::DataType> root_input_dtypes;
+    std::vector<DataType> root_input_dtypes;
 
     bool operator==(const RuntimeDTypeKey& other) const = default;
 };
@@ -395,7 +395,7 @@ struct RuntimeDTypeKeyHash {
         auto combine = [&](size_t value) noexcept { h ^= value + 0x9e3779b9 + (h << 6) + (h >> 2); };
 
         combine(std::hash<size_t>{}(k.root_input_dtypes.size()));
-        for (TensorDescriptor::DataType dtype : k.root_input_dtypes) {
+        for (DataType dtype : k.root_input_dtypes) {
             combine(std::hash<int>{}(static_cast<int>(dtype)));
         }
 
@@ -498,7 +498,7 @@ class FusedEquation {
     std::unordered_map<std::string, std::vector<uint64_t>> getOutputShapes(
         const std::unordered_map<std::string, Tensor>& inputs,
         const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) const;
-    std::unordered_map<std::string, TensorDescriptor::DataType> getOutputDataTypes(
+    std::unordered_map<std::string, DataType> getOutputDataTypes(
         const std::unordered_map<std::string, Tensor>& inputs) const;
 
     static bool resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions);

@@ -72,9 +72,9 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP32) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP32, {rowsA, ldA});
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP32, {rowsB, ldB});
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, {rowsC, ldC});
+        TensorDescriptor ADescriptor(DataType::FP32, {rowsA, ldA});
+        TensorDescriptor BDescriptor(DataType::FP32, {rowsB, ldB});
+        TensorDescriptor CDescriptor(DataType::FP32, {rowsC, ldC});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -119,10 +119,10 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP32) {
 
         if (useLdVersion)
             CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP32, false);
+                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, DataType::FP32, false);
         else
             CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-                0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP32, false);
+                0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, DataType::FP32, false);
 
         bool useWorkspace = rand() % 2;
 
@@ -143,16 +143,16 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP32) {
                                                                                            ldC,
                                                                                            transposeA,
                                                                                            transposeB,
-                                                                                           TensorDescriptor::DataType::FP32,
+                                                                                           DataType::FP32,
                                                                                            kernelWillRunOnGpu);
             } else {
                 workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(
-                    0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP32, kernelWillRunOnGpu);
+                    0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, DataType::FP32, kernelWillRunOnGpu);
             }
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
-                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes});
+                TensorDescriptor workspaceDescriptor(DataType::UINT8, {workspaceSizeInBytes});
                 workspace_d = Tensor(gpuPlacement, workspaceDescriptor);
             }
         }
@@ -190,7 +190,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP32) {
                                                   transposeB,
                                                   accumulate,
                                                   negate,
-                                                  TensorDescriptor::DataType::FP32,
+                                                  DataType::FP32,
                                                   stream);
 
         C_gpu_h.copyFromAsync(C_d, stream);
@@ -270,9 +270,9 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP16) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP16, {rowsA, ldA});
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, {rowsB, ldB});
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, {rowsC, ldC});
+        TensorDescriptor ADescriptor(DataType::FP16, {rowsA, ldA});
+        TensorDescriptor BDescriptor(DataType::FP16, {rowsB, ldB});
+        TensorDescriptor CDescriptor(DataType::FP16, {rowsC, ldC});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -317,10 +317,10 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP16) {
 
         if (useLdVersion)
             CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
+                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, DataType::FP16, false);
         else
             CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-                0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
+                0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, DataType::FP16, false);
 
         bool useWorkspace = rand() % 2;
 
@@ -341,16 +341,16 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP16) {
                                                                                            ldC,
                                                                                            transposeA,
                                                                                            transposeB,
-                                                                                           TensorDescriptor::DataType::FP16,
+                                                                                           DataType::FP16,
                                                                                            kernelWillRunOnGpu);
             } else {
                 workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(
-                    0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP16, kernelWillRunOnGpu);
+                    0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, DataType::FP16, kernelWillRunOnGpu);
             }
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
-                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes});
+                TensorDescriptor workspaceDescriptor(DataType::UINT8, {workspaceSizeInBytes});
                 workspace_d = Tensor(gpuPlacement, workspaceDescriptor);
             }
         }
@@ -388,7 +388,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP16) {
                                                   transposeB,
                                                   accumulate,
                                                   negate,
-                                                  TensorDescriptor::DataType::FP16,
+                                                  DataType::FP16,
                                                   stream);
 
         C_gpu_h.copyFromAsync(C_d, stream);
@@ -466,9 +466,9 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP32) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP32, {rowsA, ldA});
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP32, {rowsB, ldB});
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, {rowsC, ldC});
+        TensorDescriptor ADescriptor(DataType::FP32, {rowsA, ldA});
+        TensorDescriptor BDescriptor(DataType::FP32, {rowsB, ldB});
+        TensorDescriptor CDescriptor(DataType::FP32, {rowsC, ldC});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -543,7 +543,7 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP32) {
                                                                             transposeB,
                                                                             accumulate,
                                                                             negate,
-                                                                            TensorDescriptor::DataType::FP32,
+                                                                            DataType::FP32,
                                                                             stream);
 
         C_gpu_h.copyFromAsync(C_d, stream);
@@ -623,9 +623,9 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP16) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP16, {rowsA, ldA});
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, {rowsB, ldB});
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, {rowsC, ldC});
+        TensorDescriptor ADescriptor(DataType::FP16, {rowsA, ldA});
+        TensorDescriptor BDescriptor(DataType::FP16, {rowsB, ldB});
+        TensorDescriptor CDescriptor(DataType::FP16, {rowsC, ldC});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -670,10 +670,10 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP16) {
 
         if (useLdVersion)
             CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
+                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, DataType::FP16, false);
         else
             CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-                0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
+                0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, DataType::FP16, false);
 
         A_d.copyFromAsync(A, stream);
         B_d.copyFromAsync(B, stream);
@@ -707,7 +707,7 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP16) {
                                                                             transposeB,
                                                                             accumulate,
                                                                             negate,
-                                                                            TensorDescriptor::DataType::FP16,
+                                                                            DataType::FP16,
                                                                             stream);
 
         C_gpu_h.copyFromAsync(C_d, stream);
@@ -801,10 +801,10 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP32, {rowsA, ldA});
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP32, {rowsB, ldB});
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, {rowsC, ldC});
-        TensorDescriptor DDescriptor(TensorDescriptor::DataType::FP32, {rowsD, ldD});
+        TensorDescriptor ADescriptor(DataType::FP32, {rowsA, ldA});
+        TensorDescriptor BDescriptor(DataType::FP32, {rowsB, ldB});
+        TensorDescriptor CDescriptor(DataType::FP32, {rowsC, ldC});
+        TensorDescriptor DDescriptor(DataType::FP32, {rowsD, ldD});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -886,7 +886,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
                                D_d.getMemPtr());
 
         CublasMatrixMultiply::instance().chooseOptimalGemmKernel(
-            0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, TensorDescriptor::DataType::FP32, false);
+            0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, DataType::FP32, false);
 
         bool useWorkspace = rand() % 2;
 
@@ -906,12 +906,12 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
                                                                                                          transposeA,
                                                                                                          transposeB,
                                                                                                          transposeC,
-                                                                                                         TensorDescriptor::DataType::FP32,
+                                                                                                         DataType::FP32,
                                                                                                          kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
-                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes});
+                TensorDescriptor workspaceDescriptor(DataType::UINT8, {workspaceSizeInBytes});
                 workspace_d = Tensor(gpuPlacement, workspaceDescriptor);
             }
         }
@@ -956,7 +956,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
                                               transposeC,
                                               &alpha,
                                               &beta,
-                                              TensorDescriptor::DataType::FP32,
+                                              DataType::FP32,
                                               stream);
 
         D_gpu_h.copyFromAsync(D_d, stream);
@@ -1055,10 +1055,10 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP16) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP16, {rowsA, ldA});
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, {rowsB, ldB});
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, {rowsC, ldC});
-        TensorDescriptor DDescriptor(TensorDescriptor::DataType::FP16, {rowsD, ldD});
+        TensorDescriptor ADescriptor(DataType::FP16, {rowsA, ldA});
+        TensorDescriptor BDescriptor(DataType::FP16, {rowsB, ldB});
+        TensorDescriptor CDescriptor(DataType::FP16, {rowsC, ldC});
+        TensorDescriptor DDescriptor(DataType::FP16, {rowsD, ldD});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -1140,7 +1140,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP16) {
                                D_d.getMemPtr());
 
         CublasMatrixMultiply::instance().chooseOptimalGemmKernel(
-            0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, TensorDescriptor::DataType::FP16, false);
+            0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, DataType::FP16, false);
 
         bool useWorkspace = rand() % 2;
 
@@ -1160,12 +1160,12 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP16) {
                                                                                                          transposeA,
                                                                                                          transposeB,
                                                                                                          transposeC,
-                                                                                                         TensorDescriptor::DataType::FP16,
+                                                                                                         DataType::FP16,
                                                                                                          kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
-                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes});
+                TensorDescriptor workspaceDescriptor(DataType::UINT8, {workspaceSizeInBytes});
                 workspace_d = Tensor(gpuPlacement, workspaceDescriptor);
             }
         }
@@ -1210,7 +1210,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP16) {
                                               transposeC,
                                               &alpha,
                                               &beta,
-                                              TensorDescriptor::DataType::FP16,
+                                              DataType::FP16,
                                               stream);
 
         D_gpu_h.copyFromAsync(D_d, stream);
@@ -1307,10 +1307,10 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP32) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP32, {rowsA, ldA});
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP32, {rowsB, ldB});
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, {rowsC, ldC});
-        TensorDescriptor DDescriptor(TensorDescriptor::DataType::FP32, {rowsD, ldD});
+        TensorDescriptor ADescriptor(DataType::FP32, {rowsA, ldA});
+        TensorDescriptor BDescriptor(DataType::FP32, {rowsB, ldB});
+        TensorDescriptor CDescriptor(DataType::FP32, {rowsC, ldC});
+        TensorDescriptor DDescriptor(DataType::FP32, {rowsD, ldD});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -1430,7 +1430,7 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP32) {
                                                                         transposeC,
                                                                         &alpha,
                                                                         &beta,
-                                                                        TensorDescriptor::DataType::FP32,
+                                                                        DataType::FP32,
                                                                         stream);
 
         D_gpu_h.copyFromAsync(D_d, stream);
@@ -1527,10 +1527,10 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP16, {rowsA, ldA});
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, {rowsB, ldB});
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, {rowsC, ldC});
-        TensorDescriptor DDescriptor(TensorDescriptor::DataType::FP16, {rowsD, ldD});
+        TensorDescriptor ADescriptor(DataType::FP16, {rowsA, ldA});
+        TensorDescriptor BDescriptor(DataType::FP16, {rowsB, ldB});
+        TensorDescriptor CDescriptor(DataType::FP16, {rowsC, ldC});
+        TensorDescriptor DDescriptor(DataType::FP16, {rowsD, ldD});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -1650,7 +1650,7 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
                                                                         transposeC,
                                                                         &alpha,
                                                                         &beta,
-                                                                        TensorDescriptor::DataType::FP16,
+                                                                        DataType::FP16,
                                                                         stream);
 
         D_gpu_h.copyFromAsync(D_d, stream);
@@ -1691,7 +1691,6 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
 namespace {
 
 using CublasMatmulDTypes = CublasMatrixMultiply::MatmulDataTypes;
-using DataType = TensorDescriptor::DataType;
 
 bool gpuComputeCapabilityAtLeast(int gpuNum, int requiredMajor, int requiredMinor) {
     cudaDeviceProp prop;
@@ -2219,26 +2218,26 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmSupportsFp8InputsAndFp32OutputInTNLa
 namespace {
 
 template <typename T>
-TensorDescriptor::DataType surfaceThorDataType();
+DataType surfaceThorDataType();
 
 template <>
-TensorDescriptor::DataType surfaceThorDataType<float>() {
-    return TensorDescriptor::DataType::FP32;
+DataType surfaceThorDataType<float>() {
+    return DataType::FP32;
 }
 
 template <>
-TensorDescriptor::DataType surfaceThorDataType<half>() {
-    return TensorDescriptor::DataType::FP16;
+DataType surfaceThorDataType<half>() {
+    return DataType::FP16;
 }
 
 template <>
-TensorDescriptor::DataType surfaceThorDataType<__nv_bfloat16>() {
-    return TensorDescriptor::DataType::BF16;
+DataType surfaceThorDataType<__nv_bfloat16>() {
+    return DataType::BF16;
 }
 
 template <>
-TensorDescriptor::DataType surfaceThorDataType<int8_t>() {
-    return TensorDescriptor::DataType::INT8;
+DataType surfaceThorDataType<int8_t>() {
+    return DataType::INT8;
 }
 
 template <typename T>
@@ -2582,31 +2581,31 @@ TEST(CublasMatrixMultiply, HeuristicMatmulSupportsInt8InputsAndFp32OutputInTNLay
 namespace {
 
 template <typename T>
-TensorDescriptor::DataType supportedFp8ThorDataType();
+DataType supportedFp8ThorDataType();
 
 template <>
-TensorDescriptor::DataType supportedFp8ThorDataType<float>() {
-    return TensorDescriptor::DataType::FP32;
+DataType supportedFp8ThorDataType<float>() {
+    return DataType::FP32;
 }
 
 template <>
-TensorDescriptor::DataType supportedFp8ThorDataType<half>() {
-    return TensorDescriptor::DataType::FP16;
+DataType supportedFp8ThorDataType<half>() {
+    return DataType::FP16;
 }
 
 template <>
-TensorDescriptor::DataType supportedFp8ThorDataType<__nv_bfloat16>() {
-    return TensorDescriptor::DataType::BF16;
+DataType supportedFp8ThorDataType<__nv_bfloat16>() {
+    return DataType::BF16;
 }
 
 template <>
-TensorDescriptor::DataType supportedFp8ThorDataType<__nv_fp8_e4m3>() {
-    return TensorDescriptor::DataType::FP8_E4M3;
+DataType supportedFp8ThorDataType<__nv_fp8_e4m3>() {
+    return DataType::FP8_E4M3;
 }
 
 template <>
-TensorDescriptor::DataType supportedFp8ThorDataType<__nv_fp8_e5m2>() {
-    return TensorDescriptor::DataType::FP8_E5M2;
+DataType supportedFp8ThorDataType<__nv_fp8_e5m2>() {
+    return DataType::FP8_E5M2;
 }
 
 template <typename T>
@@ -2825,7 +2824,7 @@ void runSupportedFp8OptimalMatmulCase(int gpuNum, float tolerance) {
 
         std::optional<Tensor> workspace_d;
         if (workspaceSizeInBytes > 0) {
-            workspace_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
+            workspace_d = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
         }
 
         CublasMatrixMultiply::instance().gemm(A_d,
@@ -2918,8 +2917,8 @@ void runSupportedFp8OptimalGemmCase(int gpuNum, float alpha, float beta, float t
     stream.synchronize();
 
     ScopedDeviceFp8MatmulScales scales(1.0f, 1.0f);
-    const CublasMatrixMultiply::Fp8MatmulScales fp8Scales = (supportedFp8ThorDataType<TD>() == TensorDescriptor::DataType::FP8_E4M3 ||
-                                                             supportedFp8ThorDataType<TD>() == TensorDescriptor::DataType::FP8_E5M2)
+    const CublasMatrixMultiply::Fp8MatmulScales fp8Scales = (supportedFp8ThorDataType<TD>() == DataType::FP8_E4M3 ||
+                                                             supportedFp8ThorDataType<TD>() == DataType::FP8_E5M2)
                                                                 ? scales.allScales()
                                                                 : scales.inputScales();
 
@@ -2950,7 +2949,7 @@ void runSupportedFp8OptimalGemmCase(int gpuNum, float alpha, float beta, float t
 
         std::optional<Tensor> workspace_d;
         if (workspaceSizeInBytes > 0) {
-            workspace_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
+            workspace_d = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
         }
 
         CublasMatrixMultiply::instance().gemm(A_d,
@@ -3049,10 +3048,10 @@ void expectRuntimeErrorContains(const std::function<void()> &fn, const std::stri
 void expectFp8GemmSetupRejectsShape(const PackedFp8GemmShape &shape, const std::string &expectedText) {
     ScopedDeviceFp8MatmulScales scales(1.0f, 1.0f);
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
-        TensorDescriptor::DataType::FP8_E4M3,
-        TensorDescriptor::DataType::FP8_E5M2,
-        TensorDescriptor::DataType::FP32,
-        TensorDescriptor::DataType::FP32,
+        DataType::FP8_E4M3,
+        DataType::FP8_E5M2,
+        DataType::FP32,
+        DataType::FP32,
     };
 
     expectRuntimeErrorContains(
@@ -3112,12 +3111,12 @@ void runPackedFp8ToFp32OptimalGemmLayoutCase(int gpuNum, bool transposeA, bool t
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, gpuNum);
 
-    TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP8_E4M3,
+    TensorDescriptor ADescriptor(DataType::FP8_E4M3,
                                  {static_cast<uint64_t>(shape.rowsA), static_cast<uint64_t>(shape.ldA)});
-    TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP8_E5M2,
+    TensorDescriptor BDescriptor(DataType::FP8_E5M2,
                                  {static_cast<uint64_t>(shape.rowsB), static_cast<uint64_t>(shape.ldB)});
-    TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(shape.m), static_cast<uint64_t>(shape.ldC)});
-    TensorDescriptor DDescriptor(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(shape.m), static_cast<uint64_t>(shape.ldD)});
+    TensorDescriptor CDescriptor(DataType::FP32, {static_cast<uint64_t>(shape.m), static_cast<uint64_t>(shape.ldC)});
+    TensorDescriptor DDescriptor(DataType::FP32, {static_cast<uint64_t>(shape.m), static_cast<uint64_t>(shape.ldD)});
 
     Tensor A(cpuPlacement, ADescriptor);
     Tensor B(cpuPlacement, BDescriptor);
@@ -3157,10 +3156,10 @@ void runPackedFp8ToFp32OptimalGemmLayoutCase(int gpuNum, bool transposeA, bool t
 
     ScopedDeviceFp8MatmulScales scales(1.0f, 1.0f, 1.0f);
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
-        TensorDescriptor::DataType::FP8_E4M3,
-        TensorDescriptor::DataType::FP8_E5M2,
-        TensorDescriptor::DataType::FP32,
-        TensorDescriptor::DataType::FP32,
+        DataType::FP8_E4M3,
+        DataType::FP8_E5M2,
+        DataType::FP32,
+        DataType::FP32,
     };
 
     try {
@@ -3200,7 +3199,7 @@ void runPackedFp8ToFp32OptimalGemmLayoutCase(int gpuNum, bool transposeA, bool t
 
         std::optional<Tensor> workspace_d;
         if (workspaceSizeInBytes > 0) {
-            workspace_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
+            workspace_d = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
         }
 
         CublasMatrixMultiply::instance().gemm(A_d,
@@ -3246,12 +3245,12 @@ void expectFp8HeuristicGemmRejectsTemporaryTransposeLayout(int gpuNum, bool tran
     constexpr float beta = 0.0f;
 
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, gpuNum);
-    TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP8_E4M3,
+    TensorDescriptor ADescriptor(DataType::FP8_E4M3,
                                  {static_cast<uint64_t>(shape.rowsA), static_cast<uint64_t>(shape.ldA)});
-    TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP8_E5M2,
+    TensorDescriptor BDescriptor(DataType::FP8_E5M2,
                                  {static_cast<uint64_t>(shape.rowsB), static_cast<uint64_t>(shape.ldB)});
-    TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(shape.m), static_cast<uint64_t>(shape.ldC)});
-    TensorDescriptor DDescriptor(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(shape.m), static_cast<uint64_t>(shape.ldD)});
+    TensorDescriptor CDescriptor(DataType::FP32, {static_cast<uint64_t>(shape.m), static_cast<uint64_t>(shape.ldC)});
+    TensorDescriptor DDescriptor(DataType::FP32, {static_cast<uint64_t>(shape.m), static_cast<uint64_t>(shape.ldD)});
 
     Tensor A_d(gpuPlacement, ADescriptor);
     Tensor B_d(gpuPlacement, BDescriptor);
@@ -3260,10 +3259,10 @@ void expectFp8HeuristicGemmRejectsTemporaryTransposeLayout(int gpuNum, bool tran
 
     ScopedDeviceFp8MatmulScales scales(1.0f, 1.0f);
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
-        TensorDescriptor::DataType::FP8_E4M3,
-        TensorDescriptor::DataType::FP8_E5M2,
-        TensorDescriptor::DataType::FP32,
-        TensorDescriptor::DataType::FP32,
+        DataType::FP8_E4M3,
+        DataType::FP8_E5M2,
+        DataType::FP32,
+        DataType::FP32,
     };
 
     expectRuntimeErrorContains(
@@ -3425,9 +3424,9 @@ TEST(CublasMatrixMultiply, GemmWithDGeluBackwardEpilogueMatchesCpuFP32) {
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-    TensorDescriptor aDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(k)});
-    TensorDescriptor bDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(k), static_cast<uint64_t>(n)});
-    TensorDescriptor dDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(n)});
+    TensorDescriptor aDesc(DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(k)});
+    TensorDescriptor bDesc(DataType::FP32, {static_cast<uint64_t>(k), static_cast<uint64_t>(n)});
+    TensorDescriptor dDesc(DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(n)});
 
     Tensor A(cpuPlacement, aDesc);
     Tensor B(cpuPlacement, bDesc);
@@ -3465,7 +3464,7 @@ TEST(CublasMatrixMultiply, GemmWithDGeluBackwardEpilogueMatchesCpuFP32) {
         false,
         &alpha,
         &beta,
-        CublasMatrixMultiply::MatmulDataTypes::same(TensorDescriptor::DataType::FP32),
+        CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32),
         stream);
 
     D.copyFromAsync(D_d, stream);
@@ -3486,10 +3485,10 @@ TEST(CublasMatrixMultiply, GemmWithDGeluBgradBackwardEpilogueMatchesCpuFP32) {
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-    TensorDescriptor aDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(k)});
-    TensorDescriptor bDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(k), static_cast<uint64_t>(n)});
-    TensorDescriptor dDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(n)});
-    TensorDescriptor biasDesc(TensorDescriptor::DataType::FP32, {static_cast<uint64_t>(n)});
+    TensorDescriptor aDesc(DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(k)});
+    TensorDescriptor bDesc(DataType::FP32, {static_cast<uint64_t>(k), static_cast<uint64_t>(n)});
+    TensorDescriptor dDesc(DataType::FP32, {static_cast<uint64_t>(m), static_cast<uint64_t>(n)});
+    TensorDescriptor biasDesc(DataType::FP32, {static_cast<uint64_t>(n)});
 
     Tensor A(cpuPlacement, aDesc);
     Tensor B(cpuPlacement, bDesc);
@@ -3540,7 +3539,7 @@ TEST(CublasMatrixMultiply, GemmWithDGeluBgradBackwardEpilogueMatchesCpuFP32) {
         false,
         &alpha,
         &beta,
-        CublasMatrixMultiply::MatmulDataTypes::same(TensorDescriptor::DataType::FP32),
+        CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32),
         stream);
 
     D.copyFromAsync(D_d, stream);

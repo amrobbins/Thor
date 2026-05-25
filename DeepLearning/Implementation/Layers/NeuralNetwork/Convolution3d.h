@@ -23,7 +23,7 @@ class Convolution3d : public CustomLayer {
                   uint32_t frontAndBackPadDepth,
                   uint32_t numOutputChannels,
                   bool hasBias,
-                  std::optional<TensorDescriptor::DataType> weightsDataType,
+                  std::optional<DataType> weightsDataType,
                   const TensorPlacement& placement,
                   bool inferenceOnly,
                   int64_t stampedId = -1);
@@ -44,7 +44,7 @@ class Convolution3d : public CustomLayer {
                                                                              uint32_t filterWidth,
                                                                              uint32_t filterHeight,
                                                                              uint32_t filterDepth,
-                                                                             std::optional<TensorDescriptor::DataType> weightsDataType);
+                                                                             std::optional<DataType> weightsDataType);
 
    private:
     static DynamicExpression buildExpression(bool hasBias,

@@ -14,22 +14,22 @@ using namespace std;
 namespace ThorImplementation {
 namespace {
 
-bool isLayerNormIoDataType(TensorDescriptor::DataType dtype) {
+bool isLayerNormIoDataType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
     }
 }
 
-string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
+string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 class LayerNormParameter final : public PhysicalParameter {
    public:
-    LayerNormParameter(string name, uint64_t normalizedFeatureCount, TensorDescriptor::DataType dtype, bool trainable)
+    LayerNormParameter(string name, uint64_t normalizedFeatureCount, DataType dtype, bool trainable)
         : PhysicalParameter(std::move(name), trainable), normalizedFeatureCount(normalizedFeatureCount), dtype(dtype) {}
 
     void createStorage(const StorageContext& context) override {
@@ -39,7 +39,7 @@ class LayerNormParameter final : public PhysicalParameter {
 
    private:
     uint64_t normalizedFeatureCount;
-    TensorDescriptor::DataType dtype;
+    DataType dtype;
 };
 
 void validateEpsilon(double epsilon) {
@@ -50,7 +50,7 @@ void validateEpsilon(double epsilon) {
 
 shared_ptr<PhysicalParameter> makeDefaultParameter(const string& name,
                                                    uint64_t normalizedFeatureCount,
-                                                   TensorDescriptor::DataType dtype,
+                                                   DataType dtype,
                                                    bool trainable,
                                                    float initialValue) {
     auto parameter = make_shared<LayerNormParameter>(name, normalizedFeatureCount, dtype, trainable);
@@ -65,16 +65,16 @@ LayerNorm::LayerNorm(const TensorPlacement& placement,
                      bool inferenceOnly,
                      vector<uint64_t> normalizedShape,
                      optional<double> epsilon,
-                     optional<TensorDescriptor::DataType> parameterDataType,
+                     optional<DataType> parameterDataType,
                      vector<shared_ptr<PhysicalParameter>> physicalParameters,
                      int64_t stampedId)
     : TrainableLayer(placement, inferenceOnly, stampedId),
       normalizedShape(std::move(normalizedShape)),
       normalizedFeatureCount(checkedNormalizedFeatureCount(this->normalizedShape)),
       epsilon(epsilon.has_value() ? epsilon.value() : 1.0e-5),
-      parameterDataType(parameterDataType.has_value() ? parameterDataType.value() : TensorDescriptor::DataType::FP32) {
+      parameterDataType(parameterDataType.has_value() ? parameterDataType.value() : DataType::FP32) {
     validateEpsilon(this->epsilon);
-    if (this->parameterDataType != TensorDescriptor::DataType::FP32) {
+    if (this->parameterDataType != DataType::FP32) {
         throw runtime_error("LayerNorm currently requires fp32 scale/bias parameters for cuDNN Frontend LayerNorm; got " +
                             dtypeName(this->parameterDataType) + ".");
     }
@@ -230,8 +230,8 @@ void LayerNorm::compileImpl() {
                 throw runtime_error("LayerNorm all feature inputs must have the same outer sample count.");
             }
         }
-        saveMean.emplace_back(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {outerSize}));
-        saveInvVariance.emplace_back(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {outerSize}));
+        saveMean.emplace_back(placement, TensorDescriptor(DataType::FP32, {outerSize}));
+        saveInvVariance.emplace_back(placement, TensorDescriptor(DataType::FP32, {outerSize}));
         scratchDScale.emplace_back(weights.clone());
         scratchDBias.emplace_back(biases.clone());
         if (errorInputs.size() > i && errorInputs[i].has_value() && (errorOutputs.size() <= i || !errorOutputs[i].has_value())) {
@@ -268,7 +268,7 @@ void LayerNorm::computeFeatureOut(uint32_t connectionNumber) {
     descriptor.inputDataType = input.getDataType();
     descriptor.outputDataType = output.getDataType();
     descriptor.parameterDataType = parameterDataType;
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
+    descriptor.computeDataType = DataType::FP32;
     descriptor.epsilon = static_cast<float>(epsilon);
     descriptor.training = !isInferenceOnly();
 
@@ -324,7 +324,7 @@ optional<Event> LayerNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t
     descriptor.inputDataType = input.getDataType();
     descriptor.outputDataType = errorInputs[connectionNumber].value().getDataType();
     descriptor.parameterDataType = parameterDataType;
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
+    descriptor.computeDataType = DataType::FP32;
     descriptor.epsilon = static_cast<float>(epsilon);
     descriptor.training = true;
 

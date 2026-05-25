@@ -116,12 +116,12 @@ void appendSpec(ostringstream& out, string_view name, const AttentionTensorSpec&
     out << name << ".ragged=" << spec.ragged << ';';
 }
 
-bool isFp8(TensorDescriptor::DataType dtype) {
-    return dtype == TensorDescriptor::DataType::FP8_E4M3 || dtype == TensorDescriptor::DataType::FP8_E5M2;
+bool isFp8(DataType dtype) {
+    return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2;
 }
 
-bool isFp16OrBf16(TensorDescriptor::DataType dtype) {
-    return dtype == TensorDescriptor::DataType::FP16 || dtype == TensorDescriptor::DataType::BF16;
+bool isFp16OrBf16(DataType dtype) {
+    return dtype == DataType::FP16 || dtype == DataType::BF16;
 }
 
 bool hasBshdPackedStrides(const AttentionTensorSpec& spec) {
@@ -170,7 +170,7 @@ void requireTensorMatchesSpec(const Tensor& tensor, const AttentionTensorSpec& s
 
 void requireFp8ScaleScalarMatchesDescriptor(const Tensor& scalar, string_view name) {
     requireInitialized(scalar, name);
-    if (scalar.getDataType() != TensorDescriptor::DataType::FP32) {
+    if (scalar.getDataType() != DataType::FP32) {
         throw invalid_argument(string("cuDNN FP8 attention scalar '") + string(name) + "' dtype mismatch. Expected FP32, got " +
                                TensorDescriptor::getElementTypeName(scalar.getDataType()));
     }
@@ -202,7 +202,7 @@ vector<int64_t> contiguousStrides(const vector<int64_t>& dims) {
 
 vector<int64_t> denseScoreBiasStrides(const CudnnAttentionDescriptor& descriptor) { return contiguousStrides(denseScoreBiasDimensions(descriptor)); }
 
-AttentionTensorSpec fullDenseScoreBiasSpec(const CudnnAttentionDescriptor& descriptor, TensorDescriptor::DataType dataType) {
+AttentionTensorSpec fullDenseScoreBiasSpec(const CudnnAttentionDescriptor& descriptor, DataType dataType) {
     AttentionTensorSpec spec;
     spec.dimensions = denseScoreBiasDimensions(descriptor);
     spec.strides = denseScoreBiasStrides(descriptor);
@@ -221,7 +221,7 @@ AttentionTensorSpec tensorSpecForBiasTensor(const Tensor& tensor) {
 }
 
 const AttentionTensorSpec& scoreBiasSpecOrDefault(const CudnnAttentionDescriptor& descriptor,
-                                                  TensorDescriptor::DataType dataType,
+                                                  DataType dataType,
                                                   AttentionTensorSpec& fallbackStorage) {
     if (descriptor.bias.has_value()) {
         return descriptor.bias.value();
@@ -238,11 +238,11 @@ const AttentionTensorSpec& scoreDBiasSpecOrDefault(const CudnnAttentionDescripto
     return fallbackStorage;
 }
 
-bool isSupportedAttentionDBiasDataType(TensorDescriptor::DataType dtype, const CudnnAttentionDescriptor& descriptor) {
+bool isSupportedAttentionDBiasDataType(DataType dtype, const CudnnAttentionDescriptor& descriptor) {
     return dtype == descriptor.q.dataType || dtype == descriptor.computeDataType;
 }
 
-TensorDescriptor::DataType attentionForwardBiasDataType(const CudnnAttentionDescriptor& descriptor) {
+DataType attentionForwardBiasDataType(const CudnnAttentionDescriptor& descriptor) {
     // cuDNN FP16/BF16 SDPA takes additive score bias in the compute dtype, while FP8 SDPA takes
     // additive score bias in the FP8 IO dtype.  Keeping this as an explicit helper makes the
     // support-surface probes exercise the same descriptor contract that production code would use.
@@ -258,7 +258,7 @@ bool scoreBiasUsesSequenceBroadcast(const AttentionTensorSpec& spec, const Cudnn
 void validateScoreBiasSpec(const AttentionTensorSpec& spec,
                            const CudnnAttentionDescriptor& descriptor,
                            string_view name,
-                           TensorDescriptor::DataType expectedDataType,
+                           DataType expectedDataType,
                            bool allowBroadcast) {
     if (spec.dataType != expectedDataType) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected " +
@@ -293,7 +293,7 @@ void validateScoreBiasSpec(const AttentionTensorSpec& spec,
 void requireBiasMatchesDescriptor(const Tensor& bias,
                                   const CudnnAttentionDescriptor& descriptor,
                                   string_view name,
-                                  TensorDescriptor::DataType expectedDataType,
+                                  DataType expectedDataType,
                                   bool allowBroadcast) {
     requireInitialized(bias, name);
     const AttentionTensorSpec actual = tensorSpecForBiasTensor(bias);
@@ -353,7 +353,7 @@ void requireAttentionDBiasMatchesDescriptor(const Tensor& bias, const CudnnAtten
 
 CudnnAttentionDescriptor descriptorWithRuntimeBiasSpec(const CudnnAttentionDescriptor& descriptor,
                                                        const optional<Tensor>& bias,
-                                                       TensorDescriptor::DataType expectedDataType) {
+                                                       DataType expectedDataType) {
     CudnnAttentionDescriptor withBiasSpec = descriptor;
     if (withBiasSpec.useBias && !withBiasSpec.bias.has_value() && bias.has_value()) {
         withBiasSpec.bias = tensorSpecForBiasTensor(bias.value());
@@ -373,7 +373,7 @@ CudnnAttentionDescriptor descriptorWithRuntimeDBiasSpec(const CudnnAttentionDesc
 
 void requireSeqLenMatchesDescriptor(const Tensor& seq_len, const CudnnAttentionDescriptor& descriptor, string_view name) {
     requireInitialized(seq_len, name);
-    if (seq_len.getDataType() != TensorDescriptor::DataType::INT32) {
+    if (seq_len.getDataType() != DataType::INT32) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT32, got " +
                                TensorDescriptor::getElementTypeName(seq_len.getDataType()));
     }
@@ -387,7 +387,7 @@ void requireSeqLenMatchesDescriptor(const Tensor& seq_len, const CudnnAttentionD
 
 void requireRaggedOffsetMatchesDescriptor(const Tensor& offset, const CudnnAttentionDescriptor& descriptor, string_view name) {
     requireInitialized(offset, name);
-    if (offset.getDataType() != TensorDescriptor::DataType::INT32) {
+    if (offset.getDataType() != DataType::INT32) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT32, got " +
                                TensorDescriptor::getElementTypeName(offset.getDataType()));
     }
@@ -401,7 +401,7 @@ void requireRaggedOffsetMatchesDescriptor(const Tensor& offset, const CudnnAtten
 
 void requireDropoutScalarMatchesDescriptor(const Tensor& scalar, string_view name) {
     requireInitialized(scalar, name);
-    if (scalar.getDataType() != TensorDescriptor::DataType::INT64) {
+    if (scalar.getDataType() != DataType::INT64) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT64, got " +
                                TensorDescriptor::getElementTypeName(scalar.getDataType()));
     }
@@ -432,7 +432,7 @@ int64_t pagedKvPageCountForTable(const CudnnAttentionDescriptor& descriptor, str
 
 void requirePagedKvTableMatchesDescriptor(const Tensor& table, const CudnnAttentionDescriptor& descriptor, string_view name) {
     requireInitialized(table, name);
-    if (table.getDataType() != TensorDescriptor::DataType::INT32) {
+    if (table.getDataType() != DataType::INT32) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dtype mismatch. Expected INT32, got " +
                                TensorDescriptor::getElementTypeName(table.getDataType()));
     }
@@ -446,21 +446,21 @@ void requirePagedKvTableMatchesDescriptor(const Tensor& table, const CudnnAttent
 
 namespace fe = cudnn_frontend;
 
-fe::DataType_t toFrontendDataType(TensorDescriptor::DataType dtype) {
+fe::DataType_t toFrontendDataType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             return fe::DataType_t::HALF;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             return fe::DataType_t::BFLOAT16;
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             return fe::DataType_t::FLOAT;
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             return fe::DataType_t::FP8_E4M3;
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             return fe::DataType_t::FP8_E5M2;
-        case TensorDescriptor::DataType::INT32:
+        case DataType::INT32:
             return fe::DataType_t::INT32;
-        case TensorDescriptor::DataType::INT64:
+        case DataType::INT64:
             return fe::DataType_t::INT64;
         default:
             throw invalid_argument("Unsupported cuDNN Frontend attention dtype: " + TensorDescriptor::getElementTypeName(dtype));
@@ -513,7 +513,7 @@ class AttentionGraphCache {
                                                     int64_t uid,
                                                     const vector<int64_t>& dim,
                                                     const vector<int64_t>& stride,
-                                                    TensorDescriptor::DataType dtype) {
+                                                    DataType dtype) {
         return graph->tensor(fe::graph::Tensor_attributes()
                                  .set_name(string(name))
                                  .set_uid(uid)
@@ -543,19 +543,19 @@ class AttentionGraphCache {
     shared_ptr<fe::graph::Tensor_attributes> scalar(shared_ptr<fe::graph::Graph>& graph,
                                                     string_view name,
                                                     int64_t uid,
-                                                    TensorDescriptor::DataType dtype = TensorDescriptor::DataType::FP32) {
+                                                    DataType dtype = DataType::FP32) {
         return tensor(graph, name, uid, {1, 1, 1, 1}, {1, 1, 1, 1}, dtype);
     }
 
     shared_ptr<fe::graph::Tensor_attributes> seqLen(shared_ptr<fe::graph::Graph>& graph, string_view name, int64_t uid, int64_t batch) {
-        return tensor(graph, name, uid, {batch, 1, 1, 1}, {1, 1, 1, 1}, TensorDescriptor::DataType::INT32);
+        return tensor(graph, name, uid, {batch, 1, 1, 1}, {1, 1, 1, 1}, DataType::INT32);
     }
 
     shared_ptr<fe::graph::Tensor_attributes> raggedOffset(shared_ptr<fe::graph::Graph>& graph,
                                                           string_view name,
                                                           int64_t uid,
                                                           int64_t batch) {
-        return tensor(graph, name, uid, {batch + 1, 1, 1, 1}, {1, 1, 1, 1}, TensorDescriptor::DataType::INT32);
+        return tensor(graph, name, uid, {batch + 1, 1, 1, 1}, {1, 1, 1, 1}, DataType::INT32);
     }
 
     shared_ptr<fe::graph::Tensor_attributes> makeAttentionTensor(shared_ptr<fe::graph::Graph>& graph,
@@ -650,7 +650,7 @@ class AttentionGraphCache {
         built.workspaceBytes = workspaceBytes;
         if (workspaceBytes > 0) {
             built.workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                                     TensorDescriptor(TensorDescriptor::DataType::UINT8, {static_cast<uint64_t>(workspaceBytes)}),
+                                     TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(workspaceBytes)}),
                                      256);
         }
     }
@@ -698,21 +698,21 @@ class AttentionGraphCache {
                                UID_PAGE_TABLE_K,
                                {descriptor.batchSize(), 1, k_pages, 1},
                                {k_pages, k_pages, 1, 1},
-                               TensorDescriptor::DataType::INT32))
+                               DataType::INT32))
                     .set_paged_attention_v_table(
                         tensor(built.graph,
                                "page_table_v",
                                UID_PAGE_TABLE_V,
                                {descriptor.batchSize(), 1, v_pages, 1},
                                {v_pages, v_pages, 1, 1},
-                               TensorDescriptor::DataType::INT32))
+                               DataType::INT32))
                     .set_paged_attention_max_seq_len_kv(static_cast<int>(descriptor.pagedKv.maxSequenceLengthKv));
             }
             if (descriptor.dropout.probability > 0.0f) {
                 if (descriptor.dropout.usePhilox) {
                     attrs.set_dropout(descriptor.dropout.probability,
-                                      scalar(built.graph, "dropout_seed", UID_DROPOUT_SEED, TensorDescriptor::DataType::INT64),
-                                      scalar(built.graph, "dropout_offset", UID_DROPOUT_OFFSET, TensorDescriptor::DataType::INT64));
+                                      scalar(built.graph, "dropout_seed", UID_DROPOUT_SEED, DataType::INT64),
+                                      scalar(built.graph, "dropout_offset", UID_DROPOUT_OFFSET, DataType::INT64));
                 } else {
                     attrs.set_dropout(
                         tensor(built.graph,
@@ -723,7 +723,7 @@ class AttentionGraphCache {
                                 descriptor.queryLength() * descriptor.keyValueLength(),
                                 descriptor.keyValueLength(),
                                 1},
-                               TensorDescriptor::DataType::BOOLEAN),
+                               DataType::BOOLEAN),
                         scalar(built.graph, "dropout_scale", UID_DROPOUT_SCALE));
                 }
             }
@@ -761,15 +761,15 @@ class AttentionGraphCache {
             }
             if (descriptor.useBias) {
                 AttentionTensorSpec fallback;
-                const TensorDescriptor::DataType biasDataType = attentionForwardBiasDataType(descriptor);
+                const DataType biasDataType = attentionForwardBiasDataType(descriptor);
                 const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(descriptor, biasDataType, fallback);
                 attrs.set_bias(tensor(built.graph, "bias", UID_BIAS, biasSpec.dimensions, biasSpec.strides, biasDataType));
             }
             if (descriptor.dropout.probability > 0.0f) {
                 if (descriptor.dropout.usePhilox) {
                     attrs.set_dropout(descriptor.dropout.probability,
-                                      scalar(built.graph, "dropout_seed", UID_DROPOUT_SEED, TensorDescriptor::DataType::INT64),
-                                      scalar(built.graph, "dropout_offset", UID_DROPOUT_OFFSET, TensorDescriptor::DataType::INT64));
+                                      scalar(built.graph, "dropout_seed", UID_DROPOUT_SEED, DataType::INT64),
+                                      scalar(built.graph, "dropout_offset", UID_DROPOUT_OFFSET, DataType::INT64));
                 } else {
                     attrs.set_dropout(
                         tensor(built.graph,
@@ -846,7 +846,7 @@ class AttentionGraphCache {
                             UID_STATS,
                             {descriptor.batchSize(), descriptor.queryHeads(), descriptor.queryLength(), 1},
                             {descriptor.queryHeads() * descriptor.queryLength(), descriptor.queryLength(), 1, 1},
-                            TensorDescriptor::DataType::FP32);
+                            DataType::FP32);
 
         if (descriptor.useFp8) {
             auto attrs = fe::graph::SDPA_fp8_backward_attributes().set_name(descriptor.debugName + "_fp8_backward");
@@ -943,8 +943,8 @@ class AttentionGraphCache {
                 throwInvalidAttention("attention backward currently supports only Philox dropout seed/offset");
             }
             attrs.set_dropout(descriptor.dropout.probability,
-                              scalar(built.graph, "dropout_seed", UID_DROPOUT_SEED, TensorDescriptor::DataType::INT64),
-                              scalar(built.graph, "dropout_offset", UID_DROPOUT_OFFSET, TensorDescriptor::DataType::INT64));
+                              scalar(built.graph, "dropout_seed", UID_DROPOUT_SEED, DataType::INT64),
+                              scalar(built.graph, "dropout_offset", UID_DROPOUT_OFFSET, DataType::INT64));
         }
 
         auto [dQ, dK, dV] = built.graph->sdpa_backward(q, k, v, o, dO, stats, attrs);
@@ -990,13 +990,13 @@ void executeGraph(BuiltGraph& built, unordered_map<int64_t, void*>& pack, Stream
 }  // namespace
 
 AttentionTensorSpec AttentionTensorSpec::bhsd(
-    int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, TensorDescriptor::DataType dataType) {
+    int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, DataType dataType) {
     return AttentionTensorSpec{
         {batch, heads, sequenceLength, headDim}, {heads * sequenceLength * headDim, sequenceLength * headDim, headDim, 1}, dataType, false};
 }
 
 AttentionTensorSpec AttentionTensorSpec::bshd(
-    int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, TensorDescriptor::DataType dataType) {
+    int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, DataType dataType) {
     // Semantic dimension order remains [B,H,S,D]; this stride maps those indices to BSHD physical storage.
     return AttentionTensorSpec{
         {batch, heads, sequenceLength, headDim}, {sequenceLength * heads * headDim, headDim, heads * headDim, 1}, dataType, false};
@@ -1007,7 +1007,7 @@ AttentionTensorSpec AttentionTensorSpec::fromLayout(AttentionTensorLayout layout
                                                     int64_t heads,
                                                     int64_t sequenceLength,
                                                     int64_t headDim,
-                                                    TensorDescriptor::DataType dataType) {
+                                                    DataType dataType) {
     switch (layout) {
         case AttentionTensorLayout::BHSD:
             return bhsd(batch, heads, sequenceLength, headDim, dataType);
@@ -1107,9 +1107,9 @@ void CudnnAttentionDescriptor::validateForward() const {
             throwInvalidAttention("FP16/BF16 attention head dimensions must be multiples of 8");
     }
 
-    if (computeDataType != TensorDescriptor::DataType::FP32)
+    if (computeDataType != DataType::FP32)
         throwInvalidAttention("computeDataType should be FP32 for numerically stable cuDNN SDPA");
-    if (intermediateDataType != TensorDescriptor::DataType::FP32)
+    if (intermediateDataType != DataType::FP32)
         throwInvalidAttention("intermediateDataType should be FP32 for numerically stable cuDNN SDPA");
     const bool anyRagged = q.ragged || k.ragged || v.ragged || o.ragged;
     if (anyRagged && !usePaddingMask)
@@ -1129,7 +1129,7 @@ void CudnnAttentionDescriptor::validateForward() const {
     }
     if (useBias) {
         AttentionTensorSpec fallback;
-        const TensorDescriptor::DataType biasDataType = attentionForwardBiasDataType(*this);
+        const DataType biasDataType = attentionForwardBiasDataType(*this);
         const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, biasDataType, fallback);
         validateScoreBiasSpec(biasSpec, *this, "bias", biasDataType, true);
     }
@@ -1191,7 +1191,7 @@ void CudnnAttentionDescriptor::validateBackward() const {
             "to bypass this guard for cuDNN support-surface probing only.");
     if (useBias) {
         AttentionTensorSpec fallback;
-        const TensorDescriptor::DataType biasDataType = attentionForwardBiasDataType(*this);
+        const DataType biasDataType = attentionForwardBiasDataType(*this);
         const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, biasDataType, fallback);
         // cuDNN backward is reliable for dense bias and batch/head-broadcast bias. Sequence-broadcast
         // bias is lowered by production autodiff through an explicit dense materialization; keep the native
@@ -1231,7 +1231,7 @@ string CudnnAttentionDescriptor::cacheKey(string_view passName, int gpuNum) cons
         << ";bias=" << useBias << ";paged=" << usePagedKvCache << ";fp8=" << useFp8 << ';';
     if (useBias) {
         AttentionTensorSpec fallback;
-        const TensorDescriptor::DataType biasDataType = attentionForwardBiasDataType(*this);
+        const DataType biasDataType = attentionForwardBiasDataType(*this);
         const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(*this, biasDataType, fallback);
         appendSpec(out, "bias", biasSpec);
         AttentionTensorSpec dBiasFallback;

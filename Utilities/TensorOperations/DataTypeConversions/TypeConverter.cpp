@@ -21,8 +21,8 @@ struct Converter<__nv_fp8_e5m2, __nv_fp8_e4m3> {
 
 void TypeConverter::convertType(void *source,
                                 void *dest,
-                                TensorDescriptor::DataType sourceDataType,
-                                TensorDescriptor::DataType destDataType,
+                                DataType sourceDataType,
+                                DataType destDataType,
                                 long numElements,
                                 Stream stream,
                                 int deviceNum) {
@@ -56,877 +56,877 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
     // FROM_TYPE *source = args->source;
     // TO_TYPE *dest = args->dest;
     long numElements = args->numElements;
-    TensorDescriptor::DataType sourceDataType = args->sourceDataType;
-    TensorDescriptor::DataType destDataType = args->destDataType;
+    DataType sourceDataType = args->sourceDataType;
+    DataType destDataType = args->destDataType;
 
     switch (sourceDataType) {
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, __nv_fp8_e4m3>(
                         (__nv_fp8_e4m3 *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, __nv_fp8_e5m2>(
                         (__nv_fp8_e4m3 *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, __nv_bfloat16>(
                         (__nv_fp8_e4m3 *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, half>((__nv_fp8_e4m3 *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, float>((__nv_fp8_e4m3 *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, double>((__nv_fp8_e4m3 *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, int8_t>((__nv_fp8_e4m3 *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, int16_t>((__nv_fp8_e4m3 *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, int32_t>((__nv_fp8_e4m3 *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, int64_t>((__nv_fp8_e4m3 *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, uint8_t>((__nv_fp8_e4m3 *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, uint16_t>((__nv_fp8_e4m3 *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, uint32_t>((__nv_fp8_e4m3 *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, uint64_t>((__nv_fp8_e4m3 *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<__nv_fp8_e4m3, bool>((__nv_fp8_e4m3 *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<__nv_fp8_e4m3>((__nv_fp8_e4m3 *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, __nv_fp8_e4m3>(
                         (__nv_fp8_e5m2 *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, __nv_fp8_e5m2>(
                         (__nv_fp8_e5m2 *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, __nv_bfloat16>(
                         (__nv_fp8_e5m2 *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, half>((__nv_fp8_e5m2 *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, float>((__nv_fp8_e5m2 *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, double>((__nv_fp8_e5m2 *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, int8_t>((__nv_fp8_e5m2 *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, int16_t>((__nv_fp8_e5m2 *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, int32_t>((__nv_fp8_e5m2 *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, int64_t>((__nv_fp8_e5m2 *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, uint8_t>((__nv_fp8_e5m2 *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, uint16_t>((__nv_fp8_e5m2 *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, uint32_t>((__nv_fp8_e5m2 *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, uint64_t>((__nv_fp8_e5m2 *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<__nv_fp8_e5m2, bool>((__nv_fp8_e5m2 *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<__nv_fp8_e5m2>((__nv_fp8_e5m2 *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<__nv_bfloat16, __nv_fp8_e4m3>(
                         (__nv_bfloat16 *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<__nv_bfloat16, __nv_fp8_e5m2>(
                         (__nv_bfloat16 *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<__nv_bfloat16, __nv_bfloat16>(
                         (__nv_bfloat16 *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<__nv_bfloat16, half>((__nv_bfloat16 *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<__nv_bfloat16, float>((__nv_bfloat16 *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<__nv_bfloat16, double>((__nv_bfloat16 *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<__nv_bfloat16, int8_t>((__nv_bfloat16 *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<__nv_bfloat16, int16_t>((__nv_bfloat16 *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<__nv_bfloat16, int32_t>((__nv_bfloat16 *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<__nv_bfloat16, int64_t>((__nv_bfloat16 *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<__nv_bfloat16, uint8_t>((__nv_bfloat16 *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<__nv_bfloat16, uint16_t>((__nv_bfloat16 *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<__nv_bfloat16, uint32_t>((__nv_bfloat16 *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<__nv_bfloat16, uint64_t>((__nv_bfloat16 *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<__nv_bfloat16, bool>((__nv_bfloat16 *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<__nv_bfloat16>((__nv_bfloat16 *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<half, __nv_fp8_e4m3>((half *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<half, __nv_fp8_e5m2>((half *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<half, __nv_bfloat16>((half *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<half, half>((half *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<half, float>((half *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<half, double>((half *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<half, int8_t>((half *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<half, int16_t>((half *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<half, int32_t>((half *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<half, int64_t>((half *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<half, uint8_t>((half *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<half, uint16_t>((half *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<half, uint32_t>((half *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<half, uint64_t>((half *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<half, bool>((half *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<half>((half *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<float, __nv_fp8_e4m3>((float *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<float, __nv_fp8_e5m2>((float *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<float, __nv_bfloat16>((float *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<float, half>((float *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<float, float>((float *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<float, double>((float *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<float, int8_t>((float *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<float, int16_t>((float *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<float, int32_t>((float *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<float, int64_t>((float *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<float, uint8_t>((float *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<float, uint16_t>((float *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<float, uint32_t>((float *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<float, uint64_t>((float *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<float, bool>((float *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<float>((float *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::FP64:
+        case DataType::FP64:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<double, __nv_fp8_e4m3>((double *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<double, __nv_fp8_e5m2>((double *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<double, __nv_bfloat16>((double *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<double, half>((double *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<double, float>((double *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<double, double>((double *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<double, int8_t>((double *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<double, int16_t>((double *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<double, int32_t>((double *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<double, int64_t>((double *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<double, uint8_t>((double *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<double, uint16_t>((double *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<double, uint32_t>((double *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<double, uint64_t>((double *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<double, bool>((double *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<double>((double *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::INT8:
+        case DataType::INT8:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<int8_t, __nv_fp8_e4m3>((int8_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<int8_t, __nv_fp8_e5m2>((int8_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<int8_t, __nv_bfloat16>((int8_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<int8_t, half>((int8_t *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<int8_t, float>((int8_t *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<int8_t, double>((int8_t *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<int8_t, int8_t>((int8_t *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<int8_t, int16_t>((int8_t *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<int8_t, int32_t>((int8_t *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<int8_t, int64_t>((int8_t *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<int8_t, uint8_t>((int8_t *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<int8_t, uint16_t>((int8_t *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<int8_t, uint32_t>((int8_t *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<int8_t, uint64_t>((int8_t *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<int8_t, bool>((int8_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<int8_t>((int8_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::INT16:
+        case DataType::INT16:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<int16_t, __nv_fp8_e4m3>((int16_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<int16_t, __nv_fp8_e5m2>((int16_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<int16_t, __nv_bfloat16>((int16_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<int16_t, half>((int16_t *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<int16_t, float>((int16_t *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<int16_t, double>((int16_t *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<int16_t, int8_t>((int16_t *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<int16_t, int16_t>((int16_t *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<int16_t, int32_t>((int16_t *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<int16_t, int64_t>((int16_t *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<int16_t, uint8_t>((int16_t *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<int16_t, uint16_t>((int16_t *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<int16_t, uint32_t>((int16_t *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<int16_t, uint64_t>((int16_t *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<int16_t, bool>((int16_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<int16_t>((int16_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::INT32:
+        case DataType::INT32:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<int32_t, __nv_fp8_e4m3>((int32_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<int32_t, __nv_fp8_e5m2>((int32_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<int32_t, __nv_bfloat16>((int32_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<int32_t, half>((int32_t *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<int32_t, float>((int32_t *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<int32_t, double>((int32_t *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<int32_t, int8_t>((int32_t *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<int32_t, int16_t>((int32_t *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<int32_t, int32_t>((int32_t *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<int32_t, int64_t>((int32_t *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<int32_t, uint8_t>((int32_t *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<int32_t, uint16_t>((int32_t *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<int32_t, uint32_t>((int32_t *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<int32_t, uint64_t>((int32_t *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<int32_t, bool>((int32_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<int32_t>((int32_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::INT64:
+        case DataType::INT64:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<int64_t, __nv_fp8_e4m3>((int64_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<int64_t, __nv_fp8_e5m2>((int64_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<int64_t, __nv_bfloat16>((int64_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<int64_t, half>((int64_t *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<int64_t, float>((int64_t *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<int64_t, double>((int64_t *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<int64_t, int8_t>((int64_t *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<int64_t, int16_t>((int64_t *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<int64_t, int32_t>((int64_t *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<int64_t, int64_t>((int64_t *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<int64_t, uint8_t>((int64_t *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<int64_t, uint16_t>((int64_t *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<int64_t, uint32_t>((int64_t *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<int64_t, uint64_t>((int64_t *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<int64_t, bool>((int64_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<int64_t>((int64_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::UINT8:
+        case DataType::UINT8:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<uint8_t, __nv_fp8_e4m3>((uint8_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<uint8_t, __nv_fp8_e5m2>((uint8_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<uint8_t, __nv_bfloat16>((uint8_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<uint8_t, half>((uint8_t *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<uint8_t, float>((uint8_t *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<uint8_t, double>((uint8_t *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<uint8_t, int8_t>((uint8_t *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<uint8_t, int16_t>((uint8_t *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<uint8_t, int32_t>((uint8_t *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<uint8_t, int64_t>((uint8_t *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<uint8_t, uint8_t>((uint8_t *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<uint8_t, uint16_t>((uint8_t *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<uint8_t, uint32_t>((uint8_t *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<uint8_t, uint64_t>((uint8_t *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<uint8_t, bool>((uint8_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<uint8_t>((uint8_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::UINT16:
+        case DataType::UINT16:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<uint16_t, __nv_fp8_e4m3>((uint16_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<uint16_t, __nv_fp8_e5m2>((uint16_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<uint16_t, __nv_bfloat16>((uint16_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<uint16_t, half>((uint16_t *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<uint16_t, float>((uint16_t *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<uint16_t, double>((uint16_t *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<uint16_t, int8_t>((uint16_t *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<uint16_t, int16_t>((uint16_t *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<uint16_t, int32_t>((uint16_t *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<uint16_t, int64_t>((uint16_t *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<uint16_t, uint8_t>((uint16_t *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<uint16_t, uint16_t>((uint16_t *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<uint16_t, uint32_t>((uint16_t *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<uint16_t, uint64_t>((uint16_t *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<uint16_t, bool>((uint16_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<uint16_t>((uint16_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::UINT32:
+        case DataType::UINT32:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<uint32_t, __nv_fp8_e4m3>((uint32_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<uint32_t, __nv_fp8_e5m2>((uint32_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<uint32_t, __nv_bfloat16>((uint32_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<uint32_t, half>((uint32_t *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<uint32_t, float>((uint32_t *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<uint32_t, double>((uint32_t *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<uint32_t, int8_t>((uint32_t *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<uint32_t, int16_t>((uint32_t *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<uint32_t, int32_t>((uint32_t *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<uint32_t, int64_t>((uint32_t *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<uint32_t, uint8_t>((uint32_t *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<uint32_t, uint16_t>((uint32_t *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<uint32_t, uint32_t>((uint32_t *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<uint32_t, uint64_t>((uint32_t *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<uint32_t, bool>((uint32_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<uint32_t>((uint32_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::UINT64:
+        case DataType::UINT64:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<uint64_t, __nv_fp8_e4m3>((uint64_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<uint64_t, __nv_fp8_e5m2>((uint64_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<uint64_t, __nv_bfloat16>((uint64_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<uint64_t, half>((uint64_t *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<uint64_t, float>((uint64_t *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<uint64_t, double>((uint64_t *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<uint64_t, int8_t>((uint64_t *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<uint64_t, int16_t>((uint64_t *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<uint64_t, int32_t>((uint64_t *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<uint64_t, int64_t>((uint64_t *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<uint64_t, uint8_t>((uint64_t *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<uint64_t, uint16_t>((uint64_t *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<uint64_t, uint32_t>((uint64_t *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<uint64_t, uint64_t>((uint64_t *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<uint64_t, bool>((uint64_t *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<uint64_t>((uint64_t *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::BOOLEAN:
+        case DataType::BOOLEAN:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeImpl<bool, __nv_fp8_e4m3>((bool *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeImpl<bool, __nv_fp8_e5m2>((bool *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeImpl<bool, __nv_bfloat16>((bool *)args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeImpl<bool, half>((bool *)args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeImpl<bool, float>((bool *)args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeImpl<bool, double>((bool *)args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeImpl<bool, int8_t>((bool *)args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeImpl<bool, int16_t>((bool *)args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeImpl<bool, int32_t>((bool *)args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeImpl<bool, int64_t>((bool *)args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeImpl<bool, uint8_t>((bool *)args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeImpl<bool, uint16_t>((bool *)args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeImpl<bool, uint32_t>((bool *)args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeImpl<bool, uint64_t>((bool *)args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeImpl<bool, bool>((bool *)args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     cpuConvertTypeToPackedBooleanImpl<bool>((bool *)args->source, args->dest, numElements);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::PACKED_BOOLEAN:
+        case DataType::PACKED_BOOLEAN:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     cpuConvertTypeFromPackedBooleanImpl<__nv_fp8_e4m3>(args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     cpuConvertTypeFromPackedBooleanImpl<__nv_fp8_e5m2>(args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     cpuConvertTypeFromPackedBooleanImpl<__nv_bfloat16>(args->source, (__nv_bfloat16 *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     cpuConvertTypeFromPackedBooleanImpl<half>(args->source, (half *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     cpuConvertTypeFromPackedBooleanImpl<float>(args->source, (float *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     cpuConvertTypeFromPackedBooleanImpl<double>(args->source, (double *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     cpuConvertTypeFromPackedBooleanImpl<int8_t>(args->source, (int8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     cpuConvertTypeFromPackedBooleanImpl<int16_t>(args->source, (int16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     cpuConvertTypeFromPackedBooleanImpl<int32_t>(args->source, (int32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     cpuConvertTypeFromPackedBooleanImpl<int64_t>(args->source, (int64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     cpuConvertTypeFromPackedBooleanImpl<uint8_t>(args->source, (uint8_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     cpuConvertTypeFromPackedBooleanImpl<uint16_t>(args->source, (uint16_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     cpuConvertTypeFromPackedBooleanImpl<uint32_t>(args->source, (uint32_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     cpuConvertTypeFromPackedBooleanImpl<uint64_t>(args->source, (uint64_t *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     cpuConvertTypeFromPackedBooleanImpl<bool>(args->source, (bool *)args->dest, numElements);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     THOR_UNREACHABLE();
                 default:
                     THOR_UNREACHABLE();

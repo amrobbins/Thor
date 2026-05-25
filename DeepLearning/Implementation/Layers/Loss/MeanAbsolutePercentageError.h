@@ -17,7 +17,7 @@ class MeanAbsolutePercentageError : public Loss {
    public:
     ~MeanAbsolutePercentageError() override;
 
-    MeanAbsolutePercentageError(TensorDescriptor::DataType lossDataType = TensorDescriptor::DataType::FP32,
+    MeanAbsolutePercentageError(DataType lossDataType = DataType::FP32,
                                 float epsilon = 0.0001,
                                 float maxMagnitude = 1000.0f);
 

@@ -12,7 +12,7 @@
 #include <string_view>
 #include "DeepLearning/Implementation/ThorError.h"
 
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 using json = nlohmann::json;
 
 namespace ThorImplementation {

@@ -191,7 +191,7 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
         descriptor.o.ragged = true;
     }
     descriptor.computeDataType = compute_dtype;
-    descriptor.intermediateDataType = TensorDescriptor::DataType::FP32;
+    descriptor.intermediateDataType = DataType::FP32;
     descriptor.attentionScale = attention_scale;
     descriptor.maskKind = mask_kind;
     descriptor.diagonalLeftBound = diagonal_left_bound;
@@ -205,10 +205,10 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
     descriptor.dropout.usePhilox = true;
     descriptor.debugName = debug_name;
     descriptor.useFp8 =
-        qTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || qTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
-        kTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || kTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
-        vTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || vTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
-        oTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || oTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2;
+        qTensor.getDataType() == DataType::FP8_E4M3 || qTensor.getDataType() == DataType::FP8_E5M2 ||
+        kTensor.getDataType() == DataType::FP8_E4M3 || kTensor.getDataType() == DataType::FP8_E5M2 ||
+        vTensor.getDataType() == DataType::FP8_E4M3 || vTensor.getDataType() == DataType::FP8_E5M2 ||
+        oTensor.getDataType() == DataType::FP8_E4M3 || oTensor.getDataType() == DataType::FP8_E5M2;
     descriptor.validateForward();
     return descriptor;
 }
@@ -229,7 +229,7 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
         descriptor.o.ragged = true;
     }
     descriptor.computeDataType = compute_dtype;
-    descriptor.intermediateDataType = TensorDescriptor::DataType::FP32;
+    descriptor.intermediateDataType = DataType::FP32;
     descriptor.attentionScale = attention_scale;
     descriptor.maskKind = mask_kind;
     descriptor.diagonalLeftBound = diagonal_left_bound;
@@ -245,15 +245,15 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
     descriptor.deterministicBackward = deterministic_backward;
     descriptor.debugName = debug_name;
     descriptor.useFp8 =
-        qTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || qTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
-        kTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || kTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
-        vTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || vTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2 ||
-        oTensor.getDataType() == TensorDescriptor::DataType::FP8_E4M3 || oTensor.getDataType() == TensorDescriptor::DataType::FP8_E5M2;
+        qTensor.getDataType() == DataType::FP8_E4M3 || qTensor.getDataType() == DataType::FP8_E5M2 ||
+        kTensor.getDataType() == DataType::FP8_E4M3 || kTensor.getDataType() == DataType::FP8_E5M2 ||
+        vTensor.getDataType() == DataType::FP8_E4M3 || vTensor.getDataType() == DataType::FP8_E5M2 ||
+        oTensor.getDataType() == DataType::FP8_E4M3 || oTensor.getDataType() == DataType::FP8_E5M2;
     descriptor.validateBackward();
     return descriptor;
 }
 
-TensorDescriptor::DataType CompiledAttentionBackward::outputDTypeFor(ExprOp op) const {
+DataType CompiledAttentionBackward::outputDTypeFor(ExprOp op) const {
     switch (op) {
         case ExprOp::ATTENTION_BACKWARD_Q:
             return dQ_dtype;
@@ -282,7 +282,7 @@ bool sameOptionalFloat(const std::optional<float>& lhs, const std::optional<floa
 
 bool attentionConfigMatchesBackward(const CompiledAttention& forward,
                                     const CompiledAttentionBackward& backward,
-                                    TensorDescriptor::DataType output_dtype) {
+                                    DataType output_dtype) {
     return forward.q_layout == backward.q_layout && forward.k_layout == backward.k_layout && forward.v_layout == backward.v_layout &&
            forward.o_layout == backward.o_layout && forward.mask_kind == backward.mask_kind &&
            forward.diagonal_left_bound == backward.diagonal_left_bound && forward.diagonal_right_bound == backward.diagonal_right_bound &&
@@ -1264,7 +1264,7 @@ struct ResolvedMatmulScale {
         if (!device_scratch.has_value()) {
             throw std::runtime_error("Missing preallocated GEMM device scalar scratch tensor.");
         }
-        if (binding.sourceDType != TensorDescriptor::DataType::FP32) {
+        if (binding.sourceDType != DataType::FP32) {
             throw std::runtime_error("Dynamic GEMM tensor-backed alpha/beta currently require FP32 source dtype.");
         }
         const char* device_ptr = static_cast<const char*>(binding.buffer.getMemPtr());
@@ -1287,7 +1287,7 @@ struct ResolvedMatmulScale {
         if (!device_scratch.has_value()) {
             throw std::runtime_error("Missing preallocated GEMM device scalar scratch tensor.");
         }
-        if (tensor.getDataType() == TensorDescriptor::DataType::FP32) {
+        if (tensor.getDataType() == DataType::FP32) {
             launchScaleFp32DeviceScalar(static_cast<const float*>(tensor.getMemPtr()),
                                         static_cast<float*>(device_scratch.value().getMemPtr()),
                                         host_value,
@@ -1311,7 +1311,7 @@ struct ResolvedMatmulScales {
 };
 
 static const float* getTensorRuntimeScalarDevicePtr(const TensorScalarBinding& binding) {
-    if (binding.sourceDType != TensorDescriptor::DataType::FP32) {
+    if (binding.sourceDType != DataType::FP32) {
         throw std::runtime_error("Dynamic GEMM tensor-backed alpha/beta currently require FP32 source dtype.");
     }
     const char* device_ptr = static_cast<const char*>(binding.buffer.getMemPtr());
@@ -1361,7 +1361,7 @@ static ResolvedMatmulScale resolveMatmulRuntimeScale(const std::optional<Runtime
         if (!tensorResolvesToSingleElement(tensor)) {
             throw std::runtime_error("Dynamic GEMM alpha/beta expression must resolve to a single element.");
         }
-        if (tensor.getDataType() == TensorDescriptor::DataType::FP32 && resolved.host_value == 1.0f) {
+        if (tensor.getDataType() == DataType::FP32 && resolved.host_value == 1.0f) {
             resolved.setDevicePointer(static_cast<const float*>(tensor.getMemPtr()));
             return resolved;
         }
@@ -1849,25 +1849,25 @@ static shared_ptr<BuiltMatmul> cacheLookup(const MatmulCacheKey& key) {
     return nullptr;
 }
 
-static cudnnDataType_t toCudnnDataType(TensorDescriptor::DataType dtype) {
+static cudnnDataType_t toCudnnDataType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             return CUDNN_DATA_FLOAT;
 
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             return CUDNN_DATA_HALF;
 
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             return CUDNN_DATA_BFLOAT16;
 
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             return CUDNN_DATA_FP8_E4M3;
 
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             return CUDNN_DATA_FP8_E5M2;
 
         default:
-            throw std::runtime_error("toCudnnDataType: unsupported TensorDescriptor::DataType value " +
+            throw std::runtime_error("toCudnnDataType: unsupported DataType value " +
                                      std::to_string(static_cast<int>(dtype)));
     }
 }
@@ -1952,7 +1952,7 @@ std::vector<uint64_t> StampedEquation::computeReductionOutputDims(const std::vec
     return squeezed;
 }
 
-static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<uint64_t> dims, TensorDescriptor::DataType dtype) {
+static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<uint64_t> dims, DataType dtype) {
     while (dims.size() < 4)
         dims.push_back(1);
     if (dims.size() > 8)
@@ -1971,21 +1971,21 @@ static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<uint64_t>
     return desc;
 }
 
-static fe::DataType_t toFrontendDataType(TensorDescriptor::DataType dtype) {
+static fe::DataType_t toFrontendDataType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             return fe::DataType_t::FLOAT;
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             return fe::DataType_t::HALF;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             return fe::DataType_t::BFLOAT16;
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             return fe::DataType_t::FP8_E4M3;
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             return fe::DataType_t::FP8_E5M2;
-        case TensorDescriptor::DataType::INT32:
+        case DataType::INT32:
             return fe::DataType_t::INT32;
-        case TensorDescriptor::DataType::INT64:
+        case DataType::INT64:
             return fe::DataType_t::INT64;
         default:
             throw std::runtime_error("Unsupported dtype for cuDNN Frontend convolution: " + TensorDescriptor::getElementTypeName(dtype));
@@ -2016,7 +2016,7 @@ static std::shared_ptr<fe::graph::Tensor_attributes> createFrontendConvolutionTe
                                                                                      const std::string& name,
                                                                                      int64_t uid,
                                                                                      const std::vector<uint64_t>& dims,
-                                                                                     TensorDescriptor::DataType dtype) {
+                                                                                     DataType dtype) {
     const std::vector<int64_t> frontend_dims = toFrontendInt64Vector(dims, name.c_str());
     return graph->tensor(fe::graph::Tensor_attributes()
                              .set_name(name)
@@ -2030,7 +2030,7 @@ static void setFrontendConvolutionOutputTensor(std::shared_ptr<fe::graph::Tensor
                                                const std::string& name,
                                                int64_t uid,
                                                const std::vector<uint64_t>& dims,
-                                               TensorDescriptor::DataType dtype) {
+                                               DataType dtype) {
     const std::vector<int64_t> frontend_dims = toFrontendInt64Vector(dims, name.c_str());
     tensor->set_output(true)
         .set_name(name)
@@ -2110,7 +2110,7 @@ static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
     }
 }
 
-static cudnnReduceTensorDescriptor_t createCudnnReduceDescriptor(ExprOp op, TensorDescriptor::DataType compute_dtype, bool output_indices) {
+static cudnnReduceTensorDescriptor_t createCudnnReduceDescriptor(ExprOp op, DataType compute_dtype, bool output_indices) {
     cudnnReduceTensorDescriptor_t desc;
     CUDNN_CHECK(cudnnCreateReduceTensorDescriptor(&desc));
     CUDNN_CHECK(cudnnSetReduceTensorDescriptor(desc,
@@ -2537,9 +2537,9 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::share
 std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
                                                                 const std::vector<uint64_t>& reduction_axes,
                                                                 const std::vector<uint64_t>& squeeze_axes,
-                                                                TensorDescriptor::DataType input_dtype,
-                                                                TensorDescriptor::DataType output_dtype,
-                                                                TensorDescriptor::DataType compute_dtype,
+                                                                DataType input_dtype,
+                                                                DataType output_dtype,
+                                                                DataType compute_dtype,
                                                                 bool output_indices,
                                                                 const Tensor& input,
                                                                 int device_num) {

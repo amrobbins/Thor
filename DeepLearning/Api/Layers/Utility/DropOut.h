@@ -52,7 +52,7 @@ class DropOut : public Layer {
 
    protected:
     virtual uint64_t getReservedStateSizeInBytes(uint32_t batchSize) const {
-        ThorImplementation::TensorDescriptor::DataType dataType = ThorImplementation::TensorDescriptor::DataType::FP16;
+        ThorImplementation::DataType dataType = ThorImplementation::DataType::FP16;
         std::vector<uint64_t> featureInputDimensionsWithBatchSize;
         featureInputDimensionsWithBatchSize.push_back(batchSize);
         for (uint32_t i = 0; i < featureInput.value().getDimensions().size(); ++i)

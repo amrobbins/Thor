@@ -39,7 +39,7 @@ class DropOut : public Layer {
         this->randomSeed = seed;
     }
 
-    static size_t getReservedSpaceSizeInBytes(std::vector<unsigned long> featureInputDimensions, TensorDescriptor::DataType dataType) {
+    static size_t getReservedSpaceSizeInBytes(std::vector<unsigned long> featureInputDimensions, DataType dataType) {
         size_t numBytes;
 
         cudnnTensorDescriptor_t descriptor = createCudnnTensorDescriptor(featureInputDimensions, dataType);
@@ -69,7 +69,7 @@ class DropOut : public Layer {
         ScopedGpu scopedGpu(featureInput.value().getPlacement().getDeviceNum());
 
         randomStateBytes = getRandomStateSizeInBytes(stream.getCudnnHandle());
-        randomState = Tensor(featureInput.value().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {randomStateBytes}));
+        randomState = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::UINT8, {randomStateBytes}));
 
         cudnnStatus = cudnnCreateDropoutDescriptor(&dropoutDescriptor);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
@@ -78,7 +78,7 @@ class DropOut : public Layer {
                                                             featureInput.value().getDescriptor().getDataType());
         reserveSpaceBytes = getReservedSpaceSizeInBytes(featureInput.value().getDescriptor().getDimensions(),
                                                         featureInput.value().getDescriptor().getDataType());
-        reserveSpace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {reserveSpaceBytes}));
+        reserveSpace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::UINT8, {reserveSpaceBytes}));
 
         mtx.lock();
         cudnnStatus = cudnnSetDropoutDescriptor(

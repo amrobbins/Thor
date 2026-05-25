@@ -36,7 +36,7 @@ class DataProcessor : public WorkQueueExecutorBase<DataElement, DataElement> {
      * returns true on success.
      */
     virtual uint64_t outputTensorSizeInBytes() = 0;
-    virtual ThorImplementation::TensorDescriptor::DataType getDataType() = 0;
+    virtual ThorImplementation::DataType getDataType() = 0;
 };
 
 /**

@@ -61,10 +61,10 @@ class Tensor : private ReferenceCounted {
 
     Tensor clone() const { return uninitialized() ? Tensor() : Tensor(placement, descriptor); }
     Tensor clone(TensorPlacement newPlacement) const { return uninitialized() ? Tensor() : Tensor(newPlacement, descriptor); }
-    Tensor clone(TensorDescriptor::DataType newDataType) const {
+    Tensor clone(DataType newDataType) const {
         return uninitialized() ? Tensor() : Tensor(placement, TensorDescriptor(newDataType, descriptor.getDimensions()));
     }
-    Tensor clone(TensorPlacement newPlacement, TensorDescriptor::DataType newDataType) const {
+    Tensor clone(TensorPlacement newPlacement, DataType newDataType) const {
         return uninitialized() ? Tensor() : Tensor(newPlacement, TensorDescriptor(newDataType, descriptor.getDimensions()));
     }
     Tensor clone(std::vector<uint64_t> newDimensions) const {
@@ -108,7 +108,7 @@ class Tensor : private ReferenceCounted {
     static Tensor zeros(TensorPlacement placement, TensorDescriptor descriptor, Stream stream);
     static Tensor randoms(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, double minValue, double maxValue);
     static Tensor values(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, double value);
-    static Tensor identityMatrix(uint32_t N, TensorPlacement placement, TensorDescriptor::DataType dataType, Stream stream);
+    static Tensor identityMatrix(uint32_t N, TensorPlacement placement, DataType dataType, Stream stream);
 
     // numElements = 0 indicates all elements
     // Note that this takes num elements as its parameter rather than num bytes like regular memset
@@ -771,7 +771,7 @@ class Tensor : private ReferenceCounted {
     using ReferenceCounted::getReferenceCount;
 
     // Convenience functions to pass information from the descriptor
-    TensorDescriptor::DataType getDataType() const {
+    DataType getDataType() const {
         THOR_THROW_IF_FALSE(!uninitialized());
         return descriptor.getDataType();
     }

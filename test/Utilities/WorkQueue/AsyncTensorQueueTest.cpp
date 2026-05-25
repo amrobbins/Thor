@@ -21,6 +21,7 @@ using std::set;
 using std::string;
 using std::vector;
 
+using ThorImplementation::DataType;
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
 using ThorImplementation::TensorPlacement;
@@ -37,7 +38,7 @@ TEST(AsyncTensorQueue, blockingApiWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
 
     for (int test = 0; test < 1; ++test) {
-        TensorDescriptor tensorDescriptor(TensorDescriptor::DataType::FP32, {2});
+        TensorDescriptor tensorDescriptor(DataType::FP32, {2});
         AsyncTensorQueue queue(100, tensorDescriptor, cpuPlacement);
         set<uint32_t> observedNumbers;
 
@@ -99,7 +100,7 @@ TEST(AsyncTensorQueue, nonblockingApiWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
 
     for (int test = 0; test < 1; ++test) {
-        TensorDescriptor tensorDescriptor(TensorDescriptor::DataType::FP32, {2});
+        TensorDescriptor tensorDescriptor(DataType::FP32, {2});
         AsyncTensorQueue queue(100, tensorDescriptor, cpuPlacement);
         set<uint32_t> observedNumbers;
 

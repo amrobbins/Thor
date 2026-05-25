@@ -308,25 +308,25 @@ void launchTypedMatrixTranspose(void* output, const void* input, uint32_t numRow
     CUDA_CHECK(cudaGetLastError());
 }
 
-static inline size_t scalarSizeBytes(TensorDescriptor::DataType dtype) {
+static inline size_t scalarSizeBytes(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             return 4;
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             return 2;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             return 2;
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             return 1;
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             return 1;
-        case TensorDescriptor::DataType::UINT8:
+        case DataType::UINT8:
             return 1;
-        case TensorDescriptor::DataType::UINT16:
+        case DataType::UINT16:
             return 2;
-        case TensorDescriptor::DataType::UINT32:
+        case DataType::UINT32:
             return 4;
-        case TensorDescriptor::DataType::INT32:
+        case DataType::INT32:
             return 4;
         default:
             throw std::runtime_error("Unsupported dtype in transpose dispatch.");
@@ -335,41 +335,41 @@ static inline size_t scalarSizeBytes(TensorDescriptor::DataType dtype) {
 
 static inline int chooseTransposePack(uint32_t /*numRows*/,
                                       uint32_t /*numCols*/,
-                                      TensorDescriptor::DataType input_dtype,
-                                      TensorDescriptor::DataType output_dtype) {
+                                      DataType input_dtype,
+                                      DataType output_dtype) {
     const size_t larger_bytes = std::max(scalarSizeBytes(input_dtype), scalarSizeBytes(output_dtype));
     return static_cast<int>(4 / larger_bytes);
 }
 
 template <typename InT, int PACK>
 void dispatchOutputType(
-    void* output, const void* input, uint32_t numRows, uint32_t numCols, TensorDescriptor::DataType output_dtype, cudaStream_t stream) {
+    void* output, const void* input, uint32_t numRows, uint32_t numCols, DataType output_dtype, cudaStream_t stream) {
     switch (output_dtype) {
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             launchTypedMatrixTranspose<InT, float, PACK>(output, input, numRows, numCols, stream);
             return;
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             launchTypedMatrixTranspose<InT, __half, PACK>(output, input, numRows, numCols, stream);
             return;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             launchTypedMatrixTranspose<InT, __nv_bfloat16, PACK>(output, input, numRows, numCols, stream);
             return;
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             launchTypedMatrixTranspose<InT, __nv_fp8_e4m3, PACK>(output, input, numRows, numCols, stream);
             return;
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             launchTypedMatrixTranspose<InT, __nv_fp8_e5m2, PACK>(output, input, numRows, numCols, stream);
             return;
-        case TensorDescriptor::DataType::UINT8:
+        case DataType::UINT8:
             launchTypedMatrixTranspose<InT, uint8_t, PACK>(output, input, numRows, numCols, stream);
             return;
-        case TensorDescriptor::DataType::UINT16:
+        case DataType::UINT16:
             launchTypedMatrixTranspose<InT, uint16_t, PACK>(output, input, numRows, numCols, stream);
             return;
-        case TensorDescriptor::DataType::UINT32:
+        case DataType::UINT32:
             launchTypedMatrixTranspose<InT, uint32_t, PACK>(output, input, numRows, numCols, stream);
             return;
-        case TensorDescriptor::DataType::INT32:
+        case DataType::INT32:
             launchTypedMatrixTranspose<InT, int32_t, PACK>(output, input, numRows, numCols, stream);
             return;
         default:
@@ -382,8 +382,8 @@ void dispatchPackAndOutputType(void* output,
                                const void* input,
                                uint32_t numRows,
                                uint32_t numCols,
-                               TensorDescriptor::DataType input_dtype,
-                               TensorDescriptor::DataType output_dtype,
+                               DataType input_dtype,
+                               DataType output_dtype,
                                cudaStream_t stream) {
     switch (chooseTransposePack(numRows, numCols, input_dtype, output_dtype)) {
         case 4:
@@ -404,8 +404,8 @@ void launchMatrixTransposeByType(void* output,
                                  const void* input,
                                  uint32_t numRows,
                                  uint32_t numCols,
-                                 TensorDescriptor::DataType input_dtype,
-                                 TensorDescriptor::DataType output_dtype,
+                                 DataType input_dtype,
+                                 DataType output_dtype,
                                  cudaStream_t stream) {
     if (output == nullptr || input == nullptr) {
         throw std::runtime_error("launchMatrixTransposeByType received a null pointer.");
@@ -415,31 +415,31 @@ void launchMatrixTransposeByType(void* output,
     }
 
     switch (input_dtype) {
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             dispatchPackAndOutputType<float>(output, input, numRows, numCols, input_dtype, output_dtype, stream);
             return;
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             dispatchPackAndOutputType<__half>(output, input, numRows, numCols, input_dtype, output_dtype, stream);
             return;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             dispatchPackAndOutputType<__nv_bfloat16>(output, input, numRows, numCols, input_dtype, output_dtype, stream);
             return;
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             dispatchPackAndOutputType<__nv_fp8_e4m3>(output, input, numRows, numCols, input_dtype, output_dtype, stream);
             return;
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             dispatchPackAndOutputType<__nv_fp8_e5m2>(output, input, numRows, numCols, input_dtype, output_dtype, stream);
             return;
-        case TensorDescriptor::DataType::UINT8:
+        case DataType::UINT8:
             dispatchPackAndOutputType<uint8_t>(output, input, numRows, numCols, input_dtype, output_dtype, stream);
             return;
-        case TensorDescriptor::DataType::UINT16:
+        case DataType::UINT16:
             dispatchPackAndOutputType<uint16_t>(output, input, numRows, numCols, input_dtype, output_dtype, stream);
             return;
-        case TensorDescriptor::DataType::UINT32:
+        case DataType::UINT32:
             dispatchPackAndOutputType<uint32_t>(output, input, numRows, numCols, input_dtype, output_dtype, stream);
             return;
-        case TensorDescriptor::DataType::INT32:
+        case DataType::INT32:
             dispatchPackAndOutputType<int32_t>(output, input, numRows, numCols, input_dtype, output_dtype, stream);
             return;
         default:
@@ -452,8 +452,8 @@ void matrixTranspose(float* transposedMatrix_d, const float* matrix_d, int numRo
                                 matrix_d,
                                 static_cast<uint32_t>(numRows),
                                 static_cast<uint32_t>(numCols),
-                                TensorDescriptor::DataType::FP32,
-                                TensorDescriptor::DataType::FP32,
+                                DataType::FP32,
+                                DataType::FP32,
                                 stream);
 }
 
@@ -462,8 +462,8 @@ void matrixTranspose(__half* transposedMatrix_d, const __half* matrix_d, int num
                                 matrix_d,
                                 static_cast<uint32_t>(numRows),
                                 static_cast<uint32_t>(numCols),
-                                TensorDescriptor::DataType::FP16,
-                                TensorDescriptor::DataType::FP16,
+                                DataType::FP16,
+                                DataType::FP16,
                                 stream);
 }
 
@@ -472,8 +472,8 @@ void matrixTranspose(__nv_bfloat16* transposedMatrix_d, const __nv_bfloat16* mat
                                 matrix_d,
                                 static_cast<uint32_t>(numRows),
                                 static_cast<uint32_t>(numCols),
-                                TensorDescriptor::DataType::BF16,
-                                TensorDescriptor::DataType::BF16,
+                                DataType::BF16,
+                                DataType::BF16,
                                 stream);
 }
 
@@ -482,8 +482,8 @@ void matrixTranspose(__nv_fp8_e4m3* transposedMatrix_d, const __nv_fp8_e4m3* mat
                                 matrix_d,
                                 static_cast<uint32_t>(numRows),
                                 static_cast<uint32_t>(numCols),
-                                TensorDescriptor::DataType::FP8_E4M3,
-                                TensorDescriptor::DataType::FP8_E4M3,
+                                DataType::FP8_E4M3,
+                                DataType::FP8_E4M3,
                                 stream);
 }
 
@@ -492,8 +492,8 @@ void matrixTranspose(__nv_fp8_e5m2* transposedMatrix_d, const __nv_fp8_e5m2* mat
                                 matrix_d,
                                 static_cast<uint32_t>(numRows),
                                 static_cast<uint32_t>(numCols),
-                                TensorDescriptor::DataType::FP8_E5M2,
-                                TensorDescriptor::DataType::FP8_E5M2,
+                                DataType::FP8_E5M2,
+                                DataType::FP8_E5M2,
                                 stream);
 }
 

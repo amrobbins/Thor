@@ -48,7 +48,7 @@ TEST(Relu, Works) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -134,7 +134,7 @@ TEST(Tanh, Works) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -238,7 +238,7 @@ TEST(Elu, Works) {
         float alpha = rand() % 10000;
         alpha /= 2000.0f;
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -340,7 +340,7 @@ TEST(Swish, Works) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -422,7 +422,7 @@ TEST(Exponential, Works) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -517,7 +517,7 @@ TEST(SoftSign, Works) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -614,7 +614,7 @@ TEST(HardSigmoid, Works) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -709,7 +709,7 @@ TEST(SoftPlus, Works) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -805,7 +805,7 @@ TEST(Sigmoid, Works) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -915,7 +915,7 @@ TEST(Selu, Works) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -1016,7 +1016,7 @@ TEST(Gelu, Works) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -1103,7 +1103,7 @@ TEST(Softmax, Works) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
         Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -1167,7 +1167,7 @@ TEST(Softmax, Works) {
 
         // Backward pass
         Tensor errorInCpu(cpuPlacement, descriptor);
-        Tensor errorInCpuFloat(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
+        Tensor errorInCpuFloat(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
         Tensor errorOutGpu = softmaxLayer->getErrorOutput().value();
@@ -1184,11 +1184,11 @@ TEST(Softmax, Works) {
         stream.synchronize();
 
         half *errorOutMem = (half *)errorOutCpu.getMemPtr();
-        Tensor I(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dimensions[1], dimensions[1]}));
-        Tensor smI(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dimensions[1], dimensions[1]}));
-        Tensor smTsm(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dimensions[1], dimensions[1]}));
-        Tensor smJacobian(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dimensions[1], dimensions[1]}));
-        Tensor expectedEOut(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dimensions[1]}));
+        Tensor I(cpuPlacement, TensorDescriptor(DataType::FP32, {dimensions[1], dimensions[1]}));
+        Tensor smI(cpuPlacement, TensorDescriptor(DataType::FP32, {dimensions[1], dimensions[1]}));
+        Tensor smTsm(cpuPlacement, TensorDescriptor(DataType::FP32, {dimensions[1], dimensions[1]}));
+        Tensor smJacobian(cpuPlacement, TensorDescriptor(DataType::FP32, {dimensions[1], dimensions[1]}));
+        Tensor expectedEOut(cpuPlacement, TensorDescriptor(DataType::FP32, {dimensions[1]}));
         thresh = 0.01;
         for (uint32_t batchItem = 0; batchItem < dimensions[0]; ++batchItem) {
             diagonalize((float *)softmaxForward[batchItem].data(), (float *)smI.getMemPtr(), dimensions[1]);

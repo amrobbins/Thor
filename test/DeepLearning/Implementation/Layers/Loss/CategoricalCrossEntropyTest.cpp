@@ -45,8 +45,8 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
 
         bool inferenceOnly = (rand() % 5) == 0;
 
-        TensorDescriptor elementwiseDescriptorFP32(TensorDescriptor::DataType::FP32, dimensions);
-        TensorDescriptor elementwiseDescriptorFP16(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor elementwiseDescriptorFP32(DataType::FP32, dimensions);
+        TensorDescriptor elementwiseDescriptorFP16(DataType::FP16, dimensions);
 
         Tensor labelsCpu(cpuPlacement, elementwiseDescriptorFP32);
         Tensor activationsCpu(cpuPlacement, elementwiseDescriptorFP16);
@@ -55,7 +55,7 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
 
         vector<unsigned long> batchDimensions;
         batchDimensions.push_back(batchSize);
-        TensorDescriptor batchwiseDescriptor(TensorDescriptor::DataType::FP32, batchDimensions);
+        TensorDescriptor batchwiseDescriptor(DataType::FP32, batchDimensions);
         Tensor lossCpu(cpuPlacement, batchwiseDescriptor);
         Tensor lossGpu_h(cpuPlacement, batchwiseDescriptor);
 
@@ -82,7 +82,7 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
         shared_ptr<Softmax> softmax = make_shared<Softmax>(true);
         layers.push_back(softmax);
         shared_ptr<CrossEntropy> crossEntropy =
-            make_shared<CrossEntropy>(CrossEntropyLossType::CATEGORICAL, TensorDescriptor::DataType::FP16, false);
+            make_shared<CrossEntropy>(CrossEntropyLossType::CATEGORICAL, DataType::FP16, false);
         if (inferenceOnly)
             crossEntropy->setConstructForInferenceOnly(true);
         layers.push_back(crossEntropy);
@@ -236,11 +236,11 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
 
         bool inferenceOnly = (rand() % 5) == 0;
 
-        Tensor labelsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT16, {batchSize, 1}));
-        Tensor activationsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numClasses}));
+        Tensor labelsCpu(cpuPlacement, TensorDescriptor(DataType::UINT16, {batchSize, 1}));
+        Tensor activationsCpu(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, numClasses}));
         Tensor labelsGpu = labelsCpu.clone(gpuPlacement);
         Tensor activationsGpu = activationsCpu.clone(gpuPlacement);
-        Tensor lossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numClasses}));
+        Tensor lossCpu(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, numClasses}));
         Tensor lossGpu_h = lossCpu.clone();
 
         uint16_t *labels = (uint16_t *)labelsCpu.getMemPtr();
@@ -267,7 +267,7 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
         shared_ptr<Softmax> softmax = make_shared<Softmax>(true);
         layers.push_back(softmax);
         shared_ptr<CrossEntropy> crossEntropy =
-            make_shared<CrossEntropy>(CrossEntropyLossType::CATEGORICAL, TensorDescriptor::DataType::FP16, true);
+            make_shared<CrossEntropy>(CrossEntropyLossType::CATEGORICAL, DataType::FP16, true);
         if (inferenceOnly)
             crossEntropy->setConstructForInferenceOnly(true);
         layers.push_back(crossEntropy);
@@ -313,9 +313,9 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
         // Compute the expected loss
         half *activationsMem = (half *)activationsCpu.getMemPtr();
         half *lossMem = (half *)lossCpu.getMemPtr();
-        Tensor sumOfExponentials(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
+        Tensor sumOfExponentials(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize}));
         float *sumOfExponentialsMem = (float *)sumOfExponentials.getMemPtr();
-        Tensor exponentials(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor exponentials(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         float *exponentialsMem = (float *)exponentials.getMemPtr();
         for (uint32_t b = 0; b < batchSize; ++b) {
             sumOfExponentialsMem[b] = 0.0f;

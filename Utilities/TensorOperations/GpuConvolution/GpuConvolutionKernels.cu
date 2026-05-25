@@ -187,7 +187,7 @@ void GpuConvolution::computeConvolutionBiasesGradient(Tensor errorInput, Tensor 
 
     THOR_THROW_IF_FALSE(biasDimensions.size() == 1);
     THOR_THROW_IF_FALSE(biasDimensions[0] == channelDimension);
-    THOR_THROW_IF_FALSE(biasesGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(biasesGradient.getDescriptor().getDataType() == DataType::FP16);
 
     THOR_THROW_IF_FALSE(workspace.getDescriptor().getArraySizeInBytes() == batchDimension * channelDimension * sizeof(float));
 

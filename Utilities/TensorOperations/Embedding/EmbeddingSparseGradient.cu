@@ -29,7 +29,6 @@
 namespace ThorImplementation {
 namespace {
 
-using DataType = TensorDescriptor::DataType;
 
 constexpr uint32_t THREADS_PER_BLOCK = 256;
 constexpr bool PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS = true;

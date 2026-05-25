@@ -22,9 +22,9 @@ struct EmbeddingSparseGradientProfileResult {
     uint64_t vocabularySize = 0;
     uint64_t embeddingDim = 0;
     uint64_t capacity = 0;
-    TensorDescriptor::DataType indexDataType = TensorDescriptor::DataType::UINT32;
-    TensorDescriptor::DataType gradientDataType = TensorDescriptor::DataType::FP32;
-    TensorDescriptor::DataType rowDataType = TensorDescriptor::DataType::UINT64;
+    DataType indexDataType = DataType::UINT32;
+    DataType gradientDataType = DataType::FP32;
+    DataType rowDataType = DataType::UINT64;
     size_t sortTempBytes = 0;
     size_t rleTempBytes = 0;
     size_t scanTempBytes = 0;

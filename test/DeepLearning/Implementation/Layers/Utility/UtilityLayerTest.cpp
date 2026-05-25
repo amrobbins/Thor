@@ -60,7 +60,7 @@ TEST(InOut, NoOpWorks) {
         unsigned int rows = dimensions[0];
         unsigned int cols = dimensions[1];
         unsigned int numElements = rows * cols;
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor cpuSource(cpuPlacement, descriptor);
         Tensor gpuSource(gpuPlacement, descriptor);
         Tensor cpuDest(cpuPlacement, descriptor);
@@ -110,11 +110,11 @@ TEST(Map, MapsCorrectlyToSameNumberOfElements) {
         int rows = dimensions[0];
         int cols = dimensions[1];
         int numElements = rows * cols;
-        TensorDescriptor mappingDescriptor(TensorDescriptor::DataType::UINT32, dimensions);
+        TensorDescriptor mappingDescriptor(DataType::UINT32, dimensions);
         Tensor mappingCpu = Tensor(cpuPlacement, mappingDescriptor);
         Tensor mappingGpu = mappingCpu.clone(gpuPlacement);
 
-        TensorDescriptor sourceDestDescriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor sourceDestDescriptor(DataType::FP16, dimensions);
         Tensor sourceCpu(cpuPlacement, sourceDestDescriptor);
         Tensor sourceGpu(gpuPlacement, sourceDestDescriptor);
         Tensor destCpu(cpuPlacement, sourceDestDescriptor);
@@ -179,15 +179,15 @@ TEST(Map, MapsCorrectlyToFewerElements) {
     destDimensions.push_back(10);
     int numDestElements = 100;
 
-    TensorDescriptor sourceDescriptor(TensorDescriptor::DataType::FP16, sourceDimensions);
+    TensorDescriptor sourceDescriptor(DataType::FP16, sourceDimensions);
     Tensor sourceCpu(cpuPlacement, sourceDescriptor);
     Tensor sourceGpu(gpuPlacement, sourceDescriptor);
 
-    TensorDescriptor mappingDescriptor(TensorDescriptor::DataType::UINT8, destDimensions);
+    TensorDescriptor mappingDescriptor(DataType::UINT8, destDimensions);
     Tensor mappingCpu = Tensor(cpuPlacement, mappingDescriptor);
     Tensor mappingGpu = mappingCpu.clone(gpuPlacement);
 
-    TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, destDimensions);
+    TensorDescriptor destDescriptor(DataType::FP16, destDimensions);
     Tensor destCpu(cpuPlacement, destDescriptor);
 
     uint8_t *mappingMem = (uint8_t *)mappingCpu.getMemPtr();
@@ -247,15 +247,15 @@ TEST(Map, MapsCorrectlyToMoreElements) {
     destDimensions.push_back(10);
     int numDestElements = 100;
 
-    TensorDescriptor sourceDescriptor(TensorDescriptor::DataType::FP16, sourceDimensions);
+    TensorDescriptor sourceDescriptor(DataType::FP16, sourceDimensions);
     Tensor sourceCpu(cpuPlacement, sourceDescriptor);
     Tensor sourceGpu(gpuPlacement, sourceDescriptor);
 
-    TensorDescriptor mappingDescriptor(TensorDescriptor::DataType::UINT64, destDimensions);
+    TensorDescriptor mappingDescriptor(DataType::UINT64, destDimensions);
     Tensor mappingCpu = Tensor(cpuPlacement, mappingDescriptor);
     Tensor mappingGpu = mappingCpu.clone(gpuPlacement);
 
-    TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, destDimensions);
+    TensorDescriptor destDescriptor(DataType::FP16, destDimensions);
     Tensor destCpu(cpuPlacement, destDescriptor);
 
     unsigned long *mappingMem = (unsigned long *)mappingCpu.getMemPtr();
@@ -326,8 +326,8 @@ TEST(Flatten, FlattensCorrectly) {
                 outputDimensions.push_back(dimensions[i]);
         }
 
-        TensorDescriptor sourceDescriptor(TensorDescriptor::DataType::FP16, dimensions);
-        TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
+        TensorDescriptor sourceDescriptor(DataType::FP16, dimensions);
+        TensorDescriptor destDescriptor(DataType::FP16, outputDimensions);
         Tensor sourceCpu(cpuPlacement, sourceDescriptor);
         Tensor sourceGpu(gpuPlacement, sourceDescriptor);
         Tensor destCpu(cpuPlacement, destDescriptor);
@@ -383,8 +383,8 @@ TEST(Reshape, ReshapesCorrectly) {
     newDimensions.push_back(20);
     newDimensions.push_back(5);
 
-    TensorDescriptor sourceDescriptor(TensorDescriptor::DataType::FP16, originalDimensions);
-    TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, newDimensions);
+    TensorDescriptor sourceDescriptor(DataType::FP16, originalDimensions);
+    TensorDescriptor destDescriptor(DataType::FP16, newDimensions);
     Tensor sourceCpu(cpuPlacement, sourceDescriptor);
     Tensor sourceGpu(gpuPlacement, sourceDescriptor);
     Tensor destCpu(cpuPlacement, destDescriptor);
@@ -440,8 +440,8 @@ TEST(TypeConversion, Converts) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor sourceDescriptor(TensorDescriptor::DataType::FP32, dimensions);
-        TensorDescriptor destDescriptor(TensorDescriptor::DataType::INT64, dimensions);
+        TensorDescriptor sourceDescriptor(DataType::FP32, dimensions);
+        TensorDescriptor destDescriptor(DataType::INT64, dimensions);
         Tensor sourceCpu(cpuPlacement, sourceDescriptor);
         Tensor sourceGpu(gpuPlacement, sourceDescriptor);
         Tensor destCpu(cpuPlacement, destDescriptor);
@@ -453,7 +453,7 @@ TEST(TypeConversion, Converts) {
 
         vector<shared_ptr<Layer>> layers;
         layers.push_back(make_shared<NetworkInput>(sourceGpu));
-        layers.push_back(make_shared<TypeConversion>(TensorDescriptor::DataType::INT32));
+        layers.push_back(make_shared<TypeConversion>(DataType::INT32));
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         Stream stream = layers.front()->getStream();
@@ -488,7 +488,7 @@ TEST(TensorFanout, CreatesFanout) {
     dimensions.push_back(3);
     dimensions.push_back(6);
     int numElements = 10 * 3 * 6;
-    TensorDescriptor descriptor(TensorDescriptor::DataType::FP32, dimensions);
+    TensorDescriptor descriptor(DataType::FP32, dimensions);
     Tensor sourceCpu(cpuPlacement, descriptor);
     Tensor sourceGpu(gpuPlacement, descriptor);
     Tensor destCpu0(cpuPlacement, descriptor);
@@ -593,11 +593,11 @@ TEST(Concatenate, Concatenates) {
             axisElementsPerSourceArray[t] = splitArrayDimensions[axis];
             wholeDimensions[axis] += splitArrayDimensions[axis];
 
-            TensorDescriptor partDescriptor(TensorDescriptor::DataType::FP16, splitArrayDimensions);
+            TensorDescriptor partDescriptor(DataType::FP16, splitArrayDimensions);
             partsCpu.emplace_back(cpuPlacement, partDescriptor);
             partsGpu.emplace_back(gpuPlacement, partDescriptor);
         }
-        TensorDescriptor wholeDescriptor(TensorDescriptor::DataType::FP16, wholeDimensions);
+        TensorDescriptor wholeDescriptor(DataType::FP16, wholeDimensions);
         wholeCpu = Tensor(cpuPlacement, wholeDescriptor);
 
         stridePerDestDimension[numDimensions - 1] = 1;
@@ -723,10 +723,10 @@ TEST(Split, Splits) {
             axisElementsPerDestArray[t] = splitArrayDimensions[axis];
             wholeDimensions[axis] += splitArrayDimensions[axis];
 
-            TensorDescriptor partDescriptor(TensorDescriptor::DataType::FP16, splitArrayDimensions);
+            TensorDescriptor partDescriptor(DataType::FP16, splitArrayDimensions);
             partsCpu.emplace_back(cpuPlacement, partDescriptor);
         }
-        TensorDescriptor wholeDescriptor(TensorDescriptor::DataType::FP16, wholeDimensions);
+        TensorDescriptor wholeDescriptor(DataType::FP16, wholeDimensions);
         wholeCpu = Tensor(cpuPlacement, wholeDescriptor);
         wholeGpu = Tensor(gpuPlacement, wholeDescriptor);
 
@@ -838,7 +838,7 @@ TEST(DeviceCrossing, Crosses) {
     dimensions.push_back(3);
     dimensions.push_back(6);
     int numElements = 10 * 3 * 6;
-    TensorDescriptor descriptor(TensorDescriptor::DataType::FP32, dimensions);
+    TensorDescriptor descriptor(DataType::FP32, dimensions);
     Tensor sourceCpu(cpuPlacement, descriptor);
     Tensor sourceGpu0(gpu0Placement, descriptor);
     Tensor destCpu(cpuPlacement, descriptor);
@@ -891,7 +891,7 @@ TEST(Pad, Pads) {
             numInputElements *= inputDimensions.back();
         }
 
-        TensorDescriptor sourceDescriptor(TensorDescriptor::DataType::FP16, inputDimensions);
+        TensorDescriptor sourceDescriptor(DataType::FP16, inputDimensions);
         Tensor sourceCpu(cpuPlacement, sourceDescriptor);
         Tensor sourceGpu(gpuPlacement, sourceDescriptor);
 
@@ -922,7 +922,7 @@ TEST(Pad, Pads) {
             outputDimensions[d] += dimensionPadding.first + dimensionPadding.second;
         }
 
-        TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
+        TensorDescriptor destDescriptor(DataType::FP16, outputDimensions);
         Tensor destCpu(cpuPlacement, destDescriptor);
 
         layers.push_back(make_shared<Pad>(paddingAmount));
@@ -1020,7 +1020,7 @@ TEST(Extract, Extracts) {
             numInputElements *= inputDimensions.back();
         }
 
-        TensorDescriptor sourceDescriptor(TensorDescriptor::DataType::FP16, inputDimensions);
+        TensorDescriptor sourceDescriptor(DataType::FP16, inputDimensions);
         Tensor sourceCpu(cpuPlacement, sourceDescriptor);
         Tensor sourceGpu(gpuPlacement, sourceDescriptor);
 
@@ -1042,7 +1042,7 @@ TEST(Extract, Extracts) {
             outputDimensions.push_back((dimensionSpans[i].second - dimensionSpans[i].first) + 1);
         }
 
-        TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
+        TensorDescriptor destDescriptor(DataType::FP16, outputDimensions);
         Tensor destCpu(cpuPlacement, destDescriptor);
 
         layers.push_back(make_shared<Extract>(dimensionSpans));

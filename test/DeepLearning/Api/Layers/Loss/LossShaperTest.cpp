@@ -225,7 +225,7 @@
 //
 //     // Write a dummy file with data into the archive since none of the layers wrote anything into it (no weights)
 //     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-//     ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {4});
+//     ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {4});
 //     ThorImplementation::Tensor dummyData(cpuPlacement, descriptor);
 //     archiveWriter.addArchiveFile("dummy", dummyData);
 //

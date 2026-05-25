@@ -22,7 +22,7 @@ class BinaryAccuracy : public Metric {
 
     std::optional<Tensor> createFeatureOutputTensor() override {
         TensorPlacement placement = featureInput.value().getPlacement();
-        return Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1U}));
+        return Tensor(placement, TensorDescriptor(DataType::FP32, {1U}));
     }
 
     void compileImpl() override {
@@ -36,25 +36,25 @@ class BinaryAccuracy : public Metric {
 
         std::vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
         std::vector<uint64_t> labelDimensions = labelsInput.value().getDescriptor().getDimensions();
-        TensorDescriptor::DataType labelsDataType = labelsInput.value().getDescriptor().getDataType();
+        DataType labelsDataType = labelsInput.value().getDescriptor().getDataType();
         THOR_THROW_IF_FALSE(labelDimensions.size() == 2);
         THOR_THROW_IF_FALSE(labelDimensions[1] == 1);
         THOR_THROW_IF_FALSE(featureInputDimensions == labelDimensions);
-        THOR_THROW_IF_FALSE(labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
-               labelsDataType == TensorDescriptor::DataType::UINT32 || labelsDataType == TensorDescriptor::DataType::INT8 ||
-               labelsDataType == TensorDescriptor::DataType::INT16 || labelsDataType == TensorDescriptor::DataType::INT32 ||
-               labelsDataType == TensorDescriptor::DataType::FP16 || labelsDataType == TensorDescriptor::DataType::FP32);
+        THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
+               labelsDataType == DataType::UINT32 || labelsDataType == DataType::INT8 ||
+               labelsDataType == DataType::INT16 || labelsDataType == DataType::INT32 ||
+               labelsDataType == DataType::FP16 || labelsDataType == DataType::FP32);
 
         batchSize = featureInput.value().getDescriptor().getDimensions()[0];
 
-        workspace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize}));
+        workspace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::FP16, {batchSize}));
 
         batchReduce = createBinaryAccuracyBatchReduce(batchSize, stream);
     }
 
     void computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) override {
-        if (predictions.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+        if (predictions.getDescriptor().getDataType() == DataType::FP16) {
+            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
                 launchComputeBinaryAccuracy(metric,
                                             (half *)predictions.getMemPtr(),
                                             (uint8_t *)labels.getMemPtr(),
@@ -63,7 +63,7 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
                 launchComputeBinaryAccuracy(metric,
                                             (half *)predictions.getMemPtr(),
                                             (uint16_t *)labels.getMemPtr(),
@@ -72,7 +72,7 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
                 launchComputeBinaryAccuracy(metric,
                                             (half *)predictions.getMemPtr(),
                                             (uint32_t *)labels.getMemPtr(),
@@ -81,7 +81,7 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT8) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
                 launchComputeBinaryAccuracy(metric,
                                             (half *)predictions.getMemPtr(),
                                             (int8_t *)labels.getMemPtr(),
@@ -90,7 +90,7 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
                 launchComputeBinaryAccuracy(metric,
                                             (half *)predictions.getMemPtr(),
                                             (int16_t *)labels.getMemPtr(),
@@ -99,7 +99,7 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
                 launchComputeBinaryAccuracy(metric,
                                             (half *)predictions.getMemPtr(),
                                             (int32_t *)labels.getMemPtr(),
@@ -108,19 +108,19 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::FP16) {
                 launchComputeBinaryAccuracy(
                     metric, (half *)predictions.getMemPtr(), (half *)labels.getMemPtr(), workspace, batchSize, batchReduce, stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::FP32) {
                 launchComputeBinaryAccuracy(
                     metric, (half *)predictions.getMemPtr(), (float *)labels.getMemPtr(), workspace, batchSize, batchReduce, stream);
             } else {
                 THOR_UNREACHABLE();
             }
 
-        } else if (predictions.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-            if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+        } else if (predictions.getDescriptor().getDataType() == DataType::FP32) {
+            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
                 launchComputeBinaryAccuracy(metric,
                                             (float *)predictions.getMemPtr(),
                                             (uint8_t *)labels.getMemPtr(),
@@ -129,7 +129,7 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
                 launchComputeBinaryAccuracy(metric,
                                             (float *)predictions.getMemPtr(),
                                             (uint16_t *)labels.getMemPtr(),
@@ -138,7 +138,7 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
                 launchComputeBinaryAccuracy(metric,
                                             (float *)predictions.getMemPtr(),
                                             (uint32_t *)labels.getMemPtr(),
@@ -147,7 +147,7 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT8) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
                 launchComputeBinaryAccuracy(metric,
                                             (float *)predictions.getMemPtr(),
                                             (int8_t *)labels.getMemPtr(),
@@ -156,7 +156,7 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
                 launchComputeBinaryAccuracy(metric,
                                             (float *)predictions.getMemPtr(),
                                             (int16_t *)labels.getMemPtr(),
@@ -165,7 +165,7 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
                 launchComputeBinaryAccuracy(metric,
                                             (float *)predictions.getMemPtr(),
                                             (int32_t *)labels.getMemPtr(),
@@ -174,11 +174,11 @@ class BinaryAccuracy : public Metric {
                                             batchReduce,
                                             stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::FP16) {
                 launchComputeBinaryAccuracy(
                     metric, (float *)predictions.getMemPtr(), (half *)labels.getMemPtr(), workspace, batchSize, batchReduce, stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::FP32) {
                 launchComputeBinaryAccuracy(metric,
                                             (float *)predictions.getMemPtr(),
                                             (float *)labels.getMemPtr(),

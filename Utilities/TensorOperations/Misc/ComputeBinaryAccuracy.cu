@@ -179,8 +179,8 @@ shared_ptr<BatchReduce> createBinaryAccuracyBatchReduce(uint32_t batchSize, Stre
                                     1,
                                     true,
                                     false,
-                                    ThorImplementation::TensorDescriptor::DataType::FP16,
-                                    ThorImplementation::TensorDescriptor::DataType::FP32,
+                                    ThorImplementation::DataType::FP16,
+                                    ThorImplementation::DataType::FP32,
                                     stream);
 }
 
@@ -194,8 +194,8 @@ void launchComputeBinaryAccuracy(ThorImplementation::Tensor accuracy_d,
                                  Stream stream) {
     THOR_THROW_IF_FALSE(batchSize > 0);
 
-    THOR_THROW_IF_FALSE(workspace_d.getDataType() == ThorImplementation::TensorDescriptor::DataType::FP16);
-    THOR_THROW_IF_FALSE(accuracy_d.getDataType() == ThorImplementation::TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(workspace_d.getDataType() == ThorImplementation::DataType::FP16);
+    THOR_THROW_IF_FALSE(accuracy_d.getDataType() == ThorImplementation::DataType::FP32);
     float *accuracy_m = (float *)accuracy_d.getMemPtr();
     uint8_t *workspace_m = (uint8_t *)workspace_d.getMemPtr();
 

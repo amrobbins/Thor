@@ -20,8 +20,8 @@ class BatchReduce {
                 uint32_t classDimSize,
                 bool reduceBatch,
                 bool reduceClass,
-                TensorDescriptor::DataType sourceDataType,
-                TensorDescriptor::DataType destDataType,
+                DataType sourceDataType,
+                DataType destDataType,
                 Stream stream,
                 bool doBatchSizeDivide = true);
 
@@ -40,8 +40,8 @@ class BatchReduce {
     uint64_t computeWorkspaceSizeInBytes(uint32_t batchletSize,
                                          uint32_t batchSize,
                                          uint32_t classDimSize,
-                                         TensorDescriptor::DataType sourceDataType,
-                                         TensorDescriptor::DataType destDataType);
+                                         DataType sourceDataType,
+                                         DataType destDataType);
 
     Stream stream;
     cudnnReduceTensorDescriptor_t reduceTensorDescriptor;

@@ -11,28 +11,28 @@
 namespace ThorImplementation {
 namespace {
 
-bool isSupportedIndexType(TensorDescriptor::DataType dtype) {
+bool isSupportedIndexType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::UINT32:
-        case TensorDescriptor::DataType::UINT64:
+        case DataType::UINT32:
+        case DataType::UINT64:
             return true;
         default:
             return false;
     }
 }
 
-bool isSupportedValueType(TensorDescriptor::DataType dtype) {
+bool isSupportedValueType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
     }
 }
 
-std::string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
+std::string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 bool hasFixedSparseOptimizerFusionReducer(uint64_t embeddingDim) {
     return embeddingDim == 16ULL || embeddingDim == 32ULL || embeddingDim == 64ULL || embeddingDim == 128ULL || embeddingDim == 256ULL;
@@ -44,7 +44,7 @@ Embedding::Embedding(TensorPlacement placement,
                      std::vector<std::shared_ptr<PhysicalParameter>> parameters,
                      uint64_t vocabularySize,
                      uint64_t embeddingDim,
-                     TensorDescriptor::DataType weightsDataType,
+                     DataType weightsDataType,
                      std::optional<uint64_t> paddingIndex,
                      bool sparseGradients,
                      bool inferenceOnly,

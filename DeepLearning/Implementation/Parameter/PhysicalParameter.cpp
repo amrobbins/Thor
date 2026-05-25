@@ -13,7 +13,7 @@ PhysicalParameter::PhysicalParameter(string name, bool trainable) : name(name), 
 PhysicalParameter::PhysicalParameter(string name,
                                      bool trainable,
                                      const std::vector<uint64_t>& shape,
-                                     const TensorDescriptor::DataType dtype)
+                                     const DataType dtype)
     : name(std::move(name)), trainable(trainable), trainingEnabled(trainable), shape(shape), dtype(dtype) {}
 
 void PhysicalParameter::compileStorage(const StorageContext& context) {
@@ -120,7 +120,7 @@ void PhysicalParameter::createStorage(const StorageContext& context) {
 
 Tensor PhysicalParameter::allocateStorage(const TensorPlacement placement,
                                           const std::vector<uint64_t>& shape,
-                                          const TensorDescriptor::DataType dtype) {
+                                          const DataType dtype) {
     TensorDescriptor storageDescriptor(dtype, shape);
     return Tensor(placement, storageDescriptor);
 }

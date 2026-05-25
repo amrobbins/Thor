@@ -12,7 +12,7 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 using LossShape = Loss::LossShape;
 using LabelType = Loss::LabelType;
 

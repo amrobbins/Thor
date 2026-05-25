@@ -166,7 +166,7 @@ static void readEntireFileIntoDirect(void* dst, uint64_t bytes, const std::strin
 TEST(UringDirect, AlignmentRequired) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
     uint64_t bufferSize = (uint64_t(1) << 29) + 4096;  // 2^29 + 4096
-    TensorDescriptor bufferDescriptor(TensorDescriptor::DataType::UINT8, {bufferSize});
+    TensorDescriptor bufferDescriptor(DataType::UINT8, {bufferSize});
 
     Tensor buffers[2];
     buffers[0] = Tensor(cpuPlacement, bufferDescriptor, 512);
@@ -184,7 +184,7 @@ TEST(UringDirect, PrefetchWriteLoop) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
     const uint64_t sixteenMegs = (uint64_t(1) << 24);
     uint64_t bufferSize = sixteenMegs;
-    TensorDescriptor bufferDescriptor(TensorDescriptor::DataType::UINT8, {bufferSize});
+    TensorDescriptor bufferDescriptor(DataType::UINT8, {bufferSize});
 
     Tensor buffers[4];
     buffers[0] = Tensor(cpuPlacement, bufferDescriptor, 4096);
@@ -223,7 +223,7 @@ TEST(UringDirect, PrefetchWriteLoop) {
 
     uringDirect.finishDumpedFile(false);
 
-    Tensor verifyBuffer(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {4 * sixteenMegs}));
+    Tensor verifyBuffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {4 * sixteenMegs}));
     readEntireFileInto(verifyBuffer.getMemPtr(), 4 * sixteenMegs, filename);
     // readEntireFileIntoDirect(verifyBuffer.getMemPtr(), 4 * fiveHundredKB, filename);
 
@@ -246,7 +246,7 @@ TEST(UringDirect, PrefetchReadLoop) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
     const uint64_t sixteenMegs = (uint64_t(1) << 24);
     const uint64_t bufferSize = sixteenMegs;
-    TensorDescriptor bufferDescriptor(TensorDescriptor::DataType::UINT8, {bufferSize});
+    TensorDescriptor bufferDescriptor(DataType::UINT8, {bufferSize});
 
     // 4 registered buffers
     Tensor buffers[4];
@@ -324,7 +324,7 @@ TEST(UringDirect, PrefetchReadLoop) {
     //
     // We can reuse your checkTestPattern by copying into one contiguous buffer,
     // or add a small checker that checks per-region. Here's the simplest: contiguous verify buffer.
-    Tensor verifyBuffer(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {4 * sixteenMegs}), 4096);
+    Tensor verifyBuffer(cpuPlacement, TensorDescriptor(DataType::UINT8, {4 * sixteenMegs}), 4096);
 
     // Concatenate readBuffers into verifyBuffer (memcpy is fine in a test)
     uint8_t* out = verifyBuffer.getMemPtr<uint8_t>();
@@ -440,7 +440,7 @@ TEST(UringDirectPerf, SequentialWriteRead) {
 
     // Allocate buffers as CPU tensors aligned to 4k (for O_DIRECT).
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
-    TensorDescriptor bufDesc(TensorDescriptor::DataType::UINT8, {chunkBytes});
+    TensorDescriptor bufDesc(DataType::UINT8, {chunkBytes});
 
     std::vector<Tensor> bufs;
     bufs.reserve(numBufs);
@@ -631,7 +631,7 @@ TEST(UringDirect, FixedBuffer_SubOffsetsWriteDifferentBlocks) {
     constexpr uint32_t kBlocks = 2;
     constexpr uint32_t kBytes = kBlocks * kAlign;
 
-    TensorDescriptor desc(TensorDescriptor::DataType::UINT8, {kBytes});
+    TensorDescriptor desc(DataType::UINT8, {kBytes});
     Tensor buf(cpuPlacement, desc, kAlign);
     uint8_t* p = buf.getMemPtr<uint8_t>();
     ASSERT_NE(p, nullptr);
@@ -674,7 +674,7 @@ TEST(UringDirect, FixedBuffer_SubOffsetsWriteDifferentBlocks) {
     ASSERT_EQ(fileSizeBytes(filename), static_cast<uint64_t>(kBytes));
 
     // Read back with simple iostream path (not O_DIRECT)
-    Tensor verify(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {kBytes}));
+    Tensor verify(cpuPlacement, TensorDescriptor(DataType::UINT8, {kBytes}));
     readEntireFileInto(verify.getMemPtr(), kBytes, filename);
 
     const uint8_t* v = verify.getMemPtr<uint8_t>();

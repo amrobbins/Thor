@@ -42,7 +42,7 @@ static Tensor maxPoolingForward(Tensor featureIn,
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     Tensor featureOut(cpuPlacement,
-                      TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, outputHeight, outputWidth}));
+                      TensorDescriptor(DataType::FP16, {batchSize, numFeatures, outputHeight, outputWidth}));
 
     uint32_t paddedInputHeight = inputHeight + 2 * verticalPadding;
     uint32_t paddedInputWidth = inputWidth + 2 * horizontalPadding;
@@ -95,7 +95,7 @@ static Tensor maxPoolingBackward(Tensor featureIn,
                                  uint32_t verticalPadding,
                                  uint32_t horizontalPadding) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    Tensor errorOut(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
+    Tensor errorOut(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
     half *errorOutMem = (half *)errorOut.getMemPtr();
     for (uint32_t i = 0; i < errorOut.getDescriptor().getTotalNumElements(); ++i)
         errorOutMem[i] = 0.0f;
@@ -169,7 +169,7 @@ static Tensor averagePoolingForward(Tensor featureIn,
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     Tensor featureOut(cpuPlacement,
-                      TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, outputHeight, outputWidth}));
+                      TensorDescriptor(DataType::FP16, {batchSize, numFeatures, outputHeight, outputWidth}));
 
     uint32_t paddedInputHeight = inputHeight + 2 * verticalPadding;
     uint32_t paddedInputWidth = inputWidth + 2 * horizontalPadding;
@@ -223,7 +223,7 @@ static Tensor averagePoolingBackward(Tensor errorIn,
                                      uint32_t verticalPadding,
                                      uint32_t horizontalPadding) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    Tensor errorOut(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
+    Tensor errorOut(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
     half *errorOutMem = (half *)errorOut.getMemPtr();
     for (uint32_t i = 0; i < errorOut.getDescriptor().getTotalNumElements(); ++i)
         errorOutMem[i] = 0.0f;
@@ -311,7 +311,7 @@ TEST(Pooling, MaxPoolingWorks) {
         bool inferenceOnly = (rand() % 4) == 0;
 
         Tensor featureIn =
-            Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
+            Tensor(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
         Tensor featureOut;
         Tensor featureOutGpu_h;
 
@@ -324,7 +324,7 @@ TEST(Pooling, MaxPoolingWorks) {
         vector<shared_ptr<Layer>> layers;
 
         layers.push_back(
-            make_shared<NetworkInput>(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
+            make_shared<NetworkInput>(gpuPlacement, DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(make_shared<NoOpLayer>());
         shared_ptr<Pooling> poolingLayer = make_shared<Pooling>(
             Pooling::Type::MAX, windowHeight, windowWidth, verticalStride, horizontalStride, verticalPadding, horizontalPadding);
@@ -459,7 +459,7 @@ TEST(Pooling, AveragePoolingWorks) {
         bool inferenceOnly = (rand() % 4) == 0;
 
         Tensor featureIn =
-            Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
+            Tensor(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
         Tensor featureOut;
         Tensor featureOutGpu_h;
 
@@ -472,7 +472,7 @@ TEST(Pooling, AveragePoolingWorks) {
         vector<shared_ptr<Layer>> layers;
 
         layers.push_back(
-            make_shared<NetworkInput>(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
+            make_shared<NetworkInput>(gpuPlacement, DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(make_shared<NoOpLayer>());
         shared_ptr<Pooling> poolingLayer = make_shared<Pooling>(
             Pooling::Type::AVERAGE, windowHeight, windowWidth, verticalStride, horizontalStride, verticalPadding, horizontalPadding);

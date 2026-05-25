@@ -78,14 +78,14 @@
 //     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 //
 //     Tensor featureIn =
-//         Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {BATCH_SIZE, NUM_CLASSES * FEATURES_PER_CLASS}));
-//     Tensor labelsIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {BATCH_SIZE, NUM_CLASSES}));
+//         Tensor(cpuPlacement, TensorDescriptor(DataType::FP16, {BATCH_SIZE, NUM_CLASSES * FEATURES_PER_CLASS}));
+//     Tensor labelsIn = Tensor(cpuPlacement, TensorDescriptor(DataType::FP32, {BATCH_SIZE, NUM_CLASSES}));
 //
 //     vector<Layer *> layers;
 //     NetworkInput *featureInput =
-//         new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions());
+//         new NetworkInput(gpuPlacement, DataType::FP16, featureIn.getDescriptor().getDimensions());
 //     layers.push_back(featureInput);
-//     NetworkInput *labelsInput = new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP32,
+//     NetworkInput *labelsInput = new NetworkInput(gpuPlacement, DataType::FP32,
 //     labelsIn.getDescriptor().getDimensions()); layers.push_back(labelsInput); FullyConnected *fullyConnectedLayer = new
 //     FullyConnected(NUM_CLASSES * FEATURES_PER_CLASS, true); layers.push_back(fullyConnectedLayer); Relu *relu = new Relu();
 //     layers.push_back(relu);

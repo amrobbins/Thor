@@ -31,7 +31,7 @@ using namespace nb::literals;
 using namespace std;
 
 using namespace Thor;
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 using PhysicalTensor = ThorImplementation::Tensor;
 using TensorMap = std::unordered_map<std::string, Tensor>;
 using PhysicalTensorMap = std::unordered_map<std::string, PhysicalTensor>;

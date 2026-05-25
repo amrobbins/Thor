@@ -13,7 +13,7 @@ using namespace std;
 
 MeanAbsolutePercentageError::~MeanAbsolutePercentageError() {}
 
-MeanAbsolutePercentageError::MeanAbsolutePercentageError(TensorDescriptor::DataType lossDataType, float epsilon, float maxMagnitude)
+MeanAbsolutePercentageError::MeanAbsolutePercentageError(DataType lossDataType, float epsilon, float maxMagnitude)
     : Loss(lossDataType) {
     this->epsilon = epsilon;
     this->maxMagnitude = maxMagnitude;
@@ -31,8 +31,8 @@ void MeanAbsolutePercentageError::compileImpl() {
         THOR_THROW_IF_FALSE(errorOutput.value().isInitialized());
         THOR_THROW_IF_FALSE(errorOutput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         THOR_THROW_IF_FALSE(errorOutput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
-        THOR_THROW_IF_FALSE(errorOutput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 ||
-               errorOutput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+        THOR_THROW_IF_FALSE(errorOutput.value().getDescriptor().getDataType() == DataType::FP16 ||
+               errorOutput.value().getDescriptor().getDataType() == DataType::FP32);
 
         THOR_THROW_IF_FALSE(labelsInput.has_value());
         THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
@@ -61,14 +61,14 @@ void MeanAbsolutePercentageError::infer(std::optional<Tensor> predictions, std::
     ScopedGpu scopedGpu(predictions.value().getPlacement().getDeviceNum());
 
     THOR_THROW_IF_FALSE(compiled);
-    THOR_THROW_IF_FALSE(predictions.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 ||
-           predictions.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(predictions.value().getDescriptor().getDataType() == DataType::FP16 ||
+           predictions.value().getDescriptor().getDataType() == DataType::FP32);
 
     stream.waitEvent(labelsStream.putEvent());
 
-    if (predictions.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+    if (predictions.value().getDescriptor().getDataType() == DataType::FP16) {
         launchMeanAbsolutePercentageErrorWithFP16Predictions();
-    } else if (predictions.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+    } else if (predictions.value().getDescriptor().getDataType() == DataType::FP32) {
         launchMeanAbsolutePercentageErrorWithFP32Predictions();
     } else {
         THOR_UNREACHABLE();
@@ -81,8 +81,8 @@ void MeanAbsolutePercentageError::backProp(std::optional<Tensor> labels,
                                            Stream stream) {
     // Mean absolute loss gradient is pre-computed during infer() for efficiency
     THOR_THROW_IF_FALSE(lossGradient.has_value());
-    THOR_THROW_IF_FALSE(lossGradient.value().getDataType() == TensorDescriptor::DataType::FP32 ||
-           lossGradient.value().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(lossGradient.value().getDataType() == DataType::FP32 ||
+           lossGradient.value().getDataType() == DataType::FP16);
 
     if (lossScalingFactor != 1) {
         cudnnStatus_t cudnnStatus;
@@ -94,32 +94,32 @@ void MeanAbsolutePercentageError::backProp(std::optional<Tensor> labels,
 }
 
 void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predictions() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP16);
 
-    if (featureOutput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
+    if (featureOutput.value().getDescriptor().getDataType() == DataType::FP16)
         launchMeanAbsolutePercentageErrorWithFP16PredictionsAndFP16Loss();
-    else if (featureOutput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
+    else if (featureOutput.value().getDescriptor().getDataType() == DataType::FP32)
         launchMeanAbsolutePercentageErrorWithFP16PredictionsAndFP32Loss();
     else
         THOR_UNREACHABLE();
 }
 
 void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predictions() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP32);
 
-    if (featureOutput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
+    if (featureOutput.value().getDescriptor().getDataType() == DataType::FP16)
         launchMeanAbsolutePercentageErrorWithFP32PredictionsAndFP16Loss();
-    else if (featureOutput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
+    else if (featureOutput.value().getDescriptor().getDataType() == DataType::FP32)
         launchMeanAbsolutePercentageErrorWithFP32PredictionsAndFP32Loss();
     else
         THOR_UNREACHABLE();
 }
 
 void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16PredictionsAndFP16Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP16);
+    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP16);
 
-    if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
         launchMeanAbsolutePercentageError<half, half, half>(labelsInput.value().getMemPtr(),
                                                             featureInput.value().getMemPtr(),
                                                             featureOutput.value().getMemPtr(),
@@ -130,7 +130,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                             stream,
                                                             epsilon,
                                                             maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
         launchMeanAbsolutePercentageError<float, half, half>(labelsInput.value().getMemPtr(),
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
@@ -141,7 +141,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                              stream,
                                                              epsilon,
                                                              maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
         launchMeanAbsolutePercentageError<uint8_t, half, half>(labelsInput.value().getMemPtr(),
                                                                featureInput.value().getMemPtr(),
                                                                featureOutput.value().getMemPtr(),
@@ -152,7 +152,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                stream,
                                                                epsilon,
                                                                maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
         launchMeanAbsolutePercentageError<uint16_t, half, half>(labelsInput.value().getMemPtr(),
                                                                 featureInput.value().getMemPtr(),
                                                                 featureOutput.value().getMemPtr(),
@@ -163,7 +163,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                 stream,
                                                                 epsilon,
                                                                 maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
         launchMeanAbsolutePercentageError<uint32_t, half, half>(labelsInput.value().getMemPtr(),
                                                                 featureInput.value().getMemPtr(),
                                                                 featureOutput.value().getMemPtr(),
@@ -174,7 +174,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                 stream,
                                                                 epsilon,
                                                                 maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::BOOLEAN) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
         launchMeanAbsolutePercentageError<bool, half, half>(labelsInput.value().getMemPtr(),
                                                             featureInput.value().getMemPtr(),
                                                             featureOutput.value().getMemPtr(),
@@ -191,10 +191,10 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
 }
 
 void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16PredictionsAndFP32Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP16);
+    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP32);
 
-    if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
         launchMeanAbsolutePercentageError<half, half, float>(labelsInput.value().getMemPtr(),
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
@@ -205,7 +205,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                              stream,
                                                              epsilon,
                                                              maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
         launchMeanAbsolutePercentageError<float, half, float>(labelsInput.value().getMemPtr(),
                                                               featureInput.value().getMemPtr(),
                                                               featureOutput.value().getMemPtr(),
@@ -216,7 +216,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                               stream,
                                                               epsilon,
                                                               maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
         launchMeanAbsolutePercentageError<uint8_t, half, float>(labelsInput.value().getMemPtr(),
                                                                 featureInput.value().getMemPtr(),
                                                                 featureOutput.value().getMemPtr(),
@@ -227,7 +227,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                 stream,
                                                                 epsilon,
                                                                 maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
         launchMeanAbsolutePercentageError<uint16_t, half, float>(labelsInput.value().getMemPtr(),
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
@@ -238,7 +238,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                  stream,
                                                                  epsilon,
                                                                  maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
         launchMeanAbsolutePercentageError<uint32_t, half, float>(labelsInput.value().getMemPtr(),
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
@@ -249,7 +249,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
                                                                  stream,
                                                                  epsilon,
                                                                  maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::BOOLEAN) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
         launchMeanAbsolutePercentageError<bool, half, float>(labelsInput.value().getMemPtr(),
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
@@ -266,10 +266,10 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP16Predi
 }
 
 void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32PredictionsAndFP16Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP16);
 
-    if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
         launchMeanAbsolutePercentageError<half, float, half>(labelsInput.value().getMemPtr(),
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
@@ -280,7 +280,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                              stream,
                                                              epsilon,
                                                              maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
         launchMeanAbsolutePercentageError<float, float, half>(labelsInput.value().getMemPtr(),
                                                               featureInput.value().getMemPtr(),
                                                               featureOutput.value().getMemPtr(),
@@ -291,7 +291,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                               stream,
                                                               epsilon,
                                                               maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
         launchMeanAbsolutePercentageError<uint8_t, float, half>(labelsInput.value().getMemPtr(),
                                                                 featureInput.value().getMemPtr(),
                                                                 featureOutput.value().getMemPtr(),
@@ -302,7 +302,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                 stream,
                                                                 epsilon,
                                                                 maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
         launchMeanAbsolutePercentageError<uint16_t, float, half>(labelsInput.value().getMemPtr(),
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
@@ -313,7 +313,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                  stream,
                                                                  epsilon,
                                                                  maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
         launchMeanAbsolutePercentageError<uint32_t, float, half>(labelsInput.value().getMemPtr(),
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
@@ -324,7 +324,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                  stream,
                                                                  epsilon,
                                                                  maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::BOOLEAN) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
         launchMeanAbsolutePercentageError<bool, float, half>(labelsInput.value().getMemPtr(),
                                                              featureInput.value().getMemPtr(),
                                                              featureOutput.value().getMemPtr(),
@@ -341,10 +341,10 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
 }
 
 void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32PredictionsAndFP32Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP32);
 
-    if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
         launchMeanAbsolutePercentageError<half, float, float>(labelsInput.value().getMemPtr(),
                                                               featureInput.value().getMemPtr(),
                                                               featureOutput.value().getMemPtr(),
@@ -355,7 +355,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                               stream,
                                                               epsilon,
                                                               maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
         launchMeanAbsolutePercentageError<float, float, float>(labelsInput.value().getMemPtr(),
                                                                featureInput.value().getMemPtr(),
                                                                featureOutput.value().getMemPtr(),
@@ -366,7 +366,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                stream,
                                                                epsilon,
                                                                maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
         launchMeanAbsolutePercentageError<uint8_t, float, float>(labelsInput.value().getMemPtr(),
                                                                  featureInput.value().getMemPtr(),
                                                                  featureOutput.value().getMemPtr(),
@@ -377,7 +377,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                  stream,
                                                                  epsilon,
                                                                  maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
         launchMeanAbsolutePercentageError<uint16_t, float, float>(labelsInput.value().getMemPtr(),
                                                                   featureInput.value().getMemPtr(),
                                                                   featureOutput.value().getMemPtr(),
@@ -388,7 +388,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                   stream,
                                                                   epsilon,
                                                                   maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
         launchMeanAbsolutePercentageError<uint32_t, float, float>(labelsInput.value().getMemPtr(),
                                                                   featureInput.value().getMemPtr(),
                                                                   featureOutput.value().getMemPtr(),
@@ -399,7 +399,7 @@ void MeanAbsolutePercentageError::launchMeanAbsolutePercentageErrorWithFP32Predi
                                                                   stream,
                                                                   epsilon,
                                                                   maxMagnitude);
-    } else if (labelsInput.value().getDescriptor().getDataType() == TensorDescriptor::DataType::BOOLEAN) {
+    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
         launchMeanAbsolutePercentageError<bool, float, float>(labelsInput.value().getMemPtr(),
                                                               featureInput.value().getMemPtr(),
                                                               featureOutput.value().getMemPtr(),

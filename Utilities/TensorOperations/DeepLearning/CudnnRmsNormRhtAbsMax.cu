@@ -28,7 +28,7 @@ namespace {
     throw invalid_argument("Invalid cuDNN RMSNorm+RHT+Amax descriptor: " + message);
 }
 
-string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
+string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 uint64_t checkedMul(uint64_t a, uint64_t b, string_view what) {
     if (a != 0 && b > numeric_limits<uint64_t>::max() / a) {
@@ -54,7 +54,7 @@ void requireSameGpu(const Tensor& tensor, int gpuNum, string_view name) {
     }
 }
 
-void requireDtype(const Tensor& tensor, TensorDescriptor::DataType expected, string_view name) {
+void requireDtype(const Tensor& tensor, DataType expected, string_view name) {
     if (tensor.getDataType() != expected) {
         throw invalid_argument("cuDNN RMSNorm+RHT+Amax tensor '" + string(name) + "' dtype mismatch. Expected " + dtypeName(expected) +
                                ", got " + dtypeName(tensor.getDataType()) + ".");
@@ -70,7 +70,7 @@ void requireNumElements(const Tensor& tensor, uint64_t expected, string_view nam
 }
 
 void requireTensor(
-    const Tensor& tensor, TensorDescriptor::DataType expectedDtype, uint64_t expectedElements, int gpuNum, string_view name) {
+    const Tensor& tensor, DataType expectedDtype, uint64_t expectedElements, int gpuNum, string_view name) {
     requireSameGpu(tensor, gpuNum, name);
     requireDtype(tensor, expectedDtype, name);
     requireNumElements(tensor, expectedElements, name);
@@ -274,12 +274,12 @@ void CudnnRmsNormRhtAbsMaxDescriptor::validate() const {
         throwInvalidRhtAmax("normalizedFeatureCount must be non-zero");
     }
     (void)checkedMul(outerSize, normalizedFeatureCount, "IO");
-    if (inputDataType != TensorDescriptor::DataType::BF16 || outputDataType != TensorDescriptor::DataType::BF16 ||
-        parameterDataType != TensorDescriptor::DataType::BF16) {
+    if (inputDataType != DataType::BF16 || outputDataType != DataType::BF16 ||
+        parameterDataType != DataType::BF16) {
         throwInvalidRhtAmax("x, scale, and output tensors must all be bf16; got input " + dtypeName(inputDataType) + ", output " +
                             dtypeName(outputDataType) + ", scale " + dtypeName(parameterDataType));
     }
-    if (absMaxDataType != TensorDescriptor::DataType::FP32) {
+    if (absMaxDataType != DataType::FP32) {
         throwInvalidRhtAmax("amax tensor must be fp32; got " + dtypeName(absMaxDataType));
     }
     if (!(epsilon > 0.0f)) {

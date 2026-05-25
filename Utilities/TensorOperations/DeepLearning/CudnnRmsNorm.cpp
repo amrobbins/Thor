@@ -32,24 +32,24 @@ constexpr int64_t UID_DSCALE = 36;
 
 [[noreturn]] void throwInvalidRmsNorm(const string& message) { throw invalid_argument("Invalid cuDNN RMSNorm descriptor: " + message); }
 
-bool isSupportedRmsNormIoDtype(TensorDescriptor::DataType dtype) {
+bool isSupportedRmsNormIoDtype(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
     }
 }
 
-fe::DataType_t toFrontendDataType(TensorDescriptor::DataType dtype) {
+fe::DataType_t toFrontendDataType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             return fe::DataType_t::HALF;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             return fe::DataType_t::BFLOAT16;
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             return fe::DataType_t::FLOAT;
         default:
             throw invalid_argument("Unsupported cuDNN Frontend RMSNorm dtype: " + TensorDescriptor::getElementTypeName(dtype));
@@ -66,7 +66,7 @@ int64_t checkedI64(uint64_t value, string_view what) {
     return static_cast<int64_t>(value);
 }
 
-string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
+string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 [[noreturn]] void throwInvalidFusedActivation(string_view value) {
     throw invalid_argument("Invalid cuDNN RMSNorm fused activation: " + string(value) +
@@ -101,7 +101,7 @@ void requireSameGpu(const Tensor& tensor, int gpuNum, string_view name) {
     }
 }
 
-void requireDtype(const Tensor& tensor, TensorDescriptor::DataType expected, string_view name) {
+void requireDtype(const Tensor& tensor, DataType expected, string_view name) {
     if (tensor.getDataType() != expected) {
         throw invalid_argument(string("cuDNN RMSNorm tensor '") + string(name) + "' dtype mismatch. Expected " + dtypeName(expected) +
                                ", got " + dtypeName(tensor.getDataType()) + ".");
@@ -118,7 +118,7 @@ void requireNumElements(const Tensor& tensor, uint64_t expected, string_view nam
 
 void requireIoTensor(const Tensor& tensor,
                      const CudnnRmsNormDescriptor& descriptor,
-                     TensorDescriptor::DataType expectedDtype,
+                     DataType expectedDtype,
                      int gpuNum,
                      string_view name) {
     requireSameGpu(tensor, gpuNum, name);
@@ -134,7 +134,7 @@ void requireParameterTensor(const Tensor& tensor, const CudnnRmsNormDescriptor& 
 
 void requireStatsTensor(const Tensor& tensor, const CudnnRmsNormDescriptor& descriptor, int gpuNum, string_view name) {
     requireSameGpu(tensor, gpuNum, name);
-    requireDtype(tensor, TensorDescriptor::DataType::FP32, name);
+    requireDtype(tensor, DataType::FP32, name);
     requireNumElements(tensor, descriptor.outerSize, name);
 }
 
@@ -212,7 +212,7 @@ class RmsNormGraphCache {
                                                     int64_t uid,
                                                     const vector<int64_t>& dim,
                                                     const vector<int64_t>& stride,
-                                                    TensorDescriptor::DataType dtype) {
+                                                    DataType dtype) {
         return graph->tensor(fe::graph::Tensor_attributes()
                                  .set_name(string(name))
                                  .set_uid(uid)
@@ -249,7 +249,7 @@ class RmsNormGraphCache {
         built.workspaceBytes = workspaceBytes;
         if (workspaceBytes > 0) {
             built.workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                                     TensorDescriptor(TensorDescriptor::DataType::UINT8, {static_cast<uint64_t>(workspaceBytes)}),
+                                     TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(workspaceBytes)}),
                                      256);
         }
     }
@@ -300,7 +300,7 @@ class RmsNormGraphCache {
                 .set_uid(UID_INV_VARIANCE)
                 .set_dim(statsDims(descriptor))
                 .set_stride(statsStrides(descriptor))
-                .set_data_type(toFrontendDataType(TensorDescriptor::DataType::FP32));
+                .set_data_type(toFrontendDataType(DataType::FP32));
         }
 
         finalize(built, gpuNum);
@@ -327,7 +327,7 @@ class RmsNormGraphCache {
                                   UID_INV_VARIANCE,
                                   statsDims(descriptor),
                                   statsStrides(descriptor),
-                                  TensorDescriptor::DataType::FP32);
+                                  DataType::FP32);
 
         auto attrs = fe::graph::Rmsnorm_backward_attributes().set_name(descriptor.debugName + "_backward").has_dbias(false);
 
@@ -388,15 +388,15 @@ void CudnnRmsNormDescriptor::validateForward() const {
             throwInvalidRmsNorm(
                 "fused SWISH is inference-only because cuDNN Frontend only detects the RMSNorm + SiLU fusion when RMSNorm is in inference phase");
         }
-        if (inputDataType != TensorDescriptor::DataType::BF16 || outputDataType != TensorDescriptor::DataType::BF16 ||
-            parameterDataType != TensorDescriptor::DataType::BF16) {
+        if (inputDataType != DataType::BF16 || outputDataType != DataType::BF16 ||
+            parameterDataType != DataType::BF16) {
             throwInvalidRmsNorm("fused SWISH currently requires bf16 input, bf16 output, and bf16 scale parameters; got input " +
                                 dtypeName(inputDataType) + ", output " + dtypeName(outputDataType) + ", scale " + dtypeName(parameterDataType));
         }
-    } else if (parameterDataType != TensorDescriptor::DataType::FP32) {
+    } else if (parameterDataType != DataType::FP32) {
         throwInvalidRmsNorm("scale parameters are currently required to be fp32; got " + dtypeName(parameterDataType));
     }
-    if (computeDataType != TensorDescriptor::DataType::FP32) {
+    if (computeDataType != DataType::FP32) {
         throwInvalidRmsNorm("computeDataType is currently required to be fp32; got " + dtypeName(computeDataType));
     }
     if (!(epsilon > 0.0f)) {

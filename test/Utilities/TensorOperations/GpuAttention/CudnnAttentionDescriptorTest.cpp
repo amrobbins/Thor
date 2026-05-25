@@ -17,28 +17,28 @@ namespace {
 
 CudnnAttentionDescriptor makeDescriptor() {
     CudnnAttentionDescriptor descriptor;
-    descriptor.q = AttentionTensorSpec::bhsd(3, 4, 64, 64, TensorDescriptor::DataType::FP16);
-    descriptor.k = AttentionTensorSpec::bhsd(3, 4, 80, 64, TensorDescriptor::DataType::FP16);
-    descriptor.v = AttentionTensorSpec::bhsd(3, 4, 80, 64, TensorDescriptor::DataType::FP16);
-    descriptor.o = AttentionTensorSpec::bhsd(3, 4, 64, 64, TensorDescriptor::DataType::FP16);
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
-    descriptor.intermediateDataType = TensorDescriptor::DataType::FP32;
+    descriptor.q = AttentionTensorSpec::bhsd(3, 4, 64, 64, DataType::FP16);
+    descriptor.k = AttentionTensorSpec::bhsd(3, 4, 80, 64, DataType::FP16);
+    descriptor.v = AttentionTensorSpec::bhsd(3, 4, 80, 64, DataType::FP16);
+    descriptor.o = AttentionTensorSpec::bhsd(3, 4, 64, 64, DataType::FP16);
+    descriptor.computeDataType = DataType::FP32;
+    descriptor.intermediateDataType = DataType::FP32;
     return descriptor;
 }
 
 CudnnAttentionDescriptor makePackedDescriptor() {
     CudnnAttentionDescriptor descriptor = makeDescriptor();
-    descriptor.q = AttentionTensorSpec::bshd(3, 4, 64, 64, TensorDescriptor::DataType::FP16);
-    descriptor.k = AttentionTensorSpec::bshd(3, 4, 80, 64, TensorDescriptor::DataType::FP16);
-    descriptor.v = AttentionTensorSpec::bshd(3, 4, 80, 64, TensorDescriptor::DataType::FP16);
-    descriptor.o = AttentionTensorSpec::bshd(3, 4, 64, 64, TensorDescriptor::DataType::FP16);
+    descriptor.q = AttentionTensorSpec::bshd(3, 4, 64, 64, DataType::FP16);
+    descriptor.k = AttentionTensorSpec::bshd(3, 4, 80, 64, DataType::FP16);
+    descriptor.v = AttentionTensorSpec::bshd(3, 4, 80, 64, DataType::FP16);
+    descriptor.o = AttentionTensorSpec::bshd(3, 4, 64, 64, DataType::FP16);
     return descriptor;
 }
 
 CudnnAttentionDescriptor makePagedDescriptor() {
     CudnnAttentionDescriptor descriptor = makeDescriptor();
-    descriptor.k = AttentionTensorSpec::bhsd(6, 4, 64, 64, TensorDescriptor::DataType::FP16);
-    descriptor.v = AttentionTensorSpec::bhsd(6, 4, 64, 64, TensorDescriptor::DataType::FP16);
+    descriptor.k = AttentionTensorSpec::bhsd(6, 4, 64, 64, DataType::FP16);
+    descriptor.v = AttentionTensorSpec::bhsd(6, 4, 64, 64, DataType::FP16);
     descriptor.usePaddingMask = true;
     descriptor.usePagedKvCache = true;
     descriptor.pagedKv.maxSequenceLengthKv = 128;
@@ -65,7 +65,7 @@ int fp8AttentionProbeGpuNum() {
     return std::atoi(value);
 }
 
-std::string attentionDataTypeName(TensorDescriptor::DataType dataType) { return TensorDescriptor::getElementTypeName(dataType); }
+std::string attentionDataTypeName(DataType dataType) { return TensorDescriptor::getElementTypeName(dataType); }
 
 std::string attentionLayoutName(AttentionTensorLayout layout) {
     switch (layout) {
@@ -93,7 +93,7 @@ std::string attentionMaskName(AttentionMaskKind maskKind) {
     return "unknown";
 }
 
-AttentionTensorSpec scoreBiasSpec(std::vector<int64_t> dims, TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP32) {
+AttentionTensorSpec scoreBiasSpec(std::vector<int64_t> dims, DataType dataType = DataType::FP32) {
     AttentionTensorSpec spec;
     spec.dimensions = dims;
     spec.strides.resize(spec.dimensions.size(), 1);
@@ -107,7 +107,7 @@ AttentionTensorSpec scoreBiasSpec(std::vector<int64_t> dims, TensorDescriptor::D
 
 struct Fp8AttentionProbeCase {
     std::string name;
-    TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP8_E4M3;
+    DataType dataType = DataType::FP8_E4M3;
     AttentionTensorLayout layout = AttentionTensorLayout::BSHD;
     int64_t batch = 2;
     int64_t queryHeads = 4;
@@ -135,8 +135,8 @@ CudnnAttentionDescriptor makeFp8ProbeDescriptor(const Fp8AttentionProbeCase& pro
         probeCase.layout, probeCase.batch, probeCase.keyValueHeads, probeCase.keyValueLength, probeCase.vHeadDim, probeCase.dataType);
     descriptor.o = AttentionTensorSpec::fromLayout(
         probeCase.layout, probeCase.batch, probeCase.queryHeads, probeCase.queryLength, probeCase.vHeadDim, probeCase.dataType);
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
-    descriptor.intermediateDataType = TensorDescriptor::DataType::FP32;
+    descriptor.computeDataType = DataType::FP32;
+    descriptor.intermediateDataType = DataType::FP32;
     descriptor.maskKind = probeCase.maskKind;
     descriptor.generateStats = probeCase.generateStats || probeCase.runBackward;
     descriptor.useFp8 = true;
@@ -182,19 +182,19 @@ Tensor makeTensorForSpec(TensorPlacement placement, const AttentionTensorSpec& s
 }
 
 Tensor makeFp32Scalar(TensorPlacement placement, Stream stream, double value) {
-    return Tensor::values(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1, 1, 1, 1}), stream, value);
+    return Tensor::values(placement, TensorDescriptor(DataType::FP32, {1, 1, 1, 1}), stream, value);
 }
 
 Tensor makeFp32Zeros(TensorPlacement placement, const std::vector<uint64_t>& dims, Stream stream) {
-    return Tensor::zeros(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, dims), stream);
+    return Tensor::zeros(placement, TensorDescriptor(DataType::FP32, dims), stream);
 }
 
 Tensor makeInt32Values(TensorPlacement placement, const std::vector<uint64_t>& dims, Stream stream, double value) {
-    return Tensor::values(placement, TensorDescriptor(TensorDescriptor::DataType::INT32, dims), stream, value);
+    return Tensor::values(placement, TensorDescriptor(DataType::INT32, dims), stream, value);
 }
 
 Tensor makeInt64Scalar(TensorPlacement placement, Stream stream, double value) {
-    return Tensor::values(placement, TensorDescriptor(TensorDescriptor::DataType::INT64, {1, 1, 1, 1}), stream, value);
+    return Tensor::values(placement, TensorDescriptor(DataType::INT64, {1, 1, 1, 1}), stream, value);
 }
 
 std::string probeCaseLabel(const Fp8AttentionProbeCase& probeCase) {
@@ -415,7 +415,7 @@ TEST(CudnnAttentionFrontendFp8Probe, ExperimentalForwardSupportSurface) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, gpuNum);
 
     const auto make = [](std::string name,
-                         TensorDescriptor::DataType dataType,
+                         DataType dataType,
                          AttentionTensorLayout layout = AttentionTensorLayout::BSHD,
                          int64_t keyValueHeads = 4,
                          AttentionMaskKind maskKind = AttentionMaskKind::None) {
@@ -430,8 +430,8 @@ TEST(CudnnAttentionFrontendFp8Probe, ExperimentalForwardSupportSurface) {
 
     std::vector<Fp8AttentionProbeCase> cases;
     const auto add = [&cases](Fp8AttentionProbeCase c) { cases.push_back(c); };
-    const TensorDescriptor::DataType e4m3 = TensorDescriptor::DataType::FP8_E4M3;
-    const TensorDescriptor::DataType e5m2 = TensorDescriptor::DataType::FP8_E5M2;
+    const DataType e4m3 = DataType::FP8_E4M3;
+    const DataType e5m2 = DataType::FP8_E5M2;
 
     add(make("e4m3_bshd_mha_none", e4m3));
     add(make("e4m3_bshd_gqa_none", e4m3, AttentionTensorLayout::BSHD, 2));

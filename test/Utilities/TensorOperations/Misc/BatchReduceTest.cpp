@@ -27,11 +27,11 @@ TEST(BatchReduce, reduce) {
             scale = 2 + (rand() % 100);
         }
 
-        Tensor sourceT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dim0, dim1}));
-        Tensor brSourceT(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dim0, dim1}));
-        Tensor destT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dim1}));
-        Tensor brdestT(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dim1}));
-        Tensor brdestTCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dim1}));
+        Tensor sourceT(cpuPlacement, TensorDescriptor(DataType::FP32, {dim0, dim1}));
+        Tensor brSourceT(gpuPlacement, TensorDescriptor(DataType::FP32, {dim0, dim1}));
+        Tensor destT(cpuPlacement, TensorDescriptor(DataType::FP32, {dim1}));
+        Tensor brdestT(gpuPlacement, TensorDescriptor(DataType::FP32, {dim1}));
+        Tensor brdestTCpu(cpuPlacement, TensorDescriptor(DataType::FP32, {dim1}));
         float *source = (float *)sourceT.getMemPtr();
         float *dest = (float *)destT.getMemPtr();
 
@@ -53,8 +53,8 @@ TEST(BatchReduce, reduce) {
                                 dim1,
                                 true,
                                 false,
-                                ThorImplementation::TensorDescriptor::DataType::FP32,
-                                ThorImplementation::TensorDescriptor::DataType::FP32,
+                                ThorImplementation::DataType::FP32,
+                                ThorImplementation::DataType::FP32,
                                 stream);
         batchReduce.reduce(brSourceT, brdestT);
         brdestTCpu.copyFromAsync(brdestT, stream);
@@ -76,8 +76,8 @@ TEST(BatchReduce, getStream) {
                             50,
                             true,
                             false,
-                            ThorImplementation::TensorDescriptor::DataType::FP32,
-                            ThorImplementation::TensorDescriptor::DataType::FP16,
+                            ThorImplementation::DataType::FP32,
+                            ThorImplementation::DataType::FP16,
                             stream);
 
     assert(stream == batchReduce.getStream());

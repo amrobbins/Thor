@@ -17,7 +17,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
                                                                    ThorImplementation::TensorPlacement placement,
                                                                    std::shared_ptr<Thor::Activation> activation,
                                                                    std::optional<ThorImplementation::Expression> epilogue) {
-    using ImplDataType = ThorImplementation::TensorDescriptor::DataType;
+    using ImplDataType = ThorImplementation::DataType;
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
     using ThorImplementation::Expression;

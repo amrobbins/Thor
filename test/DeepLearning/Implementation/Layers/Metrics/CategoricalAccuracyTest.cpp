@@ -43,7 +43,7 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_indicatorPerClassLabe
 
         bool inferenceOnly = (rand() % 5) == 0;
 
-        TensorDescriptor elementwiseDescriptorFP32(TensorDescriptor::DataType::FP32, dimensions);
+        TensorDescriptor elementwiseDescriptorFP32(DataType::FP32, dimensions);
 
         Tensor labelsCpu(cpuPlacement, elementwiseDescriptorFP32);
         Tensor predictionsCpu(cpuPlacement, elementwiseDescriptorFP32);
@@ -155,8 +155,8 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_classIndexLabels) {
 
         bool inferenceOnly = (rand() % 5) == 0;
 
-        TensorDescriptor elementwiseDescriptorFP32(TensorDescriptor::DataType::FP32, dimensions);
-        TensorDescriptor classIndexDescriptorFP32(TensorDescriptor::DataType::UINT32, {batchSize, 1});
+        TensorDescriptor elementwiseDescriptorFP32(DataType::FP32, dimensions);
+        TensorDescriptor classIndexDescriptorFP32(DataType::UINT32, {batchSize, 1});
 
         Tensor labelsCpu(cpuPlacement, classIndexDescriptorFP32);
         Tensor predictionsCpu(cpuPlacement, elementwiseDescriptorFP32);

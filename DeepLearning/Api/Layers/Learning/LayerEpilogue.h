@@ -13,8 +13,8 @@ class LayerEpilogue {
    public:
     [[nodiscard]] static ThorImplementation::Expression input(
         const std::string& inputName,
-        std::optional<ThorImplementation::TensorDescriptor::DataType> computeDType = std::nullopt,
-        std::optional<ThorImplementation::TensorDescriptor::DataType> outputDType = std::nullopt) {
+        std::optional<ThorImplementation::DataType> computeDType = std::nullopt,
+        std::optional<ThorImplementation::DataType> outputDType = std::nullopt) {
         return ThorImplementation::Expression::input(inputName, computeDType, outputDType);
     }
 

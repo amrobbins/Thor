@@ -15,7 +15,7 @@ namespace ThorImplementation {
 struct TensorScalarBinding {
     Tensor buffer;
     uint64_t byteOffset = 0;
-    TensorDescriptor::DataType sourceDType = TensorDescriptor::DataType::FP32;
+    DataType sourceDType = DataType::FP32;
 };
 
 using RuntimeInputValue = std::variant<Tensor, float, TensorScalarBinding>;
@@ -78,8 +78,8 @@ struct CompiledEquation {
     int deviceNum = 0;
     std::vector<std::string> input_names;
     std::vector<NamedInput::Kind> input_kinds;
-    std::vector<TensorDescriptor::DataType> input_dtypes;
-    std::vector<TensorDescriptor::DataType> output_dtypes;
+    std::vector<DataType> input_dtypes;
+    std::vector<DataType> output_dtypes;
 
     uint64_t numInputs() { return input_names.size(); }
     uint64_t numInputs() const { return input_names.size(); }
@@ -105,18 +105,18 @@ struct CompiledReduction {
     const ExprOp op;
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
-    const TensorDescriptor::DataType input_dtype;
-    const TensorDescriptor::DataType compute_dtype;
-    const TensorDescriptor::DataType output_dtype;
+    const DataType input_dtype;
+    const DataType compute_dtype;
+    const DataType output_dtype;
 
     bool operator==(const CompiledReduction& other) const = default;
 
     CompiledReduction(ExprOp op,
                       std::vector<uint64_t> reduction_axes,
                       std::vector<uint64_t> squeeze_axes,
-                      TensorDescriptor::DataType input_dtype,
-                      TensorDescriptor::DataType output_dtype,
-                      std::optional<TensorDescriptor::DataType> compute_dtype)
+                      DataType input_dtype,
+                      DataType output_dtype,
+                      std::optional<DataType> compute_dtype)
         : op(op),
           reduction_axes(std::move(reduction_axes)),
           squeeze_axes(std::move(squeeze_axes)),
@@ -136,15 +136,15 @@ struct CompiledReduction {
 struct CompiledSoftmax {
     const cudnnSoftmaxAlgorithm_t algorithm;
     const cudnnSoftmaxMode_t mode;
-    const TensorDescriptor::DataType input_dtype;
-    const TensorDescriptor::DataType output_dtype;
+    const DataType input_dtype;
+    const DataType output_dtype;
 
     bool operator==(const CompiledSoftmax& other) const = default;
 
     CompiledSoftmax(cudnnSoftmaxAlgorithm_t algorithm,
                     cudnnSoftmaxMode_t mode,
-                    TensorDescriptor::DataType input_dtype,
-                    TensorDescriptor::DataType output_dtype)
+                    DataType input_dtype,
+                    DataType output_dtype)
         : algorithm(algorithm), mode(mode), input_dtype(input_dtype), output_dtype(output_dtype) {}
 };
 
@@ -152,24 +152,24 @@ struct CompiledArgMinMax {
     const ExprOp op;
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
-    const TensorDescriptor::DataType input_dtype;
-    const TensorDescriptor::DataType output_dtype;
-    const TensorDescriptor::DataType compute_dtype;
+    const DataType input_dtype;
+    const DataType output_dtype;
+    const DataType compute_dtype;
 
     bool operator==(const CompiledArgMinMax& other) const = default;
 
     CompiledArgMinMax(ExprOp op,
                       std::vector<uint64_t> reduction_axes,
                       std::vector<uint64_t> squeeze_axes,
-                      TensorDescriptor::DataType input_dtype,
-                      TensorDescriptor::DataType output_dtype,
-                      std::optional<TensorDescriptor::DataType> compute_dtype)
+                      DataType input_dtype,
+                      DataType output_dtype,
+                      std::optional<DataType> compute_dtype)
         : op(op),
           reduction_axes(std::move(reduction_axes)),
           squeeze_axes(std::move(squeeze_axes)),
           input_dtype(input_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : TensorDescriptor::DataType::FP32) {
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : DataType::FP32) {
         std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
         this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
 
@@ -182,27 +182,27 @@ struct CompiledReduceMinMaxBackward {
     const ExprOp op;
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
-    const TensorDescriptor::DataType input_dtype;
-    const TensorDescriptor::DataType grad_output_dtype;
-    const TensorDescriptor::DataType output_dtype;
-    const TensorDescriptor::DataType compute_dtype;
+    const DataType input_dtype;
+    const DataType grad_output_dtype;
+    const DataType output_dtype;
+    const DataType compute_dtype;
 
     bool operator==(const CompiledReduceMinMaxBackward& other) const = default;
 
     CompiledReduceMinMaxBackward(ExprOp op,
                                  std::vector<uint64_t> reduction_axes,
                                  std::vector<uint64_t> squeeze_axes,
-                                 TensorDescriptor::DataType input_dtype,
-                                 TensorDescriptor::DataType grad_output_dtype,
-                                 TensorDescriptor::DataType output_dtype,
-                                 std::optional<TensorDescriptor::DataType> compute_dtype)
+                                 DataType input_dtype,
+                                 DataType grad_output_dtype,
+                                 DataType output_dtype,
+                                 std::optional<DataType> compute_dtype)
         : op(op),
           reduction_axes(std::move(reduction_axes)),
           squeeze_axes(std::move(squeeze_axes)),
           input_dtype(input_dtype),
           grad_output_dtype(grad_output_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : TensorDescriptor::DataType::FP32) {
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : DataType::FP32) {
         std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
         this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
 
@@ -219,10 +219,10 @@ struct CompiledConvolution {
     const int32_t pad_d;
     const int32_t pad_h;
     const int32_t pad_w;
-    const TensorDescriptor::DataType input_dtype;
-    const TensorDescriptor::DataType filter_dtype;
-    const TensorDescriptor::DataType output_dtype;
-    const TensorDescriptor::DataType compute_dtype;
+    const DataType input_dtype;
+    const DataType filter_dtype;
+    const DataType output_dtype;
+    const DataType compute_dtype;
 
     bool operator==(const CompiledConvolution& other) const = default;
 
@@ -233,10 +233,10 @@ struct CompiledConvolution {
                         int32_t pad_d,
                         int32_t pad_h,
                         int32_t pad_w,
-                        TensorDescriptor::DataType input_dtype,
-                        TensorDescriptor::DataType filter_dtype,
-                        TensorDescriptor::DataType output_dtype,
-                        std::optional<TensorDescriptor::DataType> compute_dtype)
+                        DataType input_dtype,
+                        DataType filter_dtype,
+                        DataType output_dtype,
+                        std::optional<DataType> compute_dtype)
         : is_3d(is_3d),
           stride_d(stride_d),
           stride_h(stride_h),
@@ -247,7 +247,7 @@ struct CompiledConvolution {
           input_dtype(input_dtype),
           filter_dtype(filter_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : TensorDescriptor::DataType::FP32) {}
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : DataType::FP32) {}
 };
 
 struct CompiledConvolutionBackward {
@@ -258,10 +258,10 @@ struct CompiledConvolutionBackward {
     const int32_t pad_d;
     const int32_t pad_h;
     const int32_t pad_w;
-    const TensorDescriptor::DataType input_dtype;
-    const TensorDescriptor::DataType grad_output_dtype;
-    const TensorDescriptor::DataType output_dtype;
-    const TensorDescriptor::DataType compute_dtype;
+    const DataType input_dtype;
+    const DataType grad_output_dtype;
+    const DataType output_dtype;
+    const DataType compute_dtype;
     const std::vector<uint64_t> explicit_output_dims;
 
     bool operator==(const CompiledConvolutionBackward& other) const = default;
@@ -273,10 +273,10 @@ struct CompiledConvolutionBackward {
                                 int32_t pad_d,
                                 int32_t pad_h,
                                 int32_t pad_w,
-                                TensorDescriptor::DataType input_dtype,
-                                TensorDescriptor::DataType grad_output_dtype,
-                                TensorDescriptor::DataType output_dtype,
-                                std::optional<TensorDescriptor::DataType> compute_dtype,
+                                DataType input_dtype,
+                                DataType grad_output_dtype,
+                                DataType output_dtype,
+                                std::optional<DataType> compute_dtype,
                                 std::vector<uint64_t> explicit_output_dims = {})
         : op(op),
           stride_d(stride_d),
@@ -288,7 +288,7 @@ struct CompiledConvolutionBackward {
           input_dtype(input_dtype),
           grad_output_dtype(grad_output_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : TensorDescriptor::DataType::FP32),
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : DataType::FP32),
           explicit_output_dims(std::move(explicit_output_dims)) {}
 };
 
@@ -302,17 +302,17 @@ struct CompiledMatmul {
     const uint32_t alpha_input_slot;
     const uint32_t beta_input_slot;
     // Retained as the promoted/common input dtype for older code paths and diagnostics.
-    const TensorDescriptor::DataType input_dtype;
-    const TensorDescriptor::DataType lhs_dtype;
-    const TensorDescriptor::DataType rhs_dtype;
-    const TensorDescriptor::DataType aux_dtype;
-    const TensorDescriptor::DataType output_dtype;
-    const TensorDescriptor::DataType compute_dtype;
+    const DataType input_dtype;
+    const DataType lhs_dtype;
+    const DataType rhs_dtype;
+    const DataType aux_dtype;
+    const DataType output_dtype;
+    const DataType compute_dtype;
     const MatmulEpilogue epilogue;
     const MatmulBackwardEpilogue backward_epilogue;
     const uint32_t epilogue_aux_input_slot;
-    const std::optional<TensorDescriptor::DataType> epilogue_aux_dtype;
-    const std::optional<TensorDescriptor::DataType> bgrad_output_dtype;
+    const std::optional<DataType> epilogue_aux_dtype;
+    const std::optional<DataType> bgrad_output_dtype;
 
     bool operator==(const CompiledMatmul& other) const = default;
 
@@ -324,17 +324,17 @@ struct CompiledMatmul {
                    double beta,
                    uint32_t alpha_input_slot,
                    uint32_t beta_input_slot,
-                   TensorDescriptor::DataType input_dtype,
-                   TensorDescriptor::DataType lhs_dtype,
-                   TensorDescriptor::DataType rhs_dtype,
-                   TensorDescriptor::DataType aux_dtype,
-                   TensorDescriptor::DataType output_dtype,
-                   std::optional<TensorDescriptor::DataType> compute_dtype,
+                   DataType input_dtype,
+                   DataType lhs_dtype,
+                   DataType rhs_dtype,
+                   DataType aux_dtype,
+                   DataType output_dtype,
+                   std::optional<DataType> compute_dtype,
                    MatmulEpilogue epilogue = MatmulEpilogue::Default,
                    MatmulBackwardEpilogue backward_epilogue = MatmulBackwardEpilogue::Default,
                    uint32_t epilogue_aux_input_slot = UINT32_MAX,
-                   std::optional<TensorDescriptor::DataType> epilogue_aux_dtype = std::nullopt,
-                   std::optional<TensorDescriptor::DataType> bgrad_output_dtype = std::nullopt)
+                   std::optional<DataType> epilogue_aux_dtype = std::nullopt,
+                   std::optional<DataType> bgrad_output_dtype = std::nullopt)
         : op(op),
           transpose_lhs(transpose_lhs),
           transpose_rhs(transpose_rhs),

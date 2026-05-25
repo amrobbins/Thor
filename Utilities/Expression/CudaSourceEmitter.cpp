@@ -16,7 +16,7 @@
 
 using namespace std;
 
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 
 namespace ThorImplementation {
 

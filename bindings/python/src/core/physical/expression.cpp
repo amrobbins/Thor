@@ -27,7 +27,7 @@ using namespace nb::literals;
 using Expression = ThorImplementation::Expression;
 using FusedEquation = ThorImplementation::FusedEquation;
 using StampedEquation = ThorImplementation::StampedEquation;
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 using Tensor = ThorImplementation::Tensor;
 using StampedExecutionPlan = ThorImplementation::StampedExecutionPlan;
 using Outputs = ThorImplementation::Outputs;

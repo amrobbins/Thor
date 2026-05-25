@@ -14,22 +14,22 @@ using namespace std;
 namespace ThorImplementation {
 namespace {
 
-bool isRmsNormIoDataType(TensorDescriptor::DataType dtype) {
+bool isRmsNormIoDataType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
     }
 }
 
-string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
+string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 class RMSNormParameter final : public PhysicalParameter {
    public:
-    RMSNormParameter(string name, uint64_t normalizedFeatureCount, TensorDescriptor::DataType dtype, bool trainable)
+    RMSNormParameter(string name, uint64_t normalizedFeatureCount, DataType dtype, bool trainable)
         : PhysicalParameter(std::move(name), trainable), normalizedFeatureCount(normalizedFeatureCount), dtype(dtype) {}
 
     void createStorage(const StorageContext& context) override {
@@ -39,7 +39,7 @@ class RMSNormParameter final : public PhysicalParameter {
 
    private:
     uint64_t normalizedFeatureCount;
-    TensorDescriptor::DataType dtype;
+    DataType dtype;
 };
 
 void validateEpsilon(double epsilon) {
@@ -50,7 +50,7 @@ void validateEpsilon(double epsilon) {
 
 shared_ptr<PhysicalParameter> makeDefaultParameter(const string& name,
                                                    uint64_t normalizedFeatureCount,
-                                                   TensorDescriptor::DataType dtype,
+                                                   DataType dtype,
                                                    bool trainable,
                                                    float initialValue) {
     auto parameter = make_shared<RMSNormParameter>(name, normalizedFeatureCount, dtype, trainable);
@@ -65,7 +65,7 @@ RMSNorm::RMSNorm(const TensorPlacement& placement,
                  bool inferenceOnly,
                  vector<uint64_t> normalizedShape,
                  optional<double> epsilon,
-                 optional<TensorDescriptor::DataType> parameterDataType,
+                 optional<DataType> parameterDataType,
                  CudnnRmsNormFusedActivation fusedActivation,
                  vector<shared_ptr<PhysicalParameter>> physicalParameters,
                  int64_t stampedId)
@@ -73,15 +73,15 @@ RMSNorm::RMSNorm(const TensorPlacement& placement,
       normalizedShape(std::move(normalizedShape)),
       normalizedFeatureCount(checkedNormalizedFeatureCount(this->normalizedShape)),
       epsilon(epsilon.has_value() ? epsilon.value() : 1.0e-5),
-      parameterDataType(parameterDataType.has_value() ? parameterDataType.value() : TensorDescriptor::DataType::FP32),
+      parameterDataType(parameterDataType.has_value() ? parameterDataType.value() : DataType::FP32),
       fusedActivation(fusedActivation) {
     validateEpsilon(this->epsilon);
     if (this->fusedActivation == CudnnRmsNormFusedActivation::SWISH) {
-        if (this->parameterDataType != TensorDescriptor::DataType::BF16) {
+        if (this->parameterDataType != DataType::BF16) {
             throw runtime_error("RMSNorm fused SWISH currently requires bf16 scale parameters for cuDNN Frontend RMSNorm + SiLU fusion; got " +
                                 dtypeName(this->parameterDataType) + ".");
         }
-    } else if (this->parameterDataType != TensorDescriptor::DataType::FP32) {
+    } else if (this->parameterDataType != DataType::FP32) {
         throw runtime_error("RMSNorm currently requires fp32 scale parameters for cuDNN Frontend RMSNorm; got " +
                             dtypeName(this->parameterDataType) + ".");
     }
@@ -202,7 +202,7 @@ void RMSNorm::compileImpl() {
             throw runtime_error("RMSNorm fused activation '" + string(toString(fusedActivation)) +
                                 "' is inference-only because cuDNN Frontend RMSNorm + SiLU fusion is only selected from an inference-phase RMSNorm graph.");
         }
-        if (input.getDataType() != TensorDescriptor::DataType::BF16) {
+        if (input.getDataType() != DataType::BF16) {
             throw runtime_error("RMSNorm fused SWISH currently requires bf16 feature inputs for cuDNN Frontend RMSNorm + SiLU fusion; got " +
                                 dtypeName(input.getDataType()) + ".");
         }
@@ -240,7 +240,7 @@ void RMSNorm::compileImpl() {
                 throw runtime_error("RMSNorm all feature inputs must have the same outer sample count.");
             }
         }
-        saveInvVariance.emplace_back(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {outerSize}));
+        saveInvVariance.emplace_back(placement, TensorDescriptor(DataType::FP32, {outerSize}));
         scratchDScale.emplace_back(weights.clone());
         if (errorInputs.size() > i && errorInputs[i].has_value() && (errorOutputs.size() <= i || !errorOutputs[i].has_value())) {
             THOR_THROW_IF_FALSE(featureInputs[i].has_value());
@@ -274,7 +274,7 @@ void RMSNorm::computeFeatureOut(uint32_t connectionNumber) {
     descriptor.inputDataType = input.getDataType();
     descriptor.outputDataType = output.getDataType();
     descriptor.parameterDataType = parameterDataType;
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
+    descriptor.computeDataType = DataType::FP32;
     descriptor.epsilon = static_cast<float>(epsilon);
     descriptor.training = !isInferenceOnly();
     descriptor.fusedActivation = fusedActivation;
@@ -323,7 +323,7 @@ optional<Event> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t c
     descriptor.inputDataType = input.getDataType();
     descriptor.outputDataType = errorInputs[connectionNumber].value().getDataType();
     descriptor.parameterDataType = parameterDataType;
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
+    descriptor.computeDataType = DataType::FP32;
     descriptor.epsilon = static_cast<float>(epsilon);
     descriptor.training = true;
 

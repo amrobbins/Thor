@@ -37,9 +37,9 @@ struct ReductionCacheKey {
     const std::vector<uint64_t> input_dims;
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
-    const TensorDescriptor::DataType input_dtype;
-    const TensorDescriptor::DataType compute_dtype;
-    const TensorDescriptor::DataType output_dtype;
+    const DataType input_dtype;
+    const DataType compute_dtype;
+    const DataType output_dtype;
     const bool output_indices;
     const int device_num;
 
@@ -49,9 +49,9 @@ struct ReductionCacheKey {
                       std::vector<uint64_t> input_dims,
                       std::vector<uint64_t> reduction_axes,
                       std::vector<uint64_t> squeeze_axes,
-                      TensorDescriptor::DataType input_dtype,
-                      TensorDescriptor::DataType output_dtype,
-                      TensorDescriptor::DataType compute_dtype,
+                      DataType input_dtype,
+                      DataType output_dtype,
+                      DataType compute_dtype,
                       bool output_indices,
                       int device_num)
         : op(op),
@@ -102,8 +102,8 @@ struct BuiltReduction {
 
 struct SoftmaxCacheKey {
     const std::vector<uint64_t> input_dims;
-    const TensorDescriptor::DataType input_dtype;
-    const TensorDescriptor::DataType output_dtype;
+    const DataType input_dtype;
+    const DataType output_dtype;
     const cudnnSoftmaxAlgorithm_t algorithm;
     const cudnnSoftmaxMode_t mode;
     const int device_num;
@@ -146,11 +146,11 @@ struct MatmulCacheKey {
     const MatmulEpilogue epilogue;
     const MatmulBackwardEpilogue backward_epilogue;
     const bool bgrad_epilogue;
-    const TensorDescriptor::DataType a_dtype;
-    const TensorDescriptor::DataType b_dtype;
-    const TensorDescriptor::DataType c_dtype;
-    const TensorDescriptor::DataType d_dtype;
-    const TensorDescriptor::DataType compute_dtype;
+    const DataType a_dtype;
+    const DataType b_dtype;
+    const DataType c_dtype;
+    const DataType d_dtype;
+    const DataType compute_dtype;
     const int device_num;
 
     bool operator==(const MatmulCacheKey& other) const = default;
@@ -171,11 +171,11 @@ struct MatmulCacheKey {
                    MatmulEpilogue epilogue,
                    MatmulBackwardEpilogue backward_epilogue,
                    bool bgrad_epilogue,
-                   TensorDescriptor::DataType a_dtype,
-                   TensorDescriptor::DataType b_dtype,
-                   TensorDescriptor::DataType c_dtype,
-                   TensorDescriptor::DataType d_dtype,
-                   TensorDescriptor::DataType compute_dtype,
+                   DataType a_dtype,
+                   DataType b_dtype,
+                   DataType c_dtype,
+                   DataType d_dtype,
+                   DataType compute_dtype,
                    int device_num)
         : op(op),
           a_rows(a_rows),
@@ -215,10 +215,10 @@ struct BuiltMatmul {
 struct CompiledRmsNorm {
     uint64_t normalized_feature_count = 0;
     double epsilon = 1.0e-5;
-    TensorDescriptor::DataType input_dtype = TensorDescriptor::DataType::FP16;
-    TensorDescriptor::DataType scale_dtype = TensorDescriptor::DataType::FP32;
-    TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP16;
-    TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
+    DataType input_dtype = DataType::FP16;
+    DataType scale_dtype = DataType::FP32;
+    DataType output_dtype = DataType::FP16;
+    DataType compute_dtype = DataType::FP32;
     CudnnRmsNormFusedActivation fused_activation = CudnnRmsNormFusedActivation::NONE;
     std::string debug_name = "thor_expr_rms_norm";
 
@@ -242,8 +242,8 @@ struct CompiledAttention {
     int64_t paged_kv_max_sequence_length = 0;
     float dropout_probability = 0.0f;
     bool use_fp8_forward_scaling = false;
-    TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
-    TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP16;
+    DataType compute_dtype = DataType::FP32;
+    DataType output_dtype = DataType::FP16;
     std::string debug_name = "thor_expr_attention";
 
     CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o) const;
@@ -253,9 +253,9 @@ struct CompiledAttention {
 struct CompiledEmbeddingLookup {
     bool has_padding_index = false;
     uint64_t padding_index = 0;
-    TensorDescriptor::DataType index_dtype = TensorDescriptor::DataType::UINT32;
-    TensorDescriptor::DataType weights_dtype = TensorDescriptor::DataType::FP32;
-    TensorDescriptor::DataType output_dtype = TensorDescriptor::DataType::FP32;
+    DataType index_dtype = DataType::UINT32;
+    DataType weights_dtype = DataType::FP32;
+    DataType output_dtype = DataType::FP32;
     std::string debug_name = "thor_expr_embedding_lookup";
     EmbeddingForwardEpilogue epilogue;
 };
@@ -317,14 +317,14 @@ struct CompiledAttentionBackward {
     bool use_paged_kv_cache = false;
     int64_t paged_kv_max_sequence_length = 0;
     float dropout_probability = 0.0f;
-    TensorDescriptor::DataType compute_dtype = TensorDescriptor::DataType::FP32;
-    TensorDescriptor::DataType dQ_dtype = TensorDescriptor::DataType::FP16;
-    TensorDescriptor::DataType dK_dtype = TensorDescriptor::DataType::FP16;
-    TensorDescriptor::DataType dV_dtype = TensorDescriptor::DataType::FP16;
+    DataType compute_dtype = DataType::FP32;
+    DataType dQ_dtype = DataType::FP16;
+    DataType dK_dtype = DataType::FP16;
+    DataType dV_dtype = DataType::FP16;
     std::string debug_name = "thor_expr_attention_backward";
 
     CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o) const;
-    [[nodiscard]] TensorDescriptor::DataType outputDTypeFor(ExprOp op) const;
+    [[nodiscard]] DataType outputDTypeFor(ExprOp op) const;
 };
 
 struct BuiltConvolution {
@@ -383,9 +383,9 @@ class StampedEquation {
     static std::shared_ptr<BuiltReduction> buildReduction(ExprOp op,
                                                           const std::vector<uint64_t>& reduction_axes,
                                                           const std::vector<uint64_t>& squeeze_axes,
-                                                          TensorDescriptor::DataType input_dtype,
-                                                          TensorDescriptor::DataType output_dtype,
-                                                          TensorDescriptor::DataType compute_dtype,
+                                                          DataType input_dtype,
+                                                          DataType output_dtype,
+                                                          DataType compute_dtype,
                                                           bool output_indices,
                                                           const Tensor& input,
                                                           int device_num);
@@ -1246,9 +1246,9 @@ struct hash<ThorImplementation::ReductionCacheKey> {
         hashCombine(h, hash<size_t>{}(k.squeeze_axes.size()));
         for (uint64_t axis : k.squeeze_axes)
             hashCombine(h, hash<uint64_t>{}(axis));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.input_dtype));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.compute_dtype));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.output_dtype));
+        hashCombine(h, hash<ThorImplementation::DataType>{}(k.input_dtype));
+        hashCombine(h, hash<ThorImplementation::DataType>{}(k.compute_dtype));
+        hashCombine(h, hash<ThorImplementation::DataType>{}(k.output_dtype));
         hashCombine(h, hash<bool>{}(k.output_indices));
         hashCombine(h, hash<int>{}(k.device_num));
         return h;
@@ -1262,8 +1262,8 @@ struct hash<ThorImplementation::SoftmaxCacheKey> {
         hashCombine(h, hash<size_t>{}(k.input_dims.size()));
         for (uint64_t d : k.input_dims)
             hashCombine(h, hash<uint64_t>{}(d));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.input_dtype));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.output_dtype));
+        hashCombine(h, hash<ThorImplementation::DataType>{}(k.input_dtype));
+        hashCombine(h, hash<ThorImplementation::DataType>{}(k.output_dtype));
         hashCombine(h, hash<int>{}(static_cast<int>(k.algorithm)));
         hashCombine(h, hash<int>{}(static_cast<int>(k.mode)));
         hashCombine(h, hash<int>{}(k.device_num));
@@ -1290,11 +1290,11 @@ struct hash<ThorImplementation::MatmulCacheKey> {
         hashCombine(h, hash<int>{}(static_cast<int>(k.epilogue)));
         hashCombine(h, hash<int>{}(static_cast<int>(k.backward_epilogue)));
         hashCombine(h, hash<bool>{}(k.bgrad_epilogue));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.a_dtype));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.b_dtype));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.c_dtype));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.d_dtype));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.compute_dtype));
+        hashCombine(h, hash<ThorImplementation::DataType>{}(k.a_dtype));
+        hashCombine(h, hash<ThorImplementation::DataType>{}(k.b_dtype));
+        hashCombine(h, hash<ThorImplementation::DataType>{}(k.c_dtype));
+        hashCombine(h, hash<ThorImplementation::DataType>{}(k.d_dtype));
+        hashCombine(h, hash<ThorImplementation::DataType>{}(k.compute_dtype));
         hashCombine(h, hash<int>{}(k.device_num));
         return h;
     }

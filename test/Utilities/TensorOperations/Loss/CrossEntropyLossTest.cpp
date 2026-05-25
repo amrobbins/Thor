@@ -38,14 +38,14 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels)
         uint32_t batchSize = (rand() % 8) + 1;
         uint32_t numClasses = (rand() % 512) + 1;
 
-        Tensor labelsT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor labelsT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         Tensor labelsT_d = labelsT.clone(gpuPlacement);
-        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         Tensor probabilitiesT_d = probabilitiesT.clone(gpuPlacement);
-        Tensor lossT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor lossT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         Tensor lossT_d = lossT.clone(gpuPlacement);
         Tensor lossT_cpu = lossT.clone();
-        Tensor gradientT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor gradientT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         Tensor gradientT_d = gradientT.clone(gpuPlacement);
         Tensor gradientT_cpu = gradientT.clone();
 
@@ -175,14 +175,14 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels_
         uint32_t batchSize = (rand() % 8) + 1;
         uint32_t numClasses = (rand() % 512) + 1;
 
-        Tensor labelsT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor labelsT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         Tensor labelsT_d = labelsT.clone(gpuPlacement);
-        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         Tensor probabilitiesT_d = probabilitiesT.clone(gpuPlacement);
-        Tensor lossT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor lossT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         Tensor lossT_d = lossT.clone(gpuPlacement);
         Tensor lossT_cpu = lossT.clone();
-        Tensor gradientT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor gradientT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         Tensor gradientT_d = gradientT.clone(gpuPlacement);
         Tensor gradientT_cpu = gradientT.clone();
 
@@ -316,14 +316,14 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels) {
         uint32_t batchSize = (rand() % 400) + 1;
         uint32_t numClasses = (rand() % 1500) + 2;
 
-        Tensor labelsT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT32, {batchSize, 1}));
+        Tensor labelsT(cpuPlacement, TensorDescriptor(DataType::UINT32, {batchSize, 1}));
         Tensor labelsT_d = labelsT.clone(gpuPlacement);
-        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         Tensor probabilitiesT_d = probabilitiesT.clone(gpuPlacement);
-        Tensor lossT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor lossT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         Tensor lossT_d = lossT.clone(gpuPlacement);
         Tensor lossT_cpu = lossT.clone();
-        Tensor gradientT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor gradientT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, numClasses}));
         Tensor gradientT_d = gradientT.clone(gpuPlacement);
         Tensor gradientT_cpu = gradientT.clone();
 
@@ -465,14 +465,14 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels_halfPre
         uint32_t batchSize = (rand() % 400) + 1;
         uint32_t numClasses = (rand() % 1500) + 2;
 
-        Tensor labelsT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT16, {batchSize, 1}));
+        Tensor labelsT(cpuPlacement, TensorDescriptor(DataType::UINT16, {batchSize, 1}));
         Tensor labelsT_d = labelsT.clone(gpuPlacement);
-        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numClasses}));
+        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, numClasses}));
         Tensor probabilitiesT_d = probabilitiesT.clone(gpuPlacement);
-        Tensor lossT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numClasses}));
+        Tensor lossT(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, numClasses}));
         Tensor lossT_d = lossT.clone(gpuPlacement);
         Tensor lossT_cpu = lossT.clone();
-        Tensor gradientT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numClasses}));
+        Tensor gradientT(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, numClasses}));
         Tensor gradientT_d = gradientT.clone(gpuPlacement);
         Tensor gradientT_cpu = gradientT.clone();
 
@@ -613,14 +613,14 @@ TEST(BinaryCrossEntropyLoss, ComputesCorrectAnswer) {
     for (uint32_t t = 0; t < 10; ++t) {
         uint32_t batchSize = (rand() % 5000) + 1;
 
-        Tensor labelsT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT32, {batchSize, 1}));
+        Tensor labelsT(cpuPlacement, TensorDescriptor(DataType::UINT32, {batchSize, 1}));
         Tensor labelsT_d = labelsT.clone(gpuPlacement);
-        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, 1}));
+        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, 1}));
         Tensor probabilitiesT_d = probabilitiesT.clone(gpuPlacement);
-        Tensor lossT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, 1}));
+        Tensor lossT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, 1}));
         Tensor lossT_d = lossT.clone(gpuPlacement);
         Tensor lossT_cpu = lossT.clone();
-        Tensor gradientT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, 1}));
+        Tensor gradientT(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, 1}));
         Tensor gradientT_d = gradientT.clone(gpuPlacement);
         Tensor gradientT_cpu = gradientT.clone();
 
@@ -734,14 +734,14 @@ TEST(BinaryCrossEntropyLoss, ComputesCorrectAnswer_halfPrecision) {
     for (uint32_t t = 0; t < 10; ++t) {
         uint32_t batchSize = (rand() % 5000) + 1;
 
-        Tensor labelsT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT16, {batchSize, 1}));
+        Tensor labelsT(cpuPlacement, TensorDescriptor(DataType::UINT16, {batchSize, 1}));
         Tensor labelsT_d = labelsT.clone(gpuPlacement);
-        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, 1}));
+        Tensor probabilitiesT(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, 1}));
         Tensor probabilitiesT_d = probabilitiesT.clone(gpuPlacement);
-        Tensor lossT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, 1}));
+        Tensor lossT(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, 1}));
         Tensor lossT_d = lossT.clone(gpuPlacement);
         Tensor lossT_cpu = lossT.clone();
-        Tensor gradientT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, 1}));
+        Tensor gradientT(cpuPlacement, TensorDescriptor(DataType::FP16, {batchSize, 1}));
         Tensor gradientT_d = gradientT.clone(gpuPlacement);
         Tensor gradientT_cpu = gradientT.clone();
 

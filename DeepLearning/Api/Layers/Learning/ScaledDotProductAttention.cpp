@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <utility>
 
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 using json = nlohmann::json;
 
 namespace {

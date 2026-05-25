@@ -36,8 +36,8 @@ class CudaSourceEmitter {
     static uint32_t tiledLogicalTransposeConsumerVectorizedOutputCount(const CompiledExecutionStage& stage,
                                                                        const std::vector<SpecializedBroadcastGroup>& groups);
 
-    static std::optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const PhysicalExecutionStage& stage);
-    static std::optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const CompiledExecutionStage& stage);
+    static std::optional<DataType> getVectorizedStageStorageDType(const PhysicalExecutionStage& stage);
+    static std::optional<DataType> getVectorizedStageStorageDType(const CompiledExecutionStage& stage);
     static uint32_t flatElementsPerThread(const PhysicalExecutionStage& stage);
     static uint32_t tiledTransposePackScalars(const PhysicalExecutionStage& stage);
     static uint32_t tiledTransposePackScalars(const CompiledExecutionStage& stage);

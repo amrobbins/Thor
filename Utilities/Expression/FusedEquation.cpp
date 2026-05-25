@@ -21,7 +21,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 using namespace std;
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 
 namespace ThorImplementation {
 
@@ -144,7 +144,7 @@ struct PackedAttentionBackwardDirectOutput {
     size_t packing_stage_idx = 0;
     uint32_t packed_value_id = UINT32_MAX;
     std::string packed_output_name;
-    TensorDescriptor::DataType packed_dtype = TensorDescriptor::DataType::FP16;
+    DataType packed_dtype = DataType::FP16;
     std::vector<uint64_t> packed_dims;
     std::array<std::optional<PackedAttentionBackwardDirectSlice>, 3> slices;
 };
@@ -363,7 +363,7 @@ static std::optional<PackedAttentionBackwardDirectOutput> tryBuildPackedAttentio
         if (!op_by_slot.at(slot).has_value()) {
             return std::nullopt;
         }
-        const TensorDescriptor::DataType slot_dtype = attention_stage.attention_backward->outputDTypeFor(op_by_slot.at(slot).value());
+        const DataType slot_dtype = attention_stage.attention_backward->outputDTypeFor(op_by_slot.at(slot).value());
         if (slot_dtype != direct.packed_dtype) {
             return std::nullopt;
         }
@@ -1919,7 +1919,7 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
 
 
 static CompiledAttention makeForwardAttentionView(const CompiledAttentionBackward& backward,
-                                                  TensorDescriptor::DataType output_dtype,
+                                                  DataType output_dtype,
                                                   std::string debug_suffix = "") {
     CompiledAttention forward;
     forward.q_layout = backward.q_layout;
@@ -4730,7 +4730,7 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
     return final_output_shapes;
 }
 
-std::unordered_map<std::string, TensorDescriptor::DataType> FusedEquation::getOutputDataTypes(
+std::unordered_map<std::string, DataType> FusedEquation::getOutputDataTypes(
     const std::unordered_map<std::string, Tensor>& inputs) const {
     std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputsForCompilation(inputs);
     std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
@@ -4739,7 +4739,7 @@ std::unordered_map<std::string, TensorDescriptor::DataType> FusedEquation::getOu
         throw std::runtime_error("FusedEquation::getOutputDataTypes requires at least one bound root input.");
     }
 
-    std::unordered_map<uint32_t, TensorDescriptor::DataType> value_dtypes;
+    std::unordered_map<uint32_t, DataType> value_dtypes;
     value_dtypes.reserve(root_values.size() + compiled_outputs->stages.size());
 
     for (const auto& [value_id, value] : root_values) {
@@ -4756,7 +4756,7 @@ std::unordered_map<std::string, TensorDescriptor::DataType> FusedEquation::getOu
 
     applyAvailableValueAliases(compiled_outputs->value_aliases, value_dtypes);
 
-    std::unordered_map<std::string, TensorDescriptor::DataType> final_output_dtypes;
+    std::unordered_map<std::string, DataType> final_output_dtypes;
     final_output_dtypes.reserve(compiled_outputs->final_outputs.size());
 
     for (const CompiledStageOutput& final_output : compiled_outputs->final_outputs) {
@@ -5499,7 +5499,7 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
-        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
+        TensorDescriptor workspaceDescriptor(DataType::UINT8, {built->workspace_bytes});
         workspace = Tensor(adaptedInput.getPlacement(), workspaceDescriptor);
     }
 
@@ -5567,7 +5567,7 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
-        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
+        TensorDescriptor workspaceDescriptor(DataType::UINT8, {built->workspace_bytes});
         workspace = Tensor(adaptedInput.getPlacement(), workspaceDescriptor);
     }
 
@@ -5726,7 +5726,7 @@ std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::s
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
-        workspace = Tensor(adaptedInput.getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes}));
+        workspace = Tensor(adaptedInput.getPlacement(), TensorDescriptor(DataType::UINT8, {built->workspace_bytes}));
     }
 
     return std::make_shared<StampedConvolution>(compiledStage, built, adaptedInput, adaptedFilter, output, stream, workspace);
@@ -5771,7 +5771,7 @@ std::shared_ptr<StampedConvolutionBackward> FusedEquation::stampConvolutionBackw
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
-        workspace = Tensor(adaptedInput.getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes}));
+        workspace = Tensor(adaptedInput.getPlacement(), TensorDescriptor(DataType::UINT8, {built->workspace_bytes}));
     }
 
     return std::make_shared<StampedConvolutionBackward>(compiledStage, built, adaptedInput, adaptedGradOutput, output, stream, workspace);
@@ -5879,7 +5879,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
-        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
+        TensorDescriptor workspaceDescriptor(DataType::UINT8, {built->workspace_bytes});
         workspace = Tensor(adaptedLhs.getPlacement(), workspaceDescriptor);
     }
 
@@ -6013,7 +6013,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
-        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
+        TensorDescriptor workspaceDescriptor(DataType::UINT8, {built->workspace_bytes});
         workspace = Tensor(adaptedLhs.getPlacement(), workspaceDescriptor);
     }
 
@@ -6023,7 +6023,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     std::optional<Tensor> beta_host_scratch = std::nullopt;
     const bool any_tensor_backed_scale = optionalRuntimeInputIsTensorLike(alpha_input) || optionalRuntimeInputIsTensorLike(beta_input);
     if (any_tensor_backed_scale) {
-        TensorDescriptor scalarDescriptor(TensorDescriptor::DataType::FP32, {1});
+        TensorDescriptor scalarDescriptor(DataType::FP32, {1});
         alpha_device_scratch = Tensor(adaptedLhs.getPlacement(), scalarDescriptor);
         beta_device_scratch = Tensor(adaptedLhs.getPlacement(), scalarDescriptor);
         const TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
@@ -6166,7 +6166,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (tensor->getPlacement() != adaptedQ.getPlacement()) {
                 throw std::runtime_error(std::string("Attention padding-mask ") + label + " placement must match q.");
             }
-            if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
+            if (tensor->getDataType() != DataType::INT32) {
                 throw std::runtime_error(std::string("Attention padding-mask ") + label + " dtype must be INT32.");
             }
             if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch}) {
@@ -6184,7 +6184,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (tensor->getPlacement() != adaptedQ.getPlacement()) {
                 throw std::runtime_error(std::string("Attention ragged ") + label + " placement must match q.");
             }
-            if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
+            if (tensor->getDataType() != DataType::INT32) {
                 throw std::runtime_error(std::string("Attention ragged ") + label + " dtype must be INT32.");
             }
             if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch + 1}) {
@@ -6202,7 +6202,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (tensor->getPlacement() != adaptedQ.getPlacement()) {
                 throw std::runtime_error(std::string("Attention paged KV ") + label + " placement must match q.");
             }
-            if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
+            if (tensor->getDataType() != DataType::INT32) {
                 throw std::runtime_error(std::string("Attention paged KV ") + label + " dtype must be INT32.");
             }
             if (compiledStage->paged_kv_max_sequence_length <= 0) {
@@ -6227,7 +6227,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (tensor->getPlacement() != adaptedQ.getPlacement()) {
                 throw std::runtime_error(std::string("Attention dropout ") + label + " placement must match q.");
             }
-            if (tensor->getDataType() != TensorDescriptor::DataType::INT64) {
+            if (tensor->getDataType() != DataType::INT64) {
                 throw std::runtime_error(std::string("Attention dropout ") + label + " dtype must be INT64.");
             }
             if (tensor->getDimensions() != std::vector<uint64_t>{1, 1, 1, 1}) {
@@ -6245,7 +6245,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (tensor->getPlacement() != adaptedQ.getPlacement()) {
                 throw std::runtime_error(std::string("Attention FP8 ") + label + " placement must match q.");
             }
-            if (tensor->getDataType() != TensorDescriptor::DataType::FP32) {
+            if (tensor->getDataType() != DataType::FP32) {
                 throw std::runtime_error(std::string("Attention FP8 ") + label + " dtype must be FP32.");
             }
             if (tensor->getDimensions() != std::vector<uint64_t>{1, 1, 1, 1}) {
@@ -6381,7 +6381,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         throw std::runtime_error("Attention-backward dO dimensions do not match the corresponding forward attention output shape.");
     }
 
-    auto make_or_validate_output = [&](size_t idx, TensorDescriptor::DataType dtype, const std::vector<uint64_t>& dims, const char* label) {
+    auto make_or_validate_output = [&](size_t idx, DataType dtype, const std::vector<uint64_t>& dims, const char* label) {
         if (idx < preallocatedOutputs.size() && preallocatedOutputs[idx].has_value()) {
             Tensor out = preallocatedOutputs[idx].value();
             if (out.getPlacement() != adaptedQ.getPlacement()) {
@@ -6404,7 +6404,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     Tensor dV = make_or_validate_output(2, compiledStage->dV_dtype, adaptedV.getDimensions(), "dV");
     Tensor oScratch(adaptedQ.getPlacement(), TensorDescriptor(adaptedDO.getDataType(), o_dims));
     Tensor stats(adaptedQ.getPlacement(),
-                 TensorDescriptor(TensorDescriptor::DataType::FP32, {qLogical.batch, qLogical.heads, qLogical.sequence_length, 1}));
+                 TensorDescriptor(DataType::FP32, {qLogical.batch, qLogical.heads, qLogical.sequence_length, 1}));
     const std::vector<uint64_t> denseBiasDims{qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length};
     std::optional<Tensor> dBiasScratch = std::nullopt;
     if (compiledStage->use_bias) {
@@ -6419,7 +6419,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             if (tensor->getPlacement() != adaptedQ.getPlacement()) {
                 throw std::runtime_error(std::string("Attention-backward padding-mask ") + label + " placement must match q.");
             }
-            if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
+            if (tensor->getDataType() != DataType::INT32) {
                 throw std::runtime_error(std::string("Attention-backward padding-mask ") + label + " dtype must be INT32.");
             }
             if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch}) {
@@ -6437,7 +6437,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             if (tensor->getPlacement() != adaptedQ.getPlacement()) {
                 throw std::runtime_error(std::string("Attention-backward ragged ") + label + " placement must match q.");
             }
-            if (tensor->getDataType() != TensorDescriptor::DataType::INT32) {
+            if (tensor->getDataType() != DataType::INT32) {
                 throw std::runtime_error(std::string("Attention-backward ragged ") + label + " dtype must be INT32.");
             }
             if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch + 1}) {
@@ -6455,7 +6455,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             if (tensor->getPlacement() != adaptedQ.getPlacement()) {
                 throw std::runtime_error(std::string("Attention-backward dropout ") + label + " placement must match q.");
             }
-            if (tensor->getDataType() != TensorDescriptor::DataType::INT64) {
+            if (tensor->getDataType() != DataType::INT64) {
                 throw std::runtime_error(std::string("Attention-backward dropout ") + label + " dtype must be INT64.");
             }
             if (tensor->getDimensions() != std::vector<uint64_t>{1, 1, 1, 1}) {
@@ -6551,14 +6551,14 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
 
     std::optional<Tensor> workspace = std::nullopt;
     if (built->workspace_bytes > 0) {
-        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
+        TensorDescriptor workspaceDescriptor(DataType::UINT8, {built->workspace_bytes});
         workspace = Tensor(adaptedInput.getPlacement(), workspaceDescriptor);
     }
 
     const std::vector<uint64_t> unsqueezed_output_dims =
         StampedEquation::computeReductionOutputDims(adaptedInput.getDimensions(), built->key.reduction_axes, {});
 
-    TensorDescriptor indicesDescriptor(TensorDescriptor::DataType::UINT32, unsqueezed_output_dims);
+    TensorDescriptor indicesDescriptor(DataType::UINT32, unsqueezed_output_dims);
     Tensor indices(adaptedInput.getPlacement(), indicesDescriptor);
 
     TensorDescriptor reductionValueDescriptor(built->key.output_dtype, unsqueezed_output_dims);
@@ -7555,7 +7555,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                                              dOTensor)) {
                         if (!candidate_state->stats.isInitialized()) {
                             const std::vector<uint64_t> o_dims = candidate_state->output.getDimensions();
-                            TensorDescriptor statsDescriptor(TensorDescriptor::DataType::FP32,
+                            TensorDescriptor statsDescriptor(DataType::FP32,
                                                              {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1});
                             candidate_state->stats = Tensor(candidate_state->output.getPlacement(), statsDescriptor);
                         }

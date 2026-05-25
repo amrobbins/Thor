@@ -23,7 +23,7 @@ TEST(LossShaper, NumericalBatchFp16) {
         dimensions.push_back((rand() % 400) + 2);
         vector<uint64_t> reducedDimensions = {1, 1};
 
-        const TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP16;
+        const DataType dataType = DataType::FP16;
 
         Tensor rawLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
         // Accumulators are FP32:
@@ -93,7 +93,7 @@ TEST(LossShaper, NumericalElementWiseFp32) {
         dimensions.push_back((rand() % 400) + 2);
         vector<uint64_t> reducedDimensions = {dimensions[0], 1};
 
-        const TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP32;
+        const DataType dataType = DataType::FP32;
 
         Tensor rawLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
         Tensor elementwiseLossCpu(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
@@ -165,7 +165,7 @@ TEST(LossShaper, NumericalClassWiseFp32) {
         dimensions.push_back((rand() % 400) + 2);
         vector<uint64_t> reducedDimensions = {1, dimensions[1]};
 
-        const TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP32;
+        const DataType dataType = DataType::FP32;
 
         Tensor rawLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
         Tensor classwiseLossCpu(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));

@@ -2498,35 +2498,35 @@ void Tensor::add(Tensor augend, double addend, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = augend.getDataType();
+    DataType dataType = augend.getDataType();
     uint64_t numElements = augend.getTotalNumElements();
     void *augendMem = augend.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         addScalarHalf<<<gridSize, blockSize, 0, stream>>>((half *)augendMem, (half *)destMem, addend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar4B<float><<<gridSize, blockSize, 0, stream>>>((float *)augendMem, (float *)destMem, addend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar1BUnsignedInt<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)augendMem, (uint8_t *)destMem, addend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar2BUnsignedInt<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)augendMem, (uint16_t *)destMem, addend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)augendMem, (uint32_t *)destMem, addend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar1BSignedInt<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)augendMem, (int8_t *)destMem, addend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar2BSignedInt<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)augendMem, (int16_t *)destMem, addend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)augendMem, (int32_t *)destMem, addend, numElements);
     } else {
@@ -2547,40 +2547,40 @@ void Tensor::add(Tensor augend, Tensor addend, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = augend.getDataType();
+    DataType dataType = augend.getDataType();
     uint64_t numElements = augend.getTotalNumElements();
     void *augendMem = augend.getMemPtr();
     void *addendMem = addend.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         addElementwiseHalf<<<gridSize, blockSize, 0, stream>>>((half *)augendMem, (half *)destMem, (half *)addendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         addElementwise4B<float><<<gridSize, blockSize, 0, stream>>>((float *)augendMem, (float *)destMem, (float *)addendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         addElementwise1BUnsignedInt<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)augendMem, (uint8_t *)destMem, (uint8_t *)addendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 4095) / 4096);
         addElementwise2BUnsignedInt<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)augendMem, (uint16_t *)destMem, (uint16_t *)addendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         addElementwise4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)augendMem, (uint32_t *)destMem, (uint32_t *)addendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         addElementwise1BSignedInt<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)augendMem, (int8_t *)destMem, (int8_t *)addendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 4095) / 4096);
         addElementwise2BSignedInt<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)augendMem, (int16_t *)destMem, (int16_t *)addendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         addElementwise4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)augendMem, (int32_t *)destMem, (int32_t *)addendMem, numElements);
@@ -2597,41 +2597,41 @@ void Tensor::add(Tensor augend, double addend, float alpha, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = augend.getDataType();
+    DataType dataType = augend.getDataType();
     uint64_t numElements = augend.getTotalNumElements();
     void *augendMem = augend.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         addScalarHalf<<<gridSize, blockSize, 0, stream>>>((half *)augendMem, (half *)destMem, addend, alpha, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar4B<float><<<gridSize, blockSize, 0, stream>>>((float *)augendMem, (float *)destMem, addend, alpha, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         THOR_THROW_IF_FALSE(alpha >= 0.0f);
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar1BUnsignedInt<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)augendMem, (uint8_t *)destMem, addend, alpha, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         THOR_THROW_IF_FALSE(alpha >= 0.0f);
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar2BUnsignedInt<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)augendMem, (uint16_t *)destMem, addend, alpha, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         THOR_THROW_IF_FALSE(alpha >= 0.0f);
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)augendMem, (uint32_t *)destMem, addend, alpha, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar1BSignedInt<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)augendMem, (int8_t *)destMem, addend, alpha, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar2BSignedInt<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)augendMem, (int16_t *)destMem, addend, alpha, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         addScalar4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)augendMem, (int32_t *)destMem, addend, alpha, numElements);
     } else {
@@ -2652,48 +2652,48 @@ void Tensor::add(Tensor augend, Tensor addend, float alpha, float beta, Stream s
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = augend.getDataType();
+    DataType dataType = augend.getDataType();
     uint64_t numElements = augend.getTotalNumElements();
     void *augendMem = augend.getMemPtr();
     void *addendMem = addend.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         addElementwiseHalf<<<gridSize, blockSize, 0, stream>>>(
             (half *)augendMem, (half *)destMem, (half *)addendMem, alpha, beta, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         addElementwise4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)augendMem, (float *)destMem, (float *)addendMem, alpha, beta, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         THOR_THROW_IF_FALSE(alpha >= 0.0f);
         THOR_THROW_IF_FALSE(beta >= 0.0f);
         dim3 gridSize((numElements + 4095) / 4096);
         addElementwise1BUnsignedInt<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)augendMem, (uint8_t *)destMem, (uint8_t *)addendMem, alpha, beta, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         THOR_THROW_IF_FALSE(alpha >= 0.0f);
         THOR_THROW_IF_FALSE(beta >= 0.0f);
         dim3 gridSize((numElements + 4095) / 4096);
         addElementwise2BUnsignedInt<uint16_t><<<gridSize, blockSize, 0, stream>>>(
             (uint16_t *)augendMem, (uint16_t *)destMem, (uint16_t *)addendMem, alpha, beta, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         THOR_THROW_IF_FALSE(alpha >= 0.0f);
         THOR_THROW_IF_FALSE(beta >= 0.0f);
         dim3 gridSize((numElements + 2047) / 2048);
         addElementwise4B<uint32_t><<<gridSize, blockSize, 0, stream>>>(
             (uint32_t *)augendMem, (uint32_t *)destMem, (uint32_t *)addendMem, alpha, beta, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         addElementwise1BSignedInt<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)augendMem, (int8_t *)destMem, (int8_t *)addendMem, alpha, beta, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 4095) / 4096);
         addElementwise2BSignedInt<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)augendMem, (int16_t *)destMem, (int16_t *)addendMem, alpha, beta, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         addElementwise4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)augendMem, (int32_t *)destMem, (int32_t *)addendMem, alpha, beta, numElements);
@@ -2710,39 +2710,39 @@ void Tensor::subtract(double minuend, Tensor subtrahend, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = subtrahend.getDataType();
+    DataType dataType = subtrahend.getDataType();
     uint64_t numElements = subtrahend.getTotalNumElements();
     void *subtrahendMem = subtrahend.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         subtractScalarMinuendHalf<<<gridSize, blockSize, 0, stream>>>((half *)subtrahendMem, (half *)destMem, minuend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarMinuend4B<float><<<gridSize, blockSize, 0, stream>>>((float *)subtrahendMem, (float *)destMem, minuend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarMinuend1BUnsignedInt<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)subtrahendMem, (uint8_t *)destMem, minuend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarMinuend2BUnsignedInt<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)subtrahendMem, (uint16_t *)destMem, minuend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarMinuend4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)subtrahendMem, (uint32_t *)destMem, minuend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarMinuend1BSignedInt<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)subtrahendMem, (int8_t *)destMem, minuend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarMinuend2BSignedInt<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)subtrahendMem, (int16_t *)destMem, minuend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarMinuend4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)subtrahendMem, (int32_t *)destMem, minuend, numElements);
@@ -2759,40 +2759,40 @@ void Tensor::subtract(Tensor minuend, double subtrahend, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = minuend.getDataType();
+    DataType dataType = minuend.getDataType();
     uint64_t numElements = minuend.getTotalNumElements();
     void *minuendMem = minuend.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         subtractScalarSubtrahendHalf<<<gridSize, blockSize, 0, stream>>>((half *)minuendMem, (half *)destMem, subtrahend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarSubtrahend4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)minuendMem, (float *)destMem, subtrahend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarSubtrahend1BUnsignedInt<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)minuendMem, (uint8_t *)destMem, ((uint8_t)subtrahend), numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarSubtrahend2BUnsignedInt<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)minuendMem, (uint16_t *)destMem, ((uint16_t)subtrahend), numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarSubtrahend4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)minuendMem, (uint32_t *)destMem, subtrahend, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarSubtrahend1BSignedInt<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)minuendMem, (int8_t *)destMem, ((int8_t)subtrahend), numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarSubtrahend2BSignedInt<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)minuendMem, (int16_t *)destMem, ((int16_t)subtrahend), numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarSubtrahend4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)minuendMem, (int32_t *)destMem, subtrahend, numElements);
@@ -2812,42 +2812,42 @@ void Tensor::subtract(Tensor minuend, Tensor subtrahend, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = minuend.getDataType();
+    DataType dataType = minuend.getDataType();
     uint64_t numElements = minuend.getTotalNumElements();
     void *minuendMem = minuend.getMemPtr();
     void *subtrahendMem = subtrahend.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         subtractElementwiseHalf<<<gridSize, blockSize, 0, stream>>>(
             (half *)minuendMem, (half *)destMem, (half *)subtrahendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractElementwise4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)minuendMem, (float *)destMem, (float *)subtrahendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         subtractElementwise1BUnsignedInt<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)minuendMem, (uint8_t *)destMem, (uint8_t *)subtrahendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractElementwise2BUnsignedInt<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)minuendMem, (uint16_t *)destMem, (uint16_t *)subtrahendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractElementwise4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)minuendMem, (uint32_t *)destMem, (uint32_t *)subtrahendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         subtractElementwise1BSignedInt<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)minuendMem, (int8_t *)destMem, (int8_t *)subtrahendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractElementwise2BSignedInt<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)minuendMem, (int16_t *)destMem, (int16_t *)subtrahendMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         subtractElementwise4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)minuendMem, (int32_t *)destMem, (int32_t *)subtrahendMem, numElements);
@@ -2864,40 +2864,40 @@ void Tensor::multiply(Tensor multiplicand, double multiplier, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = multiplicand.getDataType();
+    DataType dataType = multiplicand.getDataType();
     uint64_t numElements = multiplicand.getTotalNumElements();
     void *multiplicandMem = multiplicand.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         multiplyScalarMultiplierHalf<<<gridSize, blockSize, 0, stream>>>((half *)multiplicandMem, (half *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarMultiplier4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)multiplicandMem, (float *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarMultiplier1B<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)multiplicandMem, (uint8_t *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarMultiplier2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)multiplicandMem, (uint16_t *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarMultiplier4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)multiplicandMem, (uint32_t *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarMultiplier1B<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)multiplicandMem, (int8_t *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarMultiplier2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)multiplicandMem, (int16_t *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarMultiplier4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)multiplicandMem, (int32_t *)destMem, multiplier, numElements);
@@ -2916,41 +2916,41 @@ void Tensor::multiplyTensorScalar(Tensor tensor, Tensor scalar, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = tensor.getDataType();
+    DataType dataType = tensor.getDataType();
     uint64_t numElements = tensor.getTotalNumElements();
     void *tensorMem = tensor.getMemPtr();
     void *scalarMem = scalar.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         multiplyScalarTensorHalf<<<gridSize, blockSize, 0, stream>>>((half *)tensorMem, (half *)destMem, (half *)scalarMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarTensor4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)tensorMem, (float *)destMem, (float *)scalarMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarTensor1B<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)tensorMem, (uint8_t *)destMem, (uint8_t *)scalarMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarTensor2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)tensorMem, (uint16_t *)destMem, (uint16_t *)scalarMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarTensor4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)tensorMem, (uint32_t *)destMem, (uint32_t *)scalarMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarTensor1B<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)tensorMem, (int8_t *)destMem, (int8_t *)scalarMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarTensor2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)tensorMem, (int16_t *)destMem, (int16_t *)scalarMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarTensor4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)tensorMem, (int32_t *)destMem, (int32_t *)scalarMem, numElements);
@@ -2972,42 +2972,42 @@ void Tensor::multiplyElementwise(Tensor multiplicand, Tensor multiplier, Stream 
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = multiplicand.getDataType();
+    DataType dataType = multiplicand.getDataType();
     uint64_t numElements = multiplicand.getTotalNumElements();
     void *multiplicandMem = multiplicand.getMemPtr();
     void *multiplierMem = multiplier.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         multiplyElementwiseHalf<<<gridSize, blockSize, 0, stream>>>(
             (half *)multiplicandMem, (half *)destMem, (half *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyElementwise4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)multiplicandMem, (float *)destMem, (float *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyElementwise1B<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)multiplicandMem, (uint8_t *)destMem, (uint8_t *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyElementwise2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)multiplicandMem, (uint16_t *)destMem, (uint16_t *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyElementwise4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)multiplicandMem, (uint32_t *)destMem, (uint32_t *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyElementwise1B<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)multiplicandMem, (int8_t *)destMem, (int8_t *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyElementwise2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)multiplicandMem, (int16_t *)destMem, (int16_t *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         multiplyElementwise4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)multiplicandMem, (int32_t *)destMem, (int32_t *)multiplierMem, numElements);
@@ -3064,7 +3064,7 @@ void Tensor::multiply(Tensor multiplicand, Tensor multiplier, Stream stream) {
         THOR_THROW_IF_FALSE(getTotalNumElements() == multiplicand.getTotalNumElements());
         multiplyElementwise(multiplicand, multiplier, stream);
     } else if (multiplicand.getDimensions().size() == 2 && multiplier.getDimensions().size() == 2) {
-        THOR_THROW_IF_FALSE(getDataType() == TensorDescriptor::DataType::FP16 || getDataType() == TensorDescriptor::DataType::FP32);
+        THOR_THROW_IF_FALSE(getDataType() == DataType::FP16 || getDataType() == DataType::FP32);
         THOR_THROW_IF_FALSE(multiplicand.getDimensions()[1] == multiplier.getDimensions()[0]);
         THOR_THROW_IF_FALSE(getDimensions()[0] == multiplicand.getDimensions()[0]);
         if (getDimensions().size() == 1)
@@ -3164,40 +3164,40 @@ void Tensor::divide(Tensor numerator, double denominator, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = numerator.getDataType();
+    DataType dataType = numerator.getDataType();
     uint64_t numElements = numerator.getTotalNumElements();
     void *numeratorMem = numerator.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         divideScalarDenominatorHalf<<<gridSize, blockSize, 0, stream>>>((half *)numeratorMem, (half *)destMem, denominator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarDenominator4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)numeratorMem, (float *)destMem, denominator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarDenominator1B<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)numeratorMem, (uint8_t *)destMem, denominator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarDenominator2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)numeratorMem, (uint16_t *)destMem, denominator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarDenominator4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)numeratorMem, (uint32_t *)destMem, denominator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarDenominator1B<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)numeratorMem, (int8_t *)destMem, denominator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarDenominator2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)numeratorMem, (int16_t *)destMem, denominator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarDenominator4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)numeratorMem, (int32_t *)destMem, denominator, numElements);
@@ -3214,40 +3214,40 @@ void Tensor::divide(double numerator, Tensor denominator, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = denominator.getDataType();
+    DataType dataType = denominator.getDataType();
     uint64_t numElements = denominator.getTotalNumElements();
     void *denominatorMem = denominator.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         divideScalarNumeratorHalf<<<gridSize, blockSize, 0, stream>>>((half *)denominatorMem, (half *)destMem, numerator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarNumerator4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)denominatorMem, (float *)destMem, numerator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarNumerator1B<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)denominatorMem, (uint8_t *)destMem, numerator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarNumerator2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)denominatorMem, (uint16_t *)destMem, numerator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarNumerator4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)denominatorMem, (uint32_t *)destMem, numerator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarNumerator1B<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)denominatorMem, (int8_t *)destMem, numerator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarNumerator2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)denominatorMem, (int16_t *)destMem, numerator, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideScalarNumerator4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)denominatorMem, (int32_t *)destMem, numerator, numElements);
@@ -3267,42 +3267,42 @@ void Tensor::divide(Tensor numerator, Tensor denominator, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = numerator.getDataType();
+    DataType dataType = numerator.getDataType();
     uint64_t numElements = numerator.getTotalNumElements();
     void *numeratorMem = numerator.getMemPtr();
     void *denominatorMem = denominator.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 4095) / 4096);
         divideElementwiseHalf<<<gridSize, blockSize, 0, stream>>>(
             (half *)numeratorMem, (half *)destMem, (half *)denominatorMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideElementwise4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)numeratorMem, (float *)destMem, (float *)denominatorMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideElementwise1B<uint8_t>
             <<<gridSize, blockSize, 0, stream>>>((uint8_t *)numeratorMem, (uint8_t *)destMem, (uint8_t *)denominatorMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideElementwise2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)numeratorMem, (uint16_t *)destMem, (uint16_t *)denominatorMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideElementwise4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)numeratorMem, (uint32_t *)destMem, (uint32_t *)denominatorMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideElementwise1B<int8_t>
             <<<gridSize, blockSize, 0, stream>>>((int8_t *)numeratorMem, (int8_t *)destMem, (int8_t *)denominatorMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideElementwise2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)numeratorMem, (int16_t *)destMem, (int16_t *)denominatorMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         divideElementwise4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)numeratorMem, (int32_t *)destMem, (int32_t *)denominatorMem, numElements);
@@ -3321,9 +3321,9 @@ void Tensor::multiplyAccumulateElementwise(Tensor a, Tensor b, Tensor c, Stream 
     THOR_THROW_IF_FALSE(a.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(b.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(c.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    THOR_THROW_IF_FALSE((a.getDataType() == TensorDescriptor::DataType::FP32 || a.getDataType() == TensorDescriptor::DataType::FP16));
-    THOR_THROW_IF_FALSE((b.getDataType() == TensorDescriptor::DataType::FP32 || b.getDataType() == TensorDescriptor::DataType::FP16));
-    THOR_THROW_IF_FALSE((c.getDataType() == TensorDescriptor::DataType::FP32 || c.getDataType() == TensorDescriptor::DataType::FP16));
+    THOR_THROW_IF_FALSE((a.getDataType() == DataType::FP32 || a.getDataType() == DataType::FP16));
+    THOR_THROW_IF_FALSE((b.getDataType() == DataType::FP32 || b.getDataType() == DataType::FP16));
+    THOR_THROW_IF_FALSE((c.getDataType() == DataType::FP32 || c.getDataType() == DataType::FP16));
     THOR_THROW_IF_FALSE(a.getDataType() == b.getDataType());
     THOR_THROW_IF_FALSE(a.getDataType() == c.getDataType());
     THOR_THROW_IF_FALSE(a.getTotalNumElements() == getTotalNumElements());
@@ -3334,7 +3334,7 @@ void Tensor::multiplyAccumulateElementwise(Tensor a, Tensor b, Tensor c, Stream 
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType destDataType = getDataType();
+    DataType destDataType = getDataType();
     uint64_t numElements = a.getTotalNumElements();
     void *aMem = a.getMemPtr();
     void *bMem = b.getMemPtr();
@@ -3343,57 +3343,57 @@ void Tensor::multiplyAccumulateElementwise(Tensor a, Tensor b, Tensor c, Stream 
 
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
-    if (a.getDataType() == TensorDescriptor::DataType::FP16) {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+    if (a.getDataType() == DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (half *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (float *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             multiplyAccumulateElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>(
                 (uint8_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (uint16_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (uint32_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             multiplyAccumulateElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>(
                 (int8_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (int16_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (int32_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
         } else {
             THOR_UNREACHABLE();
         }
     } else {
-        if (destDataType == TensorDescriptor::DataType::FP16) {
+        if (destDataType == DataType::FP16) {
             multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (half *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        } else if (destDataType == DataType::FP32) {
             multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (float *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        } else if (destDataType == DataType::UINT8) {
             multiplyAccumulateElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>(
                 (uint8_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        } else if (destDataType == DataType::UINT16) {
             multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (uint16_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        } else if (destDataType == DataType::UINT32) {
             multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (uint32_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        } else if (destDataType == DataType::INT8) {
             multiplyAccumulateElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>(
                 (int8_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        } else if (destDataType == DataType::INT16) {
             multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (int16_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
-        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        } else if (destDataType == DataType::INT32) {
             multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (int32_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
         } else {
@@ -3486,33 +3486,33 @@ void Tensor::max(double minValue, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = getDataType();
+    DataType dataType = getDataType();
     uint64_t numElements = getTotalNumElements();
     void *mem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, minValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 1023) / 1024);
         max4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, minValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         max1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)mem, minValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, minValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 1023) / 1024);
         max4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, minValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         max1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)mem, minValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, minValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 1023) / 1024);
         max4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, minValue, numElements);
     } else {
@@ -3604,33 +3604,33 @@ void Tensor::min(double maxValue, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = getDataType();
+    DataType dataType = getDataType();
     uint64_t numElements = getTotalNumElements();
     void *mem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 1023) / 1024);
         min4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         min1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)mem, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 1023) / 1024);
         min4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         min1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)mem, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 1023) / 1024);
         min4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, maxValue, numElements);
     } else {
@@ -3726,33 +3726,33 @@ void Tensor::bound(double minValue, double maxValue, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = getDataType();
+    DataType dataType = getDataType();
     uint64_t numElements = getTotalNumElements();
     void *mem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 2047) / 2048);
         bound2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, minValue, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
         bound4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, minValue, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         bound1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)mem, minValue, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         bound2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, minValue, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         bound4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, minValue, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         bound1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)mem, minValue, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         bound2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, minValue, maxValue, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
         bound4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, minValue, maxValue, numElements);
     } else {
@@ -3856,34 +3856,34 @@ void Tensor::min(Tensor other, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = getDataType();
+    DataType dataType = getDataType();
     uint64_t numElements = getTotalNumElements();
     void *mem = getMemPtr();
     void *otherMem = other.getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, (half *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 1023) / 1024);
         min4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, (float *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         min1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)mem, (uint8_t *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, (uint16_t *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 1023) / 1024);
         min4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, (uint32_t *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         min1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)mem, (int8_t *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, (int16_t *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 1023) / 1024);
         min4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, (int32_t *)otherMem, numElements);
     } else {
@@ -3987,34 +3987,34 @@ void Tensor::max(Tensor other, Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = getDataType();
+    DataType dataType = getDataType();
     uint64_t numElements = getTotalNumElements();
     void *mem = getMemPtr();
     void *otherMem = other.getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, (half *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         dim3 gridSize((numElements + 1023) / 1024);
         max4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, (float *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         max1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)mem, (uint8_t *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, (uint16_t *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         dim3 gridSize((numElements + 1023) / 1024);
         max4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, (uint32_t *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
         max1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)mem, (int8_t *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, (int16_t *)otherMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         dim3 gridSize((numElements + 1023) / 1024);
         max4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, (int32_t *)otherMem, numElements);
     } else {
@@ -4166,41 +4166,41 @@ void Tensor::fillGpuIdentityMatrixOnes(Stream stream) {
     uint32_t gpuNum = getPlacement().getDeviceNum();
     ScopedGpu scopedGpu(gpuNum);
 
-    TensorDescriptor::DataType dataType = getDataType();
-    THOR_THROW_IF_FALSE(dataType != TensorDescriptor::DataType::PACKED_BOOLEAN);
+    DataType dataType = getDataType();
+    THOR_THROW_IF_FALSE(dataType != DataType::PACKED_BOOLEAN);
     uint32_t N = getDimensions()[0];
 
     dim3 blockSize(256);
     dim3 gridSize((N + 255) / 256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
+    if (dataType == DataType::FP16) {
         fillIdentityOnes<half><<<gridSize, blockSize, 0, stream>>>(getMemPtr<half>(), N);
-    } else if (dataType == TensorDescriptor::DataType::BF16) {
+    } else if (dataType == DataType::BF16) {
         fillIdentityOnes<__nv_bfloat16><<<gridSize, blockSize, 0, stream>>>(getMemPtr<__nv_bfloat16>(), N);
-    } else if (dataType == TensorDescriptor::DataType::FP8_E4M3) {
+    } else if (dataType == DataType::FP8_E4M3) {
         fillIdentityOnes<__nv_fp8_e4m3><<<gridSize, blockSize, 0, stream>>>(getMemPtr<__nv_fp8_e4m3>(), N);
-    } else if (dataType == TensorDescriptor::DataType::FP8_E5M2) {
+    } else if (dataType == DataType::FP8_E5M2) {
         fillIdentityOnes<__nv_fp8_e5m2><<<gridSize, blockSize, 0, stream>>>(getMemPtr<__nv_fp8_e5m2>(), N);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
+    } else if (dataType == DataType::FP32) {
         fillIdentityOnes<float><<<gridSize, blockSize, 0, stream>>>(getMemPtr<float>(), N);
-    } else if (dataType == TensorDescriptor::DataType::FP64) {
+    } else if (dataType == DataType::FP64) {
         fillIdentityOnes<double><<<gridSize, blockSize, 0, stream>>>(getMemPtr<double>(), N);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
+    } else if (dataType == DataType::INT8) {
         fillIdentityOnes<int8_t><<<gridSize, blockSize, 0, stream>>>(getMemPtr<int8_t>(), N);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
+    } else if (dataType == DataType::INT16) {
         fillIdentityOnes<int16_t><<<gridSize, blockSize, 0, stream>>>(getMemPtr<int16_t>(), N);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
+    } else if (dataType == DataType::INT32) {
         fillIdentityOnes<int32_t><<<gridSize, blockSize, 0, stream>>>(getMemPtr<int32_t>(), N);
-    } else if (dataType == TensorDescriptor::DataType::INT64) {
+    } else if (dataType == DataType::INT64) {
         fillIdentityOnes<int64_t><<<gridSize, blockSize, 0, stream>>>(getMemPtr<int64_t>(), N);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+    } else if (dataType == DataType::UINT8) {
         fillIdentityOnes<uint8_t><<<gridSize, blockSize, 0, stream>>>(getMemPtr<uint8_t>(), N);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+    } else if (dataType == DataType::UINT16) {
         fillIdentityOnes<uint16_t><<<gridSize, blockSize, 0, stream>>>(getMemPtr<uint16_t>(), N);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+    } else if (dataType == DataType::UINT32) {
         fillIdentityOnes<uint32_t><<<gridSize, blockSize, 0, stream>>>(getMemPtr<uint32_t>(), N);
-    } else if (dataType == TensorDescriptor::DataType::UINT64) {
+    } else if (dataType == DataType::UINT64) {
         fillIdentityOnes<uint64_t><<<gridSize, blockSize, 0, stream>>>(getMemPtr<uint64_t>(), N);
-    } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
+    } else if (dataType == DataType::BOOLEAN) {
         fillIdentityOnes<bool><<<gridSize, blockSize, 0, stream>>>(getMemPtr<bool>(), N);
     } else {
         THOR_UNREACHABLE();

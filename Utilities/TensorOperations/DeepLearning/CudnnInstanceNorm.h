@@ -28,10 +28,10 @@ struct CudnnInstanceNormDescriptor {
     uint64_t channelCount = 0;
     uint64_t spatialElementCount = 0;
 
-    TensorDescriptor::DataType inputDataType = TensorDescriptor::DataType::FP16;
-    TensorDescriptor::DataType outputDataType = TensorDescriptor::DataType::FP16;
-    TensorDescriptor::DataType parameterDataType = TensorDescriptor::DataType::FP32;
-    TensorDescriptor::DataType computeDataType = TensorDescriptor::DataType::FP32;
+    DataType inputDataType = DataType::FP16;
+    DataType outputDataType = DataType::FP16;
+    DataType parameterDataType = DataType::FP32;
+    DataType computeDataType = DataType::FP32;
 
     float epsilon = 1.0e-5f;
     bool training = true;

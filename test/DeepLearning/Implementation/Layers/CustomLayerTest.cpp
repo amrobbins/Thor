@@ -22,7 +22,6 @@
 #include "Helpers/GradientRivet.h"
 
 using namespace ThorImplementation;
-using DataType = TensorDescriptor::DataType;
 
 namespace {
 

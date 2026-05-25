@@ -14,7 +14,6 @@
 namespace ThorImplementation {
 namespace {
 
-using DataType = TensorDescriptor::DataType;
 
 bool isSupportedCountDType(DataType dtype) {
     return dtype == DataType::UINT16 || dtype == DataType::UINT32 || dtype == DataType::UINT64;

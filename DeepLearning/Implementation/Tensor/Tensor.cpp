@@ -370,7 +370,7 @@ void *Tensor::getBaseMemPtr() const {
     return backingMemory->mem;
 }
 
-static uint64_t checkedWholeByteElementSizeBytes(TensorDescriptor::DataType dataType, const char *context) {
+static uint64_t checkedWholeByteElementSizeBytes(DataType dataType, const char *context) {
     const float size = TensorDescriptor::getElementSizeInBytes(dataType);
     if (size < 1.0f || size != std::floor(size)) {
         throw std::runtime_error(std::string(context) + " does not support packed sub-byte element types.");
@@ -378,7 +378,7 @@ static uint64_t checkedWholeByteElementSizeBytes(TensorDescriptor::DataType data
     return static_cast<uint64_t>(size);
 }
 
-static uint8_t *dataPointerWithElementOffset(void *mem, TensorDescriptor::DataType dataType, uint64_t elementOffset) {
+static uint8_t *dataPointerWithElementOffset(void *mem, DataType dataType, uint64_t elementOffset) {
     if (elementOffset == 0) {
         return static_cast<uint8_t *>(mem);
     }
@@ -386,7 +386,7 @@ static uint8_t *dataPointerWithElementOffset(void *mem, TensorDescriptor::DataTy
     return static_cast<uint8_t *>(mem) + elementOffset * elementSizeBytes;
 }
 
-static const uint8_t *dataPointerWithElementOffset(const void *mem, TensorDescriptor::DataType dataType, uint64_t elementOffset) {
+static const uint8_t *dataPointerWithElementOffset(const void *mem, DataType dataType, uint64_t elementOffset) {
     if (elementOffset == 0) {
         return static_cast<const uint8_t *>(mem);
     }
@@ -441,40 +441,40 @@ ElementDataType *Tensor::getMemPtr() {
 
     // Ensure that if the convenience template parameter ElementDataType is used that it agrees with the descriptor
     if (!(is_same<BaseT, void>::value)) {
-        if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
+        if (descriptor.getDataType() == DataType::FP16)
             THOR_THROW_IF_FALSE((is_same<BaseT, half>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
+        else if (descriptor.getDataType() == DataType::FP32)
             THOR_THROW_IF_FALSE((is_same<BaseT, float>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP64)
+        else if (descriptor.getDataType() == DataType::FP64)
             THOR_THROW_IF_FALSE((is_same<BaseT, double>::value));
         else if (is_same<BaseT, char>::value)
-            THOR_THROW_IF_FALSE(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
-                                descriptor.getDataType() == TensorDescriptor::DataType::INT8);
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
+            THOR_THROW_IF_FALSE(descriptor.getDataType() == DataType::UINT8 ||
+                                descriptor.getDataType() == DataType::INT8);
+        else if (descriptor.getDataType() == DataType::INT8)
             THOR_THROW_IF_FALSE((is_same<BaseT, int8_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
+        else if (descriptor.getDataType() == DataType::INT16)
             THOR_THROW_IF_FALSE((is_same<BaseT, int16_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
+        else if (descriptor.getDataType() == DataType::INT32)
             THOR_THROW_IF_FALSE((is_same<BaseT, int32_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT64)
+        else if (descriptor.getDataType() == DataType::INT64)
             THOR_THROW_IF_FALSE((is_same<BaseT, int64_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
+        else if (descriptor.getDataType() == DataType::UINT8)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
+        else if (descriptor.getDataType() == DataType::UINT16)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint16_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
+        else if (descriptor.getDataType() == DataType::UINT32)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint32_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT64)
+        else if (descriptor.getDataType() == DataType::UINT64)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint64_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
+        else if (descriptor.getDataType() == DataType::BOOLEAN)
             THOR_THROW_IF_FALSE((is_same<BaseT, bool>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
+        else if (descriptor.getDataType() == DataType::PACKED_BOOLEAN)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
+        else if (descriptor.getDataType() == DataType::BF16)
             THOR_THROW_IF_FALSE((is_same<BaseT, __nv_bfloat16>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
+        else if (descriptor.getDataType() == DataType::FP8_E4M3)
             THOR_THROW_IF_FALSE((is_same<BaseT, __nv_fp8_e4m3>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
+        else if (descriptor.getDataType() == DataType::FP8_E5M2)
             THOR_THROW_IF_FALSE((is_same<BaseT, __nv_fp8_e5m2>::value));
         else
             THOR_UNREACHABLE();
@@ -492,40 +492,40 @@ const ElementDataType *Tensor::getMemPtr() const {
 
     // Ensure that if the convenience template parameter ElementDataType is used that it agrees with the descriptor
     if (!(is_same<BaseT, void>::value)) {
-        if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
+        if (descriptor.getDataType() == DataType::FP16)
             THOR_THROW_IF_FALSE((is_same<BaseT, half>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
+        else if (descriptor.getDataType() == DataType::FP32)
             THOR_THROW_IF_FALSE((is_same<BaseT, float>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP64)
+        else if (descriptor.getDataType() == DataType::FP64)
             THOR_THROW_IF_FALSE((is_same<BaseT, double>::value));
         else if (is_same<BaseT, char>::value)
-            THOR_THROW_IF_FALSE(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
-                                descriptor.getDataType() == TensorDescriptor::DataType::INT8);
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
+            THOR_THROW_IF_FALSE(descriptor.getDataType() == DataType::UINT8 ||
+                                descriptor.getDataType() == DataType::INT8);
+        else if (descriptor.getDataType() == DataType::INT8)
             THOR_THROW_IF_FALSE((is_same<BaseT, int8_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
+        else if (descriptor.getDataType() == DataType::INT16)
             THOR_THROW_IF_FALSE((is_same<BaseT, int16_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
+        else if (descriptor.getDataType() == DataType::INT32)
             THOR_THROW_IF_FALSE((is_same<BaseT, int32_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT64)
+        else if (descriptor.getDataType() == DataType::INT64)
             THOR_THROW_IF_FALSE((is_same<BaseT, int64_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
+        else if (descriptor.getDataType() == DataType::UINT8)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
+        else if (descriptor.getDataType() == DataType::UINT16)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint16_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
+        else if (descriptor.getDataType() == DataType::UINT32)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint32_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT64)
+        else if (descriptor.getDataType() == DataType::UINT64)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint64_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
+        else if (descriptor.getDataType() == DataType::BOOLEAN)
             THOR_THROW_IF_FALSE((is_same<BaseT, bool>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
+        else if (descriptor.getDataType() == DataType::PACKED_BOOLEAN)
             THOR_THROW_IF_FALSE((is_same<BaseT, uint8_t>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
+        else if (descriptor.getDataType() == DataType::BF16)
             THOR_THROW_IF_FALSE((is_same<BaseT, __nv_bfloat16>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
+        else if (descriptor.getDataType() == DataType::FP8_E4M3)
             THOR_THROW_IF_FALSE((is_same<BaseT, __nv_fp8_e4m3>::value));
-        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
+        else if (descriptor.getDataType() == DataType::FP8_E5M2)
             THOR_THROW_IF_FALSE((is_same<BaseT, __nv_fp8_e5m2>::value));
         else
             THOR_UNREACHABLE();
@@ -540,43 +540,43 @@ ElementDataType Tensor::getElement(vector<unsigned long> dimensionIndex) {
 
 #ifdef THOR_DEBUG
     // This seems like too much overhead to get just one element, so it is explicitly removed for release.
-    if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
+    if (descriptor.getDataType() == DataType::FP16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, half>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
+    else if (descriptor.getDataType() == DataType::FP32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, float>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP64)
+    else if (descriptor.getDataType() == DataType::FP64)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, double>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
+    else if (descriptor.getDataType() == DataType::INT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int8_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
+    else if (descriptor.getDataType() == DataType::INT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int16_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
+    else if (descriptor.getDataType() == DataType::INT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int32_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT64)
+    else if (descriptor.getDataType() == DataType::INT64)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int64_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
+    else if (descriptor.getDataType() == DataType::UINT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
+    else if (descriptor.getDataType() == DataType::UINT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint16_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
+    else if (descriptor.getDataType() == DataType::UINT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint32_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT64)
+    else if (descriptor.getDataType() == DataType::UINT64)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint64_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
+    else if (descriptor.getDataType() == DataType::BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
+    else if (descriptor.getDataType() == DataType::PACKED_BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
+    else if (descriptor.getDataType() == DataType::BF16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_bfloat16>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
+    else if (descriptor.getDataType() == DataType::FP8_E4M3)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e4m3>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
+    else if (descriptor.getDataType() == DataType::FP8_E5M2)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e5m2>::value));
     else
         THOR_UNREACHABLE();
 #endif
 
-    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
+    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != DataType::PACKED_BOOLEAN);
     return *getElementPointer<ElementDataType>(dimensionIndex);
 }
 
@@ -586,43 +586,43 @@ void Tensor::setElement(std::vector<unsigned long> dimensionIndex, const Element
 
 #ifdef THOR_DEBUG
     // This seems like too much overhead to get just one element, so it is explicitly removed for release.
-    if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
+    if (descriptor.getDataType() == DataType::FP16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, half>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
+    else if (descriptor.getDataType() == DataType::FP32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, float>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP64)
+    else if (descriptor.getDataType() == DataType::FP64)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, double>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
+    else if (descriptor.getDataType() == DataType::INT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int8_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
+    else if (descriptor.getDataType() == DataType::INT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int16_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
+    else if (descriptor.getDataType() == DataType::INT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int32_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT64)
+    else if (descriptor.getDataType() == DataType::INT64)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int64_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
+    else if (descriptor.getDataType() == DataType::UINT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
+    else if (descriptor.getDataType() == DataType::UINT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint16_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
+    else if (descriptor.getDataType() == DataType::UINT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint32_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT64)
+    else if (descriptor.getDataType() == DataType::UINT64)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint64_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
+    else if (descriptor.getDataType() == DataType::BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
+    else if (descriptor.getDataType() == DataType::PACKED_BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
+    else if (descriptor.getDataType() == DataType::BF16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_bfloat16>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
+    else if (descriptor.getDataType() == DataType::FP8_E4M3)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e4m3>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
+    else if (descriptor.getDataType() == DataType::FP8_E5M2)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e5m2>::value));
     else
         THOR_UNREACHABLE();
 #endif
 
-    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
+    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != DataType::PACKED_BOOLEAN);
     *getElementPointer<ElementDataType>(dimensionIndex) = value;
 }
 
@@ -632,43 +632,43 @@ ElementDataType *Tensor::getElementPointer(std::vector<unsigned long> dimensionI
 
 #ifdef THOR_DEBUG
     // This seems like too much overhead to get just one element, so it is explicitly removed for release.
-    if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
+    if (descriptor.getDataType() == DataType::FP16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, half>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
+    else if (descriptor.getDataType() == DataType::FP32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, float>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP64)
+    else if (descriptor.getDataType() == DataType::FP64)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, double>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
+    else if (descriptor.getDataType() == DataType::INT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int8_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
+    else if (descriptor.getDataType() == DataType::INT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int16_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
+    else if (descriptor.getDataType() == DataType::INT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int32_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT64)
+    else if (descriptor.getDataType() == DataType::INT64)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, int64_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
+    else if (descriptor.getDataType() == DataType::UINT8)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
+    else if (descriptor.getDataType() == DataType::UINT16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint16_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
+    else if (descriptor.getDataType() == DataType::UINT32)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint32_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT64)
+    else if (descriptor.getDataType() == DataType::UINT64)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint64_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
+    else if (descriptor.getDataType() == DataType::BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, bool>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
+    else if (descriptor.getDataType() == DataType::PACKED_BOOLEAN)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, uint8_t>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
+    else if (descriptor.getDataType() == DataType::BF16)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_bfloat16>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
+    else if (descriptor.getDataType() == DataType::FP8_E4M3)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e4m3>::value));
-    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
+    else if (descriptor.getDataType() == DataType::FP8_E5M2)
         THOR_THROW_IF_FALSE((is_same<ElementDataType, __nv_fp8_e5m2>::value));
     else
         THOR_UNREACHABLE();
 #endif
 
-    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
+    THOR_THROW_IF_FALSE(getDescriptor().getDataType() != DataType::PACKED_BOOLEAN);
     const std::vector<uint64_t> dims = getDimensions();
     const std::vector<uint64_t> strides = getStridesElements();
     THOR_THROW_IF_FALSE(dimensionIndex.size() <= dims.size());
@@ -1210,7 +1210,7 @@ void Tensor::memset(int8_t value, uint64_t numElements) {
     if (numElements == 0) {
         numBytes = getArraySizeInBytes();
     } else {
-        if (getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+        if (getDataType() == DataType::PACKED_BOOLEAN) {
             THOR_THROW_IF_FALSE(numElements % 8 == 0);
             numBytes = numElements / 8;
         } else {
@@ -1268,45 +1268,45 @@ void fillCpuIdentityMatrixOnes(void *data) {
     THOR_THROW_IF_FALSE(args != nullptr);
 
     THOR_THROW_IF_FALSE(args->tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
-    TensorDescriptor::DataType dataType = args->tensor.getDataType();
-    THOR_THROW_IF_FALSE(dataType != TensorDescriptor::DataType::PACKED_BOOLEAN);
+    DataType dataType = args->tensor.getDataType();
+    THOR_THROW_IF_FALSE(dataType != DataType::PACKED_BOOLEAN);
 
-    if (dataType == TensorDescriptor::DataType::FP16)
+    if (dataType == DataType::FP16)
         fillCpuIdentityMatrixOnesTyped<half>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::BF16)
+    else if (dataType == DataType::BF16)
         fillCpuIdentityMatrixOnesTyped<__nv_bfloat16>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::FP8_E4M3)
+    else if (dataType == DataType::FP8_E4M3)
         fillCpuIdentityMatrixOnesTyped<__nv_fp8_e4m3>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::FP8_E5M2)
+    else if (dataType == DataType::FP8_E5M2)
         fillCpuIdentityMatrixOnesTyped<__nv_fp8_e5m2>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::FP32)
+    else if (dataType == DataType::FP32)
         fillCpuIdentityMatrixOnesTyped<float>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::FP64)
+    else if (dataType == DataType::FP64)
         fillCpuIdentityMatrixOnesTyped<double>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::INT8)
+    else if (dataType == DataType::INT8)
         fillCpuIdentityMatrixOnesTyped<int8_t>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::INT16)
+    else if (dataType == DataType::INT16)
         fillCpuIdentityMatrixOnesTyped<int16_t>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::INT32)
+    else if (dataType == DataType::INT32)
         fillCpuIdentityMatrixOnesTyped<int32_t>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::INT64)
+    else if (dataType == DataType::INT64)
         fillCpuIdentityMatrixOnesTyped<int64_t>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::UINT8)
+    else if (dataType == DataType::UINT8)
         fillCpuIdentityMatrixOnesTyped<uint8_t>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::UINT16)
+    else if (dataType == DataType::UINT16)
         fillCpuIdentityMatrixOnesTyped<uint16_t>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::UINT32)
+    else if (dataType == DataType::UINT32)
         fillCpuIdentityMatrixOnesTyped<uint32_t>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::UINT64)
+    else if (dataType == DataType::UINT64)
         fillCpuIdentityMatrixOnesTyped<uint64_t>(args->tensor);
-    else if (dataType == TensorDescriptor::DataType::BOOLEAN)
+    else if (dataType == DataType::BOOLEAN)
         fillCpuIdentityMatrixOnesTyped<bool>(args->tensor);
     else
         THOR_UNREACHABLE();
 }
 
-Tensor Tensor::identityMatrix(uint32_t N, TensorPlacement placement, TensorDescriptor::DataType dataType, Stream stream) {
-    THOR_THROW_IF_FALSE(dataType != TensorDescriptor::DataType::PACKED_BOOLEAN);
+Tensor Tensor::identityMatrix(uint32_t N, TensorPlacement placement, DataType dataType, Stream stream) {
+    THOR_THROW_IF_FALSE(dataType != DataType::PACKED_BOOLEAN);
     Tensor tensor(placement, TensorDescriptor(dataType, {N, N}));
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
@@ -1361,7 +1361,7 @@ void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
             numBytes = getArraySizeInBytes();
         } else {
             // If you need to set part of the last packed boolean to 0, you will need 2 calls to memset, one for zeros one for last value.
-            if (getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+            if (getDataType() == DataType::PACKED_BOOLEAN) {
                 THOR_THROW_IF_FALSE(numElements % 8 == 0);
                 numBytes = numElements / 8;
             } else {
@@ -1495,7 +1495,7 @@ void fillCpuRandom(void *data) {
     THOR_THROW_IF_FALSE(args != nullptr);
 
     THOR_THROW_IF_FALSE(args->tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
-    TensorDescriptor::DataType dataType = args->tensor.getDataType();
+    DataType dataType = args->tensor.getDataType();
 
     Tensor tensor = args->tensor;
     double minValue = args->minValue;
@@ -1506,37 +1506,37 @@ void fillCpuRandom(void *data) {
     const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
     const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
 
-    if (dataType == TensorDescriptor::DataType::FP16)
+    if (dataType == DataType::FP16)
         fillCpuRandomFloating<half>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::BF16)
+    else if (dataType == DataType::BF16)
         fillCpuRandomFloating<__nv_bfloat16>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::FP8_E4M3)
+    else if (dataType == DataType::FP8_E4M3)
         fillCpuRandomFloating<__nv_fp8_e4m3>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::FP8_E5M2)
+    else if (dataType == DataType::FP8_E5M2)
         fillCpuRandomFloating<__nv_fp8_e5m2>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::FP32)
+    else if (dataType == DataType::FP32)
         fillCpuRandomFloating<float>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::FP64)
+    else if (dataType == DataType::FP64)
         fillCpuRandomFloating<double>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::INT8)
+    else if (dataType == DataType::INT8)
         fillCpuRandomIntegral<int8_t, int16_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::INT16)
+    else if (dataType == DataType::INT16)
         fillCpuRandomIntegral<int16_t, int32_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::INT32)
+    else if (dataType == DataType::INT32)
         fillCpuRandomIntegral<int32_t, int64_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::INT64)
+    else if (dataType == DataType::INT64)
         fillCpuRandomIntegral<int64_t, int64_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::UINT8)
+    else if (dataType == DataType::UINT8)
         fillCpuRandomIntegral<uint8_t, uint16_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::UINT16)
+    else if (dataType == DataType::UINT16)
         fillCpuRandomIntegral<uint16_t, uint32_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::UINT32)
+    else if (dataType == DataType::UINT32)
         fillCpuRandomIntegral<uint32_t, uint64_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::UINT64)
+    else if (dataType == DataType::UINT64)
         fillCpuRandomIntegral<uint64_t, uint64_t>(tensor, minValue, maxValue, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::BOOLEAN)
+    else if (dataType == DataType::BOOLEAN)
         fillCpuRandomIntegral<bool, uint16_t>(tensor, 0, 1, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN)
+    else if (dataType == DataType::PACKED_BOOLEAN)
         fillCpuRandomPackedBoolean(tensor);
     else
         THOR_UNREACHABLE();
@@ -1568,49 +1568,49 @@ void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
         std::unique_ptr<HostFunctionArgsBase> args(new FillRandomArgs(*this, minValue, maxValue));
         stream.enqueueHostFunction(fillCpuRandom, std::move(args));
     } else {
-        TensorDescriptor::DataType dataType = getDataType();
-        if (dataType == TensorDescriptor::DataType::FP16) {
+        DataType dataType = getDataType();
+        if (dataType == DataType::FP16) {
             launchGpuFillRandom<half>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::BF16) {
+        } else if (dataType == DataType::BF16) {
             launchGpuFillRandom<__nv_bfloat16>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::FP8_E4M3) {
+        } else if (dataType == DataType::FP8_E4M3) {
             launchGpuFillRandom<__nv_fp8_e4m3>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::FP8_E5M2) {
+        } else if (dataType == DataType::FP8_E5M2) {
             launchGpuFillRandom<__nv_fp8_e5m2>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::FP32) {
+        } else if (dataType == DataType::FP32) {
             launchGpuFillRandom<float>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::FP64) {
+        } else if (dataType == DataType::FP64) {
             launchGpuFillRandom<double>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::INT8) {
+        } else if (dataType == DataType::INT8) {
             // Since for int I am rounding down for integer types, adding just under 1.0 to the continuous distribution gives
             // the range [minValue, maxValue] where minValue and maxValue have equal likelihood of being generated to all other values.
             // Note that converting to an integer truncates and so rounds toward 0.
             adjustSignedIntegralRandomRange(minValue, maxValue);
             launchGpuFillRandom<int8_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::INT16) {
+        } else if (dataType == DataType::INT16) {
             adjustSignedIntegralRandomRange(minValue, maxValue);
             launchGpuFillRandom<int16_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::INT32) {
+        } else if (dataType == DataType::INT32) {
             adjustSignedIntegralRandomRange(minValue, maxValue);
             launchGpuFillRandom<int32_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::INT64) {
+        } else if (dataType == DataType::INT64) {
             adjustSignedIntegralRandomRange(minValue, maxValue);
             launchGpuFillRandom<int64_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        } else if (dataType == DataType::UINT8) {
             adjustUnsignedIntegralRandomRange(maxValue);
             launchGpuFillRandom<uint8_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        } else if (dataType == DataType::UINT16) {
             adjustUnsignedIntegralRandomRange(maxValue);
             launchGpuFillRandom<uint16_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        } else if (dataType == DataType::UINT32) {
             adjustUnsignedIntegralRandomRange(maxValue);
             launchGpuFillRandom<uint32_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::UINT64) {
+        } else if (dataType == DataType::UINT64) {
             adjustUnsignedIntegralRandomRange(maxValue);
             launchGpuFillRandom<uint64_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
-        } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
+        } else if (dataType == DataType::BOOLEAN) {
             launchGpuFillRandom<bool>(getMemPtr(), getTotalNumElements(), 0, 1.999999, stream);
-        } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+        } else if (dataType == DataType::PACKED_BOOLEAN) {
             launchGpuFillRandom<uint8_t>(getMemPtr(), (getTotalNumElements() + 7) / 8, 0, 255.999999, stream);
         } else {
             THOR_UNREACHABLE();
@@ -1654,39 +1654,39 @@ void fillValue(void *params) {
     const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
     const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
 
-    TensorDescriptor::DataType dataType = cpuFillParams->tensor.getDataType();
+    DataType dataType = cpuFillParams->tensor.getDataType();
 
-    if (dataType == TensorDescriptor::DataType::FP16)
+    if (dataType == DataType::FP16)
         fillValueTyped<half>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::BF16)
+    else if (dataType == DataType::BF16)
         fillValueTyped<__nv_bfloat16>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::FP8_E4M3)
+    else if (dataType == DataType::FP8_E4M3)
         fillValueTyped<__nv_fp8_e4m3>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::FP8_E5M2)
+    else if (dataType == DataType::FP8_E5M2)
         fillValueTyped<__nv_fp8_e5m2>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::FP32)
+    else if (dataType == DataType::FP32)
         fillValueTyped<float>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::FP64)
+    else if (dataType == DataType::FP64)
         fillValueTyped<double>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::INT8)
+    else if (dataType == DataType::INT8)
         fillValueTyped<int8_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::INT16)
+    else if (dataType == DataType::INT16)
         fillValueTyped<int16_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::INT32)
+    else if (dataType == DataType::INT32)
         fillValueTyped<int32_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::INT64)
+    else if (dataType == DataType::INT64)
         fillValueTyped<int64_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::UINT8)
+    else if (dataType == DataType::UINT8)
         fillValueTyped<uint8_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::UINT16)
+    else if (dataType == DataType::UINT16)
         fillValueTyped<uint16_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::UINT32)
+    else if (dataType == DataType::UINT32)
         fillValueTyped<uint32_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::UINT64)
+    else if (dataType == DataType::UINT64)
         fillValueTyped<uint64_t>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::BOOLEAN)
+    else if (dataType == DataType::BOOLEAN)
         fillValueTyped<bool>(cpuFillParams->tensor, cpuFillParams->value, numProcs, elementsPerThread);
-    else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+    else if (dataType == DataType::PACKED_BOOLEAN) {
         uint8_t *mem = cpuFillParams->tensor.getMemPtr<uint8_t>();
         uint8_t value = cpuFillParams->value ? 0b11111111 : 0;
         numElements = (numElements + 7) / 8;
@@ -1709,58 +1709,58 @@ void fillValue(void *params) {
 
 // Note: value will be cast to the type of the tensor elements
 void Tensor::fill(double value, Stream stream) {
-    TensorDescriptor::DataType dataType = getDataType();
+    DataType dataType = getDataType();
     if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
         std::unique_ptr<HostFunctionArgsBase> args(new CpuFillParams(value, *this));
         stream.enqueueHostFunction(fillValue, std::move(args));
     } else {
-        if (dataType == TensorDescriptor::DataType::FP16) {
+        if (dataType == DataType::FP16) {
             launchFillValueGpuKernel<half>(
                 castCpuTensorValue<half>(value), (half *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::BF16) {
+        } else if (dataType == DataType::BF16) {
             launchFillValueGpuKernel<__nv_bfloat16>(castCpuTensorValue<__nv_bfloat16>(value),
                                                     (__nv_bfloat16 *)getMemPtr(),
                                                     getTotalNumElements(),
                                                     getPlacement().getDeviceNum(),
                                                     stream);
-        } else if (dataType == TensorDescriptor::DataType::FP8_E4M3) {
+        } else if (dataType == DataType::FP8_E4M3) {
             launchFillValueGpuKernel<__nv_fp8_e4m3>(castCpuTensorValue<__nv_fp8_e4m3>(value),
                                                     (__nv_fp8_e4m3 *)getMemPtr(),
                                                     getTotalNumElements(),
                                                     getPlacement().getDeviceNum(),
                                                     stream);
-        } else if (dataType == TensorDescriptor::DataType::FP8_E5M2) {
+        } else if (dataType == DataType::FP8_E5M2) {
             launchFillValueGpuKernel<__nv_fp8_e5m2>(castCpuTensorValue<__nv_fp8_e5m2>(value),
                                                     (__nv_fp8_e5m2 *)getMemPtr(),
                                                     getTotalNumElements(),
                                                     getPlacement().getDeviceNum(),
                                                     stream);
-        } else if (dataType == TensorDescriptor::DataType::FP32) {
+        } else if (dataType == DataType::FP32) {
             launchFillValueGpuKernel<float>(value, (float *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::FP64) {
+        } else if (dataType == DataType::FP64) {
             launchFillValueGpuKernel<double>(value, (double *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        } else if (dataType == DataType::UINT8) {
             launchFillValueGpuKernel<uint8_t>(value, (uint8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        } else if (dataType == DataType::UINT16) {
             launchFillValueGpuKernel<uint16_t>(
                 value, (uint16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        } else if (dataType == DataType::UINT32) {
             launchFillValueGpuKernel<uint32_t>(
                 value, (uint32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::UINT64) {
+        } else if (dataType == DataType::UINT64) {
             launchFillValueGpuKernel<uint64_t>(
                 value, (uint64_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::INT8) {
+        } else if (dataType == DataType::INT8) {
             launchFillValueGpuKernel<int8_t>(value, (int8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::INT16) {
+        } else if (dataType == DataType::INT16) {
             launchFillValueGpuKernel<int16_t>(value, (int16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::INT32) {
+        } else if (dataType == DataType::INT32) {
             launchFillValueGpuKernel<int32_t>(value, (int32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::INT64) {
+        } else if (dataType == DataType::INT64) {
             launchFillValueGpuKernel<int64_t>(value, (int64_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
+        } else if (dataType == DataType::BOOLEAN) {
             launchFillValueGpuKernel<bool>(value, (bool *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+        } else if (dataType == DataType::PACKED_BOOLEAN) {
             uint8_t packedValue = 0;
             if (value)
                 packedValue = 0b11111111;
@@ -1782,9 +1782,9 @@ Tensor Tensor::transposeMatrix(Stream stream) {
     transposedDimensions.push_back(dimensions[0]);
     Tensor transposedTensor = clone(transposedDimensions);
 
-    if (getDataType() == TensorDescriptor::DataType::FP16) {
+    if (getDataType() == DataType::FP16) {
         matrixTranspose((half *)transposedTensor.getMemPtr(), (half *)getMemPtr(), dimensions[0], dimensions[1], stream);
-    } else if (getDataType() == TensorDescriptor::DataType::FP32) {
+    } else if (getDataType() == DataType::FP32) {
         matrixTranspose((float *)transposedTensor.getMemPtr(), (float *)getMemPtr(), dimensions[0], dimensions[1], stream);
     } else {
         THOR_UNREACHABLE();  // TODO
@@ -1800,9 +1800,9 @@ Tensor Tensor::transposeMatrix(Stream stream) {
 //     THOR_THROW_IF_FALSE(dimensions.size() == 2);
 //     THOR_THROW_IF_FALSE(dimensions[0] == dimensions[1]);
 //
-//     if (getDataType() == TensorDescriptor::DataType::FP16) {
+//     if (getDataType() == DataType::FP16) {
 //         matrixTransposeSquare((half *)getMemPtr(), (half *)getMemPtr(), dimensions[0], stream);
-//     } else if (getDataType() == TensorDescriptor::DataType::FP32) {
+//     } else if (getDataType() == DataType::FP32) {
 //         matrixTransposeSquare((float *)getMemPtr(), (float *)getMemPtr(), dimensions[0], stream);
 //     } else {
 //         THOR_UNREACHABLE();  // TODO

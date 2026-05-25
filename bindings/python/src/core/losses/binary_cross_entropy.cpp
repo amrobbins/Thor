@@ -11,7 +11,7 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 
 void bind_binary_cross_entropy(nb::module_ &losses) {
     auto binary_cross_entropy = nb::class_<BinaryCrossEntropy, Loss>(losses, "BinaryCrossEntropy");
