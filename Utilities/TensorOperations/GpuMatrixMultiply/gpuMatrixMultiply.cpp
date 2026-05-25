@@ -310,9 +310,8 @@
 //                     // splitK is not enabled
 //                     for (int l = 0; (l < (1 + splitK_trial)) && (AlgoCount < AlgoCombinations); l++) {
 //                         /* Setup attribute of the algo to run */
-//                         cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tileA[tileIdx], sizeof(tileA[tileIdx]));
-//                         int splitK_val = 0;
-//                         int redScheme = CUBLASLT_REDUCTION_SCHEME_NONE;
+//                         cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tileA[tileIdx],
+//                         sizeof(tileA[tileIdx])); int splitK_val = 0; int redScheme = CUBLASLT_REDUCTION_SCHEME_NONE;
 //                         cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &splitK_val, sizeof(splitK_val));
 //                         cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, &k, sizeof(k));
 //                         cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &redScheme, sizeof(int));
