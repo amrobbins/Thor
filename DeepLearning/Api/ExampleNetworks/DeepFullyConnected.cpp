@@ -15,7 +15,7 @@ Network buildDeepFullyConnected() {
                                    .network(deepFullyConnected)
                                    .name("examples")
                                    .dimensions({3, 224, 224})
-                                   .dataType(Tensor::DataType::UINT8)
+                                   .dataType(DataType::UINT8)
                                    .build();
 
     Tensor latestOutputTensor;
@@ -63,7 +63,7 @@ Network buildDeepFullyConnected() {
                               .network(deepFullyConnected)
                               .name("labels")
                               .dimensions({1000})
-                              .dataType(Tensor::DataType::FP16)
+                              .dataType(DataType::FP16)
                               .build()
                               .getFeatureOutput().value();
 
@@ -80,13 +80,13 @@ Network buildDeepFullyConnected() {
                                     .network(deepFullyConnected)
                                     .name("predictions")
                                     .inputTensor(lossLayer.getPredictions())
-                                    .dataType(Tensor::DataType::FP32)
+                                    .dataType(DataType::FP32)
                                     .build();
     NetworkOutput loss = NetworkOutput::Builder()
                              .network(deepFullyConnected)
                              .name("loss")
                              .inputTensor(lossLayer.getLoss())
-                             .dataType(Tensor::DataType::FP32)
+                             .dataType(DataType::FP32)
                              .build();
 
     return deepFullyConnected;

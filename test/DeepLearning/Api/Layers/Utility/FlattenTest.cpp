@@ -19,7 +19,7 @@ TEST(UtilityApiLayers, FlattenBuilds) {
     for (int i = 0; i < numInputDimensions; ++i)
         inputDimensions.push_back(1 + (rand() % 1000));
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 
     Tensor featureInput(dataType, inputDimensions);
     uint32_t numOutputDimensions = (rand() % (numInputDimensions - 1)) + 1;
@@ -84,8 +84,8 @@ TEST(UtilityApiLayers, FlattenSerializeDeserialize) {
     Network initialNetwork("initialNetwork");
     Stream stream(0);
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-    string dataTypeString = dataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+    string dataTypeString = dataType == DataType::FP32 ? "fp32" : "fp16";
 
     uint32_t numDimensions = 2 + (rand() % 3);
     uint32_t numFlattenedDimensions = 1 + (rand() % (numDimensions - 1));

@@ -24,7 +24,7 @@ TEST(Activations, HardSigmoidBuilds) {
     for (int i = 0; i < numDimensions; ++i)
         dimensions.push_back(1 + (rand() % 1000));
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 
     Tensor featureInput(dataType, dimensions);
     HardSigmoid::Builder hardSigmoidBuilder;
@@ -68,7 +68,7 @@ TEST(Activations, HardSigmoidSerializeDeserialize) {
     srand(time(nullptr));
 
     Network initialNetwork("initialNetwork");
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+    DataType dataType = rand() % 2 ? DataType::FP16 : DataType::FP32;
     vector<uint64_t> inputDimensions;
     uint32_t numDimensions = 1 + (rand() % 5);
     for (uint32_t i = 0; i < numDimensions; ++i)
@@ -142,7 +142,7 @@ TEST(Activations, HardSigmoidSerializeDeserialize) {
     const auto &input = hardSigmoidJ.at("feature_input");
     ASSERT_TRUE(input.is_object());
     ASSERT_TRUE(input.at("data_type").is_string());
-    string dataTypeString = dataType == Tensor::DataType::FP16 ? "fp16" : "fp32";
+    string dataTypeString = dataType == DataType::FP16 ? "fp16" : "fp32";
     EXPECT_EQ(input.at("data_type").get<string>(), dataTypeString);
     ASSERT_TRUE(input.at("dimensions").is_array());
     ASSERT_EQ(input.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
@@ -209,7 +209,7 @@ TEST(Activations, HardSigmoidRegistered) {
     srand(time(nullptr));
 
     Network initialNetwork("initialNetwork");
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+    DataType dataType = rand() % 2 ? DataType::FP16 : DataType::FP32;
     vector<uint64_t> inputDimensions;
     uint32_t numDimensions = 1 + (rand() % 5);
     for (uint32_t i = 0; i < numDimensions; ++i)

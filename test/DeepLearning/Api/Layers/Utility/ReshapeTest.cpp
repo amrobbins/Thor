@@ -17,7 +17,7 @@ TEST(UtilityApiLayers, ReshapeBuilds) {
     vector<uint64_t> inputDimensions = {2, 6, 4, 1};
     vector<uint64_t> outputDimensions = {8, 1, 6};
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 
     Tensor featureInput(dataType, inputDimensions);
     Reshape reshape = Reshape::Builder().network(network).featureInput(featureInput).newDimensions(outputDimensions).build();
@@ -65,8 +65,8 @@ TEST(UtilityApiLayers, ReshapeSerializeDeserialize) {
     Network initialNetwork("initialNetwork");
     Stream stream(0);
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-    string dataTypeString = dataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+    string dataTypeString = dataType == DataType::FP32 ? "fp32" : "fp16";
 
     uint32_t numDimensions = 2 + (rand() % 3);
     uint32_t numReshapedDimensions = 1 + (rand() % (numDimensions - 1));

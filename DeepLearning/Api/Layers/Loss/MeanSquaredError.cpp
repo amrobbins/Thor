@@ -44,7 +44,7 @@ void MeanSquaredError::deserialize(const json &j, Network *network) {
 
     MeanSquaredError meanSquaredError;
     meanSquaredError.lossShape = j.at("loss_shape").get<LossShape>();
-    meanSquaredError.lossDataType = j.at("loss_data_type").get<Tensor::DataType>();
+    meanSquaredError.lossDataType = j.at("loss_data_type").get<DataType>();
 
     uint64_t originalTensorId;
     originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();

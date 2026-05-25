@@ -16,28 +16,28 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-bool Embedding::isSupportedIndexDataType(Tensor::DataType dataType) {
+bool Embedding::isSupportedIndexDataType(DataType dataType) {
     switch (dataType) {
-        case Tensor::DataType::UINT32:
-        case Tensor::DataType::UINT64:
+        case DataType::UINT32:
+        case DataType::UINT64:
             return true;
         default:
             return false;
     }
 }
 
-bool Embedding::isSupportedWeightsDataType(Tensor::DataType dataType) {
+bool Embedding::isSupportedWeightsDataType(DataType dataType) {
     switch (dataType) {
-        case Tensor::DataType::FP16:
-        case Tensor::DataType::BF16:
-        case Tensor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
     }
 }
 
-std::string Embedding::dataTypeName(Tensor::DataType dataType) { return ThorImplementation::TensorDescriptor::getElementTypeName(dataType); }
+std::string Embedding::dataTypeName(DataType dataType) { return ThorImplementation::TensorDescriptor::getElementTypeName(dataType); }
 
 void Embedding::validateIndexTensor(const Tensor& tensor, const std::string& what) {
     if (!tensor.isInitialized()) {
@@ -56,7 +56,7 @@ Embedding Embedding::Builder::build() {
     if (!_sparseGradients.has_value())
         _sparseGradients = true;
     if (!_weightsDataType.has_value())
-        _weightsDataType = Tensor::DataType::FP32;
+        _weightsDataType = DataType::FP32;
     if (_weightsInitializer == nullptr)
         _weightsInitializer = Glorot::Builder().build();
 
@@ -119,7 +119,7 @@ void Embedding::Builder::verifyConfig() const {
         throw std::invalid_argument("Embedding paddingIndex must be less than vocabularySize.");
     }
 
-    const Tensor::DataType inputDataType = _featureInputs.front().getDataType();
+    const DataType inputDataType = _featureInputs.front().getDataType();
     const std::vector<uint64_t> inputDimensions = _featureInputs.front().getDimensions();
     for (uint32_t i = 0; i < _featureInputs.size(); ++i) {
         validateIndexTensor(_featureInputs[i], "featureInput " + std::to_string(i));
@@ -204,7 +204,7 @@ void Embedding::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     Embedding embedding;
     embedding.vocabularySize = j.at("vocabulary_size").get<uint64_t>();
     embedding.embeddingDim = j.at("embedding_dim").get<uint64_t>();
-    embedding.weightsDataType = j.at("weights_data_type").get<Tensor::DataType>();
+    embedding.weightsDataType = j.at("weights_data_type").get<DataType>();
     embedding.sparseGradients = j.value("sparse_gradients", true);
     if (j.contains("padding_index") && !j.at("padding_index").is_null()) {
         embedding.paddingIndex = j.at("padding_index").get<uint64_t>();

@@ -10,14 +10,14 @@ using json = nlohmann::json;
 
 TEST(UtilityApiLayers, RMSNormDefaultsToLastFeatureDimension) {
     Network network("rms_norm_default_shape");
-    Tensor input(Tensor::DataType::FP16, {4, 8, 16});
+    Tensor input(DataType::FP16, {4, 8, 16});
 
     RMSNorm layer = RMSNorm::Builder().network(network).featureInput(input).build();
 
     ASSERT_TRUE(layer.isInitialized());
     ASSERT_EQ(layer.getNormalizedShape(), vector<uint64_t>({16}));
     ASSERT_DOUBLE_EQ(layer.getEpsilon(), 1.0e-5);
-    ASSERT_EQ(layer.getParameterDataType(), Tensor::DataType::FP32);
+    ASSERT_EQ(layer.getParameterDataType(), DataType::FP32);
 
     optional<Tensor> output = layer.getFeatureOutput();
     ASSERT_TRUE(output.has_value());
@@ -27,7 +27,7 @@ TEST(UtilityApiLayers, RMSNormDefaultsToLastFeatureDimension) {
 
 TEST(UtilityApiLayers, RMSNormAcceptsExplicitTrailingNormalizedShape) {
     Network network("rms_norm_explicit_shape");
-    Tensor input(Tensor::DataType::BF16, {2, 3, 4});
+    Tensor input(DataType::BF16, {2, 3, 4});
 
     RMSNorm layer = RMSNorm::Builder().network(network).featureInput(input).normalizedShape({3, 4}).epsilon(1.0e-4).build();
 
@@ -38,7 +38,7 @@ TEST(UtilityApiLayers, RMSNormAcceptsExplicitTrailingNormalizedShape) {
 
 TEST(UtilityApiLayers, RMSNormRejectsBadNormalizedShape) {
     Network network("rms_norm_bad_shape");
-    Tensor input(Tensor::DataType::FP16, {2, 3, 4});
+    Tensor input(DataType::FP16, {2, 3, 4});
 
     EXPECT_THROW(RMSNorm::Builder().network(network).featureInput(input).normalizedShape({4, 3}).build(), std::invalid_argument);
     EXPECT_THROW(RMSNorm::Builder().network(network).featureInput(input).normalizedShape({0}).build(), std::invalid_argument);
@@ -47,17 +47,17 @@ TEST(UtilityApiLayers, RMSNormRejectsBadNormalizedShape) {
 
 TEST(UtilityApiLayers, RMSNormRejectsUnsupportedDtypes) {
     Network network("rms_norm_bad_dtype");
-    Tensor intInput(Tensor::DataType::INT32, {2, 4});
+    Tensor intInput(DataType::INT32, {2, 4});
     EXPECT_THROW(RMSNorm::Builder().network(network).featureInput(intInput).build(), std::invalid_argument);
 
-    Tensor fpInput(Tensor::DataType::FP16, {2, 4});
-    EXPECT_THROW(RMSNorm::Builder().network(network).featureInput(fpInput).parameterDataType(Tensor::DataType::FP16).build(),
+    Tensor fpInput(DataType::FP16, {2, 4});
+    EXPECT_THROW(RMSNorm::Builder().network(network).featureInput(fpInput).parameterDataType(DataType::FP16).build(),
                  std::invalid_argument);
 }
 
 TEST(UtilityApiLayers, RMSNormArchitectureJsonContainsWeightsOnlyAndNullableEpilogue) {
     Network network("rms_norm_architecture");
-    Tensor input(Tensor::DataType::FP32, {8, 32});
+    Tensor input(DataType::FP32, {8, 32});
 
     RMSNorm layer = RMSNorm::Builder().network(network).featureInput(input).normalizedShape({32}).build();
     json arch = layer.architectureJson();
@@ -75,7 +75,7 @@ TEST(UtilityApiLayers, RMSNormArchitectureJsonContainsWeightsOnlyAndNullableEpil
 
 TEST(UtilityApiLayers, RMSNormAcceptsSwishEpilogueAndSerializesExpression) {
     Network network("rms_norm_swish_epilogue");
-    Tensor input(Tensor::DataType::BF16, {8, 32});
+    Tensor input(DataType::BF16, {8, 32});
     Swish swish;
 
     RMSNorm layer = RMSNorm::Builder()
@@ -85,7 +85,7 @@ TEST(UtilityApiLayers, RMSNormAcceptsSwishEpilogueAndSerializesExpression) {
                         .epilogue(swish.toExpression(RMSNorm::epilogueInput()))
                         .build();
 
-    EXPECT_EQ(layer.getParameterDataType(), Tensor::DataType::FP32);
+    EXPECT_EQ(layer.getParameterDataType(), DataType::FP32);
     json arch = layer.architectureJson();
     ASSERT_TRUE(arch.contains("epilogue"));
     EXPECT_FALSE(arch.at("epilogue").is_null());
@@ -94,29 +94,29 @@ TEST(UtilityApiLayers, RMSNormAcceptsSwishEpilogueAndSerializesExpression) {
 
 TEST(UtilityApiLayers, RMSNormAcceptsBf16WeightsOnlyForSwishEpilogueFusionCandidate) {
     Network network("rms_norm_swish_epilogue_bf16_weights");
-    Tensor input(Tensor::DataType::BF16, {8, 32});
+    Tensor input(DataType::BF16, {8, 32});
     Swish swish;
 
     RMSNorm layer = RMSNorm::Builder()
                         .network(network)
                         .featureInput(input)
                         .normalizedShape({32})
-                        .parameterDataType(Tensor::DataType::BF16)
+                        .parameterDataType(DataType::BF16)
                         .epilogue(swish)
                         .build();
 
-    EXPECT_EQ(layer.getParameterDataType(), Tensor::DataType::BF16);
+    EXPECT_EQ(layer.getParameterDataType(), DataType::BF16);
 
     Network badNetwork("rms_norm_bf16_weights_without_swish_epilogue");
-    EXPECT_THROW(RMSNorm::Builder().network(badNetwork).featureInput(input).parameterDataType(Tensor::DataType::BF16).build(),
+    EXPECT_THROW(RMSNorm::Builder().network(badNetwork).featureInput(input).parameterDataType(DataType::BF16).build(),
                  std::invalid_argument);
 
     Network badInputNetwork("rms_norm_swish_bf16_weights_bad_input");
-    Tensor fp16Input(Tensor::DataType::FP16, {8, 32});
+    Tensor fp16Input(DataType::FP16, {8, 32});
     EXPECT_THROW(RMSNorm::Builder()
                      .network(badInputNetwork)
                      .featureInput(fp16Input)
-                     .parameterDataType(Tensor::DataType::BF16)
+                     .parameterDataType(DataType::BF16)
                      .epilogue(swish)
                      .build(),
                  std::invalid_argument);

@@ -18,10 +18,10 @@ TEST(UtilityApiLayers, TypeConverterBuilds) {
     Network network("testNetwork");
 
     vector<uint64_t> dimensions = {2, 6, 4, 1};
-    Tensor::DataType inputDataType = (Tensor::DataType)((int)Tensor::DataType::FP16 + (rand() % 13));
-    Tensor::DataType outputDataType = (Tensor::DataType)((int)Tensor::DataType::FP16 + (rand() % 13));
+    DataType inputDataType = (DataType)((int)DataType::FP16 + (rand() % 13));
+    DataType outputDataType = (DataType)((int)DataType::FP16 + (rand() % 13));
     while (outputDataType == inputDataType)
-        outputDataType = (Tensor::DataType)((int)Tensor::DataType::FP16 + (rand() % 13));
+        outputDataType = (DataType)((int)DataType::FP16 + (rand() % 13));
 
     Tensor featureInput(inputDataType, dimensions);
     TypeConverter typeConverter = TypeConverter::Builder().network(network).featureInput(featureInput).newDataType(outputDataType).build();
@@ -69,10 +69,10 @@ TEST(UtilityApiLayers, TypeConverterSerializeDeserialize) {
     Network initialNetwork("initialNetwork");
     Stream stream(0);
 
-    Tensor::DataType fromDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-    Tensor::DataType toDataType = fromDataType == Tensor::DataType::FP32 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
-    string fromDataTypeString = fromDataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
-    string toDataTypeString = toDataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
+    DataType fromDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+    DataType toDataType = fromDataType == DataType::FP32 ? DataType::FP16 : DataType::FP32;
+    string fromDataTypeString = fromDataType == DataType::FP32 ? "fp32" : "fp16";
+    string toDataTypeString = toDataType == DataType::FP32 ? "fp32" : "fp16";
 
     uint32_t numDimensions = 1 + (rand() % 4);
 

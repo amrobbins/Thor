@@ -53,8 +53,8 @@ class ScaledDotProductAttention : public CustomLayer {
                               std::optional<Tensor> fp8ScaleOInput,
                               std::optional<Tensor> fp8AmaxSInput,
                               std::optional<Tensor> fp8AmaxOInput,
-                              Tensor::DataType computeDataType,
-                              Tensor::DataType outputDataType)
+                              DataType computeDataType,
+                              DataType outputDataType)
         : CustomLayer(std::move(expression), std::move(inputNames), std::move(outputNames), inputInterfaces, outputInterfaces, {}, false),
           tensorLayout(tensorLayout),
           maskKind(maskKind),
@@ -126,8 +126,8 @@ class ScaledDotProductAttention : public CustomLayer {
     std::optional<Tensor> getFp8ScaleOInput() const { return fp8ScaleOInput; }
     std::optional<Tensor> getFp8AmaxSInput() const { return fp8AmaxSInput; }
     std::optional<Tensor> getFp8AmaxOInput() const { return fp8AmaxOInput; }
-    Tensor::DataType getComputeDataType() const { return computeDataType; }
-    Tensor::DataType getOutputDataType() const { return outputDataType; }
+    DataType getComputeDataType() const { return computeDataType; }
+    DataType getOutputDataType() const { return outputDataType; }
 
    private:
     ThorImplementation::AttentionTensorLayout tensorLayout;
@@ -151,8 +151,8 @@ class ScaledDotProductAttention : public CustomLayer {
     std::optional<Tensor> fp8ScaleOInput;
     std::optional<Tensor> fp8AmaxSInput;
     std::optional<Tensor> fp8AmaxOInput;
-    Tensor::DataType computeDataType;
-    Tensor::DataType outputDataType;
+    DataType computeDataType;
+    DataType outputDataType;
 };
 
 class ScaledDotProductAttention::Builder {
@@ -351,13 +351,13 @@ class ScaledDotProductAttention::Builder {
         return dropoutProbability(probability).dropoutSeed(seed).dropoutOffset(offset);
     }
 
-    virtual ScaledDotProductAttention::Builder& computeDataType(Tensor::DataType value) {
+    virtual ScaledDotProductAttention::Builder& computeDataType(DataType value) {
         THOR_THROW_IF_FALSE(!this->_computeDataType.has_value());
         this->_computeDataType = value;
         return *this;
     }
 
-    virtual ScaledDotProductAttention::Builder& outputDataType(Tensor::DataType value) {
+    virtual ScaledDotProductAttention::Builder& outputDataType(DataType value) {
         THOR_THROW_IF_FALSE(!this->_outputDataType.has_value());
         this->_outputDataType = value;
         return *this;
@@ -392,8 +392,8 @@ class ScaledDotProductAttention::Builder {
     std::optional<float> _dropoutProbability;
     std::optional<int64_t> _dropoutSeed;
     std::optional<int64_t> _dropoutOffset;
-    std::optional<Tensor::DataType> _computeDataType;
-    std::optional<Tensor::DataType> _outputDataType;
+    std::optional<DataType> _computeDataType;
+    std::optional<DataType> _outputDataType;
 };
 
 }  // namespace Thor

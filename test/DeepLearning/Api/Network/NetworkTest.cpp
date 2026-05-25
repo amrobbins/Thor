@@ -31,7 +31,7 @@
 //     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();
 //
 //     NetworkInput networkInput =
-//         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
+//         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(DataType::FP16).build();
 //     latestOutputTensor = networkInput.getFeatureOutput();
 //
 //     FullyConnected fullyConnected = FullyConnected::Builder()
@@ -48,10 +48,10 @@
 //     std::shared_ptr<Sgd> sgd =
 //         Sgd::Builder().initialLearningRate(0.01).decay(0).momentum(0).useNesterovMomentum(true).network(network).build();
 //
-//     NetworkInput label = NetworkInput::Builder().network(network).name("label").dimensions({1}).dataType(Tensor::DataType::FP16).build();
+//     NetworkInput label = NetworkInput::Builder().network(network).name("label").dimensions({1}).dataType(DataType::FP16).build();
 //     MeanSquaredError meanSquaredError = MeanSquaredError::Builder()
 //                                             .network(network)
-//                                             .lossDataType(Tensor::DataType::FP16)
+//                                             .lossDataType(DataType::FP16)
 //                                             .reportsRawLoss()
 //                                             .predictions(fullyConnected.getFeatureOutput())
 //                                             .labels(label.getFeatureOutput())
@@ -61,7 +61,7 @@
 //                                       .network(network)
 //                                       .name("output")
 //                                       .inputTensor(meanSquaredError.getLoss())
-//                                       .dataType(Tensor::DataType::FP16)
+//                                       .dataType(DataType::FP16)
 //                                       .build();
 //     Tensor networkOutputTensor = networkOutput.getFeatureOutput();
 //
@@ -150,7 +150,7 @@
 //     constexpr uint64_t NUM_BIASES = NUM_OUTPUTS;
 //
 //     NetworkInput networkInput =
-//         NetworkInput::Builder().network(network).name("input").dimensions({NUM_INPUTS}).dataType(Tensor::DataType::FP16).build();
+//         NetworkInput::Builder().network(network).name("input").dimensions({NUM_INPUTS}).dataType(DataType::FP16).build();
 //     latestOutputTensor = networkInput.getFeatureOutput();
 //
 //     FullyConnected fullyConnected = FullyConnected::Builder()
@@ -168,7 +168,7 @@
 //     latestOutputTensor = gradientRivet.getFeatureOutput();
 //
 //     NetworkOutput networkOutput =
-//         NetworkOutput::Builder().network(network).name("output").inputTensor(latestOutputTensor).dataType(Tensor::DataType::FP16).build();
+//         NetworkOutput::Builder().network(network).name("output").inputTensor(latestOutputTensor).dataType(DataType::FP16).build();
 //     Tensor networkOutputTensor = networkOutput.getFeatureOutput();
 //
 //     shared_ptr<Sgd> sgd = Sgd::Builder().network(network).initialLearningRate(0.1).decay(0.1).build();
@@ -258,7 +258,7 @@
 //     constexpr uint64_t NUM_BIASES = NUM_OUTPUTS;
 //
 //     NetworkInput networkInput =
-//         NetworkInput::Builder().network(network).name("input").dimensions({NUM_INPUTS}).dataType(Tensor::DataType::FP16).build();
+//         NetworkInput::Builder().network(network).name("input").dimensions({NUM_INPUTS}).dataType(DataType::FP16).build();
 //     latestOutputTensor = networkInput.getFeatureOutput();
 //
 //     FullyConnected fullyConnected = FullyConnected::Builder()
@@ -276,7 +276,7 @@
 //     latestOutputTensor = gradientRivet.getFeatureOutput();
 //
 //     NetworkOutput networkOutput =
-//         NetworkOutput::Builder().network(network).name("output").inputTensor(latestOutputTensor).dataType(Tensor::DataType::FP16).build();
+//         NetworkOutput::Builder().network(network).name("output").inputTensor(latestOutputTensor).dataType(DataType::FP16).build();
 //     Tensor networkOutputTensor = networkOutput.getFeatureOutput();
 //
 //     shared_ptr<Sgd> sgd = Sgd::Builder().network(network).initialLearningRate(0.1).decay(0.1).build();
@@ -395,7 +395,7 @@
 //                                     .network(network)
 //                                     .name("features")
 //                                     .dimensions({500})
-//                                     .dataType(Tensor::DataType::UINT8)
+//                                     .dataType(DataType::UINT8)
 //                                     .build()
 //                                     .getFeatureOutput();
 //     latestOutputTensor = networkInputTensor;
@@ -420,14 +420,14 @@
 //                                      .network(network)
 //                                      .name("output")
 //                                      .inputTensor(latestOutputTensor)
-//                                      .dataType(Tensor::DataType::FP32)
+//                                      .dataType(DataType::FP32)
 //                                      .build()
 //                                      .getFeatureOutput();
 //
 //     shared_ptr<Sgd> sgd = Sgd::Builder().network(network).initialLearningRate(0.1).decay(0.1).build();
 //
-//     ASSERT_EQ(networkInputTensor.getDataType(), Tensor::DataType::UINT8);
-//     ASSERT_EQ(networkOutputTensor.getDataType(), Tensor::DataType::FP32);
+//     ASSERT_EQ(networkInputTensor.getDataType(), DataType::UINT8);
+//     ASSERT_EQ(networkOutputTensor.getDataType(), DataType::FP32);
 //
 //     ThorImplementation::StampedNetwork stampedNetwork;
 //     int gpuNum = 0;
@@ -505,7 +505,7 @@
 //     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();
 //
 //     NetworkInput networkInput =
-//         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
+//         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(DataType::FP16).build();
 //
 //     FullyConnected::Builder fc0Builder = FullyConnected::Builder()
 //                                              .network(network)
@@ -538,7 +538,7 @@
 //                                       .network(network)
 //                                       .name("output")
 //                                       .inputTensor(gradientRivet.getFeatureOutput())
-//                                       .dataType(Tensor::DataType::FP16)
+//                                       .dataType(DataType::FP16)
 //                                       .build();
 //     Stub stub = Stub::Builder().network(network).inputTensor(fc2.getFeatureOutputs()[1]).build();
 //

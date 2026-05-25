@@ -21,27 +21,27 @@ TEST(BinaryAccuracy, Builds) {
         Network network("testNetwork");
 
         vector<uint64_t> dimensions = {1};
-        Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-        Tensor::DataType accuracyDataType = Tensor::DataType::FP32;
+        DataType predictionsDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+        DataType accuracyDataType = DataType::FP32;
 
-        Tensor::DataType labelsDataType;
+        DataType labelsDataType;
         uint32_t r = rand() % 8;
         if (r == 0)
-            labelsDataType = Tensor::DataType::UINT8;
+            labelsDataType = DataType::UINT8;
         else if (r == 1)
-            labelsDataType = Tensor::DataType::UINT16;
+            labelsDataType = DataType::UINT16;
         else if (r == 2)
-            labelsDataType = Tensor::DataType::UINT32;
+            labelsDataType = DataType::UINT32;
         else if (r == 3)
-            labelsDataType = Tensor::DataType::INT8;
+            labelsDataType = DataType::INT8;
         else if (r == 4)
-            labelsDataType = Tensor::DataType::INT16;
+            labelsDataType = DataType::INT16;
         else if (r == 5)
-            labelsDataType = Tensor::DataType::INT32;
+            labelsDataType = DataType::INT32;
         else if (r == 6)
-            labelsDataType = Tensor::DataType::FP16;
+            labelsDataType = DataType::FP16;
         else if (r == 7)
-            labelsDataType = Tensor::DataType::FP32;
+            labelsDataType = DataType::FP32;
 
         Tensor predictions(predictionsDataType, dimensions);
         Tensor labels(labelsDataType, dimensions);
@@ -102,7 +102,7 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
 
     Network initialNetwork("initialNetwork");
 
-    Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+    DataType predictionsDataType = rand() % 2 ? DataType::FP16 : DataType::FP32;
     vector<uint64_t> predictionsDimensions = {1};
     NetworkInput predictionsNetworkInput = NetworkInput::Builder()
                                                .network(initialNetwork)
@@ -111,7 +111,7 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
                                                .dataType(predictionsDataType)
                                                .build();
 
-    Tensor::DataType labelsDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+    DataType labelsDataType = rand() % 2 ? DataType::FP16 : DataType::FP32;
     vector<uint64_t> labelsDimensions = {1U};
     NetworkInput labelsNetworkInput =
         NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions(labelsDimensions).dataType(labelsDataType).build();
@@ -181,7 +181,7 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
     const auto &predictions = binaryAccuracyJ.at("predictions");
     ASSERT_TRUE(predictions.is_object());
     ASSERT_TRUE(predictions.at("data_type").is_string());
-    string predictionsDataTypeString = predictionsDataType == Tensor::DataType::FP16 ? "fp16" : "fp32";
+    string predictionsDataTypeString = predictionsDataType == DataType::FP16 ? "fp16" : "fp32";
     EXPECT_EQ(predictions.at("data_type").get<string>(), predictionsDataTypeString);
     ASSERT_TRUE(predictions.at("dimensions").is_array());
     ASSERT_EQ(predictions.at("dimensions").get<vector<uint64_t>>(), predictionsDimensions);
@@ -190,7 +190,7 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
     const auto &labels = binaryAccuracyJ.at("labels");
     ASSERT_TRUE(labels.is_object());
     ASSERT_TRUE(labels.at("data_type").is_string());
-    string labelsDataTypeString = labelsDataType == Tensor::DataType::FP16 ? "fp16" : "fp32";
+    string labelsDataTypeString = labelsDataType == DataType::FP16 ? "fp16" : "fp32";
     EXPECT_EQ(labels.at("data_type").get<string>(), labelsDataTypeString);
     ASSERT_TRUE(labels.at("dimensions").is_array());
     ASSERT_EQ(labels.at("dimensions").get<vector<uint64_t>>(), labelsDimensions);

@@ -20,7 +20,7 @@ class NetworkInput : public Layer {
 
     virtual std::string getName() const { return name; }
     std::vector<uint64_t> getDimensions() const { return dimensions; }
-    Tensor::DataType getDataType() const { return dataType; }
+    DataType getDataType() const { return dataType; }
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<NetworkInput>(*this); }
 
@@ -68,7 +68,7 @@ class NetworkInput : public Layer {
    private:
     std::string name;
     std::vector<uint64_t> dimensions;
-    Tensor::DataType dataType;
+    DataType dataType;
 
     friend class Network;
 };
@@ -114,7 +114,7 @@ class NetworkInput::Builder {
         return *this;
     }
 
-    virtual NetworkInput::Builder &dataType(const Tensor::DataType &_dataType) {
+    virtual NetworkInput::Builder &dataType(const DataType &_dataType) {
         THOR_THROW_IF_FALSE(Tensor::dataTypeValid(_dataType));
         this->_dataType = _dataType;
         return *this;
@@ -124,7 +124,7 @@ class NetworkInput::Builder {
     std::optional<std::string> _name;
     std::optional<Network *> _network;
     std::optional<std::vector<uint64_t>> _dimensions;
-    std::optional<Tensor::DataType> _dataType;
+    std::optional<DataType> _dataType;
 };
 
 }  // namespace Thor

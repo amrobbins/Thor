@@ -34,7 +34,7 @@ class RMSNorm : public TrainableLayer {
 
     const std::vector<uint64_t>& getNormalizedShape() const { return normalizedShape; }
     double getEpsilon() const { return epsilon; }
-    Tensor::DataType getParameterDataType() const { return parameterDataType; }
+    DataType getParameterDataType() const { return parameterDataType; }
     static const char* epilogueInputName() { return "__rms_norm_epilogue_input"; }
     static const char* epilogueOutputName() { return "__rms_norm_epilogue_output"; }
 
@@ -81,13 +81,13 @@ class RMSNorm : public TrainableLayer {
                                                      const bool inferenceOnly) const override;
 
    private:
-    static bool isRMSNormInputDataType(Tensor::DataType dataType);
+    static bool isRMSNormInputDataType(DataType dataType);
     static uint64_t checkedFeatureCount(const std::vector<uint64_t>& shape, const std::string& what);
     static void validateNormalizedShapeForInput(const std::vector<uint64_t>& inputDims, const std::vector<uint64_t>& normalizedShape);
 
     std::vector<uint64_t> normalizedShape;
     double epsilon = 1.0e-5;
-    Tensor::DataType parameterDataType = Tensor::DataType::FP32;
+    DataType parameterDataType = DataType::FP32;
     std::optional<ThorImplementation::Expression> epilogue;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
 
@@ -132,7 +132,7 @@ class RMSNorm::Builder {
         return *this;
     }
 
-    virtual RMSNorm::Builder& parameterDataType(Tensor::DataType dtype) {
+    virtual RMSNorm::Builder& parameterDataType(DataType dtype) {
         THOR_THROW_IF_FALSE(!this->_parameterDataType.has_value());
         this->_parameterDataType = dtype;
         return *this;
@@ -173,7 +173,7 @@ class RMSNorm::Builder {
     std::vector<Tensor> _featureInputs;
     std::vector<uint64_t> _normalizedShape;
     std::optional<double> _epsilon;
-    std::optional<Tensor::DataType> _parameterDataType;
+    std::optional<DataType> _parameterDataType;
     std::shared_ptr<Initializer> _weightsInitializer = nullptr;
     std::shared_ptr<Optimizer> _weightsOptimizer = nullptr;
     std::optional<ThorImplementation::Expression> _epilogue;

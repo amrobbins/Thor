@@ -41,7 +41,7 @@ class BatchNormalization : public TrainableLayer {
 
         std::shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormalization =
             std::make_shared<ThorImplementation::BatchNormalization>(
-                placement, inferenceOnly, numItemsObserved, exponentialRunningAverageFactor, epsilon, Tensor::DataType::FP32, getId());
+                placement, inferenceOnly, numItemsObserved, exponentialRunningAverageFactor, epsilon, DataType::FP32, getId());
 
         return physicalBatchNormalization;
     }

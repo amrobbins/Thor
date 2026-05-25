@@ -59,7 +59,7 @@ class BinaryAccuracy::Builder {
         BinaryAccuracy binaryAccuracy;
         binaryAccuracy.featureInput = _predictions.value();
         binaryAccuracy.labelsTensor = _labels.value();
-        binaryAccuracy.metricTensor = Tensor(Tensor::DataType::FP32, {1});
+        binaryAccuracy.metricTensor = Tensor(DataType::FP32, {1});
         binaryAccuracy.initialized = true;
         binaryAccuracy.addToNetwork(_network.value());
         return binaryAccuracy;

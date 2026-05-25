@@ -9,19 +9,19 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-bool AdaptiveLayerNorm::isAdaptiveLayerNormInputDataType(Tensor::DataType dataType) {
+bool AdaptiveLayerNorm::isAdaptiveLayerNormInputDataType(DataType dataType) {
     switch (dataType) {
-        case Tensor::DataType::FP16:
-        case Tensor::DataType::BF16:
-        case Tensor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
     }
 }
 
-void AdaptiveLayerNorm::validateCudnnFrontendContract(uint64_t normalizedFeatureCount, Tensor::DataType inputDataType) {
-    if (inputDataType == Tensor::DataType::FP32 && normalizedFeatureCount % 32 != 0) {
+void AdaptiveLayerNorm::validateCudnnFrontendContract(uint64_t normalizedFeatureCount, DataType inputDataType) {
+    if (inputDataType == DataType::FP32 && normalizedFeatureCount % 32 != 0) {
         throw invalid_argument(
             "AdaptiveLayerNorm cuDNN Frontend primary engines require fp32 normalized feature count to be a multiple of 32; got " +
             to_string(normalizedFeatureCount) + ".");
@@ -92,7 +92,7 @@ AdaptiveLayerNorm AdaptiveLayerNorm::Builder::build() {
     if (!_epsilon.has_value())
         _epsilon = 1.0e-5;
     if (!_scaleBiasDataType.has_value())
-        _scaleBiasDataType = Tensor::DataType::FP32;
+        _scaleBiasDataType = DataType::FP32;
 
     verifyConfig();
 
@@ -126,7 +126,7 @@ void AdaptiveLayerNorm::Builder::verifyConfig() const {
     if (!_epsilon.has_value() || !(_epsilon.value() > 0.0)) {
         throw invalid_argument("AdaptiveLayerNorm epsilon must be > 0.");
     }
-    if (_scaleBiasDataType.value() != Tensor::DataType::FP32) {
+    if (_scaleBiasDataType.value() != DataType::FP32) {
         throw invalid_argument("AdaptiveLayerNorm currently requires fp32 scale/bias tensors for cuDNN Frontend AdaptiveLayerNorm.");
     }
 
@@ -233,7 +233,7 @@ void AdaptiveLayerNorm::deserialize(const json& j, Network* network) {
     AdaptiveLayerNorm layer;
     layer.normalizedShape = j.at("normalized_shape").get<vector<uint64_t>>();
     layer.epsilon = j.at("epsilon").get<double>();
-    layer.scaleBiasDataType = j.at("scale_bias_data_type").get<Tensor::DataType>();
+    layer.scaleBiasDataType = j.at("scale_bias_data_type").get<DataType>();
 
     const auto inputsJson = j.at("inputs").get<vector<json>>();
     if (inputsJson.size() != NUM_INPUT_PORTS) {

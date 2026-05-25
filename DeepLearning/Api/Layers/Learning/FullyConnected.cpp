@@ -18,34 +18,34 @@ namespace Thor {
 
 namespace {
 
-bool isFullyConnectedFloatingDataType(Tensor::DataType dataType) {
+bool isFullyConnectedFloatingDataType(DataType dataType) {
     switch (dataType) {
-        case Tensor::DataType::FP8_E4M3:
-        case Tensor::DataType::FP8_E5M2:
-        case Tensor::DataType::FP16:
-        case Tensor::DataType::BF16:
-        case Tensor::DataType::FP32:
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
     }
 }
 
-std::string fullyConnectedDataTypeName(Tensor::DataType dataType) {
+std::string fullyConnectedDataTypeName(DataType dataType) {
     return ThorImplementation::TensorDescriptor::getElementTypeName(dataType);
 }
 
-cudaDataType_t cublasLtCudaDataTypeForFullyConnected(Tensor::DataType dataType) {
+cudaDataType_t cublasLtCudaDataTypeForFullyConnected(DataType dataType) {
     switch (dataType) {
-        case Tensor::DataType::FP32:
+        case DataType::FP32:
             return CUDA_R_32F;
-        case Tensor::DataType::BF16:
+        case DataType::BF16:
             return CUDA_R_16BF;
-        case Tensor::DataType::FP16:
+        case DataType::FP16:
             return CUDA_R_16F;
-        case Tensor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             return CUDA_R_8F_E4M3;
-        case Tensor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             return CUDA_R_8F_E5M2;
         default:
             throw std::invalid_argument("FullyConnected cuBLASLt dtype check does not support " +
@@ -53,13 +53,13 @@ cudaDataType_t cublasLtCudaDataTypeForFullyConnected(Tensor::DataType dataType) 
     }
 }
 
-std::optional<cublasComputeType_t> cublasLtComputeTypeForFullyConnected(Tensor::DataType computeDataType) {
+std::optional<cublasComputeType_t> cublasLtComputeTypeForFullyConnected(DataType computeDataType) {
     switch (computeDataType) {
-        case Tensor::DataType::FP32:
+        case DataType::FP32:
             return CUBLAS_COMPUTE_32F;
-        case Tensor::DataType::FP16:
+        case DataType::FP16:
             return CUBLAS_COMPUTE_32F_FAST_16F;
-        case Tensor::DataType::BF16:
+        case DataType::BF16:
             return CUBLAS_COMPUTE_32F_FAST_16BF;
         default:
             return std::nullopt;
@@ -89,10 +89,10 @@ bool isSupportedCublasLtMatmulDataTypesForFullyConnected(
 }
 
 ThorImplementation::CublasMatrixMultiply::MatmulDataTypes cublasLtMatmulDataTypesForFullyConnected(
-    Tensor::DataType inputDataType,
-    Tensor::DataType weightsDataType,
-    Tensor::DataType computeDataType,
-    Tensor::DataType outputDataType) {
+    DataType inputDataType,
+    DataType weightsDataType,
+    DataType computeDataType,
+    DataType outputDataType) {
     using MatmulDataTypes = ThorImplementation::CublasMatrixMultiply::MatmulDataTypes;
 
     const MatmulDataTypes directDataTypes{inputDataType, weightsDataType, outputDataType, outputDataType, computeDataType};
@@ -115,9 +115,9 @@ ThorImplementation::CublasMatrixMultiply::MatmulDataTypes cublasLtMatmulDataType
 
 ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias,
                                                                     ThorImplementation::TensorPlacement placement,
-                                                                    Tensor::DataType weightsDataType,
-                                                                    Tensor::DataType computeDataType,
-                                                                    Tensor::DataType outputDataType,
+                                                                    DataType weightsDataType,
+                                                                    DataType computeDataType,
+                                                                    DataType outputDataType,
                                                                     std::shared_ptr<Thor::Activation> activation,
                                                                     std::optional<ThorImplementation::Expression> epilogue) {
     using ThorImplementation::DynamicExpression;
@@ -268,11 +268,11 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(bool hasBias
 
 }  // namespace
 
-bool FullyConnected::isFullyConnectedFloatingDataType(Tensor::DataType dataType) {
+bool FullyConnected::isFullyConnectedFloatingDataType(DataType dataType) {
     return Thor::isFullyConnectedFloatingDataType(dataType);
 }
 
-std::string FullyConnected::dataTypeName(Tensor::DataType dataType) {
+std::string FullyConnected::dataTypeName(DataType dataType) {
     return fullyConnectedDataTypeName(dataType);
 }
 
@@ -299,14 +299,14 @@ uint64_t FullyConnected::checkedFeatureCount(const std::vector<uint64_t>& dimens
     return featureCount;
 }
 
-void FullyConnected::verifyFullyConnectedDataType(Tensor::DataType dataType, const std::string& what) {
+void FullyConnected::verifyFullyConnectedDataType(DataType dataType, const std::string& what) {
     if (!isFullyConnectedFloatingDataType(dataType)) {
         throw std::invalid_argument("FullyConnected " + what + " must be one of fp8_e4m3, fp8_e5m2, fp16, bf16, or fp32. Got " +
                                     dataTypeName(dataType) + ".");
     }
 }
 
-void FullyConnected::verifyFullyConnectedComputeDataType(Tensor::DataType dataType) {
+void FullyConnected::verifyFullyConnectedComputeDataType(DataType dataType) {
     if (!cublasLtComputeTypeForFullyConnected(dataType).has_value()) {
         throw std::invalid_argument(
             "FullyConnected computeDataType must be fp32, fp16, or bf16 for Thor's current cuBLASLt floating GEMM path. Got " +
@@ -425,7 +425,7 @@ void FullyConnected::Builder::verifyConfig() const {
         FullyConnected::validateEpilogueExpression(_epilogue.value());
     }
 
-    const Tensor::DataType inputDataType = _featureInputs.front().getDataType();
+    const DataType inputDataType = _featureInputs.front().getDataType();
     const std::vector<uint64_t> inputDimensions = _featureInputs.front().getDimensions();
     FullyConnected::checkedFeatureCount(inputDimensions, "feature input");
     FullyConnected::verifyFullyConnectedDataType(inputDataType, "feature input data type");
@@ -554,9 +554,9 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
     FullyConnected fullyConnected(epilogue);
     fullyConnected.numOutputFeatures = j.at("num_output_features").get<uint32_t>();
     fullyConnected.hasBias = j.at("has_bias").get<bool>();
-    fullyConnected.weightsDataType = j.at("weights_data_type").get<Tensor::DataType>();
-    fullyConnected.computeDataType = j.at("compute_data_type").get<Tensor::DataType>();
-    fullyConnected.outputDataType = j.at("output_data_type").get<Tensor::DataType>();
+    fullyConnected.weightsDataType = j.at("weights_data_type").get<DataType>();
+    fullyConnected.computeDataType = j.at("compute_data_type").get<DataType>();
+    fullyConnected.outputDataType = j.at("output_data_type").get<DataType>();
 
     if (j.contains("activation") && !j.at("activation").is_null()) {
         fullyConnected.activation = Activation::deserializeTemplate(j.at("activation"));

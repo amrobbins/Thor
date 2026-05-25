@@ -19,7 +19,7 @@ TEST(UtilityApiLayers, StubBuilds) {
     for (int i = 0; i < numDimensions; ++i)
         dimensions.push_back(1 + (rand() % 1000));
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 
     Tensor featureInput(dataType, dimensions);
     Stub stub = Stub::Builder().network(network).inputTensor(featureInput).build();
@@ -57,8 +57,8 @@ TEST(UtilityApiLayers, StubSerializeDeserialize) {
     Network initialNetwork("initialNetwork");
     Stream stream(0);
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-    string dataTypeString = dataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+    string dataTypeString = dataType == DataType::FP32 ? "fp32" : "fp16";
 
     uint32_t numDimensions = 1 + (rand() % 4);
 

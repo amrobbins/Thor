@@ -70,7 +70,7 @@ void CategoricalCrossEntropy::deserialize(const json &j, Network *network) {
     CategoricalCrossEntropy categoricalCrossEntropy;
     categoricalCrossEntropy.labelType = j.at("label_type").get<LabelType>();
     categoricalCrossEntropy.lossShape = j.at("loss_shape").get<LossShape>();
-    categoricalCrossEntropy.lossDataType = j.at("loss_data_type").get<Tensor::DataType>();
+    categoricalCrossEntropy.lossDataType = j.at("loss_data_type").get<DataType>();
 
     uint64_t originalTensorId;
     originalTensorId = j["softmax_output_tensor"].at("id").get<uint64_t>();

@@ -143,7 +143,7 @@ class MeanAbsoluteError::Builder {
         return *this;
     }
 
-    virtual MeanAbsoluteError::Builder &lossDataType(Tensor::DataType _lossDataType) {
+    virtual MeanAbsoluteError::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         this->_lossDataType = _lossDataType;
         return *this;
@@ -154,7 +154,7 @@ class MeanAbsoluteError::Builder {
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
-    std::optional<Tensor::DataType> _lossDataType;
+    std::optional<DataType> _lossDataType;
 };
 
 }  // namespace Thor

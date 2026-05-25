@@ -24,17 +24,17 @@
 //         vector<uint64_t> labelDimensions = {1};
 //         uint64_t numClasses = 2UL + (rand() % 1000);
 //         vector<uint64_t> predictionsDimensions = {numClasses};
-//         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-//         Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+//         DataType predictionsDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+//         DataType lossDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 //
-//         Tensor::DataType labelsDataType;
+//         DataType labelsDataType;
 //         uint32_t r = rand() % 3;
 //         if (r == 0)
-//             labelsDataType = Tensor::DataType::UINT8;
+//             labelsDataType = DataType::UINT8;
 //         else if (r == 1)
-//             labelsDataType = Tensor::DataType::UINT16;
+//             labelsDataType = DataType::UINT16;
 //         else
-//             labelsDataType = Tensor::DataType::UINT32;
+//             labelsDataType = DataType::UINT32;
 //
 //         Tensor predictions(predictionsDataType, predictionsDimensions);
 //         Tensor labels(labelsDataType, labelDimensions);
@@ -114,21 +114,21 @@
 //
 //         vector<uint64_t> dimensions;
 //         dimensions = {2UL + (rand() % 300)};
-//         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-//         Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+//         DataType predictionsDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+//         DataType lossDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 //
-//         Tensor::DataType labelsDataType;
+//         DataType labelsDataType;
 //         uint32_t r = rand() % 5;
 //         if (r == 0)
-//             labelsDataType = Tensor::DataType::UINT8;
+//             labelsDataType = DataType::UINT8;
 //         else if (r == 1)
-//             labelsDataType = Tensor::DataType::UINT16;
+//             labelsDataType = DataType::UINT16;
 //         else if (r == 2)
-//             labelsDataType = Tensor::DataType::UINT32;
+//             labelsDataType = DataType::UINT32;
 //         else if (r == 3)
-//             labelsDataType = Tensor::DataType::FP16;
+//             labelsDataType = DataType::FP16;
 //         else
-//             labelsDataType = Tensor::DataType::FP32;
+//             labelsDataType = DataType::FP32;
 //
 //         Tensor predictions(predictionsDataType, dimensions);
 //         Tensor labels(labelsDataType, dimensions);
@@ -208,21 +208,21 @@
 //
 //         vector<uint64_t> dimensions;
 //         dimensions = {2UL + (rand() % 300)};
-//         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-//         Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+//         DataType predictionsDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+//         DataType lossDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 //
-//         Tensor::DataType labelsDataType;
+//         DataType labelsDataType;
 //         uint32_t r = rand() % 5;
 //         if (r == 0)
-//             labelsDataType = Tensor::DataType::UINT8;
+//             labelsDataType = DataType::UINT8;
 //         else if (r == 1)
-//             labelsDataType = Tensor::DataType::UINT16;
+//             labelsDataType = DataType::UINT16;
 //         else if (r == 2)
-//             labelsDataType = Tensor::DataType::UINT32;
+//             labelsDataType = DataType::UINT32;
 //         else if (r == 3)
-//             labelsDataType = Tensor::DataType::FP16;
+//             labelsDataType = DataType::FP16;
 //         else if (r == 4)
-//             labelsDataType = Tensor::DataType::FP32;
+//             labelsDataType = DataType::FP32;
 //
 //         Tensor predictions(predictionsDataType, dimensions);
 //         Tensor labels(labelsDataType, dimensions);
@@ -304,17 +304,17 @@
 //         vector<uint64_t> labelDimensions = {1};
 //         uint64_t numClasses = 2UL + (rand() % 1000);
 //         vector<uint64_t> predictionsDimensions = {numClasses};
-//         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-//         Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+//         DataType predictionsDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+//         DataType lossDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 //
-//         Tensor::DataType labelsDataType;
+//         DataType labelsDataType;
 //         uint32_t r = rand() % 3;
 //         if (r == 0)
-//             labelsDataType = Tensor::DataType::UINT8;
+//             labelsDataType = DataType::UINT8;
 //         else if (r == 1)
-//             labelsDataType = Tensor::DataType::UINT16;
+//             labelsDataType = DataType::UINT16;
 //         else
-//             labelsDataType = Tensor::DataType::UINT32;
+//             labelsDataType = DataType::UINT32;
 //
 //         Tensor predictions(predictionsDataType, predictionsDimensions);
 //         Tensor labels(labelsDataType, labelDimensions);
@@ -390,11 +390,11 @@
 //     srand(time(nullptr));
 //
 //     Network initialNetwork("initialNetwork");
-//     Tensor::DataType predictionsDataType = Tensor::DataType::FP16;
+//     DataType predictionsDataType = DataType::FP16;
 //     uint32_t numClasses = 2 + (rand() % 100);
 //     vector<uint64_t> inputDimensions = {numClasses};
-//     Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
-//     Tensor::DataType labelDataType = rand() % 2 ? Tensor::DataType::UINT16 : Tensor::DataType::UINT32;
+//     DataType lossDataType = rand() % 2 ? DataType::FP16 : DataType::FP32;
+//     DataType labelDataType = rand() % 2 ? DataType::UINT16 : DataType::UINT32;
 //     NetworkInput predictionsInput = NetworkInput::Builder()
 //                                         .network(initialNetwork)
 //                                         .name("predictionsInput")
@@ -518,32 +518,32 @@
 //     ASSERT_EQ(categoricalCrossEntropyJ["layer_type"], "categorical_cross_entropy");
 //     EXPECT_TRUE(categoricalCrossEntropyJ.contains("layer_name"));
 //     ASSERT_EQ(categoricalCrossEntropyJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::RAW);
-//     ASSERT_EQ(categoricalCrossEntropyJ.at("loss_data_type").get<Tensor::DataType>(), lossDataType);
+//     ASSERT_EQ(categoricalCrossEntropyJ.at("loss_data_type").get<DataType>(), lossDataType);
 //
 //     const json &labelsJ = categoricalCrossEntropyJ["labels_tensor"];
-//     ASSERT_EQ(labelsJ.at("data_type").get<Tensor::DataType>(), labelDataType);
+//     ASSERT_EQ(labelsJ.at("data_type").get<DataType>(), labelDataType);
 //     ASSERT_EQ(labelsJ.at("dimensions").get<vector<uint64_t>>(), labelDimensions);
 //     ASSERT_TRUE(labelsJ.at("id").is_number_integer());
 //
 //     const json &predictionsJ = categoricalCrossEntropyJ["predictions_tensor"];
-//     ASSERT_EQ(predictionsJ.at("data_type").get<Tensor::DataType>(), predictionsDataType);
+//     ASSERT_EQ(predictionsJ.at("data_type").get<DataType>(), predictionsDataType);
 //     ASSERT_EQ(predictionsJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
 //     ASSERT_TRUE(predictionsJ.at("id").is_number_integer());
 //
 //     const json &softmaxOutputJ = categoricalCrossEntropyJ["softmax_output_tensor"];
-//     ASSERT_EQ(softmaxOutputJ.at("data_type").get<Tensor::DataType>(), predictionsDataType);
+//     ASSERT_EQ(softmaxOutputJ.at("data_type").get<DataType>(), predictionsDataType);
 //     ASSERT_EQ(softmaxOutputJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
 //     ASSERT_TRUE(softmaxOutputJ.at("id").is_number_integer());
 //
 //     if (lossShaper) {
 //         const json &lossShaperInputJ = categoricalCrossEntropyJ["loss_shaper_input_tensor"];
-//         ASSERT_EQ(lossShaperInputJ.at("data_type").get<Tensor::DataType>(), lossDataType);
+//         ASSERT_EQ(lossShaperInputJ.at("data_type").get<DataType>(), lossDataType);
 //         ASSERT_EQ(lossShaperInputJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
 //         ASSERT_TRUE(lossShaperInputJ.at("id").is_number_integer());
 //     }
 //
 //     const json &lossJ = categoricalCrossEntropyJ["loss_tensor"];
-//     ASSERT_EQ(lossJ.at("data_type").get<Tensor::DataType>(), lossDataType);
+//     ASSERT_EQ(lossJ.at("data_type").get<DataType>(), lossDataType);
 //     ASSERT_EQ(lossJ.at("dimensions").get<vector<uint64_t>>(), lossDimensions);
 //     ASSERT_TRUE(lossJ.at("id").is_number_integer());
 //

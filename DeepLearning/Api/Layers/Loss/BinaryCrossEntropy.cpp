@@ -65,7 +65,7 @@ void BinaryCrossEntropy::deserialize(const json &j, Network *network) {
     BinaryCrossEntropy binaryCrossEntropy;
     THOR_THROW_IF_FALSE(j.at("loss_shape").get<LossShape>() == LossShape::RAW);
     binaryCrossEntropy.lossShape = LossShape::RAW;
-    binaryCrossEntropy.lossDataType = j.at("loss_data_type").get<Tensor::DataType>();
+    binaryCrossEntropy.lossDataType = j.at("loss_data_type").get<DataType>();
 
     uint64_t originalTensorId;
     originalTensorId = j["sigmoid_output_tensor"].at("id").get<uint64_t>();

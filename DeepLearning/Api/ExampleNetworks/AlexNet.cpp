@@ -163,7 +163,7 @@ Network buildAlexNet() {
     // For the ImageNet dataset, the average pixel values are subtracted from each color channel during dataset
     // creation (in commented out code in ShardedRawDatasetCreatorTest.cpp)
     NetworkInput imagesInput =
-        NetworkInput::Builder().network(alexNet).name("examples").dimensions({3, 224, 224}).dataType(Tensor::DataType::FP16).build();
+        NetworkInput::Builder().network(alexNet).name("examples").dimensions({3, 224, 224}).dataType(DataType::FP16).build();
 
     // FIXME: put back once divide is implemented
     // imagesInput = Divide::Builder.network(alexNet).numerator(imagesInput).denominator({255});
@@ -226,7 +226,7 @@ Network buildAlexNet() {
                               .network(alexNet)
                               .name("labels")
                               .dimensions({NUM_CLASSES})
-                              .dataType(Tensor::DataType::UINT8)
+                              .dataType(DataType::UINT8)
                               .build()
                               .getFeatureOutput().value();
 
@@ -242,10 +242,10 @@ Network buildAlexNet() {
                                     .network(alexNet)
                                     .name("predictions")
                                     .inputTensor(lossLayer.getPredictions())
-                                    .dataType(Tensor::DataType::FP32)
+                                    .dataType(DataType::FP32)
                                     .build();
     NetworkOutput loss =
-        NetworkOutput::Builder().network(alexNet).name("loss").inputTensor(lossLayer.getLoss()).dataType(Tensor::DataType::FP32).build();
+        NetworkOutput::Builder().network(alexNet).name("loss").inputTensor(lossLayer.getLoss()).dataType(DataType::FP32).build();
 
     CategoricalAccuracy accuracyLayer = CategoricalAccuracy::Builder()
                                             .network(alexNet)
@@ -258,7 +258,7 @@ Network buildAlexNet() {
                                  .network(alexNet)
                                  .name("accuracy")
                                  .inputTensor(accuracyLayer.getMetric())
-                                 .dataType(Tensor::DataType::FP32)
+                                 .dataType(DataType::FP32)
                                  .build();
 
     return alexNet;

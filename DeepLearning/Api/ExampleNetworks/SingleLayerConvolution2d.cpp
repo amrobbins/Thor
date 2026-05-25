@@ -1,5 +1,5 @@
-#include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.h"
+#include "DeepLearning/Implementation/ThorError.h"
 
 using namespace Thor;
 using namespace std;
@@ -17,9 +17,10 @@ Network buildSingleLayerConvolution2d() {
                              .network(singleLayerConvolution2d)
                              .name("examples")
                              .dimensions({1, 28, 28})
-                             .dataType(Tensor::DataType::FP32)
+                             .dataType(DataType::FP32)
                              .build()
-                             .getFeatureOutput().value();
+                             .getFeatureOutput()
+                             .value();
     expectedDimensions = {1, 28, 28};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -38,7 +39,8 @@ Network buildSingleLayerConvolution2d() {
                              .activation(relu)
                              .batchNormalization()
                              .build()
-                             .getFeatureOutput().value();
+                             .getFeatureOutput()
+                             .value();
     expectedDimensions = {128, 4, 4};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -50,7 +52,8 @@ Network buildSingleLayerConvolution2d() {
                              .windowWidth(4)
                              .noPadding()
                              .build()
-                             .getFeatureOutput().value();
+                             .getFeatureOutput()
+                             .value();
     expectedDimensions = {128, 1, 1};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -63,7 +66,8 @@ Network buildSingleLayerConvolution2d() {
                              .biasInitializer(glorot)
                              .noActivation()
                              .build()
-                             .getFeatureOutput().value();
+                             .getFeatureOutput()
+                             .value();
     expectedDimensions = {10};
     THOR_THROW_IF_FALSE(latestOutputTensor.getDimensions() == expectedDimensions);
 
@@ -71,9 +75,10 @@ Network buildSingleLayerConvolution2d() {
                               .network(singleLayerConvolution2d)
                               .name("labels")
                               .dimensions({10})
-                              .dataType(Tensor::DataType::UINT8)
+                              .dataType(DataType::UINT8)
                               .build()
-                              .getFeatureOutput().value();
+                              .getFeatureOutput()
+                              .value();
 
     CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
                                             .network(singleLayerConvolution2d)
@@ -89,13 +94,13 @@ Network buildSingleLayerConvolution2d() {
                                     .network(singleLayerConvolution2d)
                                     .name("predictions")
                                     .inputTensor(lossLayer.getPredictions())
-                                    .dataType(Tensor::DataType::FP32)
+                                    .dataType(DataType::FP32)
                                     .build();
     NetworkOutput loss = NetworkOutput::Builder()
                              .network(singleLayerConvolution2d)
                              .name("loss")
                              .inputTensor(lossLayer.getLoss())
-                             .dataType(Tensor::DataType::FP32)
+                             .dataType(DataType::FP32)
                              .build();
 
     CategoricalAccuracy accuracyLayer = CategoricalAccuracy::Builder()
@@ -109,7 +114,7 @@ Network buildSingleLayerConvolution2d() {
                                        .network(singleLayerConvolution2d)
                                        .name("accuracy")
                                        .inputTensor(accuracyLayer.getMetric())
-                                       .dataType(Tensor::DataType::FP32)
+                                       .dataType(DataType::FP32)
                                        .build();
 
     // Return the assembled network
