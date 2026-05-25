@@ -24,17 +24,17 @@ TEST(CategoricalAccuracy, ClassIndexLabelBuilds) {
         vector<uint64_t> dimensions;
         uint64_t numClasses = 2UL + (rand() % 1000);
         dimensions = {numClasses};
-        Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-        Tensor::DataType accuracyDataType = Tensor::DataType::FP32;
+        DataType predictionsDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+        DataType accuracyDataType = DataType::FP32;
 
-        Tensor::DataType labelsDataType;
+        DataType labelsDataType;
         uint32_t r = rand() % 3;
         if (r == 0)
-            labelsDataType = Tensor::DataType::UINT8;
+            labelsDataType = DataType::UINT8;
         else if (r == 1)
-            labelsDataType = Tensor::DataType::UINT16;
+            labelsDataType = DataType::UINT16;
         else
-            labelsDataType = Tensor::DataType::UINT32;
+            labelsDataType = DataType::UINT32;
 
         Tensor predictions(predictionsDataType, dimensions);
         Tensor labels(labelsDataType, labelDimensions);
@@ -96,7 +96,7 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
 
     Network initialNetwork("initialNetwork");
 
-    Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+    DataType predictionsDataType = rand() % 2 ? DataType::FP16 : DataType::FP32;
     uint64_t numClasses = 2U + (rand() % 20);
     vector<uint64_t> predictionsDimensions = {numClasses};
     NetworkInput predictionsNetworkInput = NetworkInput::Builder()
@@ -106,7 +106,7 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
                                                .dataType(predictionsDataType)
                                                .build();
 
-    Tensor::DataType labelsDataType = rand() % 2 ? Tensor::DataType::UINT16 : Tensor::DataType::UINT32;
+    DataType labelsDataType = rand() % 2 ? DataType::UINT16 : DataType::UINT32;
     bool oneHotLabels = rand() % 2;
     vector<uint64_t> labelsDimensions;
     if (oneHotLabels)
@@ -193,7 +193,7 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     const auto &predictions = categoricalAccuracyJ.at("predictions");
     ASSERT_TRUE(predictions.is_object());
     ASSERT_TRUE(predictions.at("data_type").is_string());
-    string predictionsDataTypeString = predictionsDataType == Tensor::DataType::FP16 ? "fp16" : "fp32";
+    string predictionsDataTypeString = predictionsDataType == DataType::FP16 ? "fp16" : "fp32";
     EXPECT_EQ(predictions.at("data_type").get<string>(), predictionsDataTypeString);
     ASSERT_TRUE(predictions.at("dimensions").is_array());
     ASSERT_EQ(predictions.at("dimensions").get<vector<uint64_t>>(), predictionsDimensions);
@@ -202,7 +202,7 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     const auto &labels = categoricalAccuracyJ.at("labels");
     ASSERT_TRUE(labels.is_object());
     ASSERT_TRUE(labels.at("data_type").is_string());
-    EXPECT_EQ(labels.at("data_type").get<Tensor::DataType>(), labelsDataType);
+    EXPECT_EQ(labels.at("data_type").get<DataType>(), labelsDataType);
     ASSERT_TRUE(labels.at("dimensions").is_array());
     ASSERT_EQ(labels.at("dimensions").get<vector<uint64_t>>(), labelsDimensions);
     ASSERT_TRUE(labels.at("id").is_number_integer());

@@ -24,7 +24,7 @@
 //     for (int i = 0; i < numDimensions; ++i)
 //         dimensions.push_back(1 + (rand() % 1000));
 //
-//     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+//     DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 //
 //     Tensor featureInput(dataType, dimensions);
 //
@@ -97,7 +97,7 @@
 //     int numDimensions0 = 1 + rand() % 6;
 //     for (int i = 0; i < numDimensions0; ++i)
 //         dimensions.push_back(1 + (rand() % 1000));
-//     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+//     DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 //     Tensor featureInput0(dataType, dimensions);
 //     Tensor featureInput1(dataType, dimensions);
 //
@@ -202,8 +202,8 @@
 //
 //         Network initialNetwork("initialNetwork");
 //
-//         Tensor::DataType dataType = Tensor::DataType::FP16;
-//         string dataTypeString = dataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
+//         DataType dataType = DataType::FP16;
+//         string dataTypeString = dataType == DataType::FP32 ? "fp32" : "fp16";
 //
 //         vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
 //
@@ -367,7 +367,7 @@
 //         const auto &out0 = outputs.at(0);
 //         ASSERT_TRUE(out0.is_object());
 //         ASSERT_TRUE(out0.at("data_type").is_string());
-//         EXPECT_EQ(out0.at("data_type").get<string>(), dataType == Tensor::DataType::FP16 ? "fp16" : "fp32");
+//         EXPECT_EQ(out0.at("data_type").get<string>(), dataType == DataType::FP16 ? "fp16" : "fp32");
 //
 //         ASSERT_TRUE(out0.at("dimensions").is_array());
 //         ASSERT_EQ(out0.at("dimensions").size(), inputDimensions.size());

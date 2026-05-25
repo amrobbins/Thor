@@ -42,7 +42,7 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                                                              std::vector<uint64_t> normalizedShape,
                                                              uint64_t hidden,
                                                              double epsilon,
-                                                             Tensor::DataType parameterDataType,
+                                                             DataType parameterDataType,
                                                              std::optional<ThorImplementation::Expression> epilogue,
                                                              bool inferenceOnly) {
     using ThorImplementation::DynamicExpression;
@@ -159,11 +159,11 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
 
 }  // namespace
 
-bool RMSNorm::isRMSNormInputDataType(Tensor::DataType dataType) {
+bool RMSNorm::isRMSNormInputDataType(DataType dataType) {
     switch (dataType) {
-        case Tensor::DataType::FP16:
-        case Tensor::DataType::BF16:
-        case Tensor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
@@ -216,7 +216,7 @@ RMSNorm RMSNorm::Builder::build() {
     if (!_epsilon.has_value())
         _epsilon = 1.0e-5;
     if (!_parameterDataType.has_value()) {
-        _parameterDataType = Tensor::DataType::FP32;
+        _parameterDataType = DataType::FP32;
     }
     if (_weightsInitializer == nullptr)
         _weightsInitializer = UniformRandom::Builder().minValue(1.0f).maxValue(1.0f).build();
@@ -260,22 +260,22 @@ void RMSNorm::Builder::verifyConfig() const {
     if (!_epsilon.has_value() || !(_epsilon.value() > 0.0)) {
         throw invalid_argument("RMSNorm epsilon must be > 0.");
     }
-    const Tensor::DataType inputDataType = _featureInputs.front().getDataType();
+    const DataType inputDataType = _featureInputs.front().getDataType();
     const bool swishEpilogue = _epilogue.has_value() && isSwishEpilogueExpression(_epilogue.value());
     if (_epilogue.has_value()) {
         RMSNorm::validateEpilogueExpression(_epilogue.value());
     }
-    if (_parameterDataType.value() == Tensor::DataType::BF16) {
+    if (_parameterDataType.value() == DataType::BF16) {
         if (!swishEpilogue) {
             throw invalid_argument(
                 "RMSNorm bf16 weights are only supported for the cuDNN Frontend RMSNorm + Swish epilogue inference fusion; "
                 "use fp32 weights for standard RMSNorm or non-Swish epilogues.");
         }
-        if (inputDataType != Tensor::DataType::BF16) {
+        if (inputDataType != DataType::BF16) {
             throw invalid_argument(
                 "RMSNorm Swish epilogue fusion with bf16 weights requires bf16 feature inputs; use fp32 weights for generic epilogue execution.");
         }
-    } else if (_parameterDataType.value() != Tensor::DataType::FP32) {
+    } else if (_parameterDataType.value() != DataType::FP32) {
         throw invalid_argument("RMSNorm currently requires fp32 weights, except bf16 weights for the Swish epilogue inference fusion.");
     }
     if (!RMSNorm::isRMSNormInputDataType(inputDataType)) {
@@ -385,7 +385,7 @@ void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const
     RMSNorm layer(epilogue);
     layer.normalizedShape = j.at("normalized_shape").get<vector<uint64_t>>();
     layer.epsilon = j.at("epsilon").get<double>();
-    layer.parameterDataType = j.at("parameter_data_type").get<Tensor::DataType>();
+    layer.parameterDataType = j.at("parameter_data_type").get<DataType>();
 
     for (const json& inputJson : j.at("inputs")) {
         const uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();

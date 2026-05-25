@@ -72,7 +72,7 @@ class TypeConverter::Builder {
         return *this;
     }
 
-    virtual TypeConverter::Builder &newDataType(Tensor::DataType _newDataType) {
+    virtual TypeConverter::Builder &newDataType(DataType _newDataType) {
         THOR_THROW_IF_FALSE(!this->_newDataType.has_value());
         THOR_THROW_IF_FALSE(Tensor::dataTypeValid(_newDataType));
         this->_newDataType = _newDataType;
@@ -82,7 +82,7 @@ class TypeConverter::Builder {
    private:
     std::optional<Network *> _network;
     std::optional<Tensor> _featureInput;
-    std::optional<Tensor::DataType> _newDataType;
+    std::optional<DataType> _newDataType;
 };
 
 }  // namespace Thor

@@ -37,7 +37,7 @@
 //
 // Tensor verifyNetworkInputApiLevel(shared_ptr<NetworkInput> layer,
 //                                   vector<uint64_t> inputDimensions,
-//                                   Tensor::DataType dataType,
+//                                   DataType dataType,
 //                                   const string &networkInputName) {
 //     EXPECT_EQ(layer->getName(), networkInputName);
 //     EXPECT_EQ(layer->getDimensions(), inputDimensions);
@@ -101,7 +101,7 @@
 //
 //     Network initialNetwork("TestModel");
 //
-//     Tensor::DataType dataType = Tensor::DataType::FP16;
+//     DataType dataType = DataType::FP16;
 //
 //     vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
 //
@@ -355,7 +355,7 @@
 //
 //     Network initialNetwork("TestModel");
 //
-//     Tensor::DataType dataType = Tensor::DataType::FP16;
+//     DataType dataType = DataType::FP16;
 //
 //     vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
 //

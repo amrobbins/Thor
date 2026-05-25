@@ -22,9 +22,6 @@ namespace ThorImplementation {
 
 class TensorDescriptor {
    public:
-    // Keep the old nested spelling source-compatible while making the namespace-level type canonical.
-    // using DataType = ThorImplementation::DataType;
-
     static DataType resolveFloatingPointDataTypePromotion(DataType a, DataType b) {
         if (a == b)
             return a;

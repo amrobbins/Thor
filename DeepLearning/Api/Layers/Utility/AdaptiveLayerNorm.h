@@ -44,7 +44,7 @@ class AdaptiveLayerNorm : public MultiConnectionLayer {
 
     const std::vector<uint64_t>& getNormalizedShape() const { return normalizedShape; }
     double getEpsilon() const { return epsilon; }
-    Tensor::DataType getScaleBiasDataType() const { return scaleBiasDataType; }
+    DataType getScaleBiasDataType() const { return scaleBiasDataType; }
 
     int getConnectionType(Tensor connectingTensor) const override;
     bool mustConnectAllInputsToDriveOutput() override { return true; }
@@ -62,17 +62,17 @@ class AdaptiveLayerNorm : public MultiConnectionLayer {
                                                      const bool inferenceOnly) const override;
 
    private:
-    static bool isAdaptiveLayerNormInputDataType(Tensor::DataType dataType);
+    static bool isAdaptiveLayerNormInputDataType(DataType dataType);
     static uint64_t checkedFeatureCount(const std::vector<uint64_t>& shape, const std::string& what);
     static void validateNormalizedShapeForInput(const std::vector<uint64_t>& inputDims, const std::vector<uint64_t>& normalizedShape);
-    static void validateCudnnFrontendContract(uint64_t normalizedFeatureCount, Tensor::DataType inputDataType);
+    static void validateCudnnFrontendContract(uint64_t normalizedFeatureCount, DataType inputDataType);
     static const char* portName(uint32_t port);
 
     void resetInputConnectionTracking();
 
     std::vector<uint64_t> normalizedShape;
     double epsilon = 1.0e-5;
-    Tensor::DataType scaleBiasDataType = Tensor::DataType::FP32;
+    DataType scaleBiasDataType = DataType::FP32;
     std::set<uint64_t> connectedInputOriginalIds;
 
     friend class Network;
@@ -124,7 +124,7 @@ class AdaptiveLayerNorm::Builder {
         return *this;
     }
 
-    virtual AdaptiveLayerNorm::Builder& scaleBiasDataType(Tensor::DataType dtype) {
+    virtual AdaptiveLayerNorm::Builder& scaleBiasDataType(DataType dtype) {
         THOR_THROW_IF_FALSE(!this->_scaleBiasDataType.has_value());
         this->_scaleBiasDataType = dtype;
         return *this;
@@ -139,7 +139,7 @@ class AdaptiveLayerNorm::Builder {
     std::optional<Tensor> _biasInput;
     std::vector<uint64_t> _normalizedShape;
     std::optional<double> _epsilon;
-    std::optional<Tensor::DataType> _scaleBiasDataType;
+    std::optional<DataType> _scaleBiasDataType;
 };
 
 }  // namespace Thor

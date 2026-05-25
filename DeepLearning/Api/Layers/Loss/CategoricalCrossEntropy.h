@@ -81,9 +81,9 @@ class CategoricalCrossEntropy::Builder {
             std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
             std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
             THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
-            Tensor::DataType labelsDataType = _labels.value().getDataType();
-            THOR_THROW_IF_FALSE(labelsDataType == Tensor::DataType::UINT8 || labelsDataType == Tensor::DataType::UINT16 ||
-                   labelsDataType == Tensor::DataType::UINT32);
+            DataType labelsDataType = _labels.value().getDataType();
+            THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
+                   labelsDataType == DataType::UINT32);
             THOR_THROW_IF_FALSE(_numClasses.has_value());
             THOR_THROW_IF_FALSE(predictionDimensions.size() == 1);
             categoricalCrossEntropy.numClasses = _numClasses.value();
@@ -98,8 +98,8 @@ class CategoricalCrossEntropy::Builder {
         categoricalCrossEntropy.predictionsTensor = _predictions.value();
         categoricalCrossEntropy.labelsTensor = _labels.value();
         if (!_lossDataType.has_value())
-            _lossDataType = Tensor::DataType::FP32;
-        THOR_THROW_IF_FALSE(_lossDataType.value() == Tensor::DataType::FP16 || _lossDataType.value() == Tensor::DataType::FP32);
+            _lossDataType = DataType::FP32;
+        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
         categoricalCrossEntropy.lossDataType = _lossDataType.value();
 
         if (!_lossShape.has_value())
@@ -207,9 +207,9 @@ class CategoricalCrossEntropy::Builder {
         return *this;
     }
 
-    virtual CategoricalCrossEntropy::Builder &lossDataType(Tensor::DataType _lossDataType) {
+    virtual CategoricalCrossEntropy::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
-        THOR_THROW_IF_FALSE(_lossDataType == Tensor::DataType::FP32 || _lossDataType == Tensor::DataType::FP16);
+        THOR_THROW_IF_FALSE(_lossDataType == DataType::FP32 || _lossDataType == DataType::FP16);
         this->_lossDataType = _lossDataType;
         return *this;
     }
@@ -257,7 +257,7 @@ class CategoricalCrossEntropy::Builder {
     std::optional<LabelType> _labelType;
     std::optional<uint32_t> _numClasses;
     std::optional<LossShape> _lossShape;
-    std::optional<Tensor::DataType> _lossDataType;
+    std::optional<DataType> _lossDataType;
     std::optional<bool> _softmaxAddedToNetwork;
 
     friend class CategoricalCrossEntropy;

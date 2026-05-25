@@ -68,9 +68,9 @@ class CategoricalAccuracy::Builder {
             std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
             std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
             THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
-            Tensor::DataType labelsDataType = _labels.value().getDataType();
-            THOR_THROW_IF_FALSE(labelsDataType == Tensor::DataType::UINT8 || labelsDataType == Tensor::DataType::UINT16 ||
-                   labelsDataType == Tensor::DataType::UINT32);
+            DataType labelsDataType = _labels.value().getDataType();
+            THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
+                   labelsDataType == DataType::UINT32);
             THOR_THROW_IF_FALSE(_numClasses.has_value());
             THOR_THROW_IF_FALSE(predictionDimensions.size() == 1 && predictionDimensions[0] == _numClasses.value());
             categoricalAccuracy.numClasses = _numClasses.value();
@@ -78,7 +78,7 @@ class CategoricalAccuracy::Builder {
 
         categoricalAccuracy.featureInput = _predictions.value();
         categoricalAccuracy.labelsTensor = _labels.value();
-        categoricalAccuracy.metricTensor = Tensor(Tensor::DataType::FP32, {1});
+        categoricalAccuracy.metricTensor = Tensor(DataType::FP32, {1});
         categoricalAccuracy.labelType = _labelType.value();
         categoricalAccuracy.initialized = true;
         categoricalAccuracy.addToNetwork(_network.value());

@@ -43,7 +43,7 @@ void MeanAbsolutePercentageError::deserialize(const json &j, Network *network) {
 
     MeanAbsolutePercentageError meanAbsolutePercentageError;
     meanAbsolutePercentageError.lossShape = j.at("loss_shape").get<LossShape>();
-    meanAbsolutePercentageError.lossDataType = j.at("loss_data_type").get<Tensor::DataType>();
+    meanAbsolutePercentageError.lossDataType = j.at("loss_data_type").get<DataType>();
 
     uint64_t originalTensorId;
     originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();

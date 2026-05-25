@@ -21,7 +21,7 @@ TEST(UtilityApiLayers, PoolingNoPaddingBuilds) {
     int numDimensions = 3;
     for (int i = 0; i < numDimensions; ++i)
         dimensions.push_back(10 + (rand() % 1000));
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 
     uint32_t windowHeight = 1 + (rand() % dimensions[1]);
     uint32_t windowWidth = 1 + (rand() % dimensions[2]);
@@ -107,7 +107,7 @@ TEST(UtilityApiLayers, PoolingDefaultPaddingBuilds) {
     int numDimensions = 3;
     for (int i = 0; i < numDimensions; ++i)
         dimensions.push_back(10 + (rand() % 1000));
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 
     uint32_t windowHeight = 1 + (rand() % dimensions[1]);
     uint32_t windowWidth = 1 + (rand() % dimensions[2]);
@@ -192,7 +192,7 @@ TEST(UtilityApiLayers, PoolingSpecifiedPaddingBuilds) {
     int numDimensions = 3;
     for (int i = 0; i < numDimensions; ++i)
         dimensions.push_back(10 + (rand() % 1000));
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 
     uint32_t windowHeight = 1 + (rand() % dimensions[1]);
     uint32_t windowWidth = 1 + (rand() % dimensions[2]);
@@ -282,8 +282,8 @@ TEST(UtilityApiLayers, PoolingSerializeDeserialize) {
     int numDimensions = 3;
     for (int i = 0; i < numDimensions; ++i)
         dimensions.push_back(10 + (rand() % 100));
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-    string dataTypeString = dataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+    string dataTypeString = dataType == DataType::FP32 ? "fp32" : "fp16";
     Pooling::Type poolingType = rand() % 2 ? Pooling::Type::AVERAGE : Pooling::Type::MAX;
 
     uint32_t windowHeight = 1 + (rand() % dimensions[1]);

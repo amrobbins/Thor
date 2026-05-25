@@ -27,7 +27,7 @@ class Transpose : public Layer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Transpose>(*this); }
 
     std::string getLayerType() const override { return "Transpose"; }
-    Tensor::DataType getOutputDataType() const { return outputDataType; }
+    DataType getOutputDataType() const { return outputDataType; }
 
     static const char *epilogueInputName() { return "__transpose_epilogue_input"; }
     static const char *epilogueOutputName() { return "__transpose_epilogue_output"; }
@@ -105,7 +105,7 @@ class Transpose : public Layer {
     }
 
    private:
-    Tensor::DataType outputDataType = Tensor::DataType::FP32;
+    DataType outputDataType = DataType::FP32;
     std::optional<ThorImplementation::Expression> epilogue;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
 
@@ -146,7 +146,7 @@ class Transpose::Builder {
         return *this;
     }
 
-    virtual Transpose::Builder &outputDataType(Tensor::DataType dataType) {
+    virtual Transpose::Builder &outputDataType(DataType dataType) {
         THOR_THROW_IF_FALSE(!this->_outputDataType.has_value());
         if (!Tensor::dataTypeValid(dataType)) {
             throw std::invalid_argument("Transpose outputDataType is invalid.");
@@ -174,7 +174,7 @@ class Transpose::Builder {
    private:
     std::optional<Network *> _network;
     std::optional<Tensor> _featureInput;
-    std::optional<Tensor::DataType> _outputDataType;
+    std::optional<DataType> _outputDataType;
     std::optional<ThorImplementation::Expression> _epilogue;
 };
 

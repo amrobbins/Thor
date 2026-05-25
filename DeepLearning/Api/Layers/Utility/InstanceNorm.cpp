@@ -9,11 +9,11 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-bool InstanceNorm::isInstanceNormInputDataType(Tensor::DataType dataType) {
+bool InstanceNorm::isInstanceNormInputDataType(DataType dataType) {
     switch (dataType) {
-        case Tensor::DataType::FP16:
-        case Tensor::DataType::BF16:
-        case Tensor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
@@ -22,8 +22,8 @@ bool InstanceNorm::isInstanceNormInputDataType(Tensor::DataType dataType) {
 
 namespace {
 
-bool isReducedPrecisionInstanceNormInputDataType(Tensor::DataType dataType) {
-    return dataType == Tensor::DataType::FP16 || dataType == Tensor::DataType::BF16;
+bool isReducedPrecisionInstanceNormInputDataType(DataType dataType) {
+    return dataType == DataType::FP16 || dataType == DataType::BF16;
 }
 
 }  // namespace
@@ -59,7 +59,7 @@ void InstanceNorm::validateInputShape(const vector<uint64_t>& inputDims) {
     }
 }
 
-void InstanceNorm::validateCudnnFrontendContract(uint64_t channelCount, Tensor::DataType inputDataType) {
+void InstanceNorm::validateCudnnFrontendContract(uint64_t channelCount, DataType inputDataType) {
     if (isReducedPrecisionInstanceNormInputDataType(inputDataType) && channelCount % 8 != 0) {
         throw invalid_argument(
             "InstanceNorm cuDNN Frontend primary engines require fp16/bf16 channel count to be a multiple of 8; got " +
@@ -74,7 +74,7 @@ InstanceNorm InstanceNorm::Builder::build() {
     if (!_epsilon.has_value())
         _epsilon = 1.0e-5;
     if (!_parameterDataType.has_value())
-        _parameterDataType = Tensor::DataType::FP32;
+        _parameterDataType = DataType::FP32;
     if (_weightsInitializer == nullptr)
         _weightsInitializer = UniformRandom::Builder().minValue(1.0f).maxValue(1.0f).build();
     if (_biasesInitializer == nullptr)
@@ -123,10 +123,10 @@ void InstanceNorm::Builder::verifyConfig() const {
     if (!_epsilon.has_value() || !(_epsilon.value() > 0.0)) {
         throw invalid_argument("InstanceNorm epsilon must be > 0.");
     }
-    if (_parameterDataType.value() != Tensor::DataType::FP32) {
+    if (_parameterDataType.value() != DataType::FP32) {
         throw invalid_argument("InstanceNorm currently requires fp32 weights/biases for cuDNN Frontend InstanceNorm.");
     }
-    const Tensor::DataType inputDataType = _featureInputs.front().getDataType();
+    const DataType inputDataType = _featureInputs.front().getDataType();
     if (!InstanceNorm::isInstanceNormInputDataType(inputDataType)) {
         throw invalid_argument("InstanceNorm feature input dtype must be fp16, bf16, or fp32.");
     }
@@ -208,7 +208,7 @@ void InstanceNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, 
     InstanceNorm layer;
     layer.channelCount = j.at("channel_count").get<uint64_t>();
     layer.epsilon = j.at("epsilon").get<double>();
-    layer.parameterDataType = j.at("parameter_data_type").get<Tensor::DataType>();
+    layer.parameterDataType = j.at("parameter_data_type").get<DataType>();
 
     for (const json& inputJson : j.at("inputs")) {
         const uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();

@@ -15,7 +15,7 @@ Network buildFewLayerFullyConnected() {
                                    .network(fewLayerFullyConnected)
                                    .name("examples")
                                    .dimensions({3, 224, 224})
-                                   .dataType(Tensor::DataType::UINT8)
+                                   .dataType(DataType::UINT8)
                                    .build();
 
     Tensor latestOutputTensor;
@@ -61,7 +61,7 @@ Network buildFewLayerFullyConnected() {
                               .network(fewLayerFullyConnected)
                               .name("labels")
                               .dimensions({1000})
-                              .dataType(Tensor::DataType::FP16)
+                              .dataType(DataType::FP16)
                               .build()
                               .getFeatureOutput().value();
 
@@ -79,13 +79,13 @@ Network buildFewLayerFullyConnected() {
                                     .network(fewLayerFullyConnected)
                                     .name("predictions")
                                     .inputTensor(lossLayer.getPredictions())
-                                    .dataType(Tensor::DataType::FP32)
+                                    .dataType(DataType::FP32)
                                     .build();
     NetworkOutput loss = NetworkOutput::Builder()
                              .network(fewLayerFullyConnected)
                              .name("loss")
                              .inputTensor(lossLayer.getLoss())
-                             .dataType(Tensor::DataType::FP32)
+                             .dataType(DataType::FP32)
                              .build();
 
     CategoricalAccuracy accuracyLayer = CategoricalAccuracy::Builder()
@@ -99,7 +99,7 @@ Network buildFewLayerFullyConnected() {
                                  .network(fewLayerFullyConnected)
                                  .name("accuracy")
                                  .inputTensor(accuracyLayer.getMetric())
-                                 .dataType(Tensor::DataType::FP32)
+                                 .dataType(DataType::FP32)
                                  .build();
 
     return fewLayerFullyConnected;

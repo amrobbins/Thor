@@ -9,14 +9,14 @@ using json = nlohmann::json;
 
 TEST(UtilityApiLayers, InstanceNormDerivesChannelCountFromFirstFeatureDimension) {
     Network network("instance_norm_default_config");
-    Tensor input(Tensor::DataType::FP16, {8, 16, 16});
+    Tensor input(DataType::FP16, {8, 16, 16});
 
     InstanceNorm layer = InstanceNorm::Builder().network(network).featureInput(input).build();
 
     ASSERT_TRUE(layer.isInitialized());
     ASSERT_EQ(layer.getChannelCount(), 8u);
     ASSERT_DOUBLE_EQ(layer.getEpsilon(), 1.0e-5);
-    ASSERT_EQ(layer.getParameterDataType(), Tensor::DataType::FP32);
+    ASSERT_EQ(layer.getParameterDataType(), DataType::FP32);
 
     optional<Tensor> output = layer.getFeatureOutput();
     ASSERT_TRUE(output.has_value());
@@ -26,7 +26,7 @@ TEST(UtilityApiLayers, InstanceNormDerivesChannelCountFromFirstFeatureDimension)
 
 TEST(UtilityApiLayers, InstanceNormAcceptsOneDimensionalSpatialInput) {
     Network network("instance_norm_1d_spatial");
-    Tensor input(Tensor::DataType::BF16, {8, 32});
+    Tensor input(DataType::BF16, {8, 32});
 
     InstanceNorm layer = InstanceNorm::Builder().network(network).featureInput(input).epsilon(1.0e-4).build();
 
@@ -37,33 +37,33 @@ TEST(UtilityApiLayers, InstanceNormAcceptsOneDimensionalSpatialInput) {
 
 TEST(UtilityApiLayers, InstanceNormRejectsBadInputShape) {
     Network network("instance_norm_bad_shape");
-    Tensor rankOne(Tensor::DataType::FP16, {8});
+    Tensor rankOne(DataType::FP16, {8});
     EXPECT_THROW(InstanceNorm::Builder().network(network).featureInput(rankOne).build(), std::invalid_argument);
 
 }
 
 TEST(UtilityApiLayers, InstanceNormRejectsReducedPrecisionChannelCountsUnsupportedByCudnnPrimaryEngines) {
     Network network("instance_norm_bad_cudnn_contract");
-    Tensor fp16BadChannels(Tensor::DataType::FP16, {4, 32});
+    Tensor fp16BadChannels(DataType::FP16, {4, 32});
     EXPECT_THROW(InstanceNorm::Builder().network(network).featureInput(fp16BadChannels).build(), std::invalid_argument);
 
-    Tensor bf16BadChannels(Tensor::DataType::BF16, {4, 32});
+    Tensor bf16BadChannels(DataType::BF16, {4, 32});
     EXPECT_THROW(InstanceNorm::Builder().network(network).featureInput(bf16BadChannels).build(), std::invalid_argument);
 }
 
 TEST(UtilityApiLayers, InstanceNormRejectsUnsupportedDtypes) {
     Network network("instance_norm_bad_dtype");
-    Tensor intInput(Tensor::DataType::INT32, {8, 16, 16});
+    Tensor intInput(DataType::INT32, {8, 16, 16});
     EXPECT_THROW(InstanceNorm::Builder().network(network).featureInput(intInput).build(), std::invalid_argument);
 
-    Tensor fpInput(Tensor::DataType::FP16, {8, 16, 16});
-    EXPECT_THROW(InstanceNorm::Builder().network(network).featureInput(fpInput).parameterDataType(Tensor::DataType::FP16).build(),
+    Tensor fpInput(DataType::FP16, {8, 16, 16});
+    EXPECT_THROW(InstanceNorm::Builder().network(network).featureInput(fpInput).parameterDataType(DataType::FP16).build(),
                  std::invalid_argument);
 }
 
 TEST(UtilityApiLayers, InstanceNormArchitectureJsonContainsParameters) {
     Network network("instance_norm_architecture");
-    Tensor input(Tensor::DataType::FP32, {8, 32, 32});
+    Tensor input(DataType::FP32, {8, 32, 32});
 
     InstanceNorm layer = InstanceNorm::Builder().network(network).featureInput(input).build();
     json arch = layer.architectureJson();

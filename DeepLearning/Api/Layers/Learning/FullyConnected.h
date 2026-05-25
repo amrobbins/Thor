@@ -100,18 +100,18 @@ class FullyConnected : public TrainableLayer {
     uint32_t numOutputFeatures;
     bool hasBias;
     std::shared_ptr<Activation> activation;
-    Tensor::DataType weightsDataType;
-    Tensor::DataType computeDataType;
-    Tensor::DataType outputDataType;
+    DataType weightsDataType;
+    DataType computeDataType;
+    DataType outputDataType;
 
     const std::optional<ThorImplementation::Expression> epilogue;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
 
-    static bool isFullyConnectedFloatingDataType(Tensor::DataType dataType);
-    static std::string dataTypeName(Tensor::DataType dataType);
+    static bool isFullyConnectedFloatingDataType(DataType dataType);
+    static std::string dataTypeName(DataType dataType);
     static uint64_t checkedFeatureCount(const std::vector<uint64_t> &dimensions, const std::string &what);
-    static void verifyFullyConnectedDataType(Tensor::DataType dataType, const std::string &what);
-    static void verifyFullyConnectedComputeDataType(Tensor::DataType dataType);
+    static void verifyFullyConnectedDataType(DataType dataType, const std::string &what);
+    static void verifyFullyConnectedComputeDataType(DataType dataType);
 
     friend class Network;
     friend class Builder;
@@ -193,19 +193,19 @@ class FullyConnected::Builder {
         return *this;
     }
 
-    virtual FullyConnected::Builder &weightsDataType(Tensor::DataType _weightsDataType) {
+    virtual FullyConnected::Builder &weightsDataType(DataType _weightsDataType) {
         THOR_THROW_IF_FALSE(!this->_weightsDataType.has_value());
         this->_weightsDataType = _weightsDataType;
         return *this;
     }
 
-    virtual FullyConnected::Builder &computeDataType(Tensor::DataType _computeDataType) {
+    virtual FullyConnected::Builder &computeDataType(DataType _computeDataType) {
         THOR_THROW_IF_FALSE(!this->_computeDataType.has_value());
         this->_computeDataType = _computeDataType;
         return *this;
     }
 
-    virtual FullyConnected::Builder &outputDataType(Tensor::DataType _outputDataType) {
+    virtual FullyConnected::Builder &outputDataType(DataType _outputDataType) {
         THOR_THROW_IF_FALSE(!this->_outputDataType.has_value());
         this->_outputDataType = _outputDataType;
         return *this;
@@ -245,9 +245,9 @@ class FullyConnected::Builder {
     std::optional<uint32_t> _numOutputFeatures;
     std::optional<bool> _hasBias;
     std::shared_ptr<Activation> _activation;
-    std::optional<Tensor::DataType> _weightsDataType;
-    std::optional<Tensor::DataType> _computeDataType;
-    std::optional<Tensor::DataType> _outputDataType;
+    std::optional<DataType> _weightsDataType;
+    std::optional<DataType> _computeDataType;
+    std::optional<DataType> _outputDataType;
 
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasInitializer;

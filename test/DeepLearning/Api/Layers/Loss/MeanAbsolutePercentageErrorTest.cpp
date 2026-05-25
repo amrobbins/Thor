@@ -22,10 +22,10 @@
 //
 //         vector<uint64_t> dimensions;
 //         dimensions.push_back(1 + (rand() % 1000));
-//         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+//         DataType predictionsDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 //         Tensor predictions(predictionsDataType, dimensions);
 //
-//         Tensor::DataType labelsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+//         DataType labelsDataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 //         Tensor labels(labelsDataType, dimensions);
 //
 //         MeanAbsolutePercentageError::Builder meanAbsolutePercentageErrorBuilder =
@@ -124,9 +124,9 @@
 //
 //     Network initialNetwork("initialNetwork");
 //     ;
-//     Tensor::DataType dataType = Tensor::DataType::FP16;
+//     DataType dataType = DataType::FP16;
 //     vector<uint64_t> inputDimensions = {1UL};
-//     Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+//     DataType lossDataType = rand() % 2 ? DataType::FP16 : DataType::FP32;
 //
 //     NetworkInput labelsInput =
 //         NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions(inputDimensions).dataType(dataType).build();
@@ -199,20 +199,20 @@
 //     ASSERT_EQ(meanAbsolutePercentageErrorJ["layer_type"], "mean_absolute_percentage_error");
 //     EXPECT_TRUE(meanAbsolutePercentageErrorJ.contains("layer_name"));
 //     ASSERT_EQ(meanAbsolutePercentageErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::RAW);
-//     ASSERT_EQ(meanAbsolutePercentageErrorJ.at("loss_data_type").get<Tensor::DataType>(), lossDataType);
+//     ASSERT_EQ(meanAbsolutePercentageErrorJ.at("loss_data_type").get<DataType>(), lossDataType);
 //
 //     const json &labelsJ = meanAbsolutePercentageErrorJ["labels_tensor"];
-//     ASSERT_EQ(labelsJ.at("data_type").get<Tensor::DataType>(), dataType);
+//     ASSERT_EQ(labelsJ.at("data_type").get<DataType>(), dataType);
 //     ASSERT_EQ(labelsJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
 //     ASSERT_TRUE(labelsJ.at("id").is_number_integer());
 //
 //     const json &predictionsJ = meanAbsolutePercentageErrorJ["predictions_tensor"];
-//     ASSERT_EQ(predictionsJ.at("data_type").get<Tensor::DataType>(), dataType);
+//     ASSERT_EQ(predictionsJ.at("data_type").get<DataType>(), dataType);
 //     ASSERT_EQ(predictionsJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
 //     ASSERT_TRUE(predictionsJ.at("id").is_number_integer());
 //
 //     const json &lossJ = meanAbsolutePercentageErrorJ["loss_tensor"];
-//     ASSERT_EQ(lossJ.at("data_type").get<Tensor::DataType>(), lossDataType);
+//     ASSERT_EQ(lossJ.at("data_type").get<DataType>(), lossDataType);
 //     ASSERT_EQ(lossJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
 //     ASSERT_TRUE(lossJ.at("id").is_number_integer());
 //

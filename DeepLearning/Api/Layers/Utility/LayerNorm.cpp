@@ -9,11 +9,11 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-bool LayerNorm::isLayerNormInputDataType(Tensor::DataType dataType) {
+bool LayerNorm::isLayerNormInputDataType(DataType dataType) {
     switch (dataType) {
-        case Tensor::DataType::FP16:
-        case Tensor::DataType::BF16:
-        case Tensor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
@@ -63,7 +63,7 @@ LayerNorm LayerNorm::Builder::build() {
     if (!_epsilon.has_value())
         _epsilon = 1.0e-5;
     if (!_parameterDataType.has_value())
-        _parameterDataType = Tensor::DataType::FP32;
+        _parameterDataType = DataType::FP32;
     if (_weightsInitializer == nullptr)
         _weightsInitializer = UniformRandom::Builder().minValue(1.0f).maxValue(1.0f).build();
     if (_biasesInitializer == nullptr)
@@ -115,10 +115,10 @@ void LayerNorm::Builder::verifyConfig() const {
     if (!_epsilon.has_value() || !(_epsilon.value() > 0.0)) {
         throw invalid_argument("LayerNorm epsilon must be > 0.");
     }
-    if (_parameterDataType.value() != Tensor::DataType::FP32) {
+    if (_parameterDataType.value() != DataType::FP32) {
         throw invalid_argument("LayerNorm currently requires fp32 weights/biases for cuDNN Frontend LayerNorm.");
     }
-    const Tensor::DataType inputDataType = _featureInputs.front().getDataType();
+    const DataType inputDataType = _featureInputs.front().getDataType();
     if (!LayerNorm::isLayerNormInputDataType(inputDataType)) {
         throw invalid_argument("LayerNorm feature input dtype must be fp16, bf16, or fp32.");
     }
@@ -199,7 +199,7 @@ void LayerNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, con
     LayerNorm layer;
     layer.normalizedShape = j.at("normalized_shape").get<vector<uint64_t>>();
     layer.epsilon = j.at("epsilon").get<double>();
-    layer.parameterDataType = j.at("parameter_data_type").get<Tensor::DataType>();
+    layer.parameterDataType = j.at("parameter_data_type").get<DataType>();
 
     for (const json& inputJson : j.at("inputs")) {
         const uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();

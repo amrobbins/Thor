@@ -33,7 +33,7 @@ class Embedding : public TrainableLayer {
 
     uint64_t getVocabularySize() const { return vocabularySize; }
     uint64_t getEmbeddingDim() const { return embeddingDim; }
-    Tensor::DataType getWeightsDataType() const { return weightsDataType; }
+    DataType getWeightsDataType() const { return weightsDataType; }
     std::optional<uint64_t> getPaddingIndex() const { return paddingIndex; }
     bool usesSparseGradients() const { return sparseGradients; }
 
@@ -59,14 +59,14 @@ class Embedding : public TrainableLayer {
     std::string getLayerType() const override { return "Embedding"; }
 
    private:
-    static bool isSupportedIndexDataType(Tensor::DataType dataType);
-    static bool isSupportedWeightsDataType(Tensor::DataType dataType);
-    static std::string dataTypeName(Tensor::DataType dataType);
+    static bool isSupportedIndexDataType(DataType dataType);
+    static bool isSupportedWeightsDataType(DataType dataType);
+    static std::string dataTypeName(DataType dataType);
     static void validateIndexTensor(const Tensor& tensor, const std::string& what);
 
     uint64_t vocabularySize = 0;
     uint64_t embeddingDim = 0;
-    Tensor::DataType weightsDataType = Tensor::DataType::FP32;
+    DataType weightsDataType = DataType::FP32;
     std::optional<uint64_t> paddingIndex = std::nullopt;
     bool sparseGradients = true;
 
@@ -109,7 +109,7 @@ class Embedding::Builder {
         return *this;
     }
 
-    virtual Embedding::Builder& weightsDataType(Tensor::DataType weightsDataType) {
+    virtual Embedding::Builder& weightsDataType(DataType weightsDataType) {
         THOR_THROW_IF_FALSE(!this->_weightsDataType.has_value());
         this->_weightsDataType = weightsDataType;
         return *this;
@@ -147,7 +147,7 @@ class Embedding::Builder {
     std::vector<Tensor> _featureInputs;
     std::optional<uint64_t> _vocabularySize = std::nullopt;
     std::optional<uint64_t> _embeddingDim = std::nullopt;
-    std::optional<Tensor::DataType> _weightsDataType = std::nullopt;
+    std::optional<DataType> _weightsDataType = std::nullopt;
     std::optional<uint64_t> _paddingIndex = std::nullopt;
     std::optional<bool> _sparseGradients = std::nullopt;
     std::shared_ptr<Initializer> _weightsInitializer = nullptr;

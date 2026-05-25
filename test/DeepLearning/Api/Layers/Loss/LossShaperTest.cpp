@@ -20,7 +20,7 @@
 //
 //         vector<uint64_t> dimensions;
 //         dimensions.push_back(2 + (rand() % 1000));
-//         Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+//         DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 //         Tensor lossInput(dataType, dimensions);
 //
 //         LossShaper::Builder lossShaperBuilder = LossShaper::Builder().network(network).lossInput(lossInput);
@@ -110,7 +110,7 @@
 //     srand(time(nullptr));
 //
 //     Network initialNetwork("initialNetwork");
-//     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+//     DataType dataType = rand() % 2 ? DataType::FP16 : DataType::FP32;
 //     uint64_t numClasses = (rand() % 100) + 1;
 //     vector<uint64_t> inputDimensions = {numClasses};
 //
@@ -203,7 +203,7 @@
 //     const json &lossInput = lossShaperJ.at("loss_input");
 //     ASSERT_TRUE(lossInput.is_object());
 //     ASSERT_TRUE(lossInput.at("data_type").is_string());
-//     string dataTypeString = dataType == Tensor::DataType::FP16 ? "fp16" : "fp32";
+//     string dataTypeString = dataType == DataType::FP16 ? "fp16" : "fp32";
 //     EXPECT_EQ(lossInput.at("data_type").get<string>(), dataTypeString);
 //     ASSERT_TRUE(lossInput.at("dimensions").is_array());
 //     ASSERT_EQ(lossInput.at("dimensions").get<vector<uint64_t>>(), inputDimensions);

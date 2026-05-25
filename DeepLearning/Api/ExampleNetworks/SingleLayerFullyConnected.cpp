@@ -16,7 +16,7 @@ Network buildSingleLayerFullyConnected() {
                                     .network(singleLayerFullyConnected)
                                     .name("examples")
                                     .dimensions({28 * 28})
-                                    .dataType(Tensor::DataType::FP32)
+                                    .dataType(DataType::FP32)
                                     .build()
                                     .getFeatureOutput().value();
 
@@ -50,7 +50,7 @@ Network buildSingleLayerFullyConnected() {
                               .network(singleLayerFullyConnected)
                               .name("labels")
                               .dimensions({10})
-                              .dataType(Tensor::DataType::UINT8)
+                              .dataType(DataType::UINT8)
                               .build()
                               .getFeatureOutput().value();
 
@@ -68,13 +68,13 @@ Network buildSingleLayerFullyConnected() {
                                     .network(singleLayerFullyConnected)
                                     .name("predictions")
                                     .inputTensor(lossLayer.getPredictions())
-                                    .dataType(Tensor::DataType::FP32)
+                                    .dataType(DataType::FP32)
                                     .build();
     NetworkOutput loss = NetworkOutput::Builder()
                              .network(singleLayerFullyConnected)
                              .name("loss")
                              .inputTensor(lossLayer.getLoss())
-                             .dataType(Tensor::DataType::FP32)
+                             .dataType(DataType::FP32)
                              .build();
 
     CategoricalAccuracy accuracyLayer = CategoricalAccuracy::Builder()
@@ -88,7 +88,7 @@ Network buildSingleLayerFullyConnected() {
                                  .network(singleLayerFullyConnected)
                                  .name("accuracy")
                                  .inputTensor(accuracyLayer.getMetric())
-                                 .dataType(Tensor::DataType::FP32)
+                                 .dataType(DataType::FP32)
                                  .build();
 
     // Return the assembled network

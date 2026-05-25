@@ -69,7 +69,7 @@ class Loss : public Layer {
     Tensor predictionsTensor;
     Tensor lossTensor;
 
-    Tensor::DataType lossDataType;
+    DataType lossDataType;
 
     Network *network;
 

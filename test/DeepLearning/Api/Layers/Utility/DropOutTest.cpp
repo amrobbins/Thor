@@ -21,7 +21,7 @@ TEST(UtilityApiLayers, DropOutBuilds) {
 
     float dropProportion = ((rand() % 100) + 1) / 1000.0f;
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 
     Tensor featureInput(dataType, dimensions);
     DropOut dropOut = DropOut::Builder().network(network).featureInput(featureInput).dropProportion(dropProportion).build();
@@ -75,8 +75,8 @@ TEST(UtilityApiLayers, DropOutSerializeDeserialize) {
     Network initialNetwork("initialNetwork");
     Stream stream(0);
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-    string dataTypeString = dataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+    string dataTypeString = dataType == DataType::FP32 ? "fp32" : "fp16";
     float dropProportion = ((rand() % 999) + 1) / 1000.0f;
 
     uint32_t numDimensions = 1 + (rand() % 4);

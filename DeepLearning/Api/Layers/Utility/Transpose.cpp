@@ -59,7 +59,7 @@ void Transpose::deserialize(const json &j, Network *network) {
     Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
 
     Tensor featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
-    Tensor::DataType outputDataType = j.contains("output_data_type") ? j.at("output_data_type").get<Tensor::DataType>()
+    DataType outputDataType = j.contains("output_data_type") ? j.at("output_data_type").get<DataType>()
                                                                      : featureOutput.getDataType();
 
     std::vector<uint64_t> expectedOutputDimensions = featureInput.getDimensions();

@@ -225,8 +225,8 @@ class Convolution2d::Builder {
         convolution2d.weightsOptimizer = _weightsOptimizer;
         convolution2d.biasesOptimizer = _biasesOptimizer;
 
-        const Tensor::DataType convolutionDataType = convolution2d.featureInputs.front().getDataType();
-        const Tensor::DataType weightsDataType = convolutionDataType;
+        const DataType convolutionDataType = convolution2d.featureInputs.front().getDataType();
+        const DataType weightsDataType = convolutionDataType;
         const uint64_t inputChannels = convolution2d.featureInputs.front().getDimensions()[0];
 
         ParameterSpecification::Builder weightsParameterBuilder;

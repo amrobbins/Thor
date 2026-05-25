@@ -80,8 +80,8 @@ class BinaryCrossEntropy::Builder {
         binaryCrossEntropy.predictionsTensor = _predictions.value();
         binaryCrossEntropy.labelsTensor = _labels.value();
         if (!_lossDataType.has_value())
-            _lossDataType = Tensor::DataType::FP32;
-        THOR_THROW_IF_FALSE(_lossDataType.value() == Tensor::DataType::FP16 || _lossDataType.value() == Tensor::DataType::FP32);
+            _lossDataType = DataType::FP32;
+        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
         binaryCrossEntropy.lossDataType = _lossDataType.value();
 
         if (_lossShape.value() == LossShape::BATCH) {
@@ -143,9 +143,9 @@ class BinaryCrossEntropy::Builder {
         return *this;
     }
 
-    virtual BinaryCrossEntropy::Builder &lossDataType(Tensor::DataType _lossDataType) {
+    virtual BinaryCrossEntropy::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
-        THOR_THROW_IF_FALSE(_lossDataType == Tensor::DataType::FP32 || _lossDataType == Tensor::DataType::FP16);
+        THOR_THROW_IF_FALSE(_lossDataType == DataType::FP32 || _lossDataType == DataType::FP16);
         this->_lossDataType = _lossDataType;
         return *this;
     }
@@ -167,7 +167,7 @@ class BinaryCrossEntropy::Builder {
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
-    std::optional<Tensor::DataType> _lossDataType;
+    std::optional<DataType> _lossDataType;
     std::optional<bool> _sigmoidAddedToNetwork;
 
     friend class BinaryCrossEntropy;

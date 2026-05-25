@@ -60,9 +60,9 @@ class Attention : public CustomLayer {
               std::optional<Tensor> keyValueSequenceLengthsInput,
               std::optional<Tensor> queryRaggedOffsetsInput,
               std::optional<Tensor> keyValueRaggedOffsetsInput,
-              Tensor::DataType weightsDataType,
-              Tensor::DataType computeDataType,
-              Tensor::DataType outputDataType)
+              DataType weightsDataType,
+              DataType computeDataType,
+              DataType outputDataType)
         : CustomLayer(std::move(expression),
                       std::move(inputNames),
                       {"feature_output"},
@@ -143,9 +143,9 @@ class Attention : public CustomLayer {
     std::optional<Tensor> getKeyValueRaggedOffsetsInput() const { return keyValueRaggedOffsetsInput; }
     bool getUseSequenceLengths() const { return querySequenceLengthsInput.has_value(); }
     bool getUseRaggedOffsets() const { return queryRaggedOffsetsInput.has_value(); }
-    Tensor::DataType getWeightsDataType() const { return weightsDataType; }
-    Tensor::DataType getComputeDataType() const { return computeDataType; }
-    Tensor::DataType getOutputDataType() const { return outputDataType; }
+    DataType getWeightsDataType() const { return weightsDataType; }
+    DataType getComputeDataType() const { return computeDataType; }
+    DataType getOutputDataType() const { return outputDataType; }
 
    private:
     uint32_t numHeads;
@@ -171,9 +171,9 @@ class Attention : public CustomLayer {
     std::optional<Tensor> keyValueSequenceLengthsInput;
     std::optional<Tensor> queryRaggedOffsetsInput;
     std::optional<Tensor> keyValueRaggedOffsetsInput;
-    Tensor::DataType weightsDataType;
-    Tensor::DataType computeDataType;
-    Tensor::DataType outputDataType;
+    DataType weightsDataType;
+    DataType computeDataType;
+    DataType outputDataType;
 };
 
 class Attention::Builder {
@@ -343,19 +343,19 @@ class Attention::Builder {
         return *this;
     }
 
-    virtual Attention::Builder& weightsDataType(Tensor::DataType value) {
+    virtual Attention::Builder& weightsDataType(DataType value) {
         THOR_THROW_IF_FALSE(!this->_weightsDataType.has_value());
         this->_weightsDataType = value;
         return *this;
     }
 
-    virtual Attention::Builder& computeDataType(Tensor::DataType value) {
+    virtual Attention::Builder& computeDataType(DataType value) {
         THOR_THROW_IF_FALSE(!this->_computeDataType.has_value());
         this->_computeDataType = value;
         return *this;
     }
 
-    virtual Attention::Builder& outputDataType(Tensor::DataType value) {
+    virtual Attention::Builder& outputDataType(DataType value) {
         THOR_THROW_IF_FALSE(!this->_outputDataType.has_value());
         this->_outputDataType = value;
         return *this;
@@ -407,9 +407,9 @@ class Attention::Builder {
     std::optional<bool> _useRope;
     std::optional<bool> _ropeInPlace;
     std::optional<ThorImplementation::RotaryPositionEmbeddingOptions> _ropeOptions;
-    std::optional<Tensor::DataType> _weightsDataType;
-    std::optional<Tensor::DataType> _computeDataType;
-    std::optional<Tensor::DataType> _outputDataType;
+    std::optional<DataType> _weightsDataType;
+    std::optional<DataType> _computeDataType;
+    std::optional<DataType> _outputDataType;
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasInitializer;
     std::shared_ptr<Optimizer> _optimizer;

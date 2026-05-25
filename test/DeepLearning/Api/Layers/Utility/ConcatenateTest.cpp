@@ -22,7 +22,7 @@ TEST(UtilityApiLayers, ConcatenateBuilds) {
     vector<uint64_t> concatenatedDimensions(numDimensions, 0U);
     uint32_t numTensors = 1 + (rand() % 5);
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 
     vector<uint64_t> fixedDimensionSize;
     for (uint32_t d = 0; d < numDimensions; ++d) {
@@ -114,8 +114,8 @@ TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
     vector<uint64_t> concatenatedDimensions(numDimensions, 0U);
     uint64_t numTensors = 2 + (rand() % 4);
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-    string dataTypeString = dataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
+    DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
+    string dataTypeString = dataType == DataType::FP32 ? "fp32" : "fp16";
 
     vector<uint64_t> fixedDimensionSize;
     for (uint32_t d = 0; d < numDimensions; ++d) {
