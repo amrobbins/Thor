@@ -139,6 +139,9 @@ struct Options {
     std::vector<std::string> optimizers = parseStringList(envString("THOR_EMBEDDING_BACKWARD_PROFILE_OPTIMIZERS", "sgd"));
     double zipfAlpha = envDouble("THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ALPHA", 1.1);
     uint64_t zipfRows = envU64("THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ROWS", 0);
+    std::vector<uint64_t> lowRunMaxs = parseU64List(envString("THOR_EMBEDDING_BACKWARD_PROFILE_LOW_RUN_MAXS", "32"));
+    std::vector<uint64_t> ultraHighRunMins = parseU64List(envString("THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_RUN_MINS", "4096"));
+    std::vector<uint64_t> ultraHighTokensPerPartials = parseU64List(envString("THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_TOKENS_PER_PARTIALS", "1024"));
 };
 struct CaseConfig {
     uint64_t vocabularySize = 0;
@@ -149,6 +152,9 @@ struct CaseConfig {
     std::string optimizer;
     double zipfAlpha = 1.1;
     uint64_t zipfRows = 0;
+    uint32_t lowRunMax = 32U;
+    uint32_t ultraHighRunMin = 4096U;
+    uint32_t ultraHighTokensPerPartial = 1024U;
 
     std::string name() const {
         std::ostringstream ss;
@@ -527,7 +533,7 @@ std::vector<PoolSlot> buildPool(const Options& opts, const CaseConfig& cfg, int 
 }
 
 void printCsvHeader() {
-    std::cout << "case,vocab,dim,tokens,upstream_dtype,row_dtype,dup_mode,optimizer,update_path,pool_slots,pool_bytes,l2_bytes,"
+    std::cout << "case,vocab,dim,tokens,upstream_dtype,row_dtype,dup_mode,optimizer,update_path,low_run_max,ultra_high_run_min,ultra_high_tokens_per_partial,pool_slots,pool_bytes,l2_bytes,"
                  "materialize_ms,sort_ms,clear_counts_ms,rle_ms,finalize_ms,scan_ms,reduce_ms,"
                  "sparse_gradient_ms,sparse_update_ms,total_backward_update_ms,graph_sparse_gradient_ms,"
                  "active_rows,singleton_rows,duplicate_rows,low_run_rows,high_run_rows,ultra_high_run_rows,"
@@ -543,7 +549,8 @@ void printCsvRow(const CaseConfig& cfg,
                  uint64_t poolBytes,
                  uint64_t l2Bytes) {
     std::cout << cfg.name() << ',' << cfg.vocabularySize << ',' << cfg.embeddingDim << ',' << cfg.numTokens << ',' << dtypeName(cfg.upstreamDType) << ','
-              << dtypeName(meta.rowDataType) << ',' << cfg.duplicateMode << ',' << cfg.optimizer << ',' << updatePath << ',' << poolSlots << ',' << poolBytes << ',' << l2Bytes << ','
+              << dtypeName(meta.rowDataType) << ',' << cfg.duplicateMode << ',' << cfg.optimizer << ',' << updatePath << ','
+              << cfg.lowRunMax << ',' << cfg.ultraHighRunMin << ',' << cfg.ultraHighTokensPerPartial << ',' << poolSlots << ',' << poolBytes << ',' << l2Bytes << ','
               << stats.materialize.mean() << ',' << stats.sort.mean() << ',' << stats.clearCounts.mean() << ',' << stats.rle.mean() << ','
               << stats.finalize.mean() << ',' << stats.scan.mean() << ',' << stats.reduce.mean() << ',' << stats.sparseGradientTotal.mean() << ','
               << stats.sparseSgdUpdate.mean() << ',' << stats.totalBackwardAndUpdate.mean() << ',' << stats.graphSparseGradientTotal.mean() << ','
@@ -573,6 +580,8 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
                   << "increase THOR_EMBEDDING_BACKWARD_PROFILE_MAX_POOL_SLOTS or THOR_EMBEDDING_BACKWARD_PROFILE_POOL_SLOTS "
                   << "if this case is being used for final bandwidth claims. target_pool_bytes=" << targetPoolBytes << '\n';
     }
+    setEmbeddingSparseGradientRunBucketConfigOverrideForTesting(EmbeddingSparseGradientRunBucketConfig{
+        cfg.lowRunMax, cfg.ultraHighRunMin, cfg.ultraHighTokensPerPartial});
     std::vector<PoolSlot> pool = buildPool(opts, cfg, poolSlots, stream);
 
     for (int i = 0; i < opts.warmupIters; ++i) {
@@ -651,9 +660,36 @@ std::vector<CaseConfig> makeCases(const Options& opts) {
                 for (DataType dtype : opts.upstreamDTypes) {
                     for (const std::string& dup : opts.duplicateModes) {
                         for (const std::string& opt : opts.optimizers) {
-                            CaseConfig cfg{vocab, dim, tokens, dtype, dup, opt, opts.zipfAlpha, opts.zipfRows};
-                            if (keepCase(opts, cfg)) {
-                                cases.push_back(std::move(cfg));
+                            for (uint64_t lowRunMaxRaw : opts.lowRunMaxs) {
+                                for (uint64_t ultraHighRunMinRaw : opts.ultraHighRunMins) {
+                                    for (uint64_t ultraHighTokensPerPartialRaw : opts.ultraHighTokensPerPartials) {
+                                        if (lowRunMaxRaw > std::numeric_limits<uint32_t>::max() ||
+                                            ultraHighRunMinRaw > std::numeric_limits<uint32_t>::max() ||
+                                            ultraHighTokensPerPartialRaw > std::numeric_limits<uint32_t>::max()) {
+                                            throw std::invalid_argument("Embedding sparse backward profile bucket thresholds must fit uint32.");
+                                        }
+                                        CaseConfig cfg{vocab,
+                                                       dim,
+                                                       tokens,
+                                                       dtype,
+                                                       dup,
+                                                       opt,
+                                                       opts.zipfAlpha,
+                                                       opts.zipfRows,
+                                                       static_cast<uint32_t>(lowRunMaxRaw),
+                                                       static_cast<uint32_t>(ultraHighRunMinRaw),
+                                                       static_cast<uint32_t>(ultraHighTokensPerPartialRaw)};
+                                        if (cfg.lowRunMax + 1U >= cfg.ultraHighRunMin) {
+                                            throw std::invalid_argument("Embedding sparse backward profile requires low_run_max + 1 < ultra_high_run_min.");
+                                        }
+                                        if (cfg.ultraHighTokensPerPartial == 0U) {
+                                            throw std::invalid_argument("Embedding sparse backward profile requires ultra_high_tokens_per_partial > 0.");
+                                        }
+                                        if (keepCase(opts, cfg)) {
+                                            cases.push_back(std::move(cfg));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -686,6 +722,9 @@ void printUsage() {
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_DUPLICATE_MODES=unique,moderate,high,zipf\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ALPHA=1.1\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ROWS=0  # 0 means min(tokens, vocab - 1)\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_LOW_RUN_MAXS=32\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_RUN_MINS=4096\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_TOKENS_PER_PARTIALS=1024\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_OPTIMIZERS=sgd\n";
 }
 

@@ -1,4 +1,4 @@
-// #include "gpuMatrixMultiply.h"
+/// #include "gpuMatrixMultiply.h"
 // #include "Utilities/Expression/CudaHelpers.h"
 // #include "DeepLearning/Implementation/ThorError.h"
 //
