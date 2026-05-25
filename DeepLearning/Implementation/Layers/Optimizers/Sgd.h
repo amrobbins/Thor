@@ -16,6 +16,8 @@ class Sgd final : public Optimizer {
     SparseRowGradient compileSparseRows(const Tensor &weights, uint64_t maxSparseRows, Stream &gradientUpdateStream) override;
     [[nodiscard]] SparseRowOptimizerExpression toSparseRowUpdateExpression(const Tensor &weights, SparseRowGradient &sparseRowGradient) override;
     [[nodiscard]] bool supportsSparseRowGradients() const override { return true; }
+    [[nodiscard]] bool supportsSparseRowUpdateFusion() const override { return true; }
+    [[nodiscard]] std::unordered_map<std::string, float> sparseRowUpdateRuntimeScalars(uint32_t batchSize) override;
 
     void updateWeights(uint32_t batchSize) override;
     void updateSparseRows(uint32_t batchSize) override;

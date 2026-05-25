@@ -231,6 +231,15 @@ SparseRowGradient Sgd::compileSparseRows(const Tensor& weights, uint64_t maxSpar
     return sparseRowGradient.value();
 }
 
+std::unordered_map<std::string, float> Sgd::sparseRowUpdateRuntimeScalars(uint32_t batchSize) {
+    THOR_THROW_IF_FALSE(batchSize > 0);
+    const float lossScalingFactor = Loss::getLossScalingFactor();
+    THOR_THROW_IF_FALSE(lossScalingFactor > 0);
+
+    const float step = currentLearningRate / (static_cast<float>(batchSize) * lossScalingFactor);
+    return {{"step", step}};
+}
+
 void Sgd::updateWeights(uint32_t batchSize) {
     THOR_THROW_IF_FALSE(compiled);
     THOR_THROW_IF_FALSE(weightsGradient.has_value());
@@ -255,14 +264,7 @@ void Sgd::updateSparseRows(uint32_t batchSize) {
 
     sparseRowGradient->validate();
 
-    THOR_THROW_IF_FALSE(batchSize > 0);
-    const float lossScalingFactor = Loss::getLossScalingFactor();
-    THOR_THROW_IF_FALSE(lossScalingFactor > 0);
-
-    const float step = currentLearningRate / (static_cast<float>(batchSize) * lossScalingFactor);
-    sparseUpdatePlan->run({
-        {"step", step},
-    }, gradientUpdateStream);
+    sparseUpdatePlan->run(sparseRowUpdateRuntimeScalars(batchSize), gradientUpdateStream);
 }
 
 unordered_map<string, float> Sgd::updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {

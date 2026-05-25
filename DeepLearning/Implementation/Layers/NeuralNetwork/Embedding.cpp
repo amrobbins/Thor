@@ -34,6 +34,10 @@ bool isSupportedValueType(TensorDescriptor::DataType dtype) {
 
 std::string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
+bool hasFixedSparseOptimizerFusionReducer(uint64_t embeddingDim) {
+    return embeddingDim == 16ULL || embeddingDim == 32ULL || embeddingDim == 64ULL || embeddingDim == 128ULL || embeddingDim == 256ULL;
+}
+
 }  // namespace
 
 Embedding::Embedding(TensorPlacement placement,
@@ -139,8 +143,21 @@ void Embedding::compileImpl() {
                 const uint64_t maxSparseRows = std::min<uint64_t>(aFeatureInput.value().getTotalNumElements(), vocabularySize);
                 weightsSparseGradient = optimizer->compileSparseRows(storage, maxSparseRows, gradientUpdateStream.value());
                 THOR_THROW_IF_FALSE(weightsSparseGradient.has_value());
-                weightsSparseGradientProducer =
-                    prepareEmbeddingSparseGradient(aFeatureInput.value(), aErrorInput.value(), weightsSparseGradient.value(), paddingIndex);
+                weightsSparseGradientProducerFusesOptimizerUpdate =
+                    optimizer->supportsSparseRowUpdateFusion() && hasFixedSparseOptimizerFusionReducer(embeddingDim);
+                if (weightsSparseGradientProducerFusesOptimizerUpdate) {
+                    SparseRowOptimizerExpression updateExpression = optimizer->toSparseRowUpdateExpression(storage, weightsSparseGradient.value());
+                    weightsSparseGradientProducer = prepareEmbeddingSparseGradientWithSparseRowUpdate(aFeatureInput.value(),
+                                                                                                     aErrorInput.value(),
+                                                                                                     weightsSparseGradient.value(),
+                                                                                                     updateExpression.outputs,
+                                                                                                     updateExpression.inputs,
+                                                                                                     updateExpression.indexedOutputs,
+                                                                                                     paddingIndex);
+                } else {
+                    weightsSparseGradientProducer =
+                        prepareEmbeddingSparseGradient(aFeatureInput.value(), aErrorInput.value(), weightsSparseGradient.value(), paddingIndex);
+                }
             }
         }
     }
@@ -202,11 +219,21 @@ void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
         gradientUpdateStream.value().waitEvent(errorInputReady);
         THOR_THROW_IF_FALSE(weightsSparseGradient.has_value());
         THOR_THROW_IF_FALSE(weightsSparseGradientProducer != nullptr);
-        launchPreparedEmbeddingSparseGradient(*weightsSparseGradientProducer,
-                                              featureInputs[connectionNumber].value(),
-                                              errorInput.value(),
-                                              weightsSparseGradient.value(),
-                                              gradientUpdateStream.value());
+        if (weightsSparseGradientProducerFusesOptimizerUpdate) {
+            launchPreparedEmbeddingSparseGradientWithSparseRowUpdate(
+                *weightsSparseGradientProducer,
+                featureInputs[connectionNumber].value(),
+                errorInput.value(),
+                weightsSparseGradient.value(),
+                parameters[0]->getOptimizer()->sparseRowUpdateRuntimeScalars(batchSize * numBackwardConnections),
+                gradientUpdateStream.value());
+        } else {
+            launchPreparedEmbeddingSparseGradient(*weightsSparseGradientProducer,
+                                                  featureInputs[connectionNumber].value(),
+                                                  errorInput.value(),
+                                                  weightsSparseGradient.value(),
+                                                  gradientUpdateStream.value());
+        }
     }
 
     numBackwardConnectionsMade += 1;
@@ -220,7 +247,9 @@ void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
     if (gradientComplete) {
         weightsAreUpToDateEvent.reset();
         if (!isInferenceOnly() && gradientUpdateStream.has_value() && parameters[0]->isTrainingEnabled()) {
-            parameters[0]->getOptimizer()->updateSparseRows(batchSize * numBackwardConnections);
+            if (!weightsSparseGradientProducerFusesOptimizerUpdate) {
+                parameters[0]->getOptimizer()->updateSparseRows(batchSize * numBackwardConnections);
+            }
             weightsAreUpToDateEvent = gradientUpdateStream.value().putEvent();
         }
         isStartOfForward = true;

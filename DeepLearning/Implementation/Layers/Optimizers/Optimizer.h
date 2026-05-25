@@ -72,6 +72,13 @@ class Optimizer : public Parameterizable {
         throw std::runtime_error("Optimizer does not support sparse-row update expressions.");
     }
 
+    [[nodiscard]] virtual bool supportsSparseRowUpdateFusion() const { return false; }
+
+    [[nodiscard]] virtual std::unordered_map<std::string, float> sparseRowUpdateRuntimeScalars(uint32_t batchSize) {
+        (void)batchSize;
+        throw std::runtime_error("Optimizer does not expose sparse-row update runtime scalars.");
+    }
+
     // Note: It is the responsibility of the layer to ensure all dependencies are available at the start of gradient update stream,
     //       and that the data stream will be blocked until the end of the gradient update stream
     virtual void updateWeights(uint32_t batchSize) = 0;
