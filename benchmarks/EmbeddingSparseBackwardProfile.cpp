@@ -21,6 +21,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -63,6 +64,12 @@ struct StageStats {
     RunningStats activeRows;
     RunningStats singletonRows;
     RunningStats duplicateRows;
+    RunningStats lowRunRows;
+    RunningStats highRunRows;
+    RunningStats ultraHighRunRows;
+    RunningStats lowRunTokens;
+    RunningStats highRunTokens;
+    RunningStats ultraHighRunTokens;
     RunningStats maxRunCount;
 };
 
@@ -94,6 +101,14 @@ int envInt(const char* name, int defaultValue) {
     return std::stoi(raw);
 }
 
+double envDouble(const char* name, double defaultValue) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || raw[0] == '\0') {
+        return defaultValue;
+    }
+    return std::stod(raw);
+}
+
 uint64_t envU64(const char* name, uint64_t defaultValue) {
     const char* raw = std::getenv(name);
     if (raw == nullptr || raw[0] == '\0') {
@@ -122,6 +137,8 @@ struct Options {
     std::vector<DataType> upstreamDTypes = parseDTypeList(envString("THOR_EMBEDDING_BACKWARD_PROFILE_UPSTREAM_DTYPES", "fp16,bf16,fp32"));
     std::vector<std::string> duplicateModes = parseStringList(envString("THOR_EMBEDDING_BACKWARD_PROFILE_DUPLICATE_MODES", "unique,moderate,high"));
     std::vector<std::string> optimizers = parseStringList(envString("THOR_EMBEDDING_BACKWARD_PROFILE_OPTIMIZERS", "sgd"));
+    double zipfAlpha = envDouble("THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ALPHA", 1.1);
+    uint64_t zipfRows = envU64("THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ROWS", 0);
 };
 struct CaseConfig {
     uint64_t vocabularySize = 0;
@@ -130,6 +147,8 @@ struct CaseConfig {
     DataType upstreamDType = DataType::FP32;
     std::string duplicateMode;
     std::string optimizer;
+    double zipfAlpha = 1.1;
+    uint64_t zipfRows = 0;
 
     std::string name() const {
         std::ostringstream ss;
@@ -258,6 +277,13 @@ int choosePoolSlots(const Options& opts, const CaseConfig& cfg, uint64_t l2Bytes
     return static_cast<int>(std::max<uint64_t>(slots, 1));
 }
 
+uint64_t mix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31U);
+}
+
 void fillCpuIndices(Tensor& tensor, const CaseConfig& cfg, int slot) {
     uint32_t* ptr = tensor.getMemPtr<uint32_t>();
     const uint64_t validRows = std::max<uint64_t>(cfg.vocabularySize - 1, 1);
@@ -269,23 +295,38 @@ void fillCpuIndices(Tensor& tensor, const CaseConfig& cfg, int slot) {
     } else if (cfg.duplicateMode == "high") {
         uniqueRows = std::max<uint64_t>(1, std::min(validRows, std::max<uint64_t>(1, cfg.numTokens / 32)));
     } else if (cfg.duplicateMode == "zipf") {
-        uniqueRows = std::max<uint64_t>(1, std::min(validRows, std::max<uint64_t>(1, cfg.numTokens / 8)));
+        if (!(cfg.zipfAlpha > 0.0)) {
+            throw std::invalid_argument("THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ALPHA must be positive.");
+        }
+        uniqueRows = cfg.zipfRows == 0 ? std::min(cfg.numTokens, validRows) : std::min(cfg.zipfRows, validRows);
+        uniqueRows = std::max<uint64_t>(uniqueRows, 1);
     } else if (cfg.duplicateMode != "unique") {
         throw std::invalid_argument("Unsupported duplicate mode: " + cfg.duplicateMode);
     }
 
     const uint64_t stride = std::max<uint64_t>(uniqueRows, 1);
     const uint64_t base = 1 + ((static_cast<uint64_t>(slot) * stride * 1315423911ULL) % validRows);
-    for (uint64_t t = 0; t < cfg.numTokens; ++t) {
-        uint64_t within;
-        if (cfg.duplicateMode == "zipf") {
-            const uint64_t bucket = (t * 1103515245ULL + 12345ULL + static_cast<uint64_t>(slot) * 17ULL) % uniqueRows;
-            within = bucket == 0 ? 0 : (bucket / (1ULL + (bucket % 17ULL)));
-            within %= uniqueRows;
-        } else {
-            within = t % uniqueRows;
+
+    if (cfg.duplicateMode == "zipf") {
+        std::vector<double> weights(static_cast<size_t>(uniqueRows));
+        for (uint64_t rank = 0; rank < uniqueRows; ++rank) {
+            weights[static_cast<size_t>(rank)] = 1.0 / std::pow(static_cast<double>(rank + 1), cfg.zipfAlpha);
         }
-        uint64_t row = 1 + ((base + within - 1) % validRows);
+        std::discrete_distribution<uint64_t> distribution(weights.begin(), weights.end());
+        const uint64_t seed = mix64(static_cast<uint64_t>(slot)) ^ mix64(cfg.vocabularySize) ^ mix64(cfg.embeddingDim << 1U) ^
+                              mix64(cfg.numTokens << 2U) ^ mix64(static_cast<uint64_t>(cfg.upstreamDType) << 3U);
+        std::mt19937_64 rng(seed);
+        for (uint64_t t = 0; t < cfg.numTokens; ++t) {
+            const uint64_t rank = distribution(rng);
+            const uint64_t row = 1 + ((base + rank - 1) % validRows);
+            ptr[t] = static_cast<uint32_t>(row);
+        }
+        return;
+    }
+
+    for (uint64_t t = 0; t < cfg.numTokens; ++t) {
+        const uint64_t within = t % uniqueRows;
+        const uint64_t row = 1 + ((base + within - 1) % validRows);
         ptr[t] = static_cast<uint32_t>(row);
     }
 }
@@ -489,7 +530,8 @@ void printCsvHeader() {
     std::cout << "case,vocab,dim,tokens,upstream_dtype,row_dtype,dup_mode,optimizer,update_path,pool_slots,pool_bytes,l2_bytes,"
                  "materialize_ms,sort_ms,clear_counts_ms,rle_ms,finalize_ms,scan_ms,reduce_ms,"
                  "sparse_gradient_ms,sparse_update_ms,total_backward_update_ms,graph_sparse_gradient_ms,"
-                 "active_rows,singleton_rows,duplicate_rows,max_run_count,"
+                 "active_rows,singleton_rows,duplicate_rows,low_run_rows,high_run_rows,ultra_high_run_rows,"
+                 "low_run_tokens,high_run_tokens,ultra_high_run_tokens,max_run_count,"
                  "sort_temp_bytes,rle_temp_bytes,scan_temp_bytes\n";
 }
 
@@ -506,6 +548,8 @@ void printCsvRow(const CaseConfig& cfg,
               << stats.finalize.mean() << ',' << stats.scan.mean() << ',' << stats.reduce.mean() << ',' << stats.sparseGradientTotal.mean() << ','
               << stats.sparseSgdUpdate.mean() << ',' << stats.totalBackwardAndUpdate.mean() << ',' << stats.graphSparseGradientTotal.mean() << ','
               << stats.activeRows.mean() << ',' << stats.singletonRows.mean() << ',' << stats.duplicateRows.mean() << ','
+              << stats.lowRunRows.mean() << ',' << stats.highRunRows.mean() << ',' << stats.ultraHighRunRows.mean() << ','
+              << stats.lowRunTokens.mean() << ',' << stats.highRunTokens.mean() << ',' << stats.ultraHighRunTokens.mean() << ','
               << stats.maxRunCount.mean() << ',' << meta.sortTempBytes << ',' << meta.rleTempBytes << ',' << meta.scanTempBytes << '\n';
 }
 
@@ -569,6 +613,12 @@ void profileCase(const Options& opts, const CaseConfig& cfg, const cudaDevicePro
         stats.activeRows.add(static_cast<double>(profile.activeRows));
         stats.singletonRows.add(static_cast<double>(profile.singletonRows));
         stats.duplicateRows.add(static_cast<double>(profile.duplicateRows));
+        stats.lowRunRows.add(static_cast<double>(profile.lowRunRows));
+        stats.highRunRows.add(static_cast<double>(profile.highRunRows));
+        stats.ultraHighRunRows.add(static_cast<double>(profile.ultraHighRunRows));
+        stats.lowRunTokens.add(static_cast<double>(profile.lowRunTokens));
+        stats.highRunTokens.add(static_cast<double>(profile.highRunTokens));
+        stats.ultraHighRunTokens.add(static_cast<double>(profile.ultraHighRunTokens));
         stats.maxRunCount.add(static_cast<double>(profile.maxRunCount));
 
         float updateMs = 0.0f;
@@ -601,7 +651,7 @@ std::vector<CaseConfig> makeCases(const Options& opts) {
                 for (DataType dtype : opts.upstreamDTypes) {
                     for (const std::string& dup : opts.duplicateModes) {
                         for (const std::string& opt : opts.optimizers) {
-                            CaseConfig cfg{vocab, dim, tokens, dtype, dup, opt};
+                            CaseConfig cfg{vocab, dim, tokens, dtype, dup, opt, opts.zipfAlpha, opts.zipfRows};
                             if (keepCase(opts, cfg)) {
                                 cases.push_back(std::move(cfg));
                             }
@@ -626,13 +676,16 @@ void printUsage() {
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_POOL_SLOTS=0\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_GRAPH=1\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_UPDATE=1\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_FUSED_UPDATE=1\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_INITIALIZE_WEIGHTS=0\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_CASE_FILTER=\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_VOCABS=32768,131072,1048576\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_DIMS=16,32,64,128,256\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_TOKENS=4096,16384,65536\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_UPSTREAM_DTYPES=fp16,bf16,fp32\n"
-              << "  THOR_EMBEDDING_BACKWARD_PROFILE_DUPLICATE_MODES=unique,moderate,high\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_DUPLICATE_MODES=unique,moderate,high,zipf\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ALPHA=1.1\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ROWS=0  # 0 means min(tokens, vocab - 1)\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_OPTIMIZERS=sgd\n";
 }
 

@@ -142,14 +142,16 @@ class CudaGraphCaptureBuilder {
     bool containsDeviceUpdatableNodes() const { return containsDeviceUpdatableNodes_; }
 
     void captureKernel(const CudaGraphKernelLaunch& launch);
+    void captureKernelOnStream(const CudaGraphKernelLaunch& launch, Stream stream);
     DeviceUpdatableKernelNode captureDeviceUpdatableKernel(const CudaGraphKernelLaunch& launch);
+    DeviceUpdatableKernelNode captureDeviceUpdatableKernelOnStream(const CudaGraphKernelLaunch& launch, Stream stream);
 
     CudaGraph endCapture();
     CudaGraphExecutable endCaptureAndInstantiate(Stream uploadStream, bool upload = true);
 
    private:
     void ensureActive() const;
-    DeviceUpdatableKernelNode captureKernelImpl(const CudaGraphKernelLaunch& launch, bool deviceUpdatable);
+    DeviceUpdatableKernelNode captureKernelImpl(const CudaGraphKernelLaunch& launch, bool deviceUpdatable, Stream stream);
     void abortCaptureNoThrow() noexcept;
 
     Stream stream_;

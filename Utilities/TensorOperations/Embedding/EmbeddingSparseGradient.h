@@ -32,6 +32,12 @@ struct EmbeddingSparseGradientProfileResult {
     uint64_t activeRows = 0;
     uint64_t singletonRows = 0;
     uint64_t duplicateRows = 0;
+    uint64_t lowRunRows = 0;
+    uint64_t highRunRows = 0;
+    uint64_t ultraHighRunRows = 0;
+    uint64_t lowRunTokens = 0;
+    uint64_t highRunTokens = 0;
+    uint64_t ultraHighRunTokens = 0;
     uint32_t maxRunCount = 0;
 
     float materializeSortPairsMs = 0.0f;
@@ -46,17 +52,38 @@ struct EmbeddingSparseGradientProfileResult {
 
 struct CapturedEmbeddingSparseGradient {
     CapturedEmbeddingSparseGradient() = default;
-    explicit CapturedEmbeddingSparseGradient(int deviceNum) : reduceNodeHandle(deviceNum) {}
+    explicit CapturedEmbeddingSparseGradient(int deviceNum)
+        : lowReduceNodeHandle(deviceNum),
+          highReduceNodeHandle(deviceNum),
+          ultraHighPartialReduceNodeHandle(deviceNum),
+          ultraHighReduceNodeHandle(deviceNum),
+          highRunCaptureStream(deviceNum),
+          ultraHighRunCaptureStream(deviceNum) {}
 
     CapturedEmbeddingSparseGradient(const CapturedEmbeddingSparseGradient&) = delete;
     CapturedEmbeddingSparseGradient& operator=(const CapturedEmbeddingSparseGradient&) = delete;
     CapturedEmbeddingSparseGradient(CapturedEmbeddingSparseGradient&&) noexcept = default;
     CapturedEmbeddingSparseGradient& operator=(CapturedEmbeddingSparseGradient&&) noexcept = default;
 
-    void uploadTargetNodes(Stream stream) const { reduceNodeHandle.upload(reduceNode, stream); }
+    void uploadTargetNodes(Stream stream) const {
+        lowReduceNodeHandle.upload(lowReduceNode, stream);
+        highReduceNodeHandle.upload(highReduceNode, stream);
+        if (ultraHighPartialReduceNode) {
+            ultraHighPartialReduceNodeHandle.upload(ultraHighPartialReduceNode, stream);
+        }
+        ultraHighReduceNodeHandle.upload(ultraHighReduceNode, stream);
+    }
 
-    DeviceUpdatableKernelNodeDeviceHandle reduceNodeHandle;
-    DeviceUpdatableKernelNode reduceNode;
+    DeviceUpdatableKernelNodeDeviceHandle lowReduceNodeHandle;
+    DeviceUpdatableKernelNodeDeviceHandle highReduceNodeHandle;
+    DeviceUpdatableKernelNodeDeviceHandle ultraHighPartialReduceNodeHandle;
+    DeviceUpdatableKernelNodeDeviceHandle ultraHighReduceNodeHandle;
+    DeviceUpdatableKernelNode lowReduceNode;
+    DeviceUpdatableKernelNode highReduceNode;
+    DeviceUpdatableKernelNode ultraHighPartialReduceNode;
+    DeviceUpdatableKernelNode ultraHighReduceNode;
+    Stream highRunCaptureStream;
+    Stream ultraHighRunCaptureStream;
 };
 
 std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradient(const Tensor& indices,
@@ -118,10 +145,5 @@ void capturePreparedEmbeddingSparseGradientWithSparseRowUpdate(
     const std::unordered_map<std::string, float>& runtimeScalars,
     CapturedEmbeddingSparseGradient& captured);
 
-void launchEmbeddingSparseGradient(const Tensor& indices,
-                                   const Tensor& upstreamGradient,
-                                   SparseRowGradient& outputGradient,
-                                   std::optional<uint64_t> paddingIndex,
-                                   Stream stream);
 
 }  // namespace ThorImplementation

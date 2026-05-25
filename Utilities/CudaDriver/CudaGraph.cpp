@@ -248,19 +248,36 @@ void CudaGraphCaptureBuilder::ensureActive() const {
     }
 }
 
-void CudaGraphCaptureBuilder::captureKernel(const CudaGraphKernelLaunch& launch) { (void)captureKernelImpl(launch, false); }
+void CudaGraphCaptureBuilder::captureKernel(const CudaGraphKernelLaunch& launch) { (void)captureKernelImpl(launch, false, stream_); }
 
-DeviceUpdatableKernelNode CudaGraphCaptureBuilder::captureDeviceUpdatableKernel(const CudaGraphKernelLaunch& launch) {
-    return captureKernelImpl(launch, true);
+void CudaGraphCaptureBuilder::captureKernelOnStream(const CudaGraphKernelLaunch& launch, Stream stream) {
+    (void)captureKernelImpl(launch, false, stream);
 }
 
-DeviceUpdatableKernelNode CudaGraphCaptureBuilder::captureKernelImpl(const CudaGraphKernelLaunch& launch, bool deviceUpdatable) {
+DeviceUpdatableKernelNode CudaGraphCaptureBuilder::captureDeviceUpdatableKernel(const CudaGraphKernelLaunch& launch) {
+    return captureKernelImpl(launch, true, stream_);
+}
+
+DeviceUpdatableKernelNode CudaGraphCaptureBuilder::captureDeviceUpdatableKernelOnStream(const CudaGraphKernelLaunch& launch,
+                                                                                        Stream stream) {
+    return captureKernelImpl(launch, true, stream);
+}
+
+DeviceUpdatableKernelNode CudaGraphCaptureBuilder::captureKernelImpl(const CudaGraphKernelLaunch& launch,
+                                                                     bool deviceUpdatable,
+                                                                     Stream stream) {
     ensureActive();
     launch.validate();
+    if (!stream.isInitialized()) {
+        throw std::invalid_argument("CUDA graph capture target stream must be initialized.");
+    }
+    if (stream.getGpuNum() != stream_.getGpuNum()) {
+        throw std::invalid_argument("CUDA graph capture target stream must be on the same GPU as the captured graph.");
+    }
 
     ScopedGpu scopedGpu(stream_.getGpuNum());
 
-    CUlaunchConfig config = makeLaunchConfig(launch, stream_);
+    CUlaunchConfig config = makeLaunchConfig(launch, stream);
     CUlaunchAttribute deviceUpdatableAttribute{};
     if (deviceUpdatable) {
         deviceUpdatableAttribute.id = CU_LAUNCH_ATTRIBUTE_DEVICE_UPDATABLE_KERNEL_NODE;
