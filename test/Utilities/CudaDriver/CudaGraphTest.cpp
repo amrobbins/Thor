@@ -42,6 +42,10 @@ extern "C" __global__ void write_block_xy(unsigned int* out, unsigned int stride
 extern "C" __global__ void write_ordinary_capture(unsigned int* out) {
     out[blockIdx.x] = 10U + blockIdx.x;
 }
+
+extern "C" __global__ void write_offset(unsigned int* out, unsigned int offset, unsigned int base) {
+    out[offset + blockIdx.x] = base + blockIdx.x;
+}
 )CUDA";
 
 struct TestCudaModule {
@@ -49,6 +53,7 @@ struct TestCudaModule {
     CUfunction writeBlockX = nullptr;
     CUfunction writeBlockXY = nullptr;
     CUfunction writeOrdinaryCapture = nullptr;
+    CUfunction writeOffset = nullptr;
 
     explicit TestCudaModule(int deviceNum) {
         ScopedGpu scoped(deviceNum);
@@ -60,6 +65,7 @@ struct TestCudaModule {
         CU_CHECK(cuModuleGetFunction(&writeBlockX, module, "write_block_x"));
         CU_CHECK(cuModuleGetFunction(&writeBlockXY, module, "write_block_xy"));
         CU_CHECK(cuModuleGetFunction(&writeOrdinaryCapture, module, "write_ordinary_capture"));
+        CU_CHECK(cuModuleGetFunction(&writeOffset, module, "write_offset"));
     }
 
     TestCudaModule(const TestCudaModule&) = delete;
@@ -261,6 +267,50 @@ TEST(CudaGraphTest, CapturesAndLaunchesOrdinaryDriverKernel) {
     executable.launch(stream);
     std::vector<uint32_t> values = readGpuUint32Tensor(out, stream);
     EXPECT_EQ(values, (std::vector<uint32_t>{10U, 11U, 12U, 13U}));
+}
+
+
+TEST(CudaGraphTest, CapturesSiblingBranchesOnExplicitStreams) {
+    constexpr int deviceNum = 0;
+    Stream stream(deviceNum);
+    Stream helperStream0(deviceNum);
+    Stream helperStream1(deviceNum);
+    TestCudaModule module(deviceNum);
+    Tensor out(gpuPlacement, TensorDescriptor(DataType::UINT32, {9}));
+    out.memsetAsync(stream, 0);
+    stream.synchronize();
+
+    void* outPtr = out.getMemPtr();
+    uint32_t lowOffset = 0;
+    uint32_t highOffset = 3;
+    uint32_t ultraOffset = 6;
+    uint32_t lowBase = 10;
+    uint32_t highBase = 20;
+    uint32_t ultraBase = 30;
+    void* lowArgs[] = {&outPtr, &lowOffset, &lowBase};
+    void* highArgs[] = {&outPtr, &highOffset, &highBase};
+    void* ultraArgs[] = {&outPtr, &ultraOffset, &ultraBase};
+
+    CudaGraphCaptureBuilder builder(stream);
+    Event ready = stream.putEvent(false);
+    helperStream0.waitEvent(ready);
+    helperStream1.waitEvent(ready);
+
+    builder.captureKernel(CudaGraphKernelLaunch{module.writeOffset, dim3(3, 1, 1), dim3(1, 1, 1), 0, lowArgs, nullptr});
+    DeviceUpdatableKernelNode highNode = builder.captureDeviceUpdatableKernelOnStream(
+        CudaGraphKernelLaunch{module.writeOffset, dim3(3, 1, 1), dim3(1, 1, 1), 0, highArgs, nullptr}, helperStream0);
+    DeviceUpdatableKernelNode ultraNode = builder.captureDeviceUpdatableKernelOnStream(
+        CudaGraphKernelLaunch{module.writeOffset, dim3(3, 1, 1), dim3(1, 1, 1), 0, ultraArgs, nullptr}, helperStream1);
+    ASSERT_TRUE(highNode.isInitialized());
+    ASSERT_TRUE(ultraNode.isInitialized());
+
+    stream.waitEvent(helperStream0.putEvent(false));
+    stream.waitEvent(helperStream1.putEvent(false));
+    CudaGraphExecutable executable = builder.endCaptureAndInstantiate(stream);
+
+    executable.launch(stream);
+    std::vector<uint32_t> values = readGpuUint32Tensor(out, stream);
+    EXPECT_EQ(values, (std::vector<uint32_t>{10U, 11U, 12U, 20U, 21U, 22U, 30U, 31U, 32U}));
 }
 
 TEST(CudaGraphTest, DeviceUpdatedOneDimensionalGridUsesRuntimeDeviceScalarAcrossLaunches) {
