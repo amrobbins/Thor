@@ -29,6 +29,11 @@ struct EmbeddingSparseGradientProfileResult {
     size_t rleTempBytes = 0;
     size_t scanTempBytes = 0;
 
+    uint64_t activeRows = 0;
+    uint64_t singletonRows = 0;
+    uint64_t duplicateRows = 0;
+    uint32_t maxRunCount = 0;
+
     float materializeSortPairsMs = 0.0f;
     float cubSortMs = 0.0f;
     float clearRunCountsMs = 0.0f;
@@ -89,12 +94,29 @@ EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(Prep
                                                                            SparseRowGradient& outputGradient,
                                                                            Stream stream);
 
+EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradientWithSparseRowUpdate(
+    PreparedEmbeddingSparseGradient& prepared,
+    const Tensor& indices,
+    const Tensor& upstreamGradient,
+    SparseRowGradient& outputGradient,
+    const std::unordered_map<std::string, float>& runtimeScalars,
+    Stream stream);
+
 void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
                                             PreparedEmbeddingSparseGradient& prepared,
                                             const Tensor& indices,
                                             const Tensor& upstreamGradient,
                                             SparseRowGradient& outputGradient,
                                             CapturedEmbeddingSparseGradient& captured);
+
+void capturePreparedEmbeddingSparseGradientWithSparseRowUpdate(
+    CudaGraphCaptureBuilder& builder,
+    PreparedEmbeddingSparseGradient& prepared,
+    const Tensor& indices,
+    const Tensor& upstreamGradient,
+    SparseRowGradient& outputGradient,
+    const std::unordered_map<std::string, float>& runtimeScalars,
+    CapturedEmbeddingSparseGradient& captured);
 
 void launchEmbeddingSparseGradient(const Tensor& indices,
                                    const Tensor& upstreamGradient,
