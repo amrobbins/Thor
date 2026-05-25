@@ -25,6 +25,8 @@ struct SparseRowUpdateTensorBinding {
     SparseRowUpdateTensorKind kind = SparseRowUpdateTensorKind::DenseLogicalRows;
 };
 
+struct SparseRowUpdateFusionSource;
+
 struct CapturedSparseRowUpdate {
     CapturedSparseRowUpdate() = default;
     explicit CapturedSparseRowUpdate(int deviceNum) : targetNodeHandle(deviceNum) {}
@@ -58,6 +60,17 @@ class SparseRowUpdatePlan {
         int deviceNum,
         bool useFastMath = true);
 
+    // Emits the optimizer-owned sparse-row update expression as straight-line source for one reduced float4 lane.
+    // The embedding reducer supplies entries listed in localDenseLogicalInputNames directly as local float4 expressions
+    // (for example the reduced `gradient` value), so those dense logical tensors are not added to the fused kernel ABI.
+    [[nodiscard]] static SparseRowUpdateFusionSource emitFusionSource(
+        PhysicalOutputs outputs,
+        const Tensor& rows,
+        const Tensor& numRows,
+        const std::unordered_map<std::string, SparseRowUpdateTensorBinding>& inputs,
+        const std::unordered_map<std::string, Tensor>& indexedOutputs,
+        const std::unordered_map<std::string, std::string>& localDenseLogicalInputExpressions);
+
     void run(const std::unordered_map<std::string, float>& runtimeScalars, Stream stream) const;
     void capture(CudaGraphCaptureBuilder& builder,
                  CapturedSparseRowUpdate& captured,
@@ -89,12 +102,21 @@ class SparseRowUpdatePlan {
     uint64_t capacity = 0;
     uint64_t vocabularySize = 0;
     uint64_t embeddingDim = 0;
+    uint32_t valuesPerThread = 1;
     TensorDescriptor::DataType rowDataType = TensorDescriptor::DataType::UINT64;
     Tensor rows;
     Tensor numRows;
     std::vector<RuntimeInputSlot> inputSlots;
     std::vector<RuntimeOutputSlot> outputSlots;
     std::unordered_map<std::string, Tensor> indexedOutputsByName;
+};
+
+struct SparseRowUpdateFusionSource {
+    std::string helperSource;
+    std::string parameterSource;
+    std::string bodySource;
+    std::vector<SparseRowUpdatePlan::RuntimeInputSlot> kernelInputSlots;
+    std::vector<SparseRowUpdatePlan::RuntimeOutputSlot> outputSlots;
 };
 
 }  // namespace ThorImplementation

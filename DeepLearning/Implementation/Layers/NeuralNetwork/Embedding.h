@@ -46,6 +46,7 @@ class Embedding final : public TrainableLayer {
     bool sparseGradients;
     std::optional<SparseRowGradient> weightsSparseGradient;
     std::shared_ptr<PreparedEmbeddingSparseGradient> weightsSparseGradientProducer;
+    bool weightsSparseGradientProducerFusesOptimizerUpdate = false;
 };
 
 }  // namespace ThorImplementation

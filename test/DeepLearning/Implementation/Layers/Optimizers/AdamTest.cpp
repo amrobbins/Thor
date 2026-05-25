@@ -6,6 +6,7 @@
 
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <set>
@@ -36,6 +37,36 @@ void writeCpuFp32Tensor(Tensor& tensor, const std::vector<float>& values) {
         ptr[i] = values[i];
 }
 
+void writeCpuUint16Tensor(Tensor& tensor, const std::vector<uint64_t>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensor.getDataType(), DataType::UINT16);
+    ASSERT_EQ(tensor.getTotalNumElements(), values.size());
+
+    uint16_t* ptr = tensor.getMemPtr<uint16_t>();
+    for (uint64_t i = 0; i < values.size(); ++i)
+        ptr[i] = static_cast<uint16_t>(values[i]);
+}
+
+void writeCpuUint32Tensor(Tensor& tensor, const std::vector<uint64_t>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensor.getDataType(), DataType::UINT32);
+    ASSERT_EQ(tensor.getTotalNumElements(), values.size());
+
+    uint32_t* ptr = tensor.getMemPtr<uint32_t>();
+    for (uint64_t i = 0; i < values.size(); ++i)
+        ptr[i] = static_cast<uint32_t>(values[i]);
+}
+
+void writeCpuUint64Tensor(Tensor& tensor, const std::vector<uint64_t>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensor.getDataType(), DataType::UINT64);
+    ASSERT_EQ(tensor.getTotalNumElements(), values.size());
+
+    uint64_t* ptr = tensor.getMemPtr<uint64_t>();
+    for (uint64_t i = 0; i < values.size(); ++i)
+        ptr[i] = values[i];
+}
+
 std::vector<float> readCpuFp32Tensor(const Tensor& tensor) {
     EXPECT_EQ(tensor.getPlacement(), cpuPlacement);
     EXPECT_EQ(tensor.getDataType(), DataType::FP32);
@@ -55,6 +86,29 @@ void copyValuesToGpuFp32Tensor(Tensor& gpuTensor, const std::vector<float>& valu
 
     Tensor host(cpuPlacement, gpuTensor.getDescriptor());
     writeCpuFp32Tensor(host, values);
+
+    gpuTensor.copyFromAsync(host, stream);
+    stream.synchronize();
+}
+
+void copyRowValuesToGpuTensor(Tensor& gpuTensor, const std::vector<uint64_t>& values, Stream& stream) {
+    ASSERT_EQ(gpuTensor.getPlacement(), gpuPlacement);
+    ASSERT_EQ(gpuTensor.getTotalNumElements(), values.size());
+
+    Tensor host(cpuPlacement, gpuTensor.getDescriptor());
+    switch (gpuTensor.getDataType()) {
+        case DataType::UINT16:
+            writeCpuUint16Tensor(host, values);
+            break;
+        case DataType::UINT32:
+            writeCpuUint32Tensor(host, values);
+            break;
+        case DataType::UINT64:
+            writeCpuUint64Tensor(host, values);
+            break;
+        default:
+            FAIL() << "Unsupported sparse row dtype in copyRowValuesToGpuTensor.";
+    }
 
     gpuTensor.copyFromAsync(host, stream);
     stream.synchronize();
@@ -115,6 +169,72 @@ void applyAdamReferenceStep(AdamReferenceState& state,
 
         state.weights[i] = state.weights[i] - alphaT * state.m[i] / (std::sqrt(state.v[i]) + epsilon);
     }
+}
+
+
+void applySparseAdamReferenceStep(AdamReferenceState& state,
+                                  const std::vector<uint64_t>& rows,
+                                  const std::vector<float>& sparseGradientValues,
+                                  uint64_t numRows,
+                                  uint64_t embeddingDim,
+                                  uint32_t batchSize,
+                                  float alpha,
+                                  float beta1,
+                                  float beta2,
+                                  float epsilon) {
+    ASSERT_LE(numRows, rows.size());
+    ASSERT_GE(sparseGradientValues.size(), numRows * embeddingDim);
+    ASSERT_EQ(state.weights.size(), state.m.size());
+    ASSERT_EQ(state.weights.size(), state.v.size());
+    ASSERT_GT(batchSize, 0u);
+
+    state.t += 1.0f;
+
+    const float invBatchLossScale = 1.0f / (static_cast<float>(batchSize) * Loss::getLossScalingFactor());
+    const double alphaT64 = static_cast<double>(alpha) * std::sqrt(1.0 - std::pow(static_cast<double>(beta2), state.t)) /
+                            (1.0 - std::pow(static_cast<double>(beta1), state.t));
+    const float alphaT = static_cast<float>(alphaT64);
+
+    for (uint64_t u = 0; u < numRows; ++u) {
+        const uint64_t row = rows[u];
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            const uint64_t denseIndex = row * embeddingDim + d;
+            ASSERT_LT(denseIndex, state.weights.size());
+            const float g = sparseGradientValues[u * embeddingDim + d] * invBatchLossScale;
+
+            state.m[denseIndex] = beta1 * state.m[denseIndex] + (1.0f - beta1) * g;
+            state.v[denseIndex] = beta2 * state.v[denseIndex] + (1.0f - beta2) * g * g;
+            state.weights[denseIndex] -= alphaT * state.m[denseIndex] / (std::sqrt(state.v[denseIndex]) + epsilon);
+        }
+    }
+}
+
+void writeSparseGradient(SparseRowGradient& gradient,
+                         const std::vector<uint64_t>& rows,
+                         const std::vector<float>& values,
+                         uint64_t numRows,
+                         Stream& stream) {
+    ASSERT_LE(numRows, gradient.capacity);
+    ASSERT_LE(rows.size(), gradient.rows.getTotalNumElements());
+    ASSERT_EQ(values.size(), gradient.capacity * gradient.embeddingDim);
+
+    std::vector<uint64_t> rowStorage(gradient.rows.getTotalNumElements(), 0);
+    std::copy(rows.begin(), rows.end(), rowStorage.begin());
+    copyRowValuesToGpuTensor(gradient.rows, rowStorage, stream);
+    copyValuesToGpuFp32Tensor(gradient.values, values, stream);
+    copyRowValuesToGpuTensor(gradient.numRows, {numRows}, stream);
+}
+
+void runSparseAdamStep(Adam& adam,
+                       SparseRowGradient& gradient,
+                       const std::vector<uint64_t>& rows,
+                       const std::vector<float>& values,
+                       uint64_t numRows,
+                       uint32_t batchSize,
+                       Stream& stream) {
+    writeSparseGradient(gradient, rows, values, numRows, stream);
+    adam.updateSparseRows(batchSize);
+    stream.synchronize();
 }
 
 void runAdamStep(Adam& adam, const std::vector<float>& rawGradient, uint32_t batchSize, Stream& stream) {
@@ -407,6 +527,120 @@ TEST(AdamTest, TwoStepsCarryMomentsAndUseBiasCorrection) {
 
     std::unordered_map<std::string, float> all = adam.getAllHyperParameters();
     expectMapHasValue(all, "t", 2.0f);
+}
+
+TEST(AdamTest, CompileSparseRowsCreatesSparseGradientMomentsAndNoDenseGradient) {
+    Stream stream(gpuPlacement);
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {5, 4}));
+
+    Adam adam(61, /*alpha=*/0.01f, /*beta1=*/0.8f, /*beta2=*/0.9f, /*epsilon=*/1e-5f);
+    EXPECT_TRUE(adam.supportsSparseRowGradients());
+    EXPECT_TRUE(adam.supportsSparseRowUpdateFusion());
+
+    SparseRowGradient gradient = adam.compileSparseRows(weights, /*maxSparseRows=*/3, stream);
+    stream.synchronize();
+
+    EXPECT_TRUE(adam.isCompiled());
+    EXPECT_FALSE(adam.getWeightsGradient().has_value());
+    ASSERT_TRUE(adam.getSparseRowGradient().has_value());
+
+    gradient.validate();
+    EXPECT_EQ(gradient.capacity, 3u);
+    EXPECT_EQ(gradient.vocabularySize, 5u);
+    EXPECT_EQ(gradient.embeddingDim, 4u);
+    EXPECT_EQ(gradient.values.getDataType(), DataType::FP32);
+    EXPECT_EQ(gradient.values.getDimensions(), (std::vector<uint64_t>{3, 4}));
+    EXPECT_EQ(gradient.rows.getDataType(), DataType::UINT16);
+    EXPECT_EQ(gradient.numRows.getDataType(), DataType::UINT16);
+
+    Tensor weightsOut = adam.getOptimizerParameterTensor("weights");
+    Tensor m = adam.getOptimizerParameterTensor("m");
+    Tensor v = adam.getOptimizerParameterTensor("v");
+    EXPECT_EQ(weightsOut, weights);
+    EXPECT_EQ(m.getDataType(), DataType::FP32);
+    EXPECT_EQ(v.getDataType(), DataType::FP32);
+    EXPECT_EQ(m.getDimensions(), weights.getDimensions());
+    EXPECT_EQ(v.getDimensions(), weights.getDimensions());
+
+    std::vector<std::string> outputNames = adam.getOptimizerParameterNames();
+    std::set<std::string> names(outputNames.begin(), outputNames.end());
+    EXPECT_EQ(names, (std::set<std::string>{"weights", "m", "v"}));
+}
+
+TEST(AdamTest, SparseRowUpdateTwoStepsCarryMomentsOnlyForTouchedRows) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 5;
+    constexpr uint64_t embeddingDim = 4;
+    constexpr uint64_t capacity = 4;
+    constexpr float alpha = 0.02f;
+    constexpr float beta1 = 0.7f;
+    constexpr float beta2 = 0.8f;
+    constexpr float epsilon = 1e-4f;
+
+    const std::vector<float> initialWeights{
+        1.0f, 1.1f, 1.2f, 1.3f,
+        2.0f, 2.1f, 2.2f, 2.3f,
+        3.0f, 3.1f, 3.2f, 3.3f,
+        4.0f, 4.1f, 4.2f, 4.3f,
+        5.0f, 5.1f, 5.2f, 5.3f,
+    };
+    const std::vector<uint64_t> rows1{3, 1, 4, 0};
+    const std::vector<float> values1{
+        0.4f, -0.8f, 1.2f, -1.6f,
+        2.0f, -2.4f, 2.8f, -3.2f,
+        1000.0f, 1000.0f, 1000.0f, 1000.0f,
+        -1000.0f, -1000.0f, -1000.0f, -1000.0f,
+    };
+    const std::vector<uint64_t> rows2{1, 2, 3, 4};
+    const std::vector<float> values2{
+        -1.0f, 1.5f, -2.0f, 2.5f,
+        3.0f, -3.5f, 4.0f, -4.5f,
+        -0.25f, 0.5f, -0.75f, 1.0f,
+        999.0f, 999.0f, 999.0f, 999.0f,
+    };
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {vocabularySize, embeddingDim}));
+    copyValuesToGpuFp32Tensor(weights, initialWeights, stream);
+
+    Adam adam(62, alpha, beta1, beta2, epsilon);
+    SparseRowGradient gradient = adam.compileSparseRows(weights, capacity, stream);
+    stream.synchronize();
+
+    AdamReferenceState expected;
+    expected.weights = initialWeights;
+    expected.m.assign(initialWeights.size(), 0.0f);
+    expected.v.assign(initialWeights.size(), 0.0f);
+
+    applySparseAdamReferenceStep(expected,
+                                 rows1,
+                                 values1,
+                                 /*numRows=*/2,
+                                 embeddingDim,
+                                 /*batchSize=*/2,
+                                 alpha,
+                                 beta1,
+                                 beta2,
+                                 epsilon);
+    runSparseAdamStep(adam, gradient, rows1, values1, /*numRows=*/2, /*batchSize=*/2, stream);
+
+    applySparseAdamReferenceStep(expected,
+                                 rows2,
+                                 values2,
+                                 /*numRows=*/3,
+                                 embeddingDim,
+                                 /*batchSize=*/5,
+                                 alpha,
+                                 beta1,
+                                 beta2,
+                                 epsilon);
+    runSparseAdamStep(adam, gradient, rows2, values2, /*numRows=*/3, /*batchSize=*/5, stream);
+
+    EXPECT_FLOAT_EQ(adam.getT(), 2.0f);
+    expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 3e-5f, 3e-5f);
+    expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("m"), stream), expected.m, 3e-5f, 3e-5f);
+    expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("v"), stream), expected.v, 3e-5f, 3e-5f);
 }
 
 TEST(AdamTest, ThreeStepsWithFp8E5M2WeightsCarryMomentsAndQuantizeWeights) {

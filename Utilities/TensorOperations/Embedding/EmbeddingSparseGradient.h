@@ -4,11 +4,14 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/CudaDriver/CudaGraph.h"
+#include "Utilities/Expression/SparseRowUpdate.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
+#include <unordered_map>
 
 namespace ThorImplementation {
 
@@ -56,11 +59,29 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradient(
                                                                                SparseRowGradient& outputGradient,
                                                                                std::optional<uint64_t> paddingIndex);
 
+std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientWithSparseRowUpdate(
+    const Tensor& indices,
+    const Tensor& upstreamGradient,
+    SparseRowGradient& outputGradient,
+    PhysicalOutputs updateOutputs,
+    const std::unordered_map<std::string, SparseRowUpdateTensorBinding>& updateInputs,
+    const std::unordered_map<std::string, Tensor>& indexedUpdateOutputs,
+    std::optional<uint64_t> paddingIndex);
+
+bool preparedEmbeddingSparseGradientHasSparseRowUpdate(const PreparedEmbeddingSparseGradient& prepared);
+
 void launchPreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prepared,
                                            const Tensor& indices,
                                            const Tensor& upstreamGradient,
                                            SparseRowGradient& outputGradient,
                                            Stream stream);
+
+void launchPreparedEmbeddingSparseGradientWithSparseRowUpdate(PreparedEmbeddingSparseGradient& prepared,
+                                                              const Tensor& indices,
+                                                              const Tensor& upstreamGradient,
+                                                              SparseRowGradient& outputGradient,
+                                                              const std::unordered_map<std::string, float>& runtimeScalars,
+                                                              Stream stream);
 
 EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prepared,
                                                                            const Tensor& indices,

@@ -22,6 +22,8 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace ThorImplementation {
@@ -455,20 +457,35 @@ std::string sparseGradientScalarType(DataType dtype) {
     }
 }
 
-std::string sparseGradientReduceKernelName(DataType rowDType, DataType gradDType, uint64_t embeddingDim) {
+std::string sparseGradientReduceKernelName(DataType rowDType, DataType gradDType, uint64_t embeddingDim, bool hasSparseRowUpdate) {
     std::ostringstream ss;
     ss << "thor_embedding_sparse_reduce_r" << static_cast<uint64_t>(rowDType) << "_g" << static_cast<uint64_t>(gradDType) << "_d"
        << embeddingDim;
+    if (hasSparseRowUpdate) {
+        ss << "_sru";
+    }
     return ss.str();
 }
 
-std::string emitSparseGradientReduceKernelSource(DataType rowDType, DataType gradDType, uint64_t embeddingDim, const std::string& kernelName) {
+std::string emitSparseGradientReduceKernelSource(DataType rowDType,
+                                                DataType gradDType,
+                                                uint64_t embeddingDim,
+                                                const std::string& kernelName,
+                                                const SparseRowUpdateFusionSource* sparseRowUpdate) {
+    if (sparseRowUpdate != nullptr && !hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
+        throw std::invalid_argument("Embedding sparse-gradient fused sparse-row update currently requires a fixed D={16,32,64,128,256} reducer.");
+    }
+
     const std::string rowType = sparseGradientScalarType(rowDType);
     const std::string gradType = sparseGradientScalarType(gradDType);
 
     std::ostringstream ss;
     ss << "#include <cuda_fp16.h>\n";
-    ss << "#include <cuda_bf16.h>\n\n";
+    ss << "#include <cuda_bf16.h>\n";
+    ss << "#include <math_functions.h>\n\n";
+    if (sparseRowUpdate != nullptr) {
+        ss << sparseRowUpdate->helperSource;
+    }
     ss << "__device__ __forceinline__ float thor_embedding_grad_to_float(float v) { return v; }\n";
     ss << "__device__ __forceinline__ float thor_embedding_grad_to_float(__half v) { return __half2float(v); }\n";
     ss << "__device__ __forceinline__ float thor_embedding_grad_to_float(__nv_bfloat16 v) { return __bfloat162float(v); }\n";
@@ -485,7 +502,13 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType, DataType gra
     ss << "}\n\n";
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernelName << "(const unsigned int* sortedTokenIds, const unsigned int* runOffsets, const unsigned int* runCounts, ";
-    ss << "const " << rowType << "* numValidRows, const " << gradType << "* upstreamGradient, float* outputValues) {\n";
+    ss << "const " << rowType << "* numValidRows, const " << gradType << "* upstreamGradient";
+    if (sparseRowUpdate != nullptr) {
+        ss << ", const " << rowType << "* outputRows" << sparseRowUpdate->parameterSource;
+    } else {
+        ss << ", float* outputValues";
+    }
+    ss << ") {\n";
 
     if (hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
         const uint64_t threadsPerRow = embeddingDim / 4ULL;
@@ -549,8 +572,15 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType, DataType gra
         }
         ss << "    sum = thor_embedding_add_float4(sum, v);\n";
         ss << "  }\n";
-        ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * embeddingDim);\n";
-        ss << "  output[vectorIndex] = sum;\n";
+        if (sparseRowUpdate != nullptr) {
+            ss << "  const unsigned long long sru_logical_row = row;\n";
+            ss << "  const unsigned long long sru_indexed_row = static_cast<unsigned long long>(outputRows[row]);\n";
+            ss << "  const unsigned long long sru_vector_index = static_cast<unsigned long long>(vectorIndex);\n";
+            ss << sparseRowUpdate->bodySource;
+        } else {
+            ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * embeddingDim);\n";
+            ss << "  output[vectorIndex] = sum;\n";
+        }
     } else {
         ss << "  constexpr unsigned int THREADS_PER_BLOCK_LOCAL = " << THREADS_PER_BLOCK << "U;\n";
         ss << "  const unsigned long long row = static_cast<unsigned long long>(blockIdx.x);\n";
@@ -605,6 +635,7 @@ struct PreparedEmbeddingSparseGradient {
     CUmodule reduceModule = nullptr;
     CUfunction reduceKernel = nullptr;
     std::string reduceKernelName;
+    std::optional<SparseRowUpdateFusionSource> sparseRowUpdate;
 };
 
 PreparedEmbeddingSparseGradient::~PreparedEmbeddingSparseGradient() {
@@ -621,11 +652,15 @@ void compileGraphReduceKernel(PreparedEmbeddingSparseGradient& prepared) {
         return;
     }
 
-    prepared.reduceKernelName = sparseGradientReduceKernelName(prepared.rowDataType, prepared.gradientDataType, prepared.embeddingDim);
+    prepared.reduceKernelName = sparseGradientReduceKernelName(prepared.rowDataType,
+                                                              prepared.gradientDataType,
+                                                              prepared.embeddingDim,
+                                                              prepared.sparseRowUpdate.has_value());
     const std::string src = emitSparseGradientReduceKernelSource(prepared.rowDataType,
                                                                  prepared.gradientDataType,
                                                                  prepared.embeddingDim,
-                                                                 prepared.reduceKernelName);
+                                                                 prepared.reduceKernelName,
+                                                                 prepared.sparseRowUpdate.has_value() ? &prepared.sparseRowUpdate.value() : nullptr);
     if constexpr (PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS) {
         std::fprintf(stderr,
                      "\n===== Generated Embedding sparse-gradient reducer CUDA source begin: %s =====\n%s\n===== Generated Embedding sparse-gradient reducer CUDA source end: %s =====\n",
@@ -806,6 +841,9 @@ void launchReduceValues(PreparedEmbeddingSparseGradient& prepared,
                         const Tensor& upstreamGradient,
                         SparseRowGradient& outputGradient,
                         Stream stream) {
+    if (prepared.sparseRowUpdate.has_value()) {
+        throw std::invalid_argument("Prepared Embedding sparse-gradient producer with fused sparse-row update must use the fused update launcher.");
+    }
     switch (prepared.rowDataType) {
         case DataType::UINT16:
             launchReduceValuesForRowType<uint16_t>(prepared, upstreamGradient, outputGradient, stream);
@@ -819,6 +857,92 @@ void launchReduceValues(PreparedEmbeddingSparseGradient& prepared,
         default:
             throw std::runtime_error("Prepared Embedding sparse-gradient producer has unsupported row dtype.");
     }
+}
+
+struct SparseRowUpdateFusionKernelArgs {
+    std::vector<const void*> tensorInputPtrs;
+    std::vector<void*> tensorOutputPtrs;
+    std::vector<float> scalarValues;
+    std::vector<void*> args;
+};
+
+SparseRowUpdateFusionKernelArgs buildSparseRowUpdateFusionKernelArgs(const SparseRowUpdateFusionSource& source,
+                                                                    const std::unordered_map<std::string, float>& runtimeScalars) {
+    SparseRowUpdateFusionKernelArgs out;
+    out.tensorInputPtrs.reserve(source.kernelInputSlots.size());
+    out.tensorOutputPtrs.reserve(source.outputSlots.size());
+    out.scalarValues.reserve(source.kernelInputSlots.size());
+
+    for (const SparseRowUpdatePlan::RuntimeInputSlot& slot : source.kernelInputSlots) {
+        if (slot.inputKind == NamedInput::Kind::Tensor) {
+            out.tensorInputPtrs.push_back(slot.tensor.getMemPtr());
+        } else if (slot.inputKind == NamedInput::Kind::RuntimeScalarFp32) {
+            auto it = runtimeScalars.find(slot.name);
+            if (it == runtimeScalars.end()) {
+                throw std::invalid_argument("Fused embedding sparse-row update missing runtime scalar '" + slot.name + "'.");
+            }
+            out.scalarValues.push_back(it->second);
+        } else {
+            throw std::runtime_error("Fused embedding sparse-row update encountered unsupported runtime input kind.");
+        }
+    }
+    for (const SparseRowUpdatePlan::RuntimeOutputSlot& slot : source.outputSlots) {
+        out.tensorOutputPtrs.push_back(const_cast<void*>(static_cast<const void*>(slot.tensor.getMemPtr())));
+    }
+
+    out.args.reserve(source.kernelInputSlots.size() + source.outputSlots.size());
+    size_t tensorInputIndex = 0;
+    size_t scalarIndex = 0;
+    for (const SparseRowUpdatePlan::RuntimeInputSlot& slot : source.kernelInputSlots) {
+        if (slot.inputKind == NamedInput::Kind::Tensor) {
+            out.args.push_back((void*)&out.tensorInputPtrs[tensorInputIndex++]);
+        } else {
+            out.args.push_back((void*)&out.scalarValues[scalarIndex++]);
+        }
+    }
+    for (void*& ptr : out.tensorOutputPtrs) {
+        out.args.push_back((void*)&ptr);
+    }
+    return out;
+}
+
+void launchReduceValuesWithSparseRowUpdate(PreparedEmbeddingSparseGradient& prepared,
+                                           const Tensor& upstreamGradient,
+                                           SparseRowGradient& outputGradient,
+                                           const std::unordered_map<std::string, float>& runtimeScalars,
+                                           Stream stream) {
+    if (!prepared.sparseRowUpdate.has_value()) {
+        throw std::invalid_argument("Prepared Embedding sparse-gradient producer does not have a fused sparse-row update.");
+    }
+    if (prepared.reduceKernel == nullptr) {
+        throw std::runtime_error("Prepared Embedding sparse-gradient fused reducer kernel was not compiled.");
+    }
+
+    const uint32_t reduceRowsPerGridX = reduceRowsPerGridXForEmbeddingSparseGradient(prepared.embeddingDim);
+    const uint32_t reduceGridDimY = reduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim);
+    const dim3 grid(reduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim), reduceGridDimY, 1U);
+    const dim3 block(THREADS_PER_BLOCK, 1U, 1U);
+
+    const void* sortedTokenIdsPtr = prepared.sortedTokenIds.getMemPtr();
+    const void* runOffsetsPtr = prepared.runOffsets.getMemPtr();
+    const void* runCountsPtr = prepared.runCounts.getMemPtr();
+    const void* numRowsPtr = outputGradient.numRows.getMemPtr();
+    const void* upstreamPtr = upstreamGradient.getMemPtr();
+    const void* outputRowsPtr = outputGradient.rows.getMemPtr();
+
+    SparseRowUpdateFusionKernelArgs updateArgs = buildSparseRowUpdateFusionKernelArgs(prepared.sparseRowUpdate.value(), runtimeScalars);
+    std::vector<void*> args;
+    args.reserve(6 + updateArgs.args.size());
+    args.push_back((void*)&sortedTokenIdsPtr);
+    args.push_back((void*)&runOffsetsPtr);
+    args.push_back((void*)&runCountsPtr);
+    args.push_back((void*)&numRowsPtr);
+    args.push_back((void*)&upstreamPtr);
+    args.push_back((void*)&outputRowsPtr);
+    args.insert(args.end(), updateArgs.args.begin(), updateArgs.args.end());
+
+    (void)reduceRowsPerGridX;
+    CU_CHECK(cuLaunchKernel(prepared.reduceKernel, grid.x, grid.y, grid.z, block.x, block.y, block.z, 0, stream, args.data(), nullptr));
 }
 
 struct OptionalReduceGridUpdate {
@@ -927,10 +1051,12 @@ void rleRows(PreparedEmbeddingSparseGradient& prepared, SparseRowGradient& outpu
     }
 }
 
-std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradient(const Tensor& indices,
-                                                                               const Tensor& upstreamGradient,
-                                                                               SparseRowGradient& outputGradient,
-                                                                               std::optional<uint64_t> paddingIndex) {
+std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientImpl(
+    const Tensor& indices,
+    const Tensor& upstreamGradient,
+    SparseRowGradient& outputGradient,
+    std::optional<uint64_t> paddingIndex,
+    std::optional<SparseRowUpdateFusionSource> sparseRowUpdate) {
     if (!indices.isInitialized() || !upstreamGradient.isInitialized()) {
         throw std::invalid_argument("Embedding sparse-gradient indices and upstream gradient tensors must be initialized.");
     }
@@ -995,6 +1121,7 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradient(
     prepared->indexDataType = indices.getDataType();
     prepared->gradientDataType = upstreamGradient.getDataType();
     prepared->rowDataType = outputGradient.rowDataType;
+    prepared->sparseRowUpdate = std::move(sparseRowUpdate);
 
     ScopedGpu scopedGpu(placement.getDeviceNum());
     switch (prepared->rowDataType) {
@@ -1013,6 +1140,34 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradient(
     compileGraphReduceKernel(*prepared);
 
     return prepared;
+}
+
+std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradient(const Tensor& indices,
+                                                                               const Tensor& upstreamGradient,
+                                                                               SparseRowGradient& outputGradient,
+                                                                               std::optional<uint64_t> paddingIndex) {
+    return prepareEmbeddingSparseGradientImpl(indices, upstreamGradient, outputGradient, paddingIndex, std::nullopt);
+}
+
+std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientWithSparseRowUpdate(
+    const Tensor& indices,
+    const Tensor& upstreamGradient,
+    SparseRowGradient& outputGradient,
+    PhysicalOutputs updateOutputs,
+    const std::unordered_map<std::string, SparseRowUpdateTensorBinding>& updateInputs,
+    const std::unordered_map<std::string, Tensor>& indexedUpdateOutputs,
+    std::optional<uint64_t> paddingIndex) {
+    SparseRowUpdateFusionSource source = SparseRowUpdatePlan::emitFusionSource(std::move(updateOutputs),
+                                                                               outputGradient.rows,
+                                                                               outputGradient.numRows,
+                                                                               updateInputs,
+                                                                               indexedUpdateOutputs,
+                                                                               {{"gradient", "sum"}});
+    return prepareEmbeddingSparseGradientImpl(indices, upstreamGradient, outputGradient, paddingIndex, std::move(source));
+}
+
+bool preparedEmbeddingSparseGradientHasSparseRowUpdate(const PreparedEmbeddingSparseGradient& prepared) {
+    return prepared.sparseRowUpdate.has_value();
 }
 
 void validatePreparedEmbeddingSparseGradientInvocation(PreparedEmbeddingSparseGradient& prepared,
@@ -1042,6 +1197,10 @@ void launchPreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prep
                                            SparseRowGradient& outputGradient,
                                            Stream stream) {
     validatePreparedEmbeddingSparseGradientInvocation(prepared, indices, upstreamGradient, outputGradient);
+    if (prepared.sparseRowUpdate.has_value()) {
+        throw std::invalid_argument(
+            "Prepared Embedding sparse-gradient producer has a fused sparse-row update; use launchPreparedEmbeddingSparseGradientWithSparseRowUpdate.");
+    }
 
     ScopedGpu scopedGpu(prepared.deviceNum);
 
@@ -1066,12 +1225,50 @@ void launchPreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prep
     launchReduceValues(prepared, upstreamGradient, outputGradient, stream);
 }
 
+void launchPreparedEmbeddingSparseGradientWithSparseRowUpdate(PreparedEmbeddingSparseGradient& prepared,
+                                                              const Tensor& indices,
+                                                              const Tensor& upstreamGradient,
+                                                              SparseRowGradient& outputGradient,
+                                                              const std::unordered_map<std::string, float>& runtimeScalars,
+                                                              Stream stream) {
+    validatePreparedEmbeddingSparseGradientInvocation(prepared, indices, upstreamGradient, outputGradient);
+    if (!prepared.sparseRowUpdate.has_value()) {
+        throw std::invalid_argument(
+            "Prepared Embedding sparse-gradient producer does not have a fused sparse-row update; use launchPreparedEmbeddingSparseGradient.");
+    }
+
+    ScopedGpu scopedGpu(prepared.deviceNum);
+
+    launchMaterializeSortPairs(indices, prepared, stream);
+
+    const int cubItems = checkedCubItems(prepared.numTokens, "token count");
+    sortPairs(prepared, cubItems, stream);
+
+    // RLE writes only the first numRuns counts. Clear the full counts buffer so the full-capacity prefix scan below is deterministic.
+    prepared.runCounts.memsetAsync(stream, 0);
+    rleRows(prepared, outputGradient, cubItems, stream);
+
+    launchFinalizeRows(prepared, outputGradient, stream);
+
+    CUDA_CHECK(cub::DeviceScan::ExclusiveSum(prepared.scanTempStorage.getMemPtr<void>(),
+                                             prepared.scanTempBytes,
+                                             prepared.runCounts.getMemPtr<uint32_t>(),
+                                             prepared.runOffsets.getMemPtr<uint32_t>(),
+                                             cubItems,
+                                             stream.getStream()));
+
+    launchReduceValuesWithSparseRowUpdate(prepared, upstreamGradient, outputGradient, runtimeScalars, stream);
+}
+
 EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prepared,
                                                                            const Tensor& indices,
                                                                            const Tensor& upstreamGradient,
                                                                            SparseRowGradient& outputGradient,
                                                                            Stream stream) {
     validatePreparedEmbeddingSparseGradientInvocation(prepared, indices, upstreamGradient, outputGradient);
+    if (prepared.sparseRowUpdate.has_value()) {
+        throw std::invalid_argument("Embedding sparse-gradient materialization profiler does not support fused sparse-row updates yet.");
+    }
 
     ScopedGpu scopedGpu(prepared.deviceNum);
 
@@ -1144,6 +1341,9 @@ void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
                                             SparseRowGradient& outputGradient,
                                             CapturedEmbeddingSparseGradient& captured) {
     validatePreparedEmbeddingSparseGradientInvocation(prepared, indices, upstreamGradient, outputGradient);
+    if (prepared.sparseRowUpdate.has_value()) {
+        throw std::invalid_argument("Embedding sparse-gradient graph capture does not support fused sparse-row updates yet.");
+    }
     if (!captured.reduceNodeHandle.isInitialized()) {
         throw std::invalid_argument("Prepared Embedding sparse-gradient graph capture requires a preallocated reduce-node handle. Allocate CapturedEmbeddingSparseGradient before stream capture begins.");
     }

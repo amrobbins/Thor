@@ -14,7 +14,14 @@ class Adam final : public Optimizer {
     Adam(uint64_t id, float alpha, float beta1, float beta2, float epsilon);
 
     void compile(const Tensor &weights, Stream &gradientUpdateStream) override;
+    SparseRowGradient compileSparseRows(const Tensor &weights, uint64_t maxSparseRows, Stream &gradientUpdateStream) override;
+    [[nodiscard]] SparseRowOptimizerExpression toSparseRowUpdateExpression(const Tensor &weights, SparseRowGradient &sparseRowGradient) override;
+    [[nodiscard]] bool supportsSparseRowGradients() const override { return true; }
+    [[nodiscard]] bool supportsSparseRowUpdateFusion() const override { return true; }
+    [[nodiscard]] std::unordered_map<std::string, float> sparseRowUpdateRuntimeScalars(uint32_t batchSize) override;
+
     void updateWeights(uint32_t batchSize) override;
+    void updateSparseRows(uint32_t batchSize) override;
 
     std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) override;
     std::unordered_map<std::string, float> getAllHyperParameters() override;
