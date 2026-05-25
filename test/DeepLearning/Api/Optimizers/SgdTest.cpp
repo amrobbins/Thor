@@ -29,7 +29,7 @@ namespace {
 Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
 Impl::TensorPlacement gpuPlacement(Impl::TensorPlacement::MemDevices::GPU, 0);
 
-using DataType = Impl::TensorDescriptor::DataType;
+using DataType = Impl::DataType;
 
 void expectHyperParameter(const std::unordered_map<std::string, float>& parameters, const std::string& name, float expected) {
     ASSERT_TRUE(parameters.contains(name)) << "Missing hyperparameter: " << name;

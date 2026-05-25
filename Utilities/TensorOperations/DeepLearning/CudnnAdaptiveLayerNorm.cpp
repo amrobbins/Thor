@@ -37,11 +37,11 @@ constexpr int64_t UID_DBIAS = 19;
     throw invalid_argument("Invalid cuDNN AdaptiveLayerNorm descriptor: " + message);
 }
 
-bool isSupportedAdaptiveLayerNormIoDtype(TensorDescriptor::DataType dtype) {
+bool isSupportedAdaptiveLayerNormIoDtype(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
@@ -49,7 +49,7 @@ bool isSupportedAdaptiveLayerNormIoDtype(TensorDescriptor::DataType dtype) {
 }
 
 void validateCudnnFrontendPrimaryEngineContract(const CudnnAdaptiveLayerNormDescriptor& descriptor) {
-    if ((descriptor.inputDataType == TensorDescriptor::DataType::FP32 || descriptor.outputDataType == TensorDescriptor::DataType::FP32) &&
+    if ((descriptor.inputDataType == DataType::FP32 || descriptor.outputDataType == DataType::FP32) &&
         descriptor.normalizedFeatureCount % 32 != 0) {
         throwInvalidAdaptiveLayerNorm(
             "cuDNN Frontend primary AdaptiveLayerNorm engines require fp32 normalizedFeatureCount to be a multiple of 32; got " +
@@ -57,13 +57,13 @@ void validateCudnnFrontendPrimaryEngineContract(const CudnnAdaptiveLayerNormDesc
     }
 }
 
-fe::DataType_t toFrontendDataType(TensorDescriptor::DataType dtype) {
+fe::DataType_t toFrontendDataType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             return fe::DataType_t::HALF;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             return fe::DataType_t::BFLOAT16;
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             return fe::DataType_t::FLOAT;
         default:
             throw invalid_argument("Unsupported cuDNN Frontend AdaptiveLayerNorm dtype: " + TensorDescriptor::getElementTypeName(dtype));
@@ -80,7 +80,7 @@ int64_t checkedI64(uint64_t value, string_view what) {
     return static_cast<int64_t>(value);
 }
 
-string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
+string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 uint64_t checkedMul(uint64_t a, uint64_t b, string_view what) {
     if (a != 0 && b > numeric_limits<uint64_t>::max() / a) {
@@ -122,7 +122,7 @@ void requireSameGpu(const Tensor& tensor, int gpuNum, string_view name) {
     }
 }
 
-void requireDtype(const Tensor& tensor, TensorDescriptor::DataType expected, string_view name) {
+void requireDtype(const Tensor& tensor, DataType expected, string_view name) {
     if (tensor.getDataType() != expected) {
         throw invalid_argument(string("cuDNN AdaptiveLayerNorm tensor '") + string(name) + "' dtype mismatch. Expected " +
                                dtypeName(expected) + ", got " + dtypeName(tensor.getDataType()) + ".");
@@ -139,7 +139,7 @@ void requireNumElements(const Tensor& tensor, uint64_t expected, string_view nam
 
 void requireIoTensor(const Tensor& tensor,
                      const CudnnAdaptiveLayerNormDescriptor& descriptor,
-                     TensorDescriptor::DataType expectedDtype,
+                     DataType expectedDtype,
                      int gpuNum,
                      string_view name) {
     requireSameGpu(tensor, gpuNum, name);
@@ -155,7 +155,7 @@ void requireScaleBiasTensor(const Tensor& tensor, const CudnnAdaptiveLayerNormDe
 
 void requireStatsTensor(const Tensor& tensor, const CudnnAdaptiveLayerNormDescriptor& descriptor, int gpuNum, string_view name) {
     requireSameGpu(tensor, gpuNum, name);
-    requireDtype(tensor, TensorDescriptor::DataType::FP32, name);
+    requireDtype(tensor, DataType::FP32, name);
     requireNumElements(tensor, statsElementCount(descriptor), name);
 }
 
@@ -239,7 +239,7 @@ class AdaptiveLayerNormGraphCache {
                                                     int64_t uid,
                                                     const vector<int64_t>& dim,
                                                     const vector<int64_t>& stride,
-                                                    TensorDescriptor::DataType dtype) {
+                                                    DataType dtype) {
         return graph->tensor(fe::graph::Tensor_attributes()
                                  .set_name(string(name))
                                  .set_uid(uid)
@@ -273,7 +273,7 @@ class AdaptiveLayerNormGraphCache {
         built.workspaceBytes = workspaceBytes;
         if (workspaceBytes > 0) {
             built.workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                                     TensorDescriptor(TensorDescriptor::DataType::UINT8, {static_cast<uint64_t>(workspaceBytes)}),
+                                     TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(workspaceBytes)}),
                                      256);
         }
     }
@@ -324,12 +324,12 @@ class AdaptiveLayerNormGraphCache {
                 .set_uid(UID_MEAN)
                 .set_dim(statsDims(descriptor))
                 .set_stride(statsStrides(descriptor))
-                .set_data_type(toFrontendDataType(TensorDescriptor::DataType::FP32));
+                .set_data_type(toFrontendDataType(DataType::FP32));
             invVariance->set_output(true)
                 .set_uid(UID_INV_VARIANCE)
                 .set_dim(statsDims(descriptor))
                 .set_stride(statsStrides(descriptor))
-                .set_data_type(toFrontendDataType(TensorDescriptor::DataType::FP32));
+                .set_data_type(toFrontendDataType(DataType::FP32));
         }
 
         finalize(built, gpuNum);
@@ -361,13 +361,13 @@ class AdaptiveLayerNormGraphCache {
                            UID_MEAN,
                            statsDims(descriptor),
                            statsStrides(descriptor),
-                           TensorDescriptor::DataType::FP32);
+                           DataType::FP32);
         auto invVariance = tensor(built.graph,
                                   descriptor.debugName + "_inv_variance",
                                   UID_INV_VARIANCE,
                                   statsDims(descriptor),
                                   statsStrides(descriptor),
-                                  TensorDescriptor::DataType::FP32);
+                                  DataType::FP32);
 
         auto attrs = fe::graph::AdaLayernorm_backward_attributes()
                          .set_name(descriptor.debugName + "_backward")
@@ -415,10 +415,10 @@ void CudnnAdaptiveLayerNormDescriptor::validateForward() const {
     if (!isSupportedAdaptiveLayerNormIoDtype(outputDataType)) {
         throwInvalidAdaptiveLayerNorm("outputDataType must be fp16, bf16, or fp32; got " + dtypeName(outputDataType));
     }
-    if (scaleBiasDataType != TensorDescriptor::DataType::FP32) {
+    if (scaleBiasDataType != DataType::FP32) {
         throwInvalidAdaptiveLayerNorm("scale/bias tensors are currently required to be fp32; got " + dtypeName(scaleBiasDataType));
     }
-    if (computeDataType != TensorDescriptor::DataType::FP32) {
+    if (computeDataType != DataType::FP32) {
         throwInvalidAdaptiveLayerNorm("computeDataType is currently required to be fp32; got " + dtypeName(computeDataType));
     }
     if (!(epsilon > 0.0f)) {

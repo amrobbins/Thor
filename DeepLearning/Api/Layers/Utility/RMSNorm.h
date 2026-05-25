@@ -39,8 +39,8 @@ class RMSNorm : public TrainableLayer {
     static const char* epilogueOutputName() { return "__rms_norm_epilogue_output"; }
 
     [[nodiscard]] static ThorImplementation::Expression epilogueInput(
-        std::optional<ThorImplementation::TensorDescriptor::DataType> computeDType = std::nullopt,
-        std::optional<ThorImplementation::TensorDescriptor::DataType> outputDType = std::nullopt) {
+        std::optional<ThorImplementation::DataType> computeDType = std::nullopt,
+        std::optional<ThorImplementation::DataType> outputDType = std::nullopt) {
         return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
     }
 

@@ -23,7 +23,7 @@ namespace nb = nanobind;
 using namespace nb::literals;
 using namespace Thor;
 
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 using AttentionMaskKind = ThorImplementation::AttentionMaskKind;
 using RotaryScalingKind = ThorImplementation::RotaryScalingKind;
 

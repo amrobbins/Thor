@@ -17,19 +17,18 @@ using namespace std;
 namespace ThorImplementation {
 
 namespace {
-using DataType = TensorDescriptor::DataType;
 
 
 class BNParameter final : public PhysicalParameter {
    public:
-    BNParameter(const string& name, const std::optional<TensorDescriptor::DataType>& storageDataType, bool trainable)
+    BNParameter(const string& name, const std::optional<DataType>& storageDataType, bool trainable)
         : PhysicalParameter(name, trainable), storageDataType(storageDataType) {}
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
         THOR_THROW_IF_FALSE(inputTensor.getDimensions().size() == 2 || inputTensor.getDimensions().size() == 4);
         const uint64_t channels = inputTensor.getDimensions()[1];
-        TensorDescriptor::DataType resolvedDataType;
+        DataType resolvedDataType;
         if (storageDataType.has_value())
             resolvedDataType = storageDataType.value();
         else
@@ -39,7 +38,7 @@ class BNParameter final : public PhysicalParameter {
     }
 
    private:
-    const std::optional<TensorDescriptor::DataType> storageDataType;
+    const std::optional<DataType> storageDataType;
 };
 
 class ScopedCudnnTensorDescriptor final {
@@ -187,7 +186,7 @@ BatchNormalization::BatchNormalization(const TensorPlacement& placement,
                                        uint64_t numItemsObserved,
                                        std::optional<double> exponentialRunningAverageFactor,
                                        std::optional<double> epsilon,
-                                       std::optional<TensorDescriptor::DataType> storageDataType,
+                                       std::optional<DataType> storageDataType,
                                        int64_t stampedId)
     : TrainableLayer(placement, inferenceOnly, stampedId),
       exponentialRunningAverageFactor(exponentialRunningAverageFactor.has_value() ? exponentialRunningAverageFactor.value() : 0.05),

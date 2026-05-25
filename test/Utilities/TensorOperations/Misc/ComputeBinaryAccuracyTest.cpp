@@ -17,19 +17,19 @@ TEST(ComputeBinaryAccuracy, computesCorrectly21) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
 
-    TensorDescriptor::DataType predictionsDataType = TensorDescriptor::DataType::FP16;
-    TensorDescriptor::DataType labelsDataType = TensorDescriptor::DataType::UINT8;
+    DataType predictionsDataType = DataType::FP16;
+    DataType labelsDataType = DataType::UINT8;
 
     for (uint32_t t = 0; t < 10; ++t) {
         uint32_t batchSize = (rand() % 3500) + 20;
 
-        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
+        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
         Tensor accuracy_gpu_h = accuracy_d.clone(cpuPlacement);
         Tensor predictions_h(cpuPlacement, TensorDescriptor(predictionsDataType, {batchSize, 1}));
         Tensor predictions_d = predictions_h.clone(gpuPlacement);
         Tensor labels_h(cpuPlacement, TensorDescriptor(labelsDataType, {batchSize, 1}));
         Tensor labels_d = labels_h.clone(gpuPlacement);
-        Tensor workspace_d(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize}));
+        Tensor workspace_d(gpuPlacement, TensorDescriptor(DataType::FP16, {batchSize}));
 
         uint32_t numCorrect = 0;
         for (uint32_t batch = 0; batch < batchSize; ++batch) {
@@ -67,19 +67,19 @@ TEST(ComputeBinaryAccuracy, computesCorrectly22) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
 
-    TensorDescriptor::DataType predictionsDataType = TensorDescriptor::DataType::FP16;
-    TensorDescriptor::DataType labelsDataType = TensorDescriptor::DataType::FP16;
+    DataType predictionsDataType = DataType::FP16;
+    DataType labelsDataType = DataType::FP16;
 
     for (uint32_t t = 0; t < 10; ++t) {
         uint32_t batchSize = (rand() % 3500) + 20;
 
-        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
+        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
         Tensor accuracy_gpu_h = accuracy_d.clone(cpuPlacement);
         Tensor predictions_h(cpuPlacement, TensorDescriptor(predictionsDataType, {batchSize, 1}));
         Tensor predictions_d = predictions_h.clone(gpuPlacement);
         Tensor labels_h(cpuPlacement, TensorDescriptor(labelsDataType, {batchSize, 1}));
         Tensor labels_d = labels_h.clone(gpuPlacement);
-        Tensor workspace_d(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize}));
+        Tensor workspace_d(gpuPlacement, TensorDescriptor(DataType::FP16, {batchSize}));
 
         uint32_t numCorrect = 0;
         for (uint32_t batch = 0; batch < batchSize; ++batch) {
@@ -117,19 +117,19 @@ TEST(ComputeBinaryAccuracy, computesCorrectly24) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
 
-    TensorDescriptor::DataType predictionsDataType = TensorDescriptor::DataType::FP16;
-    TensorDescriptor::DataType labelsDataType = TensorDescriptor::DataType::FP32;
+    DataType predictionsDataType = DataType::FP16;
+    DataType labelsDataType = DataType::FP32;
 
     for (uint32_t t = 0; t < 10; ++t) {
         uint32_t batchSize = (rand() % 3500) + 20;
 
-        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
+        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
         Tensor accuracy_gpu_h = accuracy_d.clone(cpuPlacement);
         Tensor predictions_h(cpuPlacement, TensorDescriptor(predictionsDataType, {batchSize, 1}));
         Tensor predictions_d = predictions_h.clone(gpuPlacement);
         Tensor labels_h(cpuPlacement, TensorDescriptor(labelsDataType, {batchSize, 1}));
         Tensor labels_d = labels_h.clone(gpuPlacement);
-        Tensor workspace_d(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize}));
+        Tensor workspace_d(gpuPlacement, TensorDescriptor(DataType::FP16, {batchSize}));
 
         uint32_t numCorrect = 0;
         for (uint32_t batch = 0; batch < batchSize; ++batch) {
@@ -167,19 +167,19 @@ TEST(ComputeBinaryAccuracy, computesCorrectly41) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
 
-    TensorDescriptor::DataType predictionsDataType = TensorDescriptor::DataType::FP32;
-    TensorDescriptor::DataType labelsDataType = TensorDescriptor::DataType::INT8;
+    DataType predictionsDataType = DataType::FP32;
+    DataType labelsDataType = DataType::INT8;
 
     for (uint32_t t = 0; t < 10; ++t) {
         uint32_t batchSize = (rand() % 3500) + 20;
 
-        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
+        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
         Tensor accuracy_gpu_h = accuracy_d.clone(cpuPlacement);
         Tensor predictions_h(cpuPlacement, TensorDescriptor(predictionsDataType, {batchSize, 1}));
         Tensor predictions_d = predictions_h.clone(gpuPlacement);
         Tensor labels_h(cpuPlacement, TensorDescriptor(labelsDataType, {batchSize, 1}));
         Tensor labels_d = labels_h.clone(gpuPlacement);
-        Tensor workspace_d(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize}));
+        Tensor workspace_d(gpuPlacement, TensorDescriptor(DataType::FP16, {batchSize}));
 
         uint32_t numCorrect = 0;
         for (uint32_t batch = 0; batch < batchSize; ++batch) {
@@ -217,19 +217,19 @@ TEST(ComputeBinaryAccuracy, computesCorrectly42) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
 
-    TensorDescriptor::DataType predictionsDataType = TensorDescriptor::DataType::FP32;
-    TensorDescriptor::DataType labelsDataType = TensorDescriptor::DataType::FP16;
+    DataType predictionsDataType = DataType::FP32;
+    DataType labelsDataType = DataType::FP16;
 
     for (uint32_t t = 0; t < 10; ++t) {
         uint32_t batchSize = (rand() % 3500) + 20;
 
-        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
+        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
         Tensor accuracy_gpu_h = accuracy_d.clone(cpuPlacement);
         Tensor predictions_h(cpuPlacement, TensorDescriptor(predictionsDataType, {batchSize, 1}));
         Tensor predictions_d = predictions_h.clone(gpuPlacement);
         Tensor labels_h(cpuPlacement, TensorDescriptor(labelsDataType, {batchSize, 1}));
         Tensor labels_d = labels_h.clone(gpuPlacement);
-        Tensor workspace_d(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize}));
+        Tensor workspace_d(gpuPlacement, TensorDescriptor(DataType::FP16, {batchSize}));
 
         uint32_t numCorrect = 0;
         for (uint32_t batch = 0; batch < batchSize; ++batch) {
@@ -267,19 +267,19 @@ TEST(ComputeBinaryAccuracy, computesCorrectly44) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
 
-    TensorDescriptor::DataType predictionsDataType = TensorDescriptor::DataType::FP32;
-    TensorDescriptor::DataType labelsDataType = TensorDescriptor::DataType::UINT32;
+    DataType predictionsDataType = DataType::FP32;
+    DataType labelsDataType = DataType::UINT32;
 
     for (uint32_t t = 0; t < 10; ++t) {
         uint32_t batchSize = (rand() % 3500) + 20;
 
-        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
+        Tensor accuracy_d = Tensor(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
         Tensor accuracy_gpu_h = accuracy_d.clone(cpuPlacement);
         Tensor predictions_h(cpuPlacement, TensorDescriptor(predictionsDataType, {batchSize, 1}));
         Tensor predictions_d = predictions_h.clone(gpuPlacement);
         Tensor labels_h(cpuPlacement, TensorDescriptor(labelsDataType, {batchSize, 1}));
         Tensor labels_d = labels_h.clone(gpuPlacement);
-        Tensor workspace_d(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize}));
+        Tensor workspace_d(gpuPlacement, TensorDescriptor(DataType::FP16, {batchSize}));
 
         uint32_t numCorrect = 0;
         for (uint32_t batch = 0; batch < batchSize; ++batch) {

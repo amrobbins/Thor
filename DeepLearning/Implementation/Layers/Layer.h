@@ -332,7 +332,7 @@ class Layer {
     virtual std::string getType() { return "Layer"; }
 
     static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<unsigned long> featureInputDimensions,
-                                                               TensorDescriptor::DataType dataType);
+                                                               DataType dataType);
 
     virtual bool isKerasCompatible(std::string &explanation) {
         explanation.clear();

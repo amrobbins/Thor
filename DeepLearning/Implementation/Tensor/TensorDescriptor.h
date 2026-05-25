@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include "DeepLearning/Implementation/Tensor/DataType.h"
 #include "DeepLearning/Implementation/Tensor/PackedBoolean.h"
 
 #include "cuda.h"
@@ -10,8 +11,6 @@
 
 #include <string>
 #include <vector>
-
-#include <nlohmann/json.hpp>
 
 #include <cuda_bf16.h>
 
@@ -23,28 +22,8 @@ namespace ThorImplementation {
 
 class TensorDescriptor {
    public:
-    // TODO: add FP8_E4M3, FP8_E5M2, BF16
-    enum class DataType {
-        FP16 = 10,
-        FP32 = 11,
-        FP64 = 12,
-        INT8 = 13,
-        INT16 = 14,
-        INT32 = 15,
-        INT64 = 16,
-        UINT8 = 17,
-        UINT16 = 18,
-        UINT32 = 19,
-        UINT64 = 20,
-        BOOLEAN = 21,
-        // FIXME: PACKED_BOOLEAN is broken for multi-dimensional case when rows are not multiple of 8 elements
-        // FIXME: to fix this I need to round each dimension to (dimensionSize+7)/8 uint8_t's and I  need to save these dimensions off
-        // and use them. So that say two rows do not share bits in a single uint8_t.
-        PACKED_BOOLEAN = 22,
-        FP8_E4M3 = 23,
-        FP8_E5M2 = 24,
-        BF16 = 25,
-    };
+    // Keep the old nested spelling source-compatible while making the namespace-level type canonical.
+    // using DataType = ThorImplementation::DataType;
 
     static DataType resolveFloatingPointDataTypePromotion(DataType a, DataType b) {
         if (a == b)
@@ -359,25 +338,5 @@ class TensorDescriptor {
 
     float getElementSizeInBytes() const { return getElementSizeInBytes(dataType); }
 };
-
-NLOHMANN_JSON_SERIALIZE_ENUM(TensorDescriptor::DataType,
-                             {
-                                 {TensorDescriptor::DataType::PACKED_BOOLEAN, "packed_boolean"},
-                                 {TensorDescriptor::DataType::BOOLEAN, "boolean"},
-                                 {TensorDescriptor::DataType::INT8, "int8"},
-                                 {TensorDescriptor::DataType::UINT8, "uint8"},
-                                 {TensorDescriptor::DataType::INT16, "int16"},
-                                 {TensorDescriptor::DataType::UINT16, "uint16"},
-                                 {TensorDescriptor::DataType::INT32, "int32"},
-                                 {TensorDescriptor::DataType::UINT32, "uint32"},
-                                 {TensorDescriptor::DataType::INT64, "int64"},
-                                 {TensorDescriptor::DataType::UINT64, "uint64"},
-                                 {TensorDescriptor::DataType::FP16, "fp16"},
-                                 {TensorDescriptor::DataType::FP32, "fp32"},
-                                 {TensorDescriptor::DataType::FP64, "fp64"},
-                                 {TensorDescriptor::DataType::BF16, "bf16"},
-                                 {TensorDescriptor::DataType::FP8_E4M3, "fp8_e4m3"},
-                                 {TensorDescriptor::DataType::FP8_E5M2, "fp8_e5m2"},
-                             })
 
 }  // namespace ThorImplementation

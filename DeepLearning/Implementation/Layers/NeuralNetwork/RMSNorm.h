@@ -18,7 +18,7 @@ class RMSNorm : public TrainableLayer {
             bool inferenceOnly,
             std::vector<uint64_t> normalizedShape,
             std::optional<double> epsilon = std::nullopt,
-            std::optional<TensorDescriptor::DataType> parameterDataType = std::nullopt,
+            std::optional<DataType> parameterDataType = std::nullopt,
             CudnnRmsNormFusedActivation fusedActivation = CudnnRmsNormFusedActivation::NONE,
             std::vector<std::shared_ptr<PhysicalParameter>> physicalParameters = {},
             int64_t stampedId = -1);
@@ -56,7 +56,7 @@ class RMSNorm : public TrainableLayer {
     uint64_t normalizedFeatureCount = 0;
     uint64_t outerSize = 0;
     double epsilon = 1.0e-5;
-    TensorDescriptor::DataType parameterDataType = TensorDescriptor::DataType::FP32;
+    DataType parameterDataType = DataType::FP32;
     CudnnRmsNormFusedActivation fusedActivation = CudnnRmsNormFusedActivation::NONE;
 
     Tensor weights;

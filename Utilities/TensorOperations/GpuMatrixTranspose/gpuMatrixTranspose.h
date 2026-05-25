@@ -15,8 +15,8 @@ void launchMatrixTransposeByType(void* output,
                                  const void* input,
                                  uint32_t numRows,
                                  uint32_t numCols,
-                                 TensorDescriptor::DataType input_dtype,
-                                 TensorDescriptor::DataType output_dtype,
+                                 DataType input_dtype,
+                                 DataType output_dtype,
                                  cudaStream_t stream);
 
 void matrixTranspose(float* transposedMatrix_d, const float* matrix_d, int numRows, int numCols, cudaStream_t stream);

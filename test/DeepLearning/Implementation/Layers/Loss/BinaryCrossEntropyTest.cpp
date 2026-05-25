@@ -39,9 +39,9 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
 
         bool inferenceOnly = (rand() % 5) == 0;
 
-        TensorDescriptor labelDescriptor(TensorDescriptor::DataType::BOOLEAN, dimensions);
-        TensorDescriptor elementwiseDescriptorFP32(TensorDescriptor::DataType::FP32, dimensions);
-        TensorDescriptor elementwiseDescriptorFP16(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor labelDescriptor(DataType::BOOLEAN, dimensions);
+        TensorDescriptor elementwiseDescriptorFP32(DataType::FP32, dimensions);
+        TensorDescriptor elementwiseDescriptorFP16(DataType::FP16, dimensions);
 
         Tensor labelsCpu(cpuPlacement, labelDescriptor);
         Tensor activationsCpu(cpuPlacement, elementwiseDescriptorFP16);
@@ -73,7 +73,7 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
         shared_ptr<Sigmoid> sigmoid = make_shared<Sigmoid>(true);
         layers.push_back(sigmoid);
         shared_ptr<CrossEntropy> crossEntropy =
-            make_shared<CrossEntropy>(CrossEntropyLossType::BINARY, TensorDescriptor::DataType::FP16, false);
+            make_shared<CrossEntropy>(CrossEntropyLossType::BINARY, DataType::FP16, false);
         if (inferenceOnly)
             crossEntropy->setConstructForInferenceOnly(true);
         layers.push_back(crossEntropy);

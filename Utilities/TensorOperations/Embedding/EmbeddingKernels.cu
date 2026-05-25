@@ -67,14 +67,13 @@ struct PreparedEmbeddingForward {
     uint32_t elements_per_lane = 0;
     uint32_t grid_blocks = 1;
     int device_num = 0;
-    TensorDescriptor::DataType index_dtype = TensorDescriptor::DataType::UINT32;
-    TensorDescriptor::DataType weights_dtype = TensorDescriptor::DataType::FP32;
+    DataType index_dtype = DataType::UINT32;
+    DataType weights_dtype = DataType::FP32;
     EmbeddingForwardEpilogue epilogue;
 };
 
 namespace {
 
-using DataType = TensorDescriptor::DataType;
 
 constexpr uint32_t WARP_SIZE_EMBEDDING = 32;
 constexpr uint32_t WARPS_PER_BLOCK = 8;

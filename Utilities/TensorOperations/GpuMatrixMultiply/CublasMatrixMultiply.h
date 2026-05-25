@@ -52,7 +52,6 @@ class CublasMatrixMultiply {
     virtual ~CublasMatrixMultiply() {}
 
     struct MatmulDataTypes {
-        using DataType = TensorDescriptor::DataType;
 
         DataType A;
         DataType B;
@@ -123,7 +122,7 @@ class CublasMatrixMultiply {
                   bool transposeB,
                   const bool accumulate,
                   const bool negate,
-                  const TensorDescriptor::DataType ABCDataType,
+                  const DataType ABCDataType,
                   Stream stream);
     void multiply(Tensor A,
                   Tensor B,
@@ -163,7 +162,7 @@ class CublasMatrixMultiply {
               bool transposeC,
               const float *alpha,
               const float *beta,
-              const TensorDescriptor::DataType ABCDDataType,
+              const DataType ABCDDataType,
               Stream stream,
               CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
     void gemm(Tensor A,
@@ -225,7 +224,7 @@ class CublasMatrixMultiply {
                                             bool transposeB,
                                             const bool accumulate,
                                             const bool negate,
-                                            const TensorDescriptor::DataType ABCDataType,
+                                            const DataType ABCDataType,
                                             Stream stream);
     void multiplyUsingHeuristicKernelChoice(Tensor A,
                                             Tensor B,
@@ -280,7 +279,7 @@ class CublasMatrixMultiply {
                                         bool transposeC,
                                         const float *alpha,
                                         const float *beta,
-                                        const TensorDescriptor::DataType ABCDDataType,
+                                        const DataType ABCDDataType,
                                         Stream stream,
                                         CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
     void gemmUsingHeuristicKernelChoice(Tensor A,
@@ -461,7 +460,7 @@ class CublasMatrixMultiply {
                                                   int colsB,
                                                   bool transposeA,
                                                   bool transposeB,
-                                                  TensorDescriptor::DataType ABCDataType,
+                                                  DataType ABCDataType,
                                                   bool printResults = false) {
         int ldC = transposeB == false ? colsB : rowsB;
         chooseOptimalMatrixMultiplyKernel(
@@ -478,7 +477,7 @@ class CublasMatrixMultiply {
                                                   int ldC,
                                                   bool transposeA,
                                                   bool transposeB,
-                                                  TensorDescriptor::DataType ABCDataType,
+                                                  DataType ABCDataType,
                                                   bool printResults = false) {
         int ldD = ldC;
         chooseOptimalGemmKernel(
@@ -497,7 +496,7 @@ class CublasMatrixMultiply {
                                         bool transposeA,
                                         bool transposeB,
                                         bool transposeC,
-                                        TensorDescriptor::DataType ABCDataType,
+                                        DataType ABCDataType,
                                         bool printResults = false) {
         // Find a gpu of the proper type or fail
         int gpuNum = -1;
@@ -528,7 +527,7 @@ class CublasMatrixMultiply {
                                                   int colsB,
                                                   bool transposeA,
                                                   bool transposeB,
-                                                  TensorDescriptor::DataType ABCDataType,
+                                                  DataType ABCDataType,
                                                   bool printResults = false) {
         int ldC = transposeB == false ? colsB : rowsB;
         chooseOptimalMatrixMultiplyKernel(
@@ -545,7 +544,7 @@ class CublasMatrixMultiply {
                                                   int ldC,
                                                   bool transposeA,
                                                   bool transposeB,
-                                                  TensorDescriptor::DataType ABCDataType,
+                                                  DataType ABCDataType,
                                                   bool printResults = false) {
         int ldD = ldC;
         chooseOptimalGemmKernel(
@@ -598,7 +597,7 @@ class CublasMatrixMultiply {
                                  const bool transposeA,
                                  const bool transposeB,
                                  const bool transposeC,
-                                 const TensorDescriptor::DataType ABCDataType,
+                                 const DataType ABCDataType,
                                  const bool printResults = false);
     void chooseOptimalGemmKernel(const int gpuNum,
                                  const int rowsA,
@@ -637,7 +636,7 @@ class CublasMatrixMultiply {
                                                               int colsB,
                                                               bool transposeA,
                                                               bool transposeB,
-                                                              TensorDescriptor::DataType ABCDataType,
+                                                              DataType ABCDataType,
                                                               bool &kernelWillRunOnGpu) {
         int ldC = transposeB == false ? colsB : rowsB;
         return getMatrixMultiplyWorkspaceSizeInBytes(
@@ -654,7 +653,7 @@ class CublasMatrixMultiply {
                                                               int ldC,
                                                               bool transposeA,
                                                               bool transposeB,
-                                                              TensorDescriptor::DataType ABCDataType,
+                                                              DataType ABCDataType,
                                                               bool &kernelWillRunOnGpu) {
         int ldD = ldC;  // They are the same memory
         return getGemmWorkspaceSizeInBytes(
@@ -673,7 +672,7 @@ class CublasMatrixMultiply {
                                              bool transposeA,
                                              bool transposeB,
                                              bool transposeC,
-                                             TensorDescriptor::DataType ABCDataType,
+                                             DataType ABCDataType,
                                              bool &kernelWillRunOnGpu);
     unsigned int getGemmWorkspaceSizeInBytes(int gpuNum,
                                              int rowsA,
@@ -722,7 +721,7 @@ class CublasMatrixMultiply {
                                 bool transposeA,
                                 bool transposeB,
                                 bool transposeC,
-                                TensorDescriptor::DataType ABCDataType,
+                                DataType ABCDataType,
                                 bool workspaceAllowed);
     double getOptimalKernelTime(std::string gpuType,
                                 int rowsA,
@@ -751,7 +750,7 @@ class CublasMatrixMultiply {
                                 bool transposeA,
                                 bool transposeB,
                                 bool transposeC,
-                                TensorDescriptor::DataType ABCDataType,
+                                DataType ABCDataType,
                                 bool workspaceAllowed);
     double getOptimalKernelTime(int gpuNum,
                                 int rowsA,
@@ -781,13 +780,13 @@ class CublasMatrixMultiply {
     static constexpr std::size_t MAX_KERNEL_CACHE_OCCUPANCY = 25000;
     CublasMatrixMultiply() : optimalKernels(MAX_KERNEL_CACHE_OCCUPANCY), knownHeuristicAlgorithms(MAX_KERNEL_CACHE_OCCUPANCY) {}
 
-    cudaDataType_t mapToCublasDataType(TensorDescriptor::DataType dataType);
-    std::optional<cublasComputeType_t> mapToCublasComputeType(TensorDescriptor::DataType dataType);
+    cudaDataType_t mapToCublasDataType(DataType dataType);
+    std::optional<cublasComputeType_t> mapToCublasComputeType(DataType dataType);
     OperationType makeOperationType(MatmulDataTypes dataTypes);
-    OperationType makeOperationType(TensorDescriptor::DataType ABCDDataType);
+    OperationType makeOperationType(DataType ABCDDataType);
     bool isSupportedMatmulDataTypes(MatmulDataTypes dataTypes);
-    bool isSupportedSameDataTypeMatmul(TensorDescriptor::DataType ABCDDataType);
-    bool isFp8DataType(TensorDescriptor::DataType dataType);
+    bool isSupportedSameDataTypeMatmul(DataType ABCDDataType);
+    bool isFp8DataType(DataType dataType);
     bool isFp8Matmul(MatmulDataTypes dataTypes);
     bool isFp8InputsWithFp32Output(MatmulDataTypes dataTypes);
     bool hasRequiredExplicitFp8Scales(MatmulDataTypes dataTypes, Fp8MatmulScales fp8Scales);
@@ -795,7 +794,7 @@ class CublasMatrixMultiply {
     void validateFp8MatmulScaleConfigurationOrThrow(MatmulDataTypes dataTypes, Fp8MatmulScales fp8Scales, const std::string &context);
     std::string unsupportedMatmulDataTypesMessage(MatmulDataTypes dataTypes, const std::string &context);
     void validateMatmulDataTypesOrThrow(MatmulDataTypes dataTypes, const std::string &context);
-    std::string dataTypeToString(TensorDescriptor::DataType dataType);
+    std::string dataTypeToString(DataType dataType);
     std::string dataTypesToString(MatmulDataTypes dataTypes);
 
     bool chooseOptimalGemmKernel(int gpuNum,
@@ -858,7 +857,7 @@ class CublasMatrixMultiply {
                                                                        const uint64_t maxWorkspaceSize,
                                                                        // When set to 0.0f, any number of waves allowed:
                                                                        const float maxWaves,
-                                                                       TensorDescriptor::DataType ABCDataType) {
+                                                                       DataType ABCDataType) {
         int32_t colsC = (transposeB == false ? colsB : rowsB);
         return getHeuristicGemmKernels(numChoices,
                                        gpuNum,

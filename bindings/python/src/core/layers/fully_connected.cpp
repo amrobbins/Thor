@@ -21,7 +21,7 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 
 namespace {
 constexpr const char *DEFAULT_ACTIVATION_SENTINEL = "__thor_default_activation__";

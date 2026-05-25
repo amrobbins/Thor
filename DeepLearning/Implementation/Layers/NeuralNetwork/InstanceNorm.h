@@ -17,7 +17,7 @@ class InstanceNorm : public TrainableLayer {
                  bool inferenceOnly,
                  uint64_t channelCount,
                  std::optional<double> epsilon = std::nullopt,
-                 std::optional<TensorDescriptor::DataType> parameterDataType = std::nullopt,
+                 std::optional<DataType> parameterDataType = std::nullopt,
                  std::vector<std::shared_ptr<PhysicalParameter>> physicalParameters = {},
                  int64_t stampedId = -1);
 
@@ -52,7 +52,7 @@ class InstanceNorm : public TrainableLayer {
     uint64_t batchSize = 0;
     uint64_t spatialElementCount = 0;
     double epsilon = 1.0e-5;
-    TensorDescriptor::DataType parameterDataType = TensorDescriptor::DataType::FP32;
+    DataType parameterDataType = DataType::FP32;
 
     Tensor weights;
     Tensor biases;

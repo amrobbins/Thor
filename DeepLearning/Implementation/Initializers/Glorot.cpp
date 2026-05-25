@@ -40,21 +40,21 @@ void Glorot::initializeUniform(Stream initStream) {
         const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(clock::now().time_since_epoch()).count();
         mt19937 generator(Tensor::getThreadIdHash64(nanoseconds));
         const float fanInOutTerm = static_cast<float>(sqrt(6.0 / static_cast<double>(layerFanIn + layerFanOut)));
-        if (buffer.getDataType() == TensorDescriptor::DataType::FP16) {
+        if (buffer.getDataType() == DataType::FP16) {
             half *bufferMem = (half *)buffer.getMemPtr();
             for (uint64_t i = start; i < end; ++i) {
                 float d = distribution(generator);
                 float value = d * fanInOutTerm;
                 bufferMem[i] = (half)value;
             }
-        } else if (buffer.getDataType() == TensorDescriptor::DataType::BF16) {
+        } else if (buffer.getDataType() == DataType::BF16) {
             __nv_bfloat16 *bufferMem = (__nv_bfloat16 *)buffer.getMemPtr();
             for (uint64_t i = start; i < end; ++i) {
                 float d = distribution(generator);
                 float value = d * fanInOutTerm;
                 bufferMem[i] = __float2bfloat16(value);
             }
-        } else if (buffer.getDataType() == TensorDescriptor::DataType::FP32) {
+        } else if (buffer.getDataType() == DataType::FP32) {
             float *bufferMem = (float *)buffer.getMemPtr();
             for (uint64_t i = start; i < end; ++i) {
                 float value = distribution(generator) * fanInOutTerm;
@@ -95,17 +95,17 @@ void Glorot::initializeNormal(Stream initStream) {
         using clock = chrono::high_resolution_clock;
         const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(clock::now().time_since_epoch()).count();
         mt19937 generator(Tensor::getThreadIdHash64(nanoseconds));
-        if (buffer.getDataType() == TensorDescriptor::DataType::FP16) {
+        if (buffer.getDataType() == DataType::FP16) {
             half *bufferMem = (half *)buffer.getMemPtr();
             for (uint64_t i = start; i < end; ++i) {
                 bufferMem[i] = (half)distribution(generator);
             }
-        } else if (buffer.getDataType() == TensorDescriptor::DataType::BF16) {
+        } else if (buffer.getDataType() == DataType::BF16) {
             __nv_bfloat16 *bufferMem = (__nv_bfloat16 *)buffer.getMemPtr();
             for (uint64_t i = start; i < end; ++i) {
                 bufferMem[i] = __float2bfloat16(distribution(generator));
             }
-        } else if (buffer.getDataType() == TensorDescriptor::DataType::FP32) {
+        } else if (buffer.getDataType() == DataType::FP32) {
             float *bufferMem = (float *)buffer.getMemPtr();
             for (uint64_t i = start; i < end; ++i) {
                 bufferMem[i] = distribution(generator);

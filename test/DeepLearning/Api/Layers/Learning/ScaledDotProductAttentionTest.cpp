@@ -5,7 +5,7 @@
 
 namespace Api = Thor;
 namespace Impl = ThorImplementation;
-using DataType = Impl::TensorDescriptor::DataType;
+using DataType = Impl::DataType;
 
 TEST(AttentionApi, BuildsDenseMultiHeadSelfAttentionInterface) {
     Api::Network network("attention_api_builds_dense_multi_head_self_attention_interface");

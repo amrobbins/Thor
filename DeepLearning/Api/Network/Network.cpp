@@ -268,7 +268,7 @@ void Network::save(const string &directory, const bool overwrite) {
 
     string qualifiedModelName = networkName + ".thor.json";
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    ThorImplementation::TensorDescriptor jsonTensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8,
+    ThorImplementation::TensorDescriptor jsonTensorDescriptor(ThorImplementation::DataType::UINT8,
                                                               {modelJsonDump.size()});
     ThorImplementation::Tensor jsonDumpTensor(cpuPlacement, jsonTensorDescriptor);
     memcpy(jsonDumpTensor.getMemPtr<void>(), modelJsonDump.data(), modelJsonDump.size());
@@ -306,7 +306,7 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
 
     string jsonDump = modelJson.dump(4);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    ThorImplementation::TensorDescriptor jsonTensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {jsonDump.size()});
+    ThorImplementation::TensorDescriptor jsonTensorDescriptor(ThorImplementation::DataType::UINT8, {jsonDump.size()});
     ThorImplementation::Tensor jsonDumpTensor(cpuPlacement, jsonTensorDescriptor);
     memcpy(jsonDumpTensor.getMemPtr<void>(), jsonDump.data(), jsonDump.size());
     archiveWriter.addArchiveFile(qualifiedModelName, jsonDumpTensor);
@@ -381,7 +381,7 @@ void Network::load(const string &directory,
     string modelJsonFileName = networkName + ".thor.json";
     uint32_t modelJsonNumBytes = archiveReader->getFileSize(modelJsonFileName);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    ThorImplementation::TensorDescriptor modelJsonTensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8,
+    ThorImplementation::TensorDescriptor modelJsonTensorDescriptor(ThorImplementation::DataType::UINT8,
                                                                    {modelJsonNumBytes});
     ThorImplementation::Tensor modelJsonStrTensor(cpuPlacement, modelJsonTensorDescriptor);
     archiveReader->registerReadRequest(modelJsonFileName, modelJsonStrTensor);

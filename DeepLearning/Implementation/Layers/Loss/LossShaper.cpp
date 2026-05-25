@@ -76,9 +76,9 @@ void LossShaper::infer(std::optional<Tensor> inputTensor, std::optional<Tensor> 
         if (batchReduceStream != stream)
             batchReduceStream.waitEvent(stream.putEvent());
 
-        TensorDescriptor::DataType lossDataType = inputTensor.value().getDataType();
-        THOR_THROW_IF_FALSE(lossDataType == TensorDescriptor::DataType::FP16 || lossDataType == TensorDescriptor::DataType::FP32 ||
-               lossDataType == TensorDescriptor::DataType::FP64);
+        DataType lossDataType = inputTensor.value().getDataType();
+        THOR_THROW_IF_FALSE(lossDataType == DataType::FP16 || lossDataType == DataType::FP32 ||
+               lossDataType == DataType::FP64);
         batchReduce->reduce(inputTensor.value(), outputTensor.value());
 
         if (batchReduceStream != stream)

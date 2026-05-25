@@ -23,7 +23,7 @@ using namespace std;
 
 using PhysicalTensor = ThorImplementation::Tensor;
 using TensorPlacement = ThorImplementation::TensorPlacement;
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 using TensorDescriptor = ThorImplementation::TensorDescriptor;
 
 namespace {
@@ -451,7 +451,7 @@ new_placement : thor.physical.Placement
 )nbdoc");
 
     physical_tensor.def("clone",
-                        nb::overload_cast<TensorDescriptor::DataType>(&PhysicalTensor::clone, nb::const_),
+                        nb::overload_cast<DataType>(&PhysicalTensor::clone, nb::const_),
                         "new_data_type"_a,
                         R"nbdoc(
 Create another tensor like this one but with a different data type.
@@ -463,7 +463,7 @@ new_data_type : thor.DataType
 )nbdoc");
 
     physical_tensor.def("clone",
-                        nb::overload_cast<TensorPlacement, TensorDescriptor::DataType>(&PhysicalTensor::clone, nb::const_),
+                        nb::overload_cast<TensorPlacement, DataType>(&PhysicalTensor::clone, nb::const_),
                         "new_placement"_a,
                         "new_data_type"_a,
                         R"nbdoc(
@@ -516,7 +516,7 @@ thor.physical.PhysicalTensor
 
     physical_tensor.def(
         "clone_copy_async",
-        [](const PhysicalTensor &self, TensorDescriptor::DataType new_data_type, const Stream &stream) {
+        [](const PhysicalTensor &self, DataType new_data_type, const Stream &stream) {
             PhysicalTensor cloned = self.clone(new_data_type);
             cloned.copyFromAsync(self, stream);
             return cloned;

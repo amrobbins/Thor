@@ -170,13 +170,13 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
 
     // Create tiny files
     const std::string hello = "hello from gtest\n";
-    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello.size()});
+    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::DataType::UINT8, {hello.size()});
     ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
     memcpy(helloTensor.getMemPtr<void>(), hello.data(), hello.size());
 
     const uint32_t blobSize = 64 * 1024;
     std::vector<uint8_t> blob(blobSize, 0xAB);
-    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobSize});
+    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::DataType::UINT8, {blobSize});
     ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
     memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
@@ -288,11 +288,11 @@ TEST(TarWriter, MultiShard_RenamesAndIndexesMatchAcrossShards) {
     const std::string a = "AAA";
     const std::string b = "BBB";
 
-    ThorImplementation::TensorDescriptor aDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {a.size()});
+    ThorImplementation::TensorDescriptor aDescriptor(ThorImplementation::DataType::UINT8, {a.size()});
     ThorImplementation::Tensor aTensor(cpuPlacement, aDescriptor);
     memcpy(aTensor.getMemPtr<void>(), a.data(), a.size());
 
-    ThorImplementation::TensorDescriptor bDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {b.size()});
+    ThorImplementation::TensorDescriptor bDescriptor(ThorImplementation::DataType::UINT8, {b.size()});
     ThorImplementation::Tensor bTensor(cpuPlacement, bDescriptor);
     memcpy(bTensor.getMemPtr<void>(), b.data(), b.size());
 

@@ -23,7 +23,6 @@
 namespace ThorImplementation {
 namespace {
 
-using DataType = TensorDescriptor::DataType;
 
 std::string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 

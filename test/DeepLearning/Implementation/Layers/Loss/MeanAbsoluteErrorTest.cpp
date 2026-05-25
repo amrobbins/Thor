@@ -42,13 +42,13 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16) {
             dimensions.push_back((rand() % 500) + 1);
             numElements *= dimensions.back();
         }
-        Tensor labelsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, dimensions));
-        Tensor predictionsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, dimensions));
+        Tensor labelsCpu(cpuPlacement, TensorDescriptor(DataType::FP16, dimensions));
+        Tensor predictionsCpu(cpuPlacement, TensorDescriptor(DataType::FP16, dimensions));
         Tensor labelsGpu = labelsCpu.clone(gpuPlacement);
         Tensor predictionsGpu = predictionsCpu.clone(gpuPlacement);
-        Tensor elementLossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, dimensions));
+        Tensor elementLossCpu(cpuPlacement, TensorDescriptor(DataType::FP16, dimensions));
         Tensor elementLossGpu = elementLossCpu.clone(gpuPlacement);
-        Tensor elementLossGradientCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, dimensions));
+        Tensor elementLossGradientCpu(cpuPlacement, TensorDescriptor(DataType::FP16, dimensions));
         Tensor elementLossGradientGpu = elementLossGradientCpu.clone(gpuPlacement);
 
         half *labels = (half *)labelsCpu.getMemPtr();
@@ -70,7 +70,7 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16) {
         layers.push_back(noOpLayer);
         shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        shared_ptr<MeanAbsoluteError> meanAbsoluteError = make_shared<MeanAbsoluteError>(TensorDescriptor::DataType::FP16);
+        shared_ptr<MeanAbsoluteError> meanAbsoluteError = make_shared<MeanAbsoluteError>(DataType::FP16);
         layers.push_back(meanAbsoluteError);
         shared_ptr<NetworkOutput> elementLossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(elementLossOutput);
@@ -168,13 +168,13 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16_FP32Labels) {
             dimensions.push_back((rand() % 500) + 1);
             numElements *= dimensions.back();
         }
-        Tensor labelsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
-        Tensor predictionsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, dimensions));
+        Tensor labelsCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
+        Tensor predictionsCpu(cpuPlacement, TensorDescriptor(DataType::FP16, dimensions));
         Tensor labelsGpu = labelsCpu.clone(gpuPlacement);
         Tensor predictionsGpu = predictionsCpu.clone(gpuPlacement);
-        Tensor elementLossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, dimensions));
+        Tensor elementLossCpu(cpuPlacement, TensorDescriptor(DataType::FP16, dimensions));
         Tensor elementLossGpu = elementLossCpu.clone(gpuPlacement);
-        Tensor elementLossGradientCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, dimensions));
+        Tensor elementLossGradientCpu(cpuPlacement, TensorDescriptor(DataType::FP16, dimensions));
         Tensor elementLossGradientGpu = elementLossGradientCpu.clone(gpuPlacement);
 
         float *labels = (float *)labelsCpu.getMemPtr();
@@ -196,7 +196,7 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16_FP32Labels) {
         layers.push_back(noOpLayer);
         shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        shared_ptr<MeanAbsoluteError> meanAbsoluteError = make_shared<MeanAbsoluteError>(TensorDescriptor::DataType::FP16);
+        shared_ptr<MeanAbsoluteError> meanAbsoluteError = make_shared<MeanAbsoluteError>(DataType::FP16);
         layers.push_back(meanAbsoluteError);
         shared_ptr<NetworkOutput> elementLossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(elementLossOutput);
@@ -295,13 +295,13 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_
             dimensions.push_back((rand() % 500) + 1);
             numElements *= dimensions.back();
         }
-        Tensor labelsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
-        Tensor predictionsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, dimensions));
+        Tensor labelsCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
+        Tensor predictionsCpu(cpuPlacement, TensorDescriptor(DataType::FP16, dimensions));
         Tensor labelsGpu = labelsCpu.clone(gpuPlacement);
         Tensor predictionsGpu = predictionsCpu.clone(gpuPlacement);
-        Tensor elementLossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
+        Tensor elementLossCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
         Tensor elementLossGpu = elementLossCpu.clone(gpuPlacement);
-        Tensor elementLossGradientCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, dimensions));
+        Tensor elementLossGradientCpu(cpuPlacement, TensorDescriptor(DataType::FP16, dimensions));
         Tensor elementLossGradientGpu = elementLossGradientCpu.clone(gpuPlacement);
 
         float *labels = (float *)labelsCpu.getMemPtr();
@@ -326,7 +326,7 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_
         layers.push_back(noOpLayer);
         shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        shared_ptr<MeanAbsoluteError> meanAbsoluteError = make_shared<MeanAbsoluteError>(TensorDescriptor::DataType::FP32);
+        shared_ptr<MeanAbsoluteError> meanAbsoluteError = make_shared<MeanAbsoluteError>(DataType::FP32);
         layers.push_back(meanAbsoluteError);
         shared_ptr<NetworkOutput> elementLossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(elementLossOutput);
@@ -427,13 +427,13 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP32) {
             dimensions.push_back((rand() % 500) + 1);
             numElements *= dimensions.back();
         }
-        Tensor labelsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
-        Tensor predictionsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
+        Tensor labelsCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
+        Tensor predictionsCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
         Tensor labelsGpu = labelsCpu.clone(gpuPlacement);
         Tensor predictionsGpu = predictionsCpu.clone(gpuPlacement);
-        Tensor elementLossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
+        Tensor elementLossCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
         Tensor elementLossGpu = elementLossCpu.clone(gpuPlacement);
-        Tensor elementLossGradientCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
+        Tensor elementLossGradientCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
         Tensor elementLossGradientGpu = elementLossGradientCpu.clone(gpuPlacement);
 
         float *labels = (float *)labelsCpu.getMemPtr();
@@ -455,7 +455,7 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP32) {
         layers.push_back(noOpLayer);
         shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        shared_ptr<MeanAbsoluteError> meanAbsoluteError = make_shared<MeanAbsoluteError>(TensorDescriptor::DataType::FP32);
+        shared_ptr<MeanAbsoluteError> meanAbsoluteError = make_shared<MeanAbsoluteError>(DataType::FP32);
         layers.push_back(meanAbsoluteError);
         shared_ptr<NetworkOutput> elementLossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(elementLossOutput);
@@ -553,13 +553,13 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP32_FP16Labels) {
             dimensions.push_back((rand() % 500) + 1);
             numElements *= dimensions.back();
         }
-        Tensor labelsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, dimensions));
-        Tensor predictionsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
+        Tensor labelsCpu(cpuPlacement, TensorDescriptor(DataType::FP16, dimensions));
+        Tensor predictionsCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
         Tensor labelsGpu = labelsCpu.clone(gpuPlacement);
         Tensor predictionsGpu = predictionsCpu.clone(gpuPlacement);
-        Tensor elementLossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
+        Tensor elementLossCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
         Tensor elementLossGpu = elementLossCpu.clone(gpuPlacement);
-        Tensor elementLossGradientCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, dimensions));
+        Tensor elementLossGradientCpu(cpuPlacement, TensorDescriptor(DataType::FP32, dimensions));
         Tensor elementLossGradientGpu = elementLossGradientCpu.clone(gpuPlacement);
 
         half *labels = (half *)labelsCpu.getMemPtr();
@@ -581,7 +581,7 @@ TEST(MeanAbsoluteError, ComputesCorrectResult_BatchLoss_FP32_FP16Labels) {
         layers.push_back(noOpLayer);
         shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        shared_ptr<MeanAbsoluteError> meanAbsoluteError = make_shared<MeanAbsoluteError>(TensorDescriptor::DataType::FP32);
+        shared_ptr<MeanAbsoluteError> meanAbsoluteError = make_shared<MeanAbsoluteError>(DataType::FP32);
         layers.push_back(meanAbsoluteError);
         shared_ptr<NetworkOutput> elementLossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(elementLossOutput);

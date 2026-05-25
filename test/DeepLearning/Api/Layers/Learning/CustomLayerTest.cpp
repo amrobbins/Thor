@@ -20,7 +20,7 @@
 using namespace std;
 namespace Api = Thor;
 namespace Impl = ThorImplementation;
-using DataType = Impl::TensorDescriptor::DataType;
+using DataType = Impl::DataType;
 
 namespace {
 

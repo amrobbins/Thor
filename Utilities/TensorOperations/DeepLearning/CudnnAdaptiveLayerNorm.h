@@ -37,10 +37,10 @@ struct CudnnAdaptiveLayerNormDescriptor {
     uint64_t leadingFeatureCount = 0;
     uint64_t normalizedFeatureCount = 0;
 
-    TensorDescriptor::DataType inputDataType = TensorDescriptor::DataType::FP16;
-    TensorDescriptor::DataType outputDataType = TensorDescriptor::DataType::FP16;
-    TensorDescriptor::DataType scaleBiasDataType = TensorDescriptor::DataType::FP32;
-    TensorDescriptor::DataType computeDataType = TensorDescriptor::DataType::FP32;
+    DataType inputDataType = DataType::FP16;
+    DataType outputDataType = DataType::FP16;
+    DataType scaleBiasDataType = DataType::FP32;
+    DataType computeDataType = DataType::FP32;
 
     float epsilon = 1.0e-5f;
     bool training = true;

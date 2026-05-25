@@ -127,7 +127,7 @@ static ThorImplementation::Tensor makeGpuTensorWithPayload(uint64_t bytes, uint8
 
     // CPU tensor (source)
     TensorPlacement cpuPlace(TensorPlacement::MemDevices::CPU, 0);
-    TensorDescriptor desc(TensorDescriptor::DataType::UINT8, {bytes});
+    TensorDescriptor desc(DataType::UINT8, {bytes});
     Tensor cpu(cpuPlace, desc, 4096);
     std::memcpy(cpu.getMemPtr<uint8_t>(), cpuOut.data(), bytes);
 

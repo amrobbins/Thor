@@ -37,7 +37,6 @@ struct SparseRowOptimizerExpression {
 
 class Optimizer : public Parameterizable {
    public:
-    using DataType = TensorDescriptor::DataType;
 
     Optimizer(uint64_t id) : id(id) {}
 

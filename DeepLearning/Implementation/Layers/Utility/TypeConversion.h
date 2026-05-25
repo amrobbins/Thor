@@ -13,7 +13,7 @@ class TypeConversion : public Layer {
 
     TypeConversion() { uninitialized = true; }
 
-    TypeConversion(TensorDescriptor::DataType newDataType) {
+    TypeConversion(DataType newDataType) {
         uninitialized = false;
         dataType = newDataType;
     }
@@ -39,7 +39,7 @@ class TypeConversion : public Layer {
    private:
     bool uninitialized;
 
-    TensorDescriptor::DataType dataType;
+    DataType dataType;
 };
 
 }  // namespace ThorImplementation

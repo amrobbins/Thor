@@ -15,7 +15,7 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 
 void bind_network_input(nb::module_ &m) {
     auto network_input = nb::class_<NetworkInput, Layer>(m, "NetworkInput");

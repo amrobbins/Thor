@@ -35,19 +35,19 @@ constexpr int64_t UID_DBIAS = 19;
 
 [[noreturn]] void throwInvalidInstanceNorm(const string& message) { throw invalid_argument("Invalid cuDNN InstanceNorm descriptor: " + message); }
 
-bool isSupportedInstanceNormIoDtype(TensorDescriptor::DataType dtype) {
+bool isSupportedInstanceNormIoDtype(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
     }
 }
 
-bool isReducedPrecisionInstanceNormIoDtype(TensorDescriptor::DataType dtype) {
-    return dtype == TensorDescriptor::DataType::FP16 || dtype == TensorDescriptor::DataType::BF16;
+bool isReducedPrecisionInstanceNormIoDtype(DataType dtype) {
+    return dtype == DataType::FP16 || dtype == DataType::BF16;
 }
 
 void validateCudnnFrontendPrimaryEngineContract(const CudnnInstanceNormDescriptor& descriptor) {
@@ -60,13 +60,13 @@ void validateCudnnFrontendPrimaryEngineContract(const CudnnInstanceNormDescripto
     }
 }
 
-fe::DataType_t toFrontendDataType(TensorDescriptor::DataType dtype) {
+fe::DataType_t toFrontendDataType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             return fe::DataType_t::HALF;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             return fe::DataType_t::BFLOAT16;
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             return fe::DataType_t::FLOAT;
         default:
             throw invalid_argument("Unsupported cuDNN Frontend InstanceNorm dtype: " + TensorDescriptor::getElementTypeName(dtype));
@@ -83,7 +83,7 @@ int64_t checkedI64(uint64_t value, string_view what) {
     return static_cast<int64_t>(value);
 }
 
-string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
+string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 uint64_t checkedMul(uint64_t a, uint64_t b, string_view what) {
     if (a != 0 && b > numeric_limits<uint64_t>::max() / a) {
@@ -121,7 +121,7 @@ void requireSameGpu(const Tensor& tensor, int gpuNum, string_view name) {
     }
 }
 
-void requireDtype(const Tensor& tensor, TensorDescriptor::DataType expected, string_view name) {
+void requireDtype(const Tensor& tensor, DataType expected, string_view name) {
     if (tensor.getDataType() != expected) {
         throw invalid_argument(string("cuDNN InstanceNorm tensor '") + string(name) + "' dtype mismatch. Expected " + dtypeName(expected) +
                                ", got " + dtypeName(tensor.getDataType()) + ".");
@@ -138,7 +138,7 @@ void requireNumElements(const Tensor& tensor, uint64_t expected, string_view nam
 
 void requireIoTensor(const Tensor& tensor,
                      const CudnnInstanceNormDescriptor& descriptor,
-                     TensorDescriptor::DataType expectedDtype,
+                     DataType expectedDtype,
                      int gpuNum,
                      string_view name) {
     requireSameGpu(tensor, gpuNum, name);
@@ -154,7 +154,7 @@ void requireParameterTensor(const Tensor& tensor, const CudnnInstanceNormDescrip
 
 void requireStatsTensor(const Tensor& tensor, const CudnnInstanceNormDescriptor& descriptor, int gpuNum, string_view name) {
     requireSameGpu(tensor, gpuNum, name);
-    requireDtype(tensor, TensorDescriptor::DataType::FP32, name);
+    requireDtype(tensor, DataType::FP32, name);
     requireNumElements(tensor, statsElementCount(descriptor), name);
 }
 
@@ -237,7 +237,7 @@ class InstanceNormGraphCache {
                                                     int64_t uid,
                                                     const vector<int64_t>& dim,
                                                     const vector<int64_t>& stride,
-                                                    TensorDescriptor::DataType dtype) {
+                                                    DataType dtype) {
         return graph->tensor(fe::graph::Tensor_attributes()
                                  .set_name(string(name))
                                  .set_uid(uid)
@@ -274,7 +274,7 @@ class InstanceNormGraphCache {
         built.workspaceBytes = workspaceBytes;
         if (workspaceBytes > 0) {
             built.workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                                     TensorDescriptor(TensorDescriptor::DataType::UINT8, {static_cast<uint64_t>(workspaceBytes)}),
+                                     TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(workspaceBytes)}),
                                      256);
         }
     }
@@ -325,12 +325,12 @@ class InstanceNormGraphCache {
                 .set_uid(UID_MEAN)
                 .set_dim(statsDims(descriptor))
                 .set_stride(statsStrides(descriptor))
-                .set_data_type(toFrontendDataType(TensorDescriptor::DataType::FP32));
+                .set_data_type(toFrontendDataType(DataType::FP32));
             invVariance->set_output(true)
                 .set_uid(UID_INV_VARIANCE)
                 .set_dim(statsDims(descriptor))
                 .set_stride(statsStrides(descriptor))
-                .set_data_type(toFrontendDataType(TensorDescriptor::DataType::FP32));
+                .set_data_type(toFrontendDataType(DataType::FP32));
         }
 
         finalize(built, gpuNum);
@@ -362,13 +362,13 @@ class InstanceNormGraphCache {
                            UID_MEAN,
                            statsDims(descriptor),
                            statsStrides(descriptor),
-                           TensorDescriptor::DataType::FP32);
+                           DataType::FP32);
         auto invVariance = tensor(built.graph,
                                   descriptor.debugName + "_inv_variance",
                                   UID_INV_VARIANCE,
                                   statsDims(descriptor),
                                   statsStrides(descriptor),
-                                  TensorDescriptor::DataType::FP32);
+                                  DataType::FP32);
 
         auto attrs = fe::graph::Instancenorm_backward_attributes()
                          .set_name(descriptor.debugName + "_backward")
@@ -415,10 +415,10 @@ void CudnnInstanceNormDescriptor::validateForward() const {
     if (!isSupportedInstanceNormIoDtype(outputDataType)) {
         throwInvalidInstanceNorm("outputDataType must be fp16, bf16, or fp32; got " + dtypeName(outputDataType));
     }
-    if (parameterDataType != TensorDescriptor::DataType::FP32) {
+    if (parameterDataType != DataType::FP32) {
         throwInvalidInstanceNorm("scale/bias parameters are currently required to be fp32; got " + dtypeName(parameterDataType));
     }
-    if (computeDataType != TensorDescriptor::DataType::FP32) {
+    if (computeDataType != DataType::FP32) {
         throwInvalidInstanceNorm("computeDataType is currently required to be fp32; got " + dtypeName(computeDataType));
     }
     if (!(epsilon > 0.0f)) {

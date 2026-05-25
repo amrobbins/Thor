@@ -23,23 +23,23 @@ TEST(Tensor, Sin) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -62,7 +62,7 @@ TEST(Tensor, Sin) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = sinf(argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //       expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
@@ -83,23 +83,23 @@ TEST(Tensor, Cos) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -122,7 +122,7 @@ TEST(Tensor, Cos) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = cosf(argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //       expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
@@ -160,23 +160,23 @@ TEST(Tensor, Tan) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -201,7 +201,7 @@ TEST(Tensor, Tan) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = tanf(argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //       expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
@@ -233,23 +233,23 @@ TEST(Tensor, Csc) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -274,7 +274,7 @@ TEST(Tensor, Csc) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = cscf(argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //       expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
@@ -299,23 +299,23 @@ TEST(Tensor, Sec) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -340,7 +340,7 @@ TEST(Tensor, Sec) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = secf(argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //       expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
@@ -365,23 +365,23 @@ TEST(Tensor, Cot) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -406,7 +406,7 @@ TEST(Tensor, Cot) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = cotf(argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //       expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
@@ -427,23 +427,23 @@ TEST(Tensor, Asin) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -466,7 +466,7 @@ TEST(Tensor, Asin) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = asinf(argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //      expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
@@ -487,23 +487,23 @@ TEST(Tensor, Acos) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -526,7 +526,7 @@ TEST(Tensor, Acos) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = acosf(argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //      expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
@@ -547,23 +547,23 @@ TEST(Tensor, Atan) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -586,7 +586,7 @@ TEST(Tensor, Atan) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = atanf(argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //       expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
@@ -607,23 +607,23 @@ TEST(Tensor, Acsc) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -646,7 +646,7 @@ TEST(Tensor, Acsc) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = asinf(1.0f / argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //      expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
@@ -667,23 +667,23 @@ TEST(Tensor, Asec) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -706,7 +706,7 @@ TEST(Tensor, Asec) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = acosf(1.0f / argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //       expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
@@ -727,23 +727,23 @@ TEST(Tensor, Acot) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor::DataType destDataType;
+        DataType destDataType;
         uint32_t dt = rand() % 2;
         if (dt == 0)
-            destDataType = TensorDescriptor::DataType::FP16;
+            destDataType = DataType::FP16;
         else
-            destDataType = TensorDescriptor::DataType::FP32;
+            destDataType = DataType::FP32;
 
-        TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP32;
+        DataType sourceDataType = DataType::FP32;
 
         TensorDescriptor destDescriptor(destDataType, dimensions);
         TensorDescriptor termDescriptor(sourceDataType, dimensions);
 
         Tensor argument_h(cpuPlacement, termDescriptor);
-        Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor argument_float_h = argument_h.clone(DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
         Tensor dest_d(gpuPlacement, destDescriptor);
-        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -766,7 +766,7 @@ TEST(Tensor, Acot) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = atanf(1.0f / argument_float_h_mem[i * dimensions[1] + j]);
-                if (destDataType == TensorDescriptor::DataType::FP16)
+                if (destDataType == DataType::FP16)
                     expected = (half)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
                 //      expected, (float)(half)argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);

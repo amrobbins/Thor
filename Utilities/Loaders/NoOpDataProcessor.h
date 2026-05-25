@@ -21,15 +21,15 @@
 
 class NoOpDataProcessor : public DataProcessor {
    public:
-    NoOpDataProcessor(uint64_t numOutputTensorBytes, ThorImplementation::TensorDescriptor::DataType dataType);
+    NoOpDataProcessor(uint64_t numOutputTensorBytes, ThorImplementation::DataType dataType);
     virtual ~NoOpDataProcessor() {}
 
     virtual uint64_t outputTensorSizeInBytes();
-    virtual ThorImplementation::TensorDescriptor::DataType getDataType();
+    virtual ThorImplementation::DataType getDataType();
 
     virtual DataElement operator()(DataElement &input);
 
    private:
     uint64_t numOutputTensorBytes;
-    ThorImplementation::TensorDescriptor::DataType dataType;
+    ThorImplementation::DataType dataType;
 };

@@ -18,7 +18,7 @@ class Parameterizable;
 
 class ParameterSpecification {
    public:
-    using DataType = ThorImplementation::TensorDescriptor::DataType;
+    using DataType = ThorImplementation::DataType;
     using StorageContext = ThorImplementation::PhysicalParameter::StorageContext;
     using StorageContextStorageFactory = std::function<ThorImplementation::Tensor(const StorageContext&)>;
     class Builder;

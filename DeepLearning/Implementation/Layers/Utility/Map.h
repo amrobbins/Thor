@@ -125,7 +125,7 @@ class Map : public Layer {
         THOR_THROW_IF_FALSE(std::is_integral<INDEX_TYPE>());
         THOR_THROW_IF_FALSE(!std::is_signed<INDEX_TYPE>());
         if (sizeof(INDEX_TYPE) < sizeof(uint64_t)) {
-            uint64_t numSourceElements = TensorDescriptor(TensorDescriptor::DataType::BOOLEAN, sourceDimensions).getTotalNumElements();
+            uint64_t numSourceElements = TensorDescriptor(DataType::BOOLEAN, sourceDimensions).getTotalNumElements();
             uint64_t numDestElements = mappingOfSourceTensorIntoDestTensor.getDescriptor().getTotalNumElements();
             uint64_t maxElementsForIndexType = 1l << (8 * sizeof(INDEX_TYPE));
             THOR_THROW_IF_FALSE(numSourceElements < maxElementsForIndexType);
@@ -167,7 +167,7 @@ class Map : public Layer {
         std::map<unsigned int, std::map<INDEX_TYPE, std::priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>>>>
             nGroupingsOfOutputDestinationsOfInputElement;
 
-        TensorDescriptor elementPopulatedTensorDescriptor(TensorDescriptor::DataType::BOOLEAN, sourceDimensions);
+        TensorDescriptor elementPopulatedTensorDescriptor(DataType::BOOLEAN, sourceDimensions);
         Tensor elementPopulatedTensor(cpuPlacement, elementPopulatedTensorDescriptor);
         bool *elementPopulated = (bool *)elementPopulatedTensor.getMemPtr();
         INDEX_TYPE numErrorOutputElements = elementPopulatedTensorDescriptor.getTotalNumElements();
@@ -197,7 +197,7 @@ class Map : public Layer {
             //   errorOutputIndex_mappingsOfSizeN, {errorInputIndex1, ..., errorInputIndexN} }
             flatDimension.push_back((N + 1) * mappingsOfSizeN);
 
-            Tensor backwardMappingTensor = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT64, flatDimension));
+            Tensor backwardMappingTensor = Tensor(cpuPlacement, TensorDescriptor(DataType::UINT64, flatDimension));
             INDEX_TYPE *backwardMappingMem = (INDEX_TYPE *)backwardMappingTensor.getMemPtr();
 
             INDEX_TYPE i = 0;

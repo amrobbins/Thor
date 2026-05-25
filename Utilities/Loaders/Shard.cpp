@@ -13,7 +13,7 @@ void Shard::createShard(string filename,
                         uint64_t numValidateExamples,
                         uint64_t numTestExamples,
                         uint64_t exampleSizeInBytes,
-                        ThorImplementation::TensorDescriptor::DataType dataType,
+                        ThorImplementation::DataType dataType,
                         uint64_t maxFilenameChars,
                         std::vector<std::string> &allClassesVector,
                         uint64_t maxClassNameChars) {
@@ -246,7 +246,7 @@ string Shard::getFilename() { return filename; }
 
 uint64_t Shard::getExampleSizeInBytes() { return exampleSizeInBytes; }
 
-ThorImplementation::TensorDescriptor::DataType Shard::getDataType() { return dataType; }
+ThorImplementation::DataType Shard::getDataType() { return dataType; }
 
 uint64_t Shard::getNumExamples(ExampleType exampleType) {
     if (exampleType == ExampleType::TRAIN) {

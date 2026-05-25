@@ -85,13 +85,13 @@ class SparseRowUpdatePlan {
         NamedInput::Kind inputKind = NamedInput::Kind::Tensor;
         SparseRowUpdateTensorKind tensorKind = SparseRowUpdateTensorKind::DenseLogicalRows;
         Tensor tensor;
-        TensorDescriptor::DataType dtype = TensorDescriptor::DataType::FP32;
+        DataType dtype = DataType::FP32;
     };
 
     struct RuntimeOutputSlot {
         std::string name;
         Tensor tensor;
-        TensorDescriptor::DataType dtype = TensorDescriptor::DataType::FP32;
+        DataType dtype = DataType::FP32;
     };
 
    private:
@@ -103,7 +103,7 @@ class SparseRowUpdatePlan {
     uint64_t vocabularySize = 0;
     uint64_t embeddingDim = 0;
     uint32_t valuesPerThread = 1;
-    TensorDescriptor::DataType rowDataType = TensorDescriptor::DataType::UINT64;
+    DataType rowDataType = DataType::UINT64;
     Tensor rows;
     Tensor numRows;
     std::vector<RuntimeInputSlot> inputSlots;

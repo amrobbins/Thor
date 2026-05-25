@@ -82,7 +82,7 @@ class Metric : public Layer {
             return std::nullopt;
         } else {
             THOR_THROW_IF_FALSE(featureInput.has_value());
-            return Tensor(featureInput.value().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
+            return Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::FP32, {1}));
         }
     }
 

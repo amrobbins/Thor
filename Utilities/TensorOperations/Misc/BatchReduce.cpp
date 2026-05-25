@@ -23,14 +23,14 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
                          uint32_t classDimSize,
                          bool reduceBatch,
                          bool reduceClass,
-                         TensorDescriptor::DataType sourceDataType,
-                         TensorDescriptor::DataType destDataType,
+                         DataType sourceDataType,
+                         DataType destDataType,
                          Stream stream,
                          bool doBatchSizeDivide) {
     // stream is kept because the cudnn handle is associated with it.
     this->stream = stream;
 
-    doubleType = sourceDataType == TensorDescriptor::DataType::FP64;
+    doubleType = sourceDataType == DataType::FP64;
 
     this->batchletSize = batchletSize;
     this->batchSize = batchSize;
@@ -46,7 +46,7 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
     }
 
     if (doubleType) {
-        THOR_THROW_IF_FALSE(destDataType == TensorDescriptor::DataType::FP64);
+        THOR_THROW_IF_FALSE(destDataType == DataType::FP64);
         zero = new double;
         ((double *)zero)[0] = 0.0;
         one = new double;
@@ -65,7 +65,7 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
     workspaceSizeInBytes = computeWorkspaceSizeInBytes(batchletSize, batchSize, classDimSize, sourceDataType, destDataType);
     if (workspaceSizeInBytes > 0)
         workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
-                           TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
+                           TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
 }
 
 bool BatchReduce::isWire() {
@@ -79,8 +79,8 @@ bool BatchReduce::isScalarDivide() {
 uint64_t BatchReduce::computeWorkspaceSizeInBytes(uint32_t batchletSize,
                                                   uint32_t batchSize,
                                                   uint32_t classDimSize,
-                                                  TensorDescriptor::DataType sourceDataType,
-                                                  TensorDescriptor::DataType destDataType) {
+                                                  DataType sourceDataType,
+                                                  DataType destDataType) {
     if (isWire() || isScalarDivide()) {
         workspaceSizeInBytes = 0;
         return workspaceSizeInBytes;
@@ -92,7 +92,7 @@ uint64_t BatchReduce::computeWorkspaceSizeInBytes(uint32_t batchletSize,
 
     cudnnStatus = cudnnSetReduceTensorDescriptor(reduceTensorDescriptor,
                                                  CUDNN_REDUCE_TENSOR_ADD,
-                                                 CudnnHelper::getCudnnDataType(TensorDescriptor::DataType::FP32),
+                                                 CudnnHelper::getCudnnDataType(DataType::FP32),
                                                  CUDNN_NOT_PROPAGATE_NAN,
                                                  CUDNN_REDUCE_TENSOR_NO_INDICES,
                                                  CUDNN_32BIT_INDICES);

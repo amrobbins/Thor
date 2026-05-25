@@ -70,8 +70,8 @@ TEST(EquationCompiler, ReductionBoundaryStillSplitsStages) {
     auto physical = outs.physicalOutputs();
     resolveOutputsDTypesInPlace(physical,
                                 {
-                                    TensorDescriptor::DataType::FP32,
-                                    TensorDescriptor::DataType::FP32,
+                                    DataType::FP32,
+                                    DataType::FP32,
                                 });
 
     auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
@@ -94,8 +94,8 @@ TEST(EquationCompiler, ReductionBoundaryCommonSubexpressionDoesNotCreateExtraKer
     auto physical = outs.physicalOutputs();
     resolveOutputsDTypesInPlace(physical,
                                 {
-                                    TensorDescriptor::DataType::FP32,
-                                    TensorDescriptor::DataType::FP32,
+                                    DataType::FP32,
+                                    DataType::FP32,
                                 });
 
     auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
@@ -106,7 +106,6 @@ TEST(EquationCompiler, ReductionBoundaryCommonSubexpressionDoesNotCreateExtraKer
 }
 
 TEST(EquationCompiler, RmsNormIsOwnBoundaryStageAndCompilesDescriptor) {
-    using DataType = TensorDescriptor::DataType;
 
     auto x = Expression::input("x", DataType::FP16, DataType::FP16);
     auto scale = Expression::input("scale", DataType::FP32, DataType::FP32);
@@ -135,7 +134,6 @@ TEST(EquationCompiler, RmsNormIsOwnBoundaryStageAndCompilesDescriptor) {
 }
 
 TEST(EquationCompiler, SwishHelperDoesNotImplicitlyTurnRmsNormIntoCudnnFusion) {
-    using DataType = TensorDescriptor::DataType;
 
     auto x = Expression::input("x", DataType::BF16, DataType::BF16);
     auto scale = Expression::input("scale", DataType::FP32, DataType::FP32);
@@ -154,7 +152,6 @@ TEST(EquationCompiler, SwishHelperDoesNotImplicitlyTurnRmsNormIntoCudnnFusion) {
 }
 
 TEST(EquationCompiler, RmsNormConsumesPrecedingPointwiseStageWithoutAbsorbingIt) {
-    using DataType = TensorDescriptor::DataType;
 
     auto x = Expression::input("x", DataType::FP16, DataType::FP16);
     auto scale = Expression::input("scale", DataType::FP32, DataType::FP32);

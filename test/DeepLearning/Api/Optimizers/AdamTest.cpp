@@ -26,7 +26,7 @@ namespace {
 Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
 Impl::TensorPlacement gpuPlacement(Impl::TensorPlacement::MemDevices::GPU, 0);
 
-using DataType = Impl::TensorDescriptor::DataType;
+using DataType = Impl::DataType;
 
 void synchronizeEvents(std::vector<Event> events) {
     for (Event& event : events)

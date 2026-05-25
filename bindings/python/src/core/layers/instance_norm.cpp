@@ -16,7 +16,7 @@ using namespace nb::literals;
 using namespace std;
 using namespace Thor;
 
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 
 void bind_instance_norm(nb::module_& m) {
     auto instance_norm = nb::class_<InstanceNorm, TrainableLayer>(m, "InstanceNorm");

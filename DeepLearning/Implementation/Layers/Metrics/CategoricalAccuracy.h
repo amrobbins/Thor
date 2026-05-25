@@ -22,7 +22,7 @@ class CategoricalAccuracy : public Metric {
 
     std::optional<Tensor> createFeatureOutputTensor() override {
         TensorPlacement placement = featureInput.value().getPlacement();
-        return Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1U}));
+        return Tensor(placement, TensorDescriptor(DataType::FP32, {1U}));
     }
 
     void compileImpl() override {
@@ -34,18 +34,18 @@ class CategoricalAccuracy : public Metric {
 
         std::vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
         std::vector<uint64_t> labelDimensions = labelsInput.value().getDescriptor().getDimensions();
-        TensorDescriptor::DataType labelsDataType = labelsInput.value().getDescriptor().getDataType();
+        DataType labelsDataType = labelsInput.value().getDescriptor().getDataType();
         bool perClassLabels =
             featureInputDimensions == labelDimensions &&
-            (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
-             labelsDataType == TensorDescriptor::DataType::UINT32 || labelsDataType == TensorDescriptor::DataType::INT8 ||
-             labelsDataType == TensorDescriptor::DataType::INT16 || labelsDataType == TensorDescriptor::DataType::INT32 ||
-             labelsDataType == TensorDescriptor::DataType::FP16 || labelsDataType == TensorDescriptor::DataType::FP32);
+            (labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
+             labelsDataType == DataType::UINT32 || labelsDataType == DataType::INT8 ||
+             labelsDataType == DataType::INT16 || labelsDataType == DataType::INT32 ||
+             labelsDataType == DataType::FP16 || labelsDataType == DataType::FP32);
         bool classIndexLabels =
             labelDimensions.size() == 2 && featureInputDimensions[0] == labelDimensions[0] && labelDimensions[1] == 1 &&
-            (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
-             labelsDataType == TensorDescriptor::DataType::UINT32 || labelsDataType == TensorDescriptor::DataType::INT8 ||
-             labelsDataType == TensorDescriptor::DataType::INT16 || labelsDataType == TensorDescriptor::DataType::INT32);
+            (labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
+             labelsDataType == DataType::UINT32 || labelsDataType == DataType::INT8 ||
+             labelsDataType == DataType::INT16 || labelsDataType == DataType::INT32);
         THOR_THROW_IF_FALSE(perClassLabels ^ classIndexLabels);
         if (perClassLabels)
             labelFormat = LABEL_FORMAT::INDICATOR_PER_CLASS_TYPE;
@@ -63,7 +63,7 @@ class CategoricalAccuracy : public Metric {
         // When there are two classes and the label is a single 1 or 0, binary accuracy can be used, instead of categorical accuracy.
         THOR_THROW_IF_FALSE(numClasses >= 2);
 
-        workspace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
+        workspace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::FP32, {batchSize}));
     }
 
     void computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) override {
@@ -91,8 +91,8 @@ class CategoricalAccuracy : public Metric {
 
    private:
     void computeMetricIndicatorPerClass(Tensor labels, Tensor predictions, Tensor metric, Stream stream) {
-        if (predictions.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+        if (predictions.getDescriptor().getDataType() == DataType::FP16) {
+            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (half *)predictions.getMemPtr(),
                                                                 (uint8_t *)labels.getMemPtr(),
@@ -101,7 +101,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (half *)predictions.getMemPtr(),
                                                                 (uint16_t *)labels.getMemPtr(),
@@ -110,7 +110,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (half *)predictions.getMemPtr(),
                                                                 (uint32_t *)labels.getMemPtr(),
@@ -119,7 +119,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT8) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (half *)predictions.getMemPtr(),
                                                                 (int8_t *)labels.getMemPtr(),
@@ -128,7 +128,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (half *)predictions.getMemPtr(),
                                                                 (int16_t *)labels.getMemPtr(),
@@ -137,7 +137,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (half *)predictions.getMemPtr(),
                                                                 (int32_t *)labels.getMemPtr(),
@@ -146,7 +146,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::FP16) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (half *)predictions.getMemPtr(),
                                                                 (half *)labels.getMemPtr(),
@@ -155,7 +155,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::FP32) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (half *)predictions.getMemPtr(),
                                                                 (float *)labels.getMemPtr(),
@@ -167,8 +167,8 @@ class CategoricalAccuracy : public Metric {
                 THOR_UNREACHABLE();
             }
 
-        } else if (predictions.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-            if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+        } else if (predictions.getDescriptor().getDataType() == DataType::FP32) {
+            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (float *)predictions.getMemPtr(),
                                                                 (uint8_t *)labels.getMemPtr(),
@@ -177,7 +177,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (float *)predictions.getMemPtr(),
                                                                 (uint16_t *)labels.getMemPtr(),
@@ -186,7 +186,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (float *)predictions.getMemPtr(),
                                                                 (uint32_t *)labels.getMemPtr(),
@@ -195,7 +195,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT8) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (float *)predictions.getMemPtr(),
                                                                 (int8_t *)labels.getMemPtr(),
@@ -204,7 +204,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (float *)predictions.getMemPtr(),
                                                                 (int16_t *)labels.getMemPtr(),
@@ -213,7 +213,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (float *)predictions.getMemPtr(),
                                                                 (int32_t *)labels.getMemPtr(),
@@ -222,7 +222,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::FP16) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (float *)predictions.getMemPtr(),
                                                                 (half *)labels.getMemPtr(),
@@ -231,7 +231,7 @@ class CategoricalAccuracy : public Metric {
                                                                 batchSize,
                                                                 stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::FP32) {
                 launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
                                                                 (float *)predictions.getMemPtr(),
                                                                 (float *)labels.getMemPtr(),
@@ -248,8 +248,8 @@ class CategoricalAccuracy : public Metric {
     }
 
     void computeMetricClassIndex(Tensor labels, Tensor predictions, Tensor metric, Stream stream) {
-        if (predictions.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+        if (predictions.getDescriptor().getDataType() == DataType::FP16) {
+            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (half *)predictions.getMemPtr(),
                                                                   (uint8_t *)labels.getMemPtr(),
@@ -258,7 +258,7 @@ class CategoricalAccuracy : public Metric {
                                                                   batchSize,
                                                                   stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (half *)predictions.getMemPtr(),
                                                                   (uint16_t *)labels.getMemPtr(),
@@ -267,7 +267,7 @@ class CategoricalAccuracy : public Metric {
                                                                   batchSize,
                                                                   stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (half *)predictions.getMemPtr(),
                                                                   (uint32_t *)labels.getMemPtr(),
@@ -276,7 +276,7 @@ class CategoricalAccuracy : public Metric {
                                                                   batchSize,
                                                                   stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT8) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (half *)predictions.getMemPtr(),
                                                                   (int8_t *)labels.getMemPtr(),
@@ -284,7 +284,7 @@ class CategoricalAccuracy : public Metric {
                                                                   numClasses,
                                                                   batchSize,
                                                                   stream);
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (half *)predictions.getMemPtr(),
                                                                   (int16_t *)labels.getMemPtr(),
@@ -292,7 +292,7 @@ class CategoricalAccuracy : public Metric {
                                                                   numClasses,
                                                                   batchSize,
                                                                   stream);
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (half *)predictions.getMemPtr(),
                                                                   (int32_t *)labels.getMemPtr(),
@@ -305,8 +305,8 @@ class CategoricalAccuracy : public Metric {
                 THOR_UNREACHABLE();
             }
 
-        } else if (predictions.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-            if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+        } else if (predictions.getDescriptor().getDataType() == DataType::FP32) {
+            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (float *)predictions.getMemPtr(),
                                                                   (uint8_t *)labels.getMemPtr(),
@@ -315,7 +315,7 @@ class CategoricalAccuracy : public Metric {
                                                                   batchSize,
                                                                   stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (float *)predictions.getMemPtr(),
                                                                   (uint16_t *)labels.getMemPtr(),
@@ -324,7 +324,7 @@ class CategoricalAccuracy : public Metric {
                                                                   batchSize,
                                                                   stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (float *)predictions.getMemPtr(),
                                                                   (uint32_t *)labels.getMemPtr(),
@@ -333,7 +333,7 @@ class CategoricalAccuracy : public Metric {
                                                                   batchSize,
                                                                   stream);
 
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT8) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (float *)predictions.getMemPtr(),
                                                                   (int8_t *)labels.getMemPtr(),
@@ -341,7 +341,7 @@ class CategoricalAccuracy : public Metric {
                                                                   numClasses,
                                                                   batchSize,
                                                                   stream);
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT16) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (float *)predictions.getMemPtr(),
                                                                   (int16_t *)labels.getMemPtr(),
@@ -349,7 +349,7 @@ class CategoricalAccuracy : public Metric {
                                                                   numClasses,
                                                                   batchSize,
                                                                   stream);
-            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::INT32) {
+            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
                 launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
                                                                   (float *)predictions.getMemPtr(),
                                                                   (int32_t *)labels.getMemPtr(),

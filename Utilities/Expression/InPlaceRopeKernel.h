@@ -14,13 +14,13 @@ struct CompiledInPlaceRopeTensor {
     uint32_t input_slot = UINT32_MAX;
     std::vector<uint64_t> logical_dims;
     RotaryPositionEmbeddingOptions options;
-    TensorDescriptor::DataType dtype = TensorDescriptor::DataType::FP32;
+    DataType dtype = DataType::FP32;
 };
 
 struct CompiledInPlaceRope {
     std::vector<CompiledInPlaceRopeTensor> tensors;
 
-    [[nodiscard]] TensorDescriptor::DataType outputDType(size_t output_idx) const {
+    [[nodiscard]] DataType outputDType(size_t output_idx) const {
         if (output_idx >= tensors.size()) {
             throw std::runtime_error("CompiledInPlaceRope output index out of range.");
         }

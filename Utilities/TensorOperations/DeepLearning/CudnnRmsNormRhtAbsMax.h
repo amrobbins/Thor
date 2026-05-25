@@ -24,10 +24,10 @@ struct CudnnRmsNormRhtAbsMaxDescriptor {
     uint64_t outerSize = 0;
     uint64_t normalizedFeatureCount = 0;
 
-    TensorDescriptor::DataType inputDataType = TensorDescriptor::DataType::BF16;
-    TensorDescriptor::DataType outputDataType = TensorDescriptor::DataType::BF16;
-    TensorDescriptor::DataType parameterDataType = TensorDescriptor::DataType::BF16;
-    TensorDescriptor::DataType absMaxDataType = TensorDescriptor::DataType::FP32;
+    DataType inputDataType = DataType::BF16;
+    DataType outputDataType = DataType::BF16;
+    DataType parameterDataType = DataType::BF16;
+    DataType absMaxDataType = DataType::FP32;
 
     float epsilon = 1.0e-5f;
     uint32_t numThreads = 0;  // 0: resolve from NVIDIA's published table/fallback constraints.

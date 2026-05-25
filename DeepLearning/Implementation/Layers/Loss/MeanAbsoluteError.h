@@ -17,7 +17,7 @@ class MeanAbsoluteError : public Loss {
    public:
     ~MeanAbsoluteError() override;
 
-    MeanAbsoluteError(TensorDescriptor::DataType lossDataType = TensorDescriptor::DataType::FP32);
+    MeanAbsoluteError(DataType lossDataType = DataType::FP32);
 
     void compileImpl() override;
 

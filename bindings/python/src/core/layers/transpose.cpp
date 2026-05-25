@@ -15,7 +15,7 @@ using namespace nb::literals;
 using namespace std;
 using namespace Thor;
 
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 
 namespace {
 

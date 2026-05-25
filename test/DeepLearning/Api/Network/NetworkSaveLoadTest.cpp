@@ -61,7 +61,7 @@
 //     verifySgdApiLevel(sgd, dynamic_pointer_cast<Sgd>(layer->getOptimizer()));
 //
 //     // ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-//     // ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::FP16,
+//     // ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::FP16,
 //     inputTensor.getDimensions());
 //     // Stream stream(0);
 //

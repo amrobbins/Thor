@@ -18,7 +18,7 @@ struct EmbeddingForwardEpilogue {
     // refer to `v` for the gathered embedding value and to same-shape extra
     // tensor inputs as `arg0[linear]`, `arg1[linear]`, ... .
     std::string expression;
-    std::vector<TensorDescriptor::DataType> extra_input_dtypes;
+    std::vector<DataType> extra_input_dtypes;
 
     [[nodiscard]] bool enabled() const { return !expression.empty(); }
 };

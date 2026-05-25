@@ -21,7 +21,6 @@
 
 using namespace std;
 using namespace ThorImplementation;
-using DataType = TensorDescriptor::DataType;
 
 namespace {
 

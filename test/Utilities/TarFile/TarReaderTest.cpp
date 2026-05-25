@@ -72,7 +72,7 @@ void read_and_expect(TarReader& reader, const std::string& path, const std::vect
     // reader.readFile(path, got.data(), static_cast<uint64_t>(got.size()));
 
     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {expected.size()});
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {expected.size()});
     ThorImplementation::Tensor got(cpuPlacement, descriptor);
     reader.registerReadRequest(path, got);
     reader.executeReadRequests();
@@ -95,13 +95,13 @@ TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
 
     // Build some files
     const std::string hello_str = "hello from gtest\n";
-    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello_str.size()});
+    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::DataType::UINT8, {hello_str.size()});
     ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
     memcpy(helloTensor.getMemPtr<void>(), hello_str.data(), hello_str.size());
 
     uint32_t blobBytes = 256 * 1024;
     const std::vector<uint8_t> blob = make_pattern_bytes(blobBytes, 42);
-    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobBytes});
+    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::DataType::UINT8, {blobBytes});
     ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
     memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
@@ -154,7 +154,7 @@ TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
     const std::vector<uint8_t> b = make_pattern_bytes(fileSize, 2);  // 512 KiB
     const std::vector<uint8_t> c = make_pattern_bytes(fileSize, 3);  // 512 KiB
 
-    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {fileSize});
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {fileSize});
 
     ThorImplementation::Tensor aTensor(cpuPlacement, descriptor);
     memcpy(aTensor.getMemPtr<void>(), a.data(), fileSize);
@@ -435,7 +435,7 @@ TEST(TarRoundTrip, RejectsArchiveIdMismatchAcrossThreeShards) {
     const auto c = make_bytes(fileSize, 0xC3);
 
     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {fileSize});
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {fileSize});
 
     ThorImplementation::Tensor aTensor(cpuPlacement, descriptor);
     memcpy(aTensor.getMemPtr<void>(), a.data(), fileSize);
@@ -489,7 +489,7 @@ TEST(TarRoundTrip, RejectsWrongFooterMagicNumber) {
     const auto payload = make_bytes(fileSize, 0x5A);
 
     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {fileSize});
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {fileSize});
     ThorImplementation::Tensor payloadTensor(cpuPlacement, descriptor);
     memcpy(payloadTensor.getMemPtr<void>(), payload.data(), fileSize);
 
@@ -585,7 +585,7 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
             auto data = make_pattern_bytes(static_cast<size_t>(sizes[i]), 1000u + i);
             total_written += data.size();
 
-            ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {data.size()});
+            ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {data.size()});
             ThorImplementation::Tensor dataTensor(cpuPlacement, descriptor);
             memcpy(dataTensor.getMemPtr<void>(), data.data(), data.size());
 
@@ -618,7 +618,7 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
         ASSERT_EQ(info.size, static_cast<uint64_t>(contents[i].size())) << "size mismatch for " << paths[i];
         actualCrcs.push_back(info.crc);
 
-        ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {contents[i].size()});
+        ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {contents[i].size()});
         ThorImplementation::Tensor destTensor(cpuPlacement, descriptor);
         destTensors.push_back(destTensor);
 
@@ -666,13 +666,13 @@ TEST(TarRoundTrip, RejectsBadIndexCrcInFooter) {
 
     // Build some files
     const std::string hello_str = "hello from gtest\n";
-    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello_str.size()});
+    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::DataType::UINT8, {hello_str.size()});
     ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
     memcpy(helloTensor.getMemPtr<void>(), hello_str.data(), hello_str.size());
 
     uint32_t blobBytes = 256 * 1024;
     const std::vector<uint8_t> blob = make_pattern_bytes(blobBytes, 778);
-    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobBytes});
+    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::DataType::UINT8, {blobBytes});
     ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
     memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
@@ -816,13 +816,13 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
 
     // Build some files
     const std::string hello_str = "hello from gtest\n";
-    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello_str.size()});
+    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::DataType::UINT8, {hello_str.size()});
     ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
     memcpy(helloTensor.getMemPtr<void>(), hello_str.data(), hello_str.size());
 
     uint32_t blobBytes = 75 * 1024;
     const std::vector<uint8_t> blob = make_pattern_bytes(blobBytes, 999);
-    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobBytes});
+    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::DataType::UINT8, {blobBytes});
     ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
     memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
@@ -881,7 +881,7 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
     // Now reading with validate=true should throw due to CRC mismatch.
     TarReader r(archiveName, archiveDir);
 
-    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {sz});
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {sz});
     ThorImplementation::Tensor out(cpuPlacement, descriptor);
 
     r.registerReadRequest("data/blob.bin", out);

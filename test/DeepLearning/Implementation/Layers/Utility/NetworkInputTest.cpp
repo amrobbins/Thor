@@ -139,7 +139,7 @@ TEST(NetworkInput, ConnectedInputCopySeesBackingSwapsAndInactiveBackingWaitsForP
     }
 
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-    TensorDescriptor descriptor(TensorDescriptor::DataType::FP32, {4096});
+    TensorDescriptor descriptor(DataType::FP32, {4096});
     Stream setupStream(0);
 
     Tensor batch1 = makeFilledGpuTensor(descriptor, 1.0f, setupStream);
@@ -148,7 +148,7 @@ TEST(NetworkInput, ConnectedInputCopySeesBackingSwapsAndInactiveBackingWaitsForP
     setupStream.synchronize();
 
     auto firstReadGate = make_shared<HostGate>();
-    NetworkInput input(gpuPlacement, TensorDescriptor::DataType::FP32, descriptor.getDimensions());
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
     DelayedConnectedInputCaptureLayer capture(firstReadGate);
     input.connectToNextLayer(&capture);
 

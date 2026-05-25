@@ -22,7 +22,7 @@ using json = nlohmann::json;
 namespace ThorImplementation {
 namespace {
 
-std::string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
+std::string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 std::string inputKindName(CudaKernelExpression::TensorParamSpec::Kind kind) {
     switch (kind) {
@@ -37,21 +37,21 @@ std::string inputKindName(CudaKernelExpression::TensorParamSpec::Kind kind) {
     }
 }
 
-void validateHostRuntimeScalarDataType(TensorDescriptor::DataType type) {
-    if (type != TensorDescriptor::DataType::FP32) {
+void validateHostRuntimeScalarDataType(DataType type) {
+    if (type != DataType::FP32) {
         throw std::invalid_argument("CudaKernelExpression host runtime scalar dtype '" + dtypeName(type) +
                                     "' is not supported. Host runtime scalars are currently bound as fp32 values.");
     }
 }
 
-void validateScalarDataType(TensorDescriptor::DataType type) {
+void validateScalarDataType(DataType type) {
     switch (type) {
-        case TensorDescriptor::DataType::INT32:
-        case TensorDescriptor::DataType::UINT32:
-        case TensorDescriptor::DataType::INT64:
-        case TensorDescriptor::DataType::UINT64:
-        case TensorDescriptor::DataType::FP32:
-        case TensorDescriptor::DataType::FP64:
+        case DataType::INT32:
+        case DataType::UINT32:
+        case DataType::INT64:
+        case DataType::UINT64:
+        case DataType::FP32:
+        case DataType::FP64:
             return;
         default:
             throw std::invalid_argument("CudaKernelExpression scalar dtype '" + dtypeName(type) +
@@ -450,7 +450,7 @@ uint64_t CudaKernelExpression::LaunchContext::numel(const std::string& tensor_na
     throw std::runtime_error("CudaKernelExpression launch context has no tensor named '" + tensor_name + "'.");
 }
 
-TensorDescriptor::DataType CudaKernelExpression::LaunchContext::dtype(const std::string& tensor_name) const {
+DataType CudaKernelExpression::LaunchContext::dtype(const std::string& tensor_name) const {
     auto input_it = inputs.find(tensor_name);
     if (input_it != inputs.end()) {
         return input_it->second.getDataType();
@@ -475,19 +475,19 @@ CudaKernelExpression::Builder& CudaKernelExpression::Builder::entry(std::string 
     return *this;
 }
 
-CudaKernelExpression::Builder& CudaKernelExpression::Builder::input(std::string name, TensorDescriptor::DataType dtype) {
+CudaKernelExpression::Builder& CudaKernelExpression::Builder::input(std::string name, DataType dtype) {
     validateName(name, "input");
     inputs_.push_back(TensorParamSpec{std::move(name), dtype, TensorParamSpec::Kind::Tensor});
     return *this;
 }
 
-CudaKernelExpression::Builder& CudaKernelExpression::Builder::tensorRuntimeScalarInput(std::string name, TensorDescriptor::DataType dtype) {
+CudaKernelExpression::Builder& CudaKernelExpression::Builder::tensorRuntimeScalarInput(std::string name, DataType dtype) {
     validateName(name, "tensor runtime scalar input");
     inputs_.push_back(TensorParamSpec{std::move(name), dtype, TensorParamSpec::Kind::TensorRuntimeScalar});
     return *this;
 }
 
-CudaKernelExpression::Builder& CudaKernelExpression::Builder::hostRuntimeScalarInput(std::string name, TensorDescriptor::DataType dtype) {
+CudaKernelExpression::Builder& CudaKernelExpression::Builder::hostRuntimeScalarInput(std::string name, DataType dtype) {
     validateName(name, "host runtime scalar input");
     validateHostRuntimeScalarDataType(dtype);
     inputs_.push_back(TensorParamSpec{std::move(name), dtype, TensorParamSpec::Kind::HostRuntimeScalar});
@@ -495,7 +495,7 @@ CudaKernelExpression::Builder& CudaKernelExpression::Builder::hostRuntimeScalarI
 }
 
 CudaKernelExpression::Builder& CudaKernelExpression::Builder::output(std::string name,
-                                                                     TensorDescriptor::DataType dtype,
+                                                                     DataType dtype,
                                                                      std::vector<DimExpr> shape) {
     validateName(name, "output");
     if (shape.empty()) {
@@ -507,7 +507,7 @@ CudaKernelExpression::Builder& CudaKernelExpression::Builder::output(std::string
 }
 
 CudaKernelExpression::Builder& CudaKernelExpression::Builder::outputLike(std::string name,
-                                                                         TensorDescriptor::DataType dtype,
+                                                                         DataType dtype,
                                                                          const std::string& input_name) {
     validateName(name, "output");
     validateName(input_name, "input");
@@ -516,7 +516,7 @@ CudaKernelExpression::Builder& CudaKernelExpression::Builder::outputLike(std::st
 }
 
 CudaKernelExpression::Builder& CudaKernelExpression::Builder::scalar(
-    std::string name, TensorDescriptor::DataType type, std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> value) {
+    std::string name, DataType type, std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> value) {
     validateName(name, "scalar");
     validateScalarDataType(type);
     scalars_.push_back(ScalarParamSpec{std::move(name), type, std::move(value)});
@@ -734,7 +734,7 @@ CudaKernelExpression CudaKernelExpression::deserialize(const json& j, bool allow
 
     for (const json& input_json : j.at("inputs")) {
         const std::string name = input_json.at("name").get<std::string>();
-        const TensorDescriptor::DataType dtype = input_json.at("dtype").get<TensorDescriptor::DataType>();
+        const DataType dtype = input_json.at("dtype").get<DataType>();
         const TensorParamSpec::Kind kind = tensorParamKindFromName(input_json.value("kind", std::string("tensor")));
         switch (kind) {
             case TensorParamSpec::Kind::Tensor:
@@ -751,7 +751,7 @@ CudaKernelExpression CudaKernelExpression::deserialize(const json& j, bool allow
 
     for (const json& output_json : j.at("outputs")) {
         const std::string name = output_json.at("name").get<std::string>();
-        const TensorDescriptor::DataType dtype = output_json.at("dtype").get<TensorDescriptor::DataType>();
+        const DataType dtype = output_json.at("dtype").get<DataType>();
         if (output_json.contains("like_input_name")) {
             builder.outputLike(name, dtype, output_json.at("like_input_name").get<std::string>());
         } else {
@@ -763,7 +763,7 @@ CudaKernelExpression CudaKernelExpression::deserialize(const json& j, bool allow
         }
     }
 
-    auto parse_scalar_value = [](TensorDescriptor::DataType dtype,
+    auto parse_scalar_value = [](DataType dtype,
                                  const json& value_json) -> std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> {
         const std::string kind = value_json.at("kind").get<std::string>();
         if (kind == "dim_expr") {
@@ -773,17 +773,17 @@ CudaKernelExpression CudaKernelExpression::deserialize(const json& j, bool allow
             throw std::runtime_error("Unknown CudaKernelExpression scalar value kind in serialized expression: " + kind);
         }
         switch (dtype) {
-            case TensorDescriptor::DataType::INT32:
+            case DataType::INT32:
                 return value_json.at("value").get<int32_t>();
-            case TensorDescriptor::DataType::UINT32:
+            case DataType::UINT32:
                 return value_json.at("value").get<uint32_t>();
-            case TensorDescriptor::DataType::INT64:
+            case DataType::INT64:
                 return value_json.at("value").get<int64_t>();
-            case TensorDescriptor::DataType::UINT64:
+            case DataType::UINT64:
                 return value_json.at("value").get<uint64_t>();
-            case TensorDescriptor::DataType::FP32:
+            case DataType::FP32:
                 return value_json.at("value").get<float>();
-            case TensorDescriptor::DataType::FP64:
+            case DataType::FP64:
                 return value_json.at("value").get<double>();
             default:
                 throw std::runtime_error("Unsupported CudaKernelExpression scalar dtype in serialized expression: " + dtypeName(dtype));
@@ -792,7 +792,7 @@ CudaKernelExpression CudaKernelExpression::deserialize(const json& j, bool allow
 
     for (const json& scalar_json : j.at("scalars")) {
         const std::string name = scalar_json.at("name").get<std::string>();
-        const TensorDescriptor::DataType dtype = scalar_json.at("dtype").get<TensorDescriptor::DataType>();
+        const DataType dtype = scalar_json.at("dtype").get<DataType>();
         builder.scalar(name, dtype, parse_scalar_value(dtype, scalar_json.at("value")));
     }
 
@@ -975,25 +975,25 @@ CudaKernelScalarValue CudaKernelExpression::resolveScalar(const ScalarParamSpec&
     };
 
     switch (scalar.type) {
-        case TensorDescriptor::DataType::INT32: {
+        case DataType::INT32: {
             const int64_t v = numeric_i64();
             if (v < std::numeric_limits<int32_t>::min() || v > std::numeric_limits<int32_t>::max()) {
                 throw std::runtime_error("CudaKernelExpression scalar '" + scalar.name + "' is outside int32 range.");
             }
             return static_cast<int32_t>(v);
         }
-        case TensorDescriptor::DataType::UINT32: {
+        case DataType::UINT32: {
             const uint64_t v = numeric_u64();
             if (v > std::numeric_limits<uint32_t>::max()) {
                 throw std::runtime_error("CudaKernelExpression scalar '" + scalar.name + "' is outside uint32 range.");
             }
             return static_cast<uint32_t>(v);
         }
-        case TensorDescriptor::DataType::INT64:
+        case DataType::INT64:
             return numeric_i64();
-        case TensorDescriptor::DataType::UINT64:
+        case DataType::UINT64:
             return numeric_u64();
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             return std::visit(
                 [&](const auto& v) -> float {
                     using T = std::decay_t<decltype(v)>;
@@ -1004,7 +1004,7 @@ CudaKernelScalarValue CudaKernelExpression::resolveScalar(const ScalarParamSpec&
                     }
                 },
                 scalar.value);
-        case TensorDescriptor::DataType::FP64:
+        case DataType::FP64:
             return std::visit(
                 [&](const auto& v) -> double {
                     using T = std::decay_t<decltype(v)>;

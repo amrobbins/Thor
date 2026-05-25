@@ -23,7 +23,7 @@ class ArchiveShardReaderWorker {
     explicit ArchiveShardReaderWorker(ArchiveReaderContext context)
         : archiveDirectory(context.archiveDirectory), mtx(context.mtx), errorMessage(context.errorMessage), uringDirect(64) {
         ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-        ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {fiveHundredMBPlusTail});
+        ThorImplementation::TensorDescriptor descriptor(ThorImplementation::DataType::UINT8, {fiveHundredMBPlusTail});
 
         bounceBuffer[0] = ThorImplementation::Tensor(cpuPlacement, descriptor, 4096);
         bounceBuffer[1] = ThorImplementation::Tensor(cpuPlacement, descriptor, 4096);

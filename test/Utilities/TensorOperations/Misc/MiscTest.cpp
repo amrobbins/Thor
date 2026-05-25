@@ -199,11 +199,11 @@ TEST(Split, SplitsCorrectly) {
             axisElementsPerDestArray[t] = splitArrayDimensions[axis];
             wholeDimensions[axis] += splitArrayDimensions[axis];
 
-            TensorDescriptor partDescriptor(TensorDescriptor::DataType::FP16, splitArrayDimensions);
+            TensorDescriptor partDescriptor(DataType::FP16, splitArrayDimensions);
             partsCpu.emplace_back(cpuPlacement, partDescriptor);
             partsGpu.emplace_back(gpuPlacement, partDescriptor);
         }
-        TensorDescriptor wholeDescriptor(TensorDescriptor::DataType::FP16, wholeDimensions);
+        TensorDescriptor wholeDescriptor(DataType::FP16, wholeDimensions);
         wholeCpu = Tensor(cpuPlacement, wholeDescriptor);
         wholeGpu = Tensor(gpuPlacement, wholeDescriptor);
 
@@ -352,11 +352,11 @@ TEST(Concatenate, ConcatenatesCorrectly) {
             axisElementsPerSourceArray[t] = splitArrayDimensions[axis];
             wholeDimensions[axis] += splitArrayDimensions[axis];
 
-            TensorDescriptor partDescriptor(TensorDescriptor::DataType::FP16, splitArrayDimensions);
+            TensorDescriptor partDescriptor(DataType::FP16, splitArrayDimensions);
             partsCpu.emplace_back(cpuPlacement, partDescriptor);
             partsGpu.emplace_back(gpuPlacement, partDescriptor);
         }
-        TensorDescriptor wholeDescriptor(TensorDescriptor::DataType::FP16, wholeDimensions);
+        TensorDescriptor wholeDescriptor(DataType::FP16, wholeDimensions);
         wholeCpu = Tensor(cpuPlacement, wholeDescriptor);
         wholeGpu = Tensor(gpuPlacement, wholeDescriptor);
 

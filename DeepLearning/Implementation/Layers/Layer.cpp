@@ -11,7 +11,7 @@ mutex DropOut::mtx;
 uint64_t DropOut::randomSeed = 0ul;
 
 cudnnTensorDescriptor_t Layer::createCudnnTensorDescriptor(vector<unsigned long> featureInputDimensions,
-                                                           TensorDescriptor::DataType dataType) {
+                                                           DataType dataType) {
     cudnnTensorDescriptor_t descriptor;
 
     cudnnStatus_t cudnnStatus = cudnnCreateTensorDescriptor(&descriptor);

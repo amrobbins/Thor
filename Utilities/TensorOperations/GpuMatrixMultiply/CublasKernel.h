@@ -381,19 +381,19 @@ class CublasKernel : private ReferenceCounted {
 
     std::string gpuType;
 
-    static cudaDataType_t mapTensorDataTypeToCublasDataType(TensorDescriptor::DataType dataType) {
+    static cudaDataType_t mapTensorDataTypeToCublasDataType(DataType dataType) {
         switch (dataType) {
-            case TensorDescriptor::DataType::FP32:
+            case DataType::FP32:
                 return CUDA_R_32F;
-            case TensorDescriptor::DataType::BF16:
+            case DataType::BF16:
                 return CUDA_R_16BF;
-            case TensorDescriptor::DataType::FP16:
+            case DataType::FP16:
                 return CUDA_R_16F;
-            case TensorDescriptor::DataType::FP8_E4M3:
+            case DataType::FP8_E4M3:
                 return CUDA_R_8F_E4M3;
-            case TensorDescriptor::DataType::FP8_E5M2:
+            case DataType::FP8_E5M2:
                 return CUDA_R_8F_E5M2;
-            case TensorDescriptor::DataType::INT8:
+            case DataType::INT8:
                 return CUDA_R_8I;
             default:
                 THOR_UNREACHABLE();
@@ -452,23 +452,23 @@ class CublasKernel : private ReferenceCounted {
         }
     }
 
-    static TensorDescriptor::DataType thorDataTypeForCudaDataType(cudaDataType_t dataType) {
+    static DataType thorDataTypeForCudaDataType(cudaDataType_t dataType) {
         switch (dataType) {
             case CUDA_R_32F:
-                return TensorDescriptor::DataType::FP32;
+                return DataType::FP32;
             case CUDA_R_16BF:
-                return TensorDescriptor::DataType::BF16;
+                return DataType::BF16;
             case CUDA_R_16F:
-                return TensorDescriptor::DataType::FP16;
+                return DataType::FP16;
             case CUDA_R_8F_E4M3:
-                return TensorDescriptor::DataType::FP8_E4M3;
+                return DataType::FP8_E4M3;
             case CUDA_R_8F_E5M2:
-                return TensorDescriptor::DataType::FP8_E5M2;
+                return DataType::FP8_E5M2;
             case CUDA_R_8I:
-                return TensorDescriptor::DataType::INT8;
+                return DataType::INT8;
             default:
                 THOR_UNREACHABLE();
-                return TensorDescriptor::DataType::UINT8;
+                return DataType::UINT8;
         }
     }
 

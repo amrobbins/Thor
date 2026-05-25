@@ -157,7 +157,7 @@ class ConvolutionTestHelper {
         assert(weightsGradientDimensions[3] == (unsigned long)convolutionKernelRequirement.getFilterWidth());
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
         Tensor weightsGradientFloat(cpuPlacement,
-                                    TensorDescriptor(TensorDescriptor::DataType::FP32, weightsGradient.getDescriptor().getDimensions()));
+                                    TensorDescriptor(DataType::FP32, weightsGradient.getDescriptor().getDimensions()));
         if (accumulate) {
             weightsGradientFloat.copyFromAsync(weightsGradient, copyStream);
             copyStream.synchronize();
@@ -183,7 +183,7 @@ class ConvolutionTestHelper {
         std::vector<unsigned long> featureInputDimensionsWithPadding = featureInput.getDescriptor().getDimensions();
         featureInputDimensionsWithPadding[2] += 2 * verticalPadding;
         featureInputDimensionsWithPadding[3] += 2 * horizontalPadding;
-        Tensor featureInputPadded(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, featureInputDimensionsWithPadding));
+        Tensor featureInputPadded(cpuPlacement, TensorDescriptor(DataType::FP16, featureInputDimensionsWithPadding));
         for (unsigned int n = 0; n < featureInputDimensionsWithPadding[0]; ++n) {
             for (unsigned int c = 0; c < featureInputDimensionsWithPadding[1]; ++c) {
                 for (unsigned int h = 0; h < featureInputDimensionsWithPadding[2]; ++h) {
@@ -270,7 +270,7 @@ class ConvolutionTestHelper {
         assert(errorOutputTensorDimensions[3] == (unsigned long)convolutionKernelRequirement.getNumInputColumns());
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
         Tensor errorOutputFloat =
-            Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, errorOutput.getDescriptor().getDimensions()));
+            Tensor(cpuPlacement, TensorDescriptor(DataType::FP32, errorOutput.getDescriptor().getDimensions()));
         memset(errorOutputFloat.getMemPtr(), 0, sizeof(float) * errorOutputFloat.getDescriptor().getTotalNumElements());
 
         unsigned int filterHeight = convolutionKernelRequirement.getFilterHeight();
@@ -329,7 +329,7 @@ class ConvolutionTestHelper {
 
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
         Tensor biasesGradientFloat(cpuPlacement,
-                                   TensorDescriptor(TensorDescriptor::DataType::FP32, biasesGradient.getDescriptor().getDimensions()));
+                                   TensorDescriptor(DataType::FP32, biasesGradient.getDescriptor().getDimensions()));
         float *biasesGradientFloatMem = (float *)biasesGradientFloat.getMemPtr();
         if (accumulate) {
             Stream stream(0);

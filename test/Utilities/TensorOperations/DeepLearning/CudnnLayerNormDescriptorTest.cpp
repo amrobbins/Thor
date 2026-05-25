@@ -10,10 +10,10 @@ CudnnLayerNormDescriptor makeDescriptor() {
     CudnnLayerNormDescriptor descriptor;
     descriptor.outerSize = 8;
     descriptor.normalizedFeatureCount = 16;
-    descriptor.inputDataType = TensorDescriptor::DataType::FP16;
-    descriptor.outputDataType = TensorDescriptor::DataType::FP16;
-    descriptor.parameterDataType = TensorDescriptor::DataType::FP32;
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
+    descriptor.inputDataType = DataType::FP16;
+    descriptor.outputDataType = DataType::FP16;
+    descriptor.parameterDataType = DataType::FP32;
+    descriptor.computeDataType = DataType::FP32;
     descriptor.epsilon = 1.0e-5f;
     descriptor.training = true;
     return descriptor;
@@ -22,9 +22,9 @@ CudnnLayerNormDescriptor makeDescriptor() {
 }  // namespace
 
 TEST(CudnnLayerNormDescriptor, AcceptsFp16Bf16AndFp32IoWithFp32Parameters) {
-    for (TensorDescriptor::DataType dtype : {TensorDescriptor::DataType::FP16,
-                                             TensorDescriptor::DataType::BF16,
-                                             TensorDescriptor::DataType::FP32}) {
+    for (DataType dtype : {DataType::FP16,
+                                             DataType::BF16,
+                                             DataType::FP32}) {
         CudnnLayerNormDescriptor descriptor = makeDescriptor();
         descriptor.inputDataType = dtype;
         descriptor.outputDataType = dtype;
@@ -45,21 +45,21 @@ TEST(CudnnLayerNormDescriptor, RejectsEmptyOuterOrFeatureCount) {
 
 TEST(CudnnLayerNormDescriptor, RejectsUnsupportedIoDtype) {
     CudnnLayerNormDescriptor descriptor = makeDescriptor();
-    descriptor.inputDataType = TensorDescriptor::DataType::FP8_E4M3;
+    descriptor.inputDataType = DataType::FP8_E4M3;
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 
     descriptor = makeDescriptor();
-    descriptor.outputDataType = TensorDescriptor::DataType::INT32;
+    descriptor.outputDataType = DataType::INT32;
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 }
 
 TEST(CudnnLayerNormDescriptor, RejectsNonFp32ParametersOrCompute) {
     CudnnLayerNormDescriptor descriptor = makeDescriptor();
-    descriptor.parameterDataType = TensorDescriptor::DataType::FP16;
+    descriptor.parameterDataType = DataType::FP16;
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 
     descriptor = makeDescriptor();
-    descriptor.computeDataType = TensorDescriptor::DataType::FP16;
+    descriptor.computeDataType = DataType::FP16;
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 }
 

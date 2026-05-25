@@ -33,7 +33,7 @@ class BatchNormalization : public TrainableLayer {
                        uint64_t numItemsObserved,
                        std::optional<double> exponentialRunningAverageFactor = std::nullopt,
                        std::optional<double> epsilon = std::nullopt,
-                       std::optional<TensorDescriptor::DataType> storageDataType = std::nullopt,
+                       std::optional<DataType> storageDataType = std::nullopt,
                        int64_t stampedId = -1);
 
     double getExponentialRunningAverageFactor() const { return exponentialRunningAverageFactor; }

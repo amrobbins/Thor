@@ -14,22 +14,22 @@ using namespace std;
 namespace ThorImplementation {
 namespace {
 
-bool isInstanceNormIoDataType(TensorDescriptor::DataType dtype) {
+bool isInstanceNormIoDataType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
     }
 }
 
-bool isReducedPrecisionInstanceNormIoDataType(TensorDescriptor::DataType dtype) {
-    return dtype == TensorDescriptor::DataType::FP16 || dtype == TensorDescriptor::DataType::BF16;
+bool isReducedPrecisionInstanceNormIoDataType(DataType dtype) {
+    return dtype == DataType::FP16 || dtype == DataType::BF16;
 }
 
-void validateCudnnFrontendContract(uint64_t channelCount, TensorDescriptor::DataType inputDataType) {
+void validateCudnnFrontendContract(uint64_t channelCount, DataType inputDataType) {
     if (isReducedPrecisionInstanceNormIoDataType(inputDataType) && channelCount % 8 != 0) {
         throw runtime_error(
             "InstanceNorm cuDNN Frontend primary engines require fp16/bf16 channel count to be a multiple of 8; got " +
@@ -37,11 +37,11 @@ void validateCudnnFrontendContract(uint64_t channelCount, TensorDescriptor::Data
     }
 }
 
-string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
+string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 class InstanceNormParameter final : public PhysicalParameter {
    public:
-    InstanceNormParameter(string name, uint64_t channelCount, TensorDescriptor::DataType dtype, bool trainable)
+    InstanceNormParameter(string name, uint64_t channelCount, DataType dtype, bool trainable)
         : PhysicalParameter(std::move(name), trainable), channelCount(channelCount), dtype(dtype) {}
 
     void createStorage(const StorageContext& context) override {
@@ -51,7 +51,7 @@ class InstanceNormParameter final : public PhysicalParameter {
 
    private:
     uint64_t channelCount;
-    TensorDescriptor::DataType dtype;
+    DataType dtype;
 };
 
 void validateEpsilon(double epsilon) {
@@ -62,7 +62,7 @@ void validateEpsilon(double epsilon) {
 
 shared_ptr<PhysicalParameter> makeDefaultParameter(const string& name,
                                                    uint64_t channelCount,
-                                                   TensorDescriptor::DataType dtype,
+                                                   DataType dtype,
                                                    bool trainable,
                                                    float initialValue) {
     auto parameter = make_shared<InstanceNormParameter>(name, channelCount, dtype, trainable);
@@ -77,15 +77,15 @@ InstanceNorm::InstanceNorm(const TensorPlacement& placement,
                            bool inferenceOnly,
                            uint64_t channelCount,
                            optional<double> epsilon,
-                           optional<TensorDescriptor::DataType> parameterDataType,
+                           optional<DataType> parameterDataType,
                            vector<shared_ptr<PhysicalParameter>> physicalParameters,
                            int64_t stampedId)
     : TrainableLayer(placement, inferenceOnly, stampedId),
       channelCount(checkedChannelCount(channelCount)),
       epsilon(epsilon.has_value() ? epsilon.value() : 1.0e-5),
-      parameterDataType(parameterDataType.has_value() ? parameterDataType.value() : TensorDescriptor::DataType::FP32) {
+      parameterDataType(parameterDataType.has_value() ? parameterDataType.value() : DataType::FP32) {
     validateEpsilon(this->epsilon);
-    if (this->parameterDataType != TensorDescriptor::DataType::FP32) {
+    if (this->parameterDataType != DataType::FP32) {
         throw runtime_error("InstanceNorm currently requires fp32 scale/bias parameters for cuDNN Frontend InstanceNorm; got " +
                             dtypeName(this->parameterDataType) + ".");
     }
@@ -242,8 +242,8 @@ void InstanceNorm::compileImpl() {
                 throw runtime_error("InstanceNorm all feature inputs must have the same dimensions.");
             }
         }
-        saveMean.emplace_back(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, channelCount}));
-        saveInvVariance.emplace_back(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, channelCount}));
+        saveMean.emplace_back(placement, TensorDescriptor(DataType::FP32, {batchSize, channelCount}));
+        saveInvVariance.emplace_back(placement, TensorDescriptor(DataType::FP32, {batchSize, channelCount}));
         scratchDScale.emplace_back(weights.clone());
         scratchDBias.emplace_back(biases.clone());
         if (errorInputs.size() > i && errorInputs[i].has_value() && (errorOutputs.size() <= i || !errorOutputs[i].has_value())) {
@@ -281,7 +281,7 @@ void InstanceNorm::computeFeatureOut(uint32_t connectionNumber) {
     descriptor.inputDataType = input.getDataType();
     descriptor.outputDataType = output.getDataType();
     descriptor.parameterDataType = parameterDataType;
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
+    descriptor.computeDataType = DataType::FP32;
     descriptor.epsilon = static_cast<float>(epsilon);
     descriptor.training = !isInferenceOnly();
 
@@ -338,7 +338,7 @@ optional<Event> InstanceNorm::computeErrorOutAccumulateWeightsGradienFused(uint3
     descriptor.inputDataType = input.getDataType();
     descriptor.outputDataType = errorInputs[connectionNumber].value().getDataType();
     descriptor.parameterDataType = parameterDataType;
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
+    descriptor.computeDataType = DataType::FP32;
     descriptor.epsilon = static_cast<float>(epsilon);
     descriptor.training = true;
 

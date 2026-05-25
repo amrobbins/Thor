@@ -43,878 +43,878 @@ struct Converter<__nv_fp8_e5m2, __nv_fp8_e4m3> {
 
 void TypeConverter::gpuConvertType(void *source_d,
                                    void *dest_d,
-                                   TensorDescriptor::DataType sourceDataType,
-                                   TensorDescriptor::DataType destDataType,
+                                   DataType sourceDataType,
+                                   DataType destDataType,
                                    long numElements,
                                    Stream stream) {
     switch (sourceDataType) {
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, __nv_fp8_e4m3>(
                         (__nv_fp8_e4m3 *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, __nv_fp8_e5m2>(
                         (__nv_fp8_e4m3 *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, __nv_bfloat16>(
                         (__nv_fp8_e4m3 *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, half>((__nv_fp8_e4m3 *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, float>((__nv_fp8_e4m3 *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, double>((__nv_fp8_e4m3 *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, int8_t>((__nv_fp8_e4m3 *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, int16_t>((__nv_fp8_e4m3 *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, int32_t>((__nv_fp8_e4m3 *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, int64_t>((__nv_fp8_e4m3 *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, uint8_t>((__nv_fp8_e4m3 *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, uint16_t>((__nv_fp8_e4m3 *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, uint32_t>((__nv_fp8_e4m3 *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, uint64_t>((__nv_fp8_e4m3 *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<__nv_fp8_e4m3, bool>((__nv_fp8_e4m3 *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<__nv_fp8_e4m3>((__nv_fp8_e4m3 *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, __nv_fp8_e4m3>(
                         (__nv_fp8_e5m2 *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, __nv_fp8_e5m2>(
                         (__nv_fp8_e5m2 *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, __nv_bfloat16>(
                         (__nv_fp8_e5m2 *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, half>((__nv_fp8_e5m2 *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, float>((__nv_fp8_e5m2 *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, double>((__nv_fp8_e5m2 *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, int8_t>((__nv_fp8_e5m2 *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, int16_t>((__nv_fp8_e5m2 *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, int32_t>((__nv_fp8_e5m2 *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, int64_t>((__nv_fp8_e5m2 *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, uint8_t>((__nv_fp8_e5m2 *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, uint16_t>((__nv_fp8_e5m2 *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, uint32_t>((__nv_fp8_e5m2 *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, uint64_t>((__nv_fp8_e5m2 *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<__nv_fp8_e5m2, bool>((__nv_fp8_e5m2 *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<__nv_fp8_e5m2>((__nv_fp8_e5m2 *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<__nv_bfloat16, __nv_fp8_e4m3>(
                         (__nv_bfloat16 *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<__nv_bfloat16, __nv_fp8_e5m2>(
                         (__nv_bfloat16 *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<__nv_bfloat16, __nv_bfloat16>(
                         (__nv_bfloat16 *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<__nv_bfloat16, half>((__nv_bfloat16 *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<__nv_bfloat16, float>((__nv_bfloat16 *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<__nv_bfloat16, double>((__nv_bfloat16 *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<__nv_bfloat16, int8_t>((__nv_bfloat16 *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<__nv_bfloat16, int16_t>((__nv_bfloat16 *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<__nv_bfloat16, int32_t>((__nv_bfloat16 *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<__nv_bfloat16, int64_t>((__nv_bfloat16 *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<__nv_bfloat16, uint8_t>((__nv_bfloat16 *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<__nv_bfloat16, uint16_t>((__nv_bfloat16 *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<__nv_bfloat16, uint32_t>((__nv_bfloat16 *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<__nv_bfloat16, uint64_t>((__nv_bfloat16 *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<__nv_bfloat16, bool>((__nv_bfloat16 *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<__nv_bfloat16>((__nv_bfloat16 *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<half, __nv_fp8_e4m3>((half *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<half, __nv_fp8_e5m2>((half *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<half, __nv_bfloat16>((half *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<half, half>((half *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<half, float>((half *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<half, double>((half *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<half, int8_t>((half *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<half, int16_t>((half *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<half, int32_t>((half *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<half, int64_t>((half *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<half, uint8_t>((half *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<half, uint16_t>((half *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<half, uint32_t>((half *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<half, uint64_t>((half *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<half, bool>((half *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<half>((half *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<float, __nv_fp8_e4m3>((float *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<float, __nv_fp8_e5m2>((float *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<float, __nv_bfloat16>((float *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<float, half>((float *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<float, float>((float *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<float, double>((float *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<float, int8_t>((float *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<float, int16_t>((float *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<float, int32_t>((float *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<float, int64_t>((float *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<float, uint8_t>((float *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<float, uint16_t>((float *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<float, uint32_t>((float *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<float, uint64_t>((float *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<float, bool>((float *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<float>((float *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::FP64:
+        case DataType::FP64:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<double, __nv_fp8_e4m3>((double *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<double, __nv_fp8_e5m2>((double *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<double, __nv_bfloat16>((double *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<double, half>((double *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<double, float>((double *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<double, double>((double *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<double, int8_t>((double *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<double, int16_t>((double *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<double, int32_t>((double *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<double, int64_t>((double *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<double, uint8_t>((double *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<double, uint16_t>((double *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<double, uint32_t>((double *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<double, uint64_t>((double *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<double, bool>((double *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<double>((double *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::INT8:
+        case DataType::INT8:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<int8_t, __nv_fp8_e4m3>((int8_t *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<int8_t, __nv_fp8_e5m2>((int8_t *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<int8_t, __nv_bfloat16>((int8_t *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<int8_t, half>((int8_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<int8_t, float>((int8_t *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<int8_t, double>((int8_t *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<int8_t, int8_t>((int8_t *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<int8_t, int16_t>((int8_t *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<int8_t, int32_t>((int8_t *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<int8_t, int64_t>((int8_t *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<int8_t, uint8_t>((int8_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<int8_t, uint16_t>((int8_t *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<int8_t, uint32_t>((int8_t *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<int8_t, uint64_t>((int8_t *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<int8_t, bool>((int8_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<int8_t>((int8_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::INT16:
+        case DataType::INT16:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<int16_t, __nv_fp8_e4m3>((int16_t *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<int16_t, __nv_fp8_e5m2>((int16_t *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<int16_t, __nv_bfloat16>((int16_t *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<int16_t, half>((int16_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<int16_t, float>((int16_t *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<int16_t, double>((int16_t *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<int16_t, int8_t>((int16_t *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<int16_t, int16_t>((int16_t *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<int16_t, int32_t>((int16_t *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<int16_t, int64_t>((int16_t *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<int16_t, uint8_t>((int16_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<int16_t, uint16_t>((int16_t *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<int16_t, uint32_t>((int16_t *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<int16_t, uint64_t>((int16_t *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<int16_t, bool>((int16_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<int16_t>((int16_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::INT32:
+        case DataType::INT32:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<int32_t, __nv_fp8_e4m3>((int32_t *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<int32_t, __nv_fp8_e5m2>((int32_t *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<int32_t, __nv_bfloat16>((int32_t *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<int32_t, half>((int32_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<int32_t, float>((int32_t *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<int32_t, double>((int32_t *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<int32_t, int8_t>((int32_t *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<int32_t, int16_t>((int32_t *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<int32_t, int32_t>((int32_t *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<int32_t, int64_t>((int32_t *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<int32_t, uint8_t>((int32_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<int32_t, uint16_t>((int32_t *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<int32_t, uint32_t>((int32_t *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<int32_t, uint64_t>((int32_t *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<int32_t, bool>((int32_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<int32_t>((int32_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::INT64:
+        case DataType::INT64:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<int64_t, __nv_fp8_e4m3>((int64_t *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<int64_t, __nv_fp8_e5m2>((int64_t *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<int64_t, __nv_bfloat16>((int64_t *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<int64_t, half>((int64_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<int64_t, float>((int64_t *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<int64_t, double>((int64_t *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<int64_t, int8_t>((int64_t *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<int64_t, int16_t>((int64_t *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<int64_t, int32_t>((int64_t *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<int64_t, int64_t>((int64_t *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<int64_t, uint8_t>((int64_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<int64_t, uint16_t>((int64_t *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<int64_t, uint32_t>((int64_t *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<int64_t, uint64_t>((int64_t *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<int64_t, bool>((int64_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<int64_t>((int64_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::UINT8:
+        case DataType::UINT8:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<uint8_t, __nv_fp8_e4m3>((uint8_t *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<uint8_t, __nv_fp8_e5m2>((uint8_t *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<uint8_t, __nv_bfloat16>((uint8_t *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<uint8_t, half>((uint8_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<uint8_t, float>((uint8_t *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<uint8_t, double>((uint8_t *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<uint8_t, int8_t>((uint8_t *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<uint8_t, int16_t>((uint8_t *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<uint8_t, int32_t>((uint8_t *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<uint8_t, int64_t>((uint8_t *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<uint8_t, uint8_t>((uint8_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<uint8_t, uint16_t>((uint8_t *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<uint8_t, uint32_t>((uint8_t *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<uint8_t, uint64_t>((uint8_t *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<uint8_t, bool>((uint8_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<uint8_t>((uint8_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::UINT16:
+        case DataType::UINT16:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<uint16_t, __nv_fp8_e4m3>((uint16_t *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<uint16_t, __nv_fp8_e5m2>((uint16_t *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<uint16_t, __nv_bfloat16>((uint16_t *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<uint16_t, half>((uint16_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<uint16_t, float>((uint16_t *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<uint16_t, double>((uint16_t *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<uint16_t, int8_t>((uint16_t *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<uint16_t, int16_t>((uint16_t *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<uint16_t, int32_t>((uint16_t *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<uint16_t, int64_t>((uint16_t *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<uint16_t, uint8_t>((uint16_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<uint16_t, uint16_t>((uint16_t *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<uint16_t, uint32_t>((uint16_t *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<uint16_t, uint64_t>((uint16_t *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<uint16_t, bool>((uint16_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<uint16_t>((uint16_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::UINT32:
+        case DataType::UINT32:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<uint32_t, __nv_fp8_e4m3>((uint32_t *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<uint32_t, __nv_fp8_e5m2>((uint32_t *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<uint32_t, __nv_bfloat16>((uint32_t *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<uint32_t, half>((uint32_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<uint32_t, float>((uint32_t *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<uint32_t, double>((uint32_t *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<uint32_t, int8_t>((uint32_t *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<uint32_t, int16_t>((uint32_t *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<uint32_t, int32_t>((uint32_t *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<uint32_t, int64_t>((uint32_t *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<uint32_t, uint8_t>((uint32_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<uint32_t, uint16_t>((uint32_t *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<uint32_t, uint32_t>((uint32_t *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<uint32_t, uint64_t>((uint32_t *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<uint32_t, bool>((uint32_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<uint32_t>((uint32_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::UINT64:
+        case DataType::UINT64:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<uint64_t, __nv_fp8_e4m3>((uint64_t *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<uint64_t, __nv_fp8_e5m2>((uint64_t *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<uint64_t, __nv_bfloat16>((uint64_t *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<uint64_t, half>((uint64_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<uint64_t, float>((uint64_t *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<uint64_t, double>((uint64_t *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<uint64_t, int8_t>((uint64_t *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<uint64_t, int16_t>((uint64_t *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<uint64_t, int32_t>((uint64_t *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<uint64_t, int64_t>((uint64_t *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<uint64_t, uint8_t>((uint64_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<uint64_t, uint16_t>((uint64_t *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<uint64_t, uint32_t>((uint64_t *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<uint64_t, uint64_t>((uint64_t *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<uint64_t, bool>((uint64_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<uint64_t>((uint64_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::BOOLEAN:
+        case DataType::BOOLEAN:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeImpl<bool, __nv_fp8_e4m3>((bool *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeImpl<bool, __nv_fp8_e5m2>((bool *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeImpl<bool, __nv_bfloat16>((bool *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeImpl<bool, half>((bool *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeImpl<bool, float>((bool *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeImpl<bool, double>((bool *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeImpl<bool, int8_t>((bool *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeImpl<bool, int16_t>((bool *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeImpl<bool, int32_t>((bool *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeImpl<bool, int64_t>((bool *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeImpl<bool, uint8_t>((bool *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeImpl<bool, uint16_t>((bool *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeImpl<bool, uint32_t>((bool *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeImpl<bool, uint64_t>((bool *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeImpl<bool, bool>((bool *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     gpuConvertTypeToPackedBooleanImpl<bool>((bool *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     THOR_UNREACHABLE();
             }
             break;
-        case TensorDescriptor::DataType::PACKED_BOOLEAN:
+        case DataType::PACKED_BOOLEAN:
             switch (destDataType) {
-                case TensorDescriptor::DataType::FP8_E4M3:
+                case DataType::FP8_E4M3:
                     gpuConvertTypeFromPackedBooleanImpl((uint8_t *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP8_E5M2:
+                case DataType::FP8_E5M2:
                     gpuConvertTypeFromPackedBooleanImpl((uint8_t *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BF16:
+                case DataType::BF16:
                     gpuConvertTypeFromPackedBooleanImpl((uint8_t *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP16:
+                case DataType::FP16:
                     gpuConvertTypeFromPackedBooleanImpl((uint8_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP32:
+                case DataType::FP32:
                     gpuConvertTypeFromPackedBooleanImpl<float>((uint8_t *)source_d, (float *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::FP64:
+                case DataType::FP64:
                     gpuConvertTypeFromPackedBooleanImpl<double>((uint8_t *)source_d, (double *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT8:
+                case DataType::INT8:
                     gpuConvertTypeFromPackedBooleanImpl<int8_t>((uint8_t *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT16:
+                case DataType::INT16:
                     gpuConvertTypeFromPackedBooleanImpl<int16_t>((uint8_t *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT32:
+                case DataType::INT32:
                     gpuConvertTypeFromPackedBooleanImpl<int32_t>((uint8_t *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::INT64:
+                case DataType::INT64:
                     gpuConvertTypeFromPackedBooleanImpl<int64_t>((uint8_t *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT8:
+                case DataType::UINT8:
                     gpuConvertTypeFromPackedBooleanImpl<uint8_t>((uint8_t *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT16:
+                case DataType::UINT16:
                     gpuConvertTypeFromPackedBooleanImpl<uint16_t>((uint8_t *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT32:
+                case DataType::UINT32:
                     gpuConvertTypeFromPackedBooleanImpl<uint32_t>((uint8_t *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::UINT64:
+                case DataType::UINT64:
                     gpuConvertTypeFromPackedBooleanImpl<uint64_t>((uint8_t *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::BOOLEAN:
+                case DataType::BOOLEAN:
                     gpuConvertTypeFromPackedBooleanImpl<bool>((uint8_t *)source_d, (bool *)dest_d, numElements, stream);
                     break;
-                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                case DataType::PACKED_BOOLEAN:
                     THOR_UNREACHABLE();
                 default:
                     THOR_UNREACHABLE();
@@ -994,7 +994,7 @@ void TypeConverter::convertToSmallerElementsInPlaceOnGpu_toPackedBoolean(FROM_TY
     long numElementsLeft = numElements - chunkSize;
     long startingElement = chunkSize;
     availableBytes =
-        (sizeof(FROM_TYPE) * chunkSize) - TensorDescriptor::getArraySizeInBytes(chunkSize, TensorDescriptor::DataType::PACKED_BOOLEAN);
+        (sizeof(FROM_TYPE) * chunkSize) - TensorDescriptor::getArraySizeInBytes(chunkSize, DataType::PACKED_BOOLEAN);
 
     // Then convert elements into the empty space, thereby freeing up more empty space, and repeat until all elements are converted.
     while (numElementsLeft > 0) {
@@ -1008,7 +1008,7 @@ void TypeConverter::convertToSmallerElementsInPlaceOnGpu_toPackedBoolean(FROM_TY
         numElementsLeft -= chunkSize;
         startingElement += chunkSize;
         availableBytes +=
-            (sizeof(FROM_TYPE) * chunkSize) - TensorDescriptor::getArraySizeInBytes(chunkSize, TensorDescriptor::DataType::PACKED_BOOLEAN);
+            (sizeof(FROM_TYPE) * chunkSize) - TensorDescriptor::getArraySizeInBytes(chunkSize, DataType::PACKED_BOOLEAN);
     }
 }
 
@@ -1059,7 +1059,7 @@ void TypeConverter::convertToBiggerElementsInPlaceOnGpu_fromPackedBoolean(uint8_
 
     long numElementsLeft = numElements;
     long numEmptyBytes =
-        (sizeof(TO_TYPE) * numElements) - TensorDescriptor::getArraySizeInBytes(numElements, TensorDescriptor::DataType::PACKED_BOOLEAN);
+        (sizeof(TO_TYPE) * numElements) - TensorDescriptor::getArraySizeInBytes(numElements, DataType::PACKED_BOOLEAN);
 
     while (numElementsLeft > 8 * 256) {
         long chunkSize = numEmptyBytes / sizeof(TO_TYPE);
@@ -1071,7 +1071,7 @@ void TypeConverter::convertToBiggerElementsInPlaceOnGpu_fromPackedBoolean(uint8_
             source_d + startingElement / 8, dest_d + startingElement, chunkSize, stream);
 
         numEmptyBytes +=
-            TensorDescriptor::getArraySizeInBytes(chunkSize, TensorDescriptor::DataType::PACKED_BOOLEAN) - (sizeof(TO_TYPE) * chunkSize);
+            TensorDescriptor::getArraySizeInBytes(chunkSize, DataType::PACKED_BOOLEAN) - (sizeof(TO_TYPE) * chunkSize);
         numElementsLeft = startingElement;
     }
 

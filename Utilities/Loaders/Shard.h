@@ -40,12 +40,12 @@ struct DataElement {
     uint64_t numDataBytes;
     std::shared_ptr<uint8_t[]> data;
 
-    ThorImplementation::TensorDescriptor::DataType dataType;
+    ThorImplementation::DataType dataType;
 };
 
 struct ShardMetadata {
     uint64_t exampleSizeInBytes;
-    ThorImplementation::TensorDescriptor::DataType dataType;
+    ThorImplementation::DataType dataType;
 };
 
 class Shard {
@@ -57,7 +57,7 @@ class Shard {
                      uint64_t numValidateExamples,
                      uint64_t numTestExamples,
                      uint64_t exampleSizeInBytes,
-                     ThorImplementation::TensorDescriptor::DataType dataType,
+                     ThorImplementation::DataType dataType,
                      uint64_t maxFilenameChars,
                      std::vector<std::string> &allClassesVector,
                      uint64_t maxClassNameChars);
@@ -71,14 +71,14 @@ class Shard {
     void shrinkToFit();
     std::string getFilename();
     uint64_t getExampleSizeInBytes();
-    ThorImplementation::TensorDescriptor::DataType getDataType();
+    ThorImplementation::DataType getDataType();
     uint64_t getNumExamples(ExampleType exampleType);
     file_string_vector_t *getAllClasses();
 
    private:
     std::string filename;
     uint64_t exampleSizeInBytes;
-    ThorImplementation::TensorDescriptor::DataType dataType;
+    ThorImplementation::DataType dataType;
     boost::interprocess::managed_mapped_file mappedFile;
     bool open;
 

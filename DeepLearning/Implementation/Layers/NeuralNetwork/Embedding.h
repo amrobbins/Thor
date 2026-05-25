@@ -19,7 +19,7 @@ class Embedding final : public TrainableLayer {
               std::vector<std::shared_ptr<PhysicalParameter>> parameters,
               uint64_t vocabularySize,
               uint64_t embeddingDim,
-              TensorDescriptor::DataType weightsDataType,
+              DataType weightsDataType,
               std::optional<uint64_t> paddingIndex,
               bool sparseGradients,
               bool inferenceOnly,
@@ -41,7 +41,7 @@ class Embedding final : public TrainableLayer {
 
     uint64_t vocabularySize;
     uint64_t embeddingDim;
-    TensorDescriptor::DataType weightsDataType;
+    DataType weightsDataType;
     std::optional<uint64_t> paddingIndex;
     bool sparseGradients;
     std::optional<SparseRowGradient> weightsSparseGradient;

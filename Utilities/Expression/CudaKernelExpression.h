@@ -52,20 +52,20 @@ class CudaKernelExpression {
         enum class Kind : uint8_t { Tensor, TensorRuntimeScalar, HostRuntimeScalar };
 
         std::string name;
-        TensorDescriptor::DataType dtype = TensorDescriptor::DataType::FP32;
+        DataType dtype = DataType::FP32;
         Kind kind = Kind::Tensor;
     };
 
     struct OutputParamSpec {
         std::string name;
-        TensorDescriptor::DataType dtype = TensorDescriptor::DataType::FP32;
+        DataType dtype = DataType::FP32;
         std::vector<DimExpr> shape;
         std::string like_input_name;
     };
 
     struct ScalarParamSpec {
         std::string name;
-        TensorDescriptor::DataType type = TensorDescriptor::DataType::INT64;
+        DataType type = DataType::INT64;
         std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> value = int64_t{0};
     };
 
@@ -78,7 +78,7 @@ class CudaKernelExpression {
         [[nodiscard]] const Tensor& output(const std::string& name) const;
         [[nodiscard]] uint64_t dim(const std::string& tensor_name, uint32_t axis) const;
         [[nodiscard]] uint64_t numel(const std::string& tensor_name) const;
-        [[nodiscard]] TensorDescriptor::DataType dtype(const std::string& tensor_name) const;
+        [[nodiscard]] DataType dtype(const std::string& tensor_name) const;
     };
 
     using LaunchFn = std::function<CudaKernelLaunchConfig(const LaunchContext&)>;
@@ -112,12 +112,12 @@ class CudaKernelExpression {
 
         Builder& source(std::string cuda_source);
         Builder& entry(std::string entrypoint);
-        Builder& input(std::string name, TensorDescriptor::DataType dtype);
-        Builder& tensorRuntimeScalarInput(std::string name, TensorDescriptor::DataType dtype);
-        Builder& hostRuntimeScalarInput(std::string name, TensorDescriptor::DataType dtype);
-        Builder& output(std::string name, TensorDescriptor::DataType dtype, std::vector<DimExpr> shape);
-        Builder& outputLike(std::string name, TensorDescriptor::DataType dtype, const std::string& input_name);
-        Builder& scalar(std::string name, TensorDescriptor::DataType type, std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> value);
+        Builder& input(std::string name, DataType dtype);
+        Builder& tensorRuntimeScalarInput(std::string name, DataType dtype);
+        Builder& hostRuntimeScalarInput(std::string name, DataType dtype);
+        Builder& output(std::string name, DataType dtype, std::vector<DimExpr> shape);
+        Builder& outputLike(std::string name, DataType dtype, const std::string& input_name);
+        Builder& scalar(std::string name, DataType type, std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> value);
         Builder& launch(LaunchFn launch_fn);
         Builder& launchGrid1D(DimExpr elements, uint32_t block_size = 256, uint32_t dynamic_shared_bytes = 0);
         Builder& useFastMath(bool enabled = true);

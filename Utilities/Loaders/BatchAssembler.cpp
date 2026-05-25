@@ -1,6 +1,7 @@
 #include "Utilities/Loaders/BatchAssembler.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
+using ThorImplementation::DataType;
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
 using ThorImplementation::TensorPlacement;
@@ -49,15 +50,15 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
     }
 
     vector<uint64_t> labelDimensions = labelDescriptor.getDimensions();
-    TensorDescriptor::DataType labelsDataType = labelDescriptor.getDataType();
+    DataType labelsDataType = labelDescriptor.getDataType();
     vector<uint64_t> exampleDimensions = exampleDescriptor.getDimensions();
     THOR_THROW_IF_FALSE(labelDimensions.size() == 1);
     perClassLabels = labelDimensions[0] == classIndexes.size() &&
-                     (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::FP16 ||
-                      labelsDataType == TensorDescriptor::DataType::FP32);
+                     (labelsDataType == DataType::UINT8 || labelsDataType == DataType::FP16 ||
+                      labelsDataType == DataType::FP32);
     classIndexLabels = labelDimensions[0] == 1 &&
-                       (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
-                        labelsDataType == TensorDescriptor::DataType::UINT32);
+                       (labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
+                        labelsDataType == DataType::UINT32);
     THOR_THROW_IF_FALSE(perClassLabels ^ classIndexLabels);
 
     batchLabelTensorDescriptor = ThorImplementation::TensorDescriptor(labelDescriptor.getDataType(), {batchSize, labelDimensions[0]});
@@ -194,21 +195,21 @@ void BatchAssembler::batchAssemblerThread() {
 
         // Load labels to pinned memory buffer.
         // There is support for one-hot or soft labels, and also for single number label
-        TensorDescriptor::DataType labelsDataType = batchLabelTensorDescriptor.getDataType();
+        DataType labelsDataType = batchLabelTensorDescriptor.getDataType();
         if (perClassLabels) {
-            THOR_THROW_IF_FALSE(labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::FP16 ||
-                   labelsDataType == TensorDescriptor::DataType::FP32);
+            THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::FP16 ||
+                   labelsDataType == DataType::FP32);
 
             batchSlotOffset = classIndexes.size() * batchSlot;
-            if (labelsDataType == TensorDescriptor::DataType::UINT8) {
+            if (labelsDataType == DataType::UINT8) {
                 uint8_t *batchLabels = (uint8_t *)batchLabelsBuffer.getMemPtr() + batchSlotOffset;
                 memset(batchLabels, 0, sizeof(uint8_t) * classIndexes.size());
                 batchLabels[classIndexes[labeledExample.label]] = (uint8_t)1;
-            } else if (labelsDataType == TensorDescriptor::DataType::FP16) {
+            } else if (labelsDataType == DataType::FP16) {
                 half *batchLabels = (half *)batchLabelsBuffer.getMemPtr() + batchSlotOffset;
                 memset(batchLabels, 0, sizeof(half) * classIndexes.size());
                 batchLabels[classIndexes[labeledExample.label]] = HALF_ONE;
-            } else if (labelsDataType == TensorDescriptor::DataType::FP32) {
+            } else if (labelsDataType == DataType::FP32) {
                 float *batchLabels = (float *)batchLabelsBuffer.getMemPtr() + batchSlotOffset;
                 memset(batchLabels, 0, sizeof(float) * classIndexes.size());
                 batchLabels[classIndexes[labeledExample.label]] = 1.0f;
@@ -220,15 +221,15 @@ void BatchAssembler::batchAssemblerThread() {
                 THOR_UNREACHABLE();
             }
         } else {  // class index labels
-            THOR_THROW_IF_FALSE(labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
-                   labelsDataType == TensorDescriptor::DataType::UINT32);
-            if (labelsDataType == TensorDescriptor::DataType::UINT8) {
+            THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
+                   labelsDataType == DataType::UINT32);
+            if (labelsDataType == DataType::UINT8) {
                 uint8_t *batchLabels = (uint8_t *)batchLabelsBuffer.getMemPtr() + batchSlot;
                 batchLabels[batchSlot] = (uint8_t)classIndexes[labeledExample.label];
-            } else if (labelsDataType == TensorDescriptor::DataType::UINT16) {
+            } else if (labelsDataType == DataType::UINT16) {
                 uint16_t *batchLabels = (uint16_t *)batchLabelsBuffer.getMemPtr() + batchSlot;
                 batchLabels[batchSlot] = (uint16_t)classIndexes[labeledExample.label];
-            } else if (labelsDataType == TensorDescriptor::DataType::UINT32) {
+            } else if (labelsDataType == DataType::UINT32) {
                 uint32_t *batchLabels = (uint32_t *)batchLabelsBuffer.getMemPtr() + batchSlot;
                 batchLabels[batchSlot] = (uint32_t)classIndexes[labeledExample.label];
             } else {

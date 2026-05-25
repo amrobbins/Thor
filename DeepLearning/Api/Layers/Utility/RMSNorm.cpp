@@ -73,7 +73,7 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
             Tensor featureInputTensor = inputs.at("feature_input");
             const Tensor& weightsTensor = inputs.at("weights");
             const std::vector<uint64_t> originalInputDims = featureInputTensor.getDimensions();
-            const TensorDescriptor::DataType inputDataType = featureInputTensor.getDataType();
+            const DataType inputDataType = featureInputTensor.getDataType();
 
             if (featureInputTensor.getPlacement() != placement) {
                 throw std::runtime_error("RMSNorm feature input tensor placement does not match the layer placement.");
@@ -117,9 +117,9 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
 
             Expression fin = Expression::input("feature_input", inputDataType, inputDataType);
             Expression weights = Expression::input("weights", parameterDataType, parameterDataType);
-            Expression fout = Expression::rmsNorm(fin, weights, hidden, epsilon, TensorDescriptor::DataType::FP32, inputDataType);
-            const bool useCudnnSwishFusion = epilogueIsSwish && parameterDataType == TensorDescriptor::DataType::BF16 &&
-                                             inputDataType == TensorDescriptor::DataType::BF16;
+            Expression fout = Expression::rmsNorm(fin, weights, hidden, epsilon, DataType::FP32, inputDataType);
+            const bool useCudnnSwishFusion = epilogueIsSwish && parameterDataType == DataType::BF16 &&
+                                             inputDataType == DataType::BF16;
             if (useCudnnSwishFusion) {
                 if (!inferenceOnly) {
                     throw std::runtime_error(

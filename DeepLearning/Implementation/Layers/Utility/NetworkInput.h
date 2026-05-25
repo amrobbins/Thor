@@ -15,7 +15,7 @@ class NetworkInput : public Layer {
     ~NetworkInput() override {}
 
     NetworkInput(TensorPlacement networkPlacement,
-                 std::optional<TensorDescriptor::DataType> contentDataType,
+                 std::optional<DataType> contentDataType,
                  std::optional<std::vector<unsigned long>> contentDimensions) {
         construct(networkPlacement, contentDataType, contentDimensions);
     }
@@ -26,7 +26,7 @@ class NetworkInput : public Layer {
     }
 
     void construct(TensorPlacement networkPlacement,
-                   std::optional<TensorDescriptor::DataType> contentDataType,
+                   std::optional<DataType> contentDataType,
                    std::optional<std::vector<unsigned long>> contentDimensions) {
         THOR_THROW_IF_FALSE(contentDimensions.has_value() == contentDataType.has_value());
         this->networkPlacement = networkPlacement;
@@ -129,7 +129,7 @@ class NetworkInput : public Layer {
    protected:
     std::optional<std::vector<unsigned long>> contentDimensions;
     TensorPlacement networkPlacement;
-    std::optional<TensorDescriptor::DataType> contentDataType;
+    std::optional<DataType> contentDataType;
 
     Tensor outputBuffer;
     Stream loadStream;

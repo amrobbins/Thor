@@ -31,10 +31,10 @@
 //             numWeights = 4097;
 //         else
 //             numWeights = (rand() % 3000) + 1;
-//         Tensor weightsUpdateGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {numWeights}));
-//         Tensor gradientGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {numWeights}));
-//         Tensor mGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {numWeights}));
-//         Tensor vGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {numWeights}));
+//         Tensor weightsUpdateGpu(gpuPlacement, TensorDescriptor(DataType::FP32, {numWeights}));
+//         Tensor gradientGpu(gpuPlacement, TensorDescriptor(DataType::FP32, {numWeights}));
+//         Tensor mGpu(gpuPlacement, TensorDescriptor(DataType::FP32, {numWeights}));
+//         Tensor vGpu(gpuPlacement, TensorDescriptor(DataType::FP32, {numWeights}));
 //
 //         Tensor gradient = gradientGpu.clone(cpuPlacement);
 //         Tensor mInitial = mGpu.clone(cpuPlacement);
@@ -124,10 +124,10 @@
 //             numWeights = 4097;
 //         else
 //             numWeights = (rand() % 3000) + 1;
-//         Tensor weightsUpdateGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numWeights}));
-//         Tensor gradientGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numWeights}));
-//         Tensor mGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {numWeights}));
-//         Tensor vGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {numWeights}));
+//         Tensor weightsUpdateGpu(gpuPlacement, TensorDescriptor(DataType::FP16, {numWeights}));
+//         Tensor gradientGpu(gpuPlacement, TensorDescriptor(DataType::FP16, {numWeights}));
+//         Tensor mGpu(gpuPlacement, TensorDescriptor(DataType::FP32, {numWeights}));
+//         Tensor vGpu(gpuPlacement, TensorDescriptor(DataType::FP32, {numWeights}));
 //
 //         Tensor gradient = gradientGpu.clone(cpuPlacement);
 //         Tensor mInitial = mGpu.clone(cpuPlacement);

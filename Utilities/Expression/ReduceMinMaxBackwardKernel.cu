@@ -207,22 +207,22 @@ void dispatchReduceMinMaxBackwardScatterOutput(const void* grad_output,
                                                void* grad_input,
                                                const ReduceMinMaxBackwardMeta& meta,
                                                uint64_t output_numel,
-                                               TensorDescriptor::DataType grad_input_dtype,
+                                               DataType grad_input_dtype,
                                                cudaStream_t stream) {
     switch (grad_input_dtype) {
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             launchTypedReduceMinMaxBackwardScatter<GradT, float>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
             break;
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             launchTypedReduceMinMaxBackwardScatter<GradT, __half>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
             break;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             launchTypedReduceMinMaxBackwardScatter<GradT, __nv_bfloat16>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
             break;
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             launchTypedReduceMinMaxBackwardScatter<GradT, __nv_fp8_e4m3>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
             break;
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             launchTypedReduceMinMaxBackwardScatter<GradT, __nv_fp8_e5m2>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
             break;
         default:
@@ -238,8 +238,8 @@ void launchReduceMinMaxBackwardScatter(const void* grad_output,
                                        const std::vector<uint64_t>& input_dims,
                                        const std::vector<uint64_t>& reduction_axes,
                                        const std::vector<uint64_t>& squeeze_axes,
-                                       TensorDescriptor::DataType grad_output_dtype,
-                                       TensorDescriptor::DataType grad_input_dtype,
+                                       DataType grad_output_dtype,
+                                       DataType grad_input_dtype,
                                        cudaStream_t stream) {
     if (input_dims.size() > MAX_REDUCE_BACKWARD_RANK) {
         throw std::runtime_error("launchReduceMinMaxBackwardScatter supports rank <= 8.");
@@ -298,23 +298,23 @@ void launchReduceMinMaxBackwardScatter(const void* grad_output,
     }
 
     switch (grad_output_dtype) {
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             dispatchReduceMinMaxBackwardScatterOutput<float>(
                 grad_output, arg_indices, grad_input, meta, output_numel, grad_input_dtype, stream);
             break;
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             dispatchReduceMinMaxBackwardScatterOutput<__half>(
                 grad_output, arg_indices, grad_input, meta, output_numel, grad_input_dtype, stream);
             break;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             dispatchReduceMinMaxBackwardScatterOutput<__nv_bfloat16>(
                 grad_output, arg_indices, grad_input, meta, output_numel, grad_input_dtype, stream);
             break;
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             dispatchReduceMinMaxBackwardScatterOutput<__nv_fp8_e4m3>(
                 grad_output, arg_indices, grad_input, meta, output_numel, grad_input_dtype, stream);
             break;
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             dispatchReduceMinMaxBackwardScatterOutput<__nv_fp8_e5m2>(
                 grad_output, arg_indices, grad_input, meta, output_numel, grad_input_dtype, stream);
             break;

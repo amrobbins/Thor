@@ -10,7 +10,7 @@ namespace {
 class ConvWeightsParameter : public PhysicalParameter {
    public:
     ConvWeightsParameter(std::string name,
-                         std::optional<TensorDescriptor::DataType> storageDataType,
+                         std::optional<DataType> storageDataType,
                          bool trainable,
                          bool trainingEnabled,
                          uint32_t numOutputChannels,
@@ -24,7 +24,7 @@ class ConvWeightsParameter : public PhysicalParameter {
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
-        TensorDescriptor::DataType resolvedDataType = storageDataType.has_value() ? storageDataType.value() : inputTensor.getDataType();
+        DataType resolvedDataType = storageDataType.has_value() ? storageDataType.value() : inputTensor.getDataType();
 
         const auto& inputDims = inputTensor.getDimensions();
         if (inputDims.size() != 4) {
@@ -39,13 +39,13 @@ class ConvWeightsParameter : public PhysicalParameter {
     const uint32_t numOutputChannels;
     const uint32_t filterWidth;
     const uint32_t filterHeight;
-    const std::optional<TensorDescriptor::DataType> storageDataType;
+    const std::optional<DataType> storageDataType;
 };
 
 class ConvBiasesParameter : public PhysicalParameter {
    public:
     ConvBiasesParameter(std::string name,
-                        std::optional<TensorDescriptor::DataType> storageDataType,
+                        std::optional<DataType> storageDataType,
                         bool trainable,
                         bool trainingEnabled,
                         uint32_t numOutputChannels)
@@ -53,17 +53,16 @@ class ConvBiasesParameter : public PhysicalParameter {
 
     void createStorage(const StorageContext& context) override {
         const Tensor& inputTensor = context.getFeatureInput();
-        TensorDescriptor::DataType resolvedDataType = storageDataType.has_value() ? storageDataType.value() : inputTensor.getDataType();
+        DataType resolvedDataType = storageDataType.has_value() ? storageDataType.value() : inputTensor.getDataType();
         storage = Tensor(inputTensor.getPlacement(), TensorDescriptor(resolvedDataType, {numOutputChannels}));
     }
 
    private:
     const uint32_t numOutputChannels;
-    const std::optional<TensorDescriptor::DataType> storageDataType;
+    const std::optional<DataType> storageDataType;
 };
 }  // namespace
 
-using DataType = TensorDescriptor::DataType;
 
 Convolution2d::Convolution2d(uint32_t filterWidth,
                              uint32_t filterHeight,
@@ -160,7 +159,7 @@ std::vector<std::shared_ptr<PhysicalParameter>> Convolution2d::defineParameters(
                                                                                 bool hasBias,
                                                                                 uint32_t filterWidth,
                                                                                 uint32_t filterHeight,
-                                                                                std::optional<TensorDescriptor::DataType> weightsDataType) {
+                                                                                std::optional<DataType> weightsDataType) {
     std::vector<std::shared_ptr<PhysicalParameter>> parameters;
     parameters.push_back(
         std::make_shared<ConvWeightsParameter>("weights", weightsDataType, true, true, numOutputChannels, filterWidth, filterHeight));

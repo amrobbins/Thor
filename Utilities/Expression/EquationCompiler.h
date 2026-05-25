@@ -43,8 +43,8 @@ class EquationCompiler {
                                                        const std::string& kernel_name,
                                                        const std::vector<std::string>& input_names,
                                                        const std::vector<NamedInput::Kind>& input_kinds,
-                                                       const std::vector<TensorDescriptor::DataType>& input_dtypes,
-                                                       const std::vector<TensorDescriptor::DataType>& output_dtypes,
+                                                       const std::vector<DataType>& input_dtypes,
+                                                       const std::vector<DataType>& output_dtypes,
                                                        int device_num);
 
     static std::shared_ptr<CompiledEquation> compileFusedStage(const PhysicalExecutionStage& stage,

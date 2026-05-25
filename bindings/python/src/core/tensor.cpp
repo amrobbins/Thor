@@ -11,7 +11,7 @@ namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 using namespace Thor;
-using DataType = ThorImplementation::TensorDescriptor::DataType;
+using DataType = ThorImplementation::DataType;
 
 void bind_tensor(nb::module_ &thor) {
     auto tensor = nb::class_<Tensor>(thor, "Tensor");

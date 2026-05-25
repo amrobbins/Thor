@@ -36,7 +36,7 @@ TEST(DropOut, InferenceWorks) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor sourceCpu(cpuPlacement, descriptor);
         Tensor sourceGpu(gpuPlacement, descriptor);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -94,7 +94,7 @@ TEST(DropOut, TrainingNoDropOut) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor sourceCpu(cpuPlacement, descriptor);
         Tensor sourceGpu(gpuPlacement, descriptor);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -175,7 +175,7 @@ TEST(DropOut, TrainingAllDropOut) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor sourceCpu(cpuPlacement, descriptor);
         Tensor sourceGpu(gpuPlacement, descriptor);
         Tensor destCpu(cpuPlacement, descriptor);
@@ -255,7 +255,7 @@ TEST(DropOut, TrainingSomeDropOut) {
             numElements *= dimensions.back();
         }
 
-        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        TensorDescriptor descriptor(DataType::FP16, dimensions);
         Tensor sourceCpu(cpuPlacement, descriptor);
         Tensor sourceGpu(gpuPlacement, descriptor);
         Tensor destCpu(cpuPlacement, descriptor);

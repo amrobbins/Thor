@@ -11,26 +11,26 @@ using namespace std;
 namespace ThorImplementation {
 namespace {
 
-bool isAdaptiveLayerNormIoDataType(TensorDescriptor::DataType dtype) {
+bool isAdaptiveLayerNormIoDataType(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
             return true;
         default:
             return false;
     }
 }
 
-void validateCudnnFrontendContract(uint64_t normalizedFeatureCount, TensorDescriptor::DataType inputDataType) {
-    if (inputDataType == TensorDescriptor::DataType::FP32 && normalizedFeatureCount % 32 != 0) {
+void validateCudnnFrontendContract(uint64_t normalizedFeatureCount, DataType inputDataType) {
+    if (inputDataType == DataType::FP32 && normalizedFeatureCount % 32 != 0) {
         throw runtime_error(
             "AdaptiveLayerNorm cuDNN Frontend primary engines require fp32 normalized feature count to be a multiple of 32; got " +
             to_string(normalizedFeatureCount) + ".");
     }
 }
 
-string dtypeName(TensorDescriptor::DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
+string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 void validateEpsilon(double epsilon) {
     if (!(epsilon > 0.0)) {
@@ -44,18 +44,18 @@ AdaptiveLayerNorm::AdaptiveLayerNorm(const TensorPlacement& placement,
                                      bool inferenceOnly,
                                      vector<uint64_t> normalizedShape,
                                      optional<double> epsilon,
-                                     optional<TensorDescriptor::DataType> scaleBiasDataType,
+                                     optional<DataType> scaleBiasDataType,
                                      int64_t stampedId)
     : placement(placement),
       stampedId(stampedId),
       normalizedShape(std::move(normalizedShape)),
       normalizedFeatureCount(checkedNormalizedFeatureCount(this->normalizedShape)),
       epsilon(epsilon.has_value() ? epsilon.value() : 1.0e-5),
-      scaleBiasDataType(scaleBiasDataType.has_value() ? scaleBiasDataType.value() : TensorDescriptor::DataType::FP32) {
+      scaleBiasDataType(scaleBiasDataType.has_value() ? scaleBiasDataType.value() : DataType::FP32) {
     (void)this->stampedId;
     setConstructForInferenceOnly(inferenceOnly);
     validateEpsilon(this->epsilon);
-    if (this->scaleBiasDataType != TensorDescriptor::DataType::FP32) {
+    if (this->scaleBiasDataType != DataType::FP32) {
         throw runtime_error("AdaptiveLayerNorm currently requires fp32 scale/bias tensors for cuDNN Frontend AdaptiveLayerNorm; got " +
                             dtypeName(this->scaleBiasDataType) + ".");
     }
@@ -276,8 +276,8 @@ void AdaptiveLayerNorm::compileImpl() {
     leadingFeatureCount = computeLeadingFeatureCount(adaptiveFeatureInputs[DATA].value());
     const uint64_t statsElementCount = batchSize * leadingFeatureCount;
 
-    saveMean = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {statsElementCount}));
-    saveInvVariance = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {statsElementCount}));
+    saveMean = Tensor(placement, TensorDescriptor(DataType::FP32, {statsElementCount}));
+    saveInvVariance = Tensor(placement, TensorDescriptor(DataType::FP32, {statsElementCount}));
 
     for (auto& scratch : scratchErrorOutputs)
         scratch.reset();
@@ -349,7 +349,7 @@ void AdaptiveLayerNorm::forward(optional<Tensor> featureInput, bool validationPa
     descriptor.inputDataType = adaptiveFeatureInputs[DATA].value().getDataType();
     descriptor.outputDataType = featureOutput.value().getDataType();
     descriptor.scaleBiasDataType = scaleBiasDataType;
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
+    descriptor.computeDataType = DataType::FP32;
     descriptor.epsilon = static_cast<float>(epsilon);
     descriptor.training = !isInferenceOnly();
 
@@ -399,7 +399,7 @@ void AdaptiveLayerNorm::backward(optional<Tensor> errorInput, uint32_t batchSize
     descriptor.inputDataType = adaptiveFeatureInputs[DATA].value().getDataType();
     descriptor.outputDataType = errorInput.value().getDataType();
     descriptor.scaleBiasDataType = scaleBiasDataType;
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
+    descriptor.computeDataType = DataType::FP32;
     descriptor.epsilon = static_cast<float>(epsilon);
     descriptor.training = true;
 

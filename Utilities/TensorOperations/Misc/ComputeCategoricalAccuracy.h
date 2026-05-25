@@ -13,7 +13,7 @@
  * classIndex labels mean that there is one variable sent per batch item that carries the numerical value of the class of that batch item.
  *
  * Note:
- * workspace required is TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}) for both cases.
+ * workspace required is TensorDescriptor(DataType::FP32, {batchSize}) for both cases.
  */
 
 template <typename PREDICTION_TYPE, typename LABEL_TYPE>

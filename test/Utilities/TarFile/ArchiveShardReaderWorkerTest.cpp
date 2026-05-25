@@ -157,7 +157,7 @@ static void createBinaryFixtureFile(const std::string& path, const std::vector<F
 static ThorImplementation::Tensor makeEmptyGpuTensor(uint64_t bytes, uint32_t device = 0) {
     using namespace ThorImplementation;
     TensorPlacement gpuPlace(TensorPlacement::MemDevices::GPU, device);
-    TensorDescriptor desc(TensorDescriptor::DataType::UINT8, {bytes});
+    TensorDescriptor desc(DataType::UINT8, {bytes});
     return Tensor(gpuPlace, desc);
 }
 
@@ -167,7 +167,7 @@ static void downloadGpuTensorToCpu(const ThorImplementation::Tensor& gpu, std::v
     out.resize(bytes);
 
     TensorPlacement cpuPlace(TensorPlacement::MemDevices::CPU, 0);
-    TensorDescriptor desc(TensorDescriptor::DataType::UINT8, {bytes});
+    TensorDescriptor desc(DataType::UINT8, {bytes});
     Tensor cpu(cpuPlace, desc, 4096);
 
     Stream stream = Stream::getNextDownloadStream(gpu.getPlacement().getDeviceNum());

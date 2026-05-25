@@ -10,10 +10,10 @@ CudnnRmsNormRhtAbsMaxDescriptor makeDescriptor() {
     CudnnRmsNormRhtAbsMaxDescriptor descriptor;
     descriptor.outerSize = 8;
     descriptor.normalizedFeatureCount = 2048;
-    descriptor.inputDataType = TensorDescriptor::DataType::BF16;
-    descriptor.outputDataType = TensorDescriptor::DataType::BF16;
-    descriptor.parameterDataType = TensorDescriptor::DataType::BF16;
-    descriptor.absMaxDataType = TensorDescriptor::DataType::FP32;
+    descriptor.inputDataType = DataType::BF16;
+    descriptor.outputDataType = DataType::BF16;
+    descriptor.parameterDataType = DataType::BF16;
+    descriptor.absMaxDataType = DataType::FP32;
     descriptor.epsilon = 1.0e-5f;
     descriptor.numThreads = 128;
     descriptor.rowsPerCta = 2;
@@ -47,19 +47,19 @@ TEST(CudnnRmsNormRhtAmaxDescriptor, ResolvesDocumentedThreadTable) {
 
 TEST(CudnnRmsNormRhtAmaxDescriptor, RejectsUnsupportedDtypes) {
     CudnnRmsNormRhtAbsMaxDescriptor descriptor = makeDescriptor();
-    descriptor.inputDataType = TensorDescriptor::DataType::FP16;
+    descriptor.inputDataType = DataType::FP16;
     EXPECT_THROW(descriptor.validate(), std::invalid_argument);
 
     descriptor = makeDescriptor();
-    descriptor.parameterDataType = TensorDescriptor::DataType::FP32;
+    descriptor.parameterDataType = DataType::FP32;
     EXPECT_THROW(descriptor.validate(), std::invalid_argument);
 
     descriptor = makeDescriptor();
-    descriptor.outputDataType = TensorDescriptor::DataType::FP32;
+    descriptor.outputDataType = DataType::FP32;
     EXPECT_THROW(descriptor.validate(), std::invalid_argument);
 
     descriptor = makeDescriptor();
-    descriptor.absMaxDataType = TensorDescriptor::DataType::BF16;
+    descriptor.absMaxDataType = DataType::BF16;
     EXPECT_THROW(descriptor.validate(), std::invalid_argument);
 }
 
@@ -107,7 +107,7 @@ TEST(CudnnRmsNormRhtAmaxDescriptor, AmaxIsAbsoluteMaximumScaleMetadata) {
     descriptor.outerSize = 16;
     descriptor.rowsPerCta = 4;
 
-    EXPECT_EQ(descriptor.absMaxDataType, TensorDescriptor::DataType::FP32);
+    EXPECT_EQ(descriptor.absMaxDataType, DataType::FP32);
     EXPECT_EQ(descriptor.absMaxElementCount(), 4u);
     EXPECT_NO_THROW(descriptor.validate());
 }

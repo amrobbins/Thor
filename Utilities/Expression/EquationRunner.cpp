@@ -5,26 +5,26 @@
 
 namespace ThorImplementation {
 
-static size_t runtimeInputScalarSizeBytes(TensorDescriptor::DataType dtype) {
+static size_t runtimeInputScalarSizeBytes(DataType dtype) {
     switch (dtype) {
-        case TensorDescriptor::DataType::BOOLEAN:
-        case TensorDescriptor::DataType::INT8:
-        case TensorDescriptor::DataType::UINT8:
-        case TensorDescriptor::DataType::FP8_E4M3:
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::BOOLEAN:
+        case DataType::INT8:
+        case DataType::UINT8:
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
             return 1;
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::INT16:
-        case TensorDescriptor::DataType::UINT16:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::INT16:
+        case DataType::UINT16:
             return 2;
-        case TensorDescriptor::DataType::FP32:
-        case TensorDescriptor::DataType::INT32:
-        case TensorDescriptor::DataType::UINT32:
+        case DataType::FP32:
+        case DataType::INT32:
+        case DataType::UINT32:
             return 4;
-        case TensorDescriptor::DataType::FP64:
-        case TensorDescriptor::DataType::INT64:
-        case TensorDescriptor::DataType::UINT64:
+        case DataType::FP64:
+        case DataType::INT64:
+        case DataType::UINT64:
             return 8;
         default:
             throw std::runtime_error("Unsupported dtype in runtimeInputScalarSizeBytes.");
@@ -98,7 +98,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
             if (!std::holds_alternative<float>(inputs[i])) {
                 throw std::runtime_error("Fused equation expected a runtime scalar input at slot " + std::to_string(i) + ".");
             }
-            if (compiledEquation->input_dtypes[i] != TensorDescriptor::DataType::FP32) {
+            if (compiledEquation->input_dtypes[i] != DataType::FP32) {
                 throw std::runtime_error("Runtime scalar inputs currently require FP32 compiled input dtype.");
             }
         } else {

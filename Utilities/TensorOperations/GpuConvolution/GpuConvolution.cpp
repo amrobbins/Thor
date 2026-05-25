@@ -50,7 +50,7 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
     inputDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
     inputDimensions.push_back(convolutionKernelRequirement.getNumInputRows());
     inputDimensions.push_back(convolutionKernelRequirement.getNumInputColumns());
-    TensorDescriptor inputDescriptor(TensorDescriptor::DataType::FP16, inputDimensions);
+    TensorDescriptor inputDescriptor(DataType::FP16, inputDimensions);
     Tensor dataInput(gpuPlacement, inputDescriptor);
 
     vector<unsigned long> outputDimensions;
@@ -58,7 +58,7 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
     outputDimensions.push_back(convolutionKernelRequirement.getNumOutputChannels());
     outputDimensions.push_back(convolutionKernelRequirement.getNumOutputRows());
     outputDimensions.push_back(convolutionKernelRequirement.getNumOutputColumns());
-    TensorDescriptor outputDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
+    TensorDescriptor outputDescriptor(DataType::FP16, outputDimensions);
     Tensor dataOutput(gpuPlacement, outputDescriptor);
 
     vector<unsigned long> weightsDimensions;
@@ -66,7 +66,7 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
     weightsDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
     weightsDimensions.push_back(convolutionKernelRequirement.getFilterHeight());
     weightsDimensions.push_back(convolutionKernelRequirement.getFilterWidth());
-    TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
+    TensorDescriptor weightsDescriptor(DataType::FP16, weightsDimensions);
     Tensor weights(gpuPlacement, weightsDescriptor);
 
     // uint64_t maxWorkspaceSizeInBytes = dataInput.getDescriptor().getArraySizeInBytes() +
@@ -80,7 +80,7 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
         // if (workspaceSizeInBytes > maxWorkspaceSizeInBytes)
         //    continue;
         if (workspaceSizeInBytes > 0)
-            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
+            workspace = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
 
         // Clear any possible runtime errors
         THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
@@ -157,7 +157,7 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
     inputDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
     inputDimensions.push_back(convolutionKernelRequirement.getNumInputRows());
     inputDimensions.push_back(convolutionKernelRequirement.getNumInputColumns());
-    TensorDescriptor inputDescriptor(TensorDescriptor::DataType::FP16, inputDimensions);
+    TensorDescriptor inputDescriptor(DataType::FP16, inputDimensions);
     Tensor errorOutput(gpuPlacement, inputDescriptor);
 
     vector<unsigned long> outputDimensions;
@@ -165,7 +165,7 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
     outputDimensions.push_back(convolutionKernelRequirement.getNumOutputChannels());
     outputDimensions.push_back(convolutionKernelRequirement.getNumOutputRows());
     outputDimensions.push_back(convolutionKernelRequirement.getNumOutputColumns());
-    TensorDescriptor outputDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
+    TensorDescriptor outputDescriptor(DataType::FP16, outputDimensions);
     Tensor errorInput(gpuPlacement, outputDescriptor);
 
     vector<unsigned long> weightsDimensions;
@@ -173,7 +173,7 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
     weightsDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
     weightsDimensions.push_back(convolutionKernelRequirement.getFilterHeight());
     weightsDimensions.push_back(convolutionKernelRequirement.getFilterWidth());
-    TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
+    TensorDescriptor weightsDescriptor(DataType::FP16, weightsDimensions);
     Tensor weights(gpuPlacement, weightsDescriptor);
 
     // uint64_t maxWorkspaceSizeInBytes = errorOutput.getDescriptor().getArraySizeInBytes() +
@@ -188,7 +188,7 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
 
         std::optional<Tensor> workspace;
         if (workspaceSizeInBytes > 0)
-            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
+            workspace = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
 
         // Clear any possible runtime errors
         THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
@@ -259,7 +259,7 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
     inputDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
     inputDimensions.push_back(convolutionKernelRequirement.getNumInputRows());
     inputDimensions.push_back(convolutionKernelRequirement.getNumInputColumns());
-    TensorDescriptor inputDescriptor(TensorDescriptor::DataType::FP16, inputDimensions);
+    TensorDescriptor inputDescriptor(DataType::FP16, inputDimensions);
     Tensor dataInput(gpuPlacement, inputDescriptor);
 
     vector<unsigned long> outputDimensions;
@@ -267,7 +267,7 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
     outputDimensions.push_back(convolutionKernelRequirement.getNumOutputChannels());
     outputDimensions.push_back(convolutionKernelRequirement.getNumOutputRows());
     outputDimensions.push_back(convolutionKernelRequirement.getNumOutputColumns());
-    TensorDescriptor outputDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
+    TensorDescriptor outputDescriptor(DataType::FP16, outputDimensions);
     Tensor errorInput(gpuPlacement, outputDescriptor);
 
     vector<unsigned long> weightsDimensions;
@@ -275,7 +275,7 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
     weightsDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
     weightsDimensions.push_back(convolutionKernelRequirement.getFilterHeight());
     weightsDimensions.push_back(convolutionKernelRequirement.getFilterWidth());
-    TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
+    TensorDescriptor weightsDescriptor(DataType::FP16, weightsDimensions);
     Tensor weightsGradient(gpuPlacement, weightsDescriptor);
 
     // uint64_t maxWorkspaceSizeInBytes = dataInput.getDescriptor().getArraySizeInBytes() +
@@ -295,7 +295,7 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
         //    continue;
         std::optional<Tensor> workspace;
         if (workspaceSizeInBytes > 0)
-            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
+            workspace = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
 
         // Clear any possible runtime errors
         THOR_THROW_IF_FALSE(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);

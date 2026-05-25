@@ -1,6 +1,7 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include "DeepLearning/Api/DataType.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include <nlohmann/json.hpp>
@@ -19,7 +20,7 @@ class Network;
 
 class Tensor {
    public:
-    using DataType = ThorImplementation::TensorDescriptor::DataType;
+    using DataType = ThorImplementation::DataType;
 
     Tensor() : initialized(false) {}
     Tensor(DataType dataType, const std::vector<uint64_t> &dimensions)

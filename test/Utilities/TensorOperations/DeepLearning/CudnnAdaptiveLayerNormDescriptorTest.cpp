@@ -11,10 +11,10 @@ CudnnAdaptiveLayerNormDescriptor makeDescriptor() {
     descriptor.batchSize = 2;
     descriptor.leadingFeatureCount = 4;
     descriptor.normalizedFeatureCount = 32;
-    descriptor.inputDataType = TensorDescriptor::DataType::FP16;
-    descriptor.outputDataType = TensorDescriptor::DataType::FP16;
-    descriptor.scaleBiasDataType = TensorDescriptor::DataType::FP32;
-    descriptor.computeDataType = TensorDescriptor::DataType::FP32;
+    descriptor.inputDataType = DataType::FP16;
+    descriptor.outputDataType = DataType::FP16;
+    descriptor.scaleBiasDataType = DataType::FP32;
+    descriptor.computeDataType = DataType::FP32;
     descriptor.epsilon = 1.0e-5f;
     descriptor.training = true;
     return descriptor;
@@ -23,9 +23,9 @@ CudnnAdaptiveLayerNormDescriptor makeDescriptor() {
 }  // namespace
 
 TEST(CudnnAdaptiveLayerNormDescriptor, AcceptsFp16Bf16AndFp32IoWithFp32ScaleBias) {
-    for (TensorDescriptor::DataType dtype : {TensorDescriptor::DataType::FP16,
-                                             TensorDescriptor::DataType::BF16,
-                                             TensorDescriptor::DataType::FP32}) {
+    for (DataType dtype : {DataType::FP16,
+                                             DataType::BF16,
+                                             DataType::FP32}) {
         CudnnAdaptiveLayerNormDescriptor descriptor = makeDescriptor();
         descriptor.inputDataType = dtype;
         descriptor.outputDataType = dtype;
@@ -51,8 +51,8 @@ TEST(CudnnAdaptiveLayerNormDescriptor, RejectsEmptyBatchLeadingOrFeatureCount) {
 TEST(CudnnAdaptiveLayerNormDescriptor, RejectsFp32NormalizedFeatureCountsUnsupportedByPrimaryEngines) {
     CudnnAdaptiveLayerNormDescriptor descriptor = makeDescriptor();
     descriptor.normalizedFeatureCount = 16;
-    descriptor.inputDataType = TensorDescriptor::DataType::FP32;
-    descriptor.outputDataType = TensorDescriptor::DataType::FP32;
+    descriptor.inputDataType = DataType::FP32;
+    descriptor.outputDataType = DataType::FP32;
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 
     descriptor.normalizedFeatureCount = 32;
@@ -61,21 +61,21 @@ TEST(CudnnAdaptiveLayerNormDescriptor, RejectsFp32NormalizedFeatureCountsUnsuppo
 
 TEST(CudnnAdaptiveLayerNormDescriptor, RejectsUnsupportedIoDtype) {
     CudnnAdaptiveLayerNormDescriptor descriptor = makeDescriptor();
-    descriptor.inputDataType = TensorDescriptor::DataType::FP8_E4M3;
+    descriptor.inputDataType = DataType::FP8_E4M3;
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 
     descriptor = makeDescriptor();
-    descriptor.outputDataType = TensorDescriptor::DataType::INT32;
+    descriptor.outputDataType = DataType::INT32;
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 }
 
 TEST(CudnnAdaptiveLayerNormDescriptor, RejectsNonFp32ScaleBiasOrCompute) {
     CudnnAdaptiveLayerNormDescriptor descriptor = makeDescriptor();
-    descriptor.scaleBiasDataType = TensorDescriptor::DataType::FP16;
+    descriptor.scaleBiasDataType = DataType::FP16;
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 
     descriptor = makeDescriptor();
-    descriptor.computeDataType = TensorDescriptor::DataType::FP16;
+    descriptor.computeDataType = DataType::FP16;
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 }
 

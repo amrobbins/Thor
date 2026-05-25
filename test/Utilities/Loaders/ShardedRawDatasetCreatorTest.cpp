@@ -179,8 +179,8 @@ static void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards, const ui
     BatchAssembler batchAssembler(
         shards,
         ExampleType::TEST,
-        ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {3, 224, 224}),
-        ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::FP32, {numClasses}),
+        ThorImplementation::TensorDescriptor(ThorImplementation::DataType::UINT8, {3, 224, 224}),
+        ThorImplementation::TensorDescriptor(ThorImplementation::DataType::FP32, {numClasses}),
         batchSize);
 
     ASSERT_EQ(batchAssembler.getNumBatchesPerEpoch(), (7 + (batchSize - 1)) / batchSize);
@@ -309,7 +309,7 @@ TEST(ShardedRawDatasetCreator, createImagenet10Classes) {
 /*
 class MnistDataProcessor : public DataProcessor {
    public:
-    MnistDataProcessor(uint64_t numOutputTensorBytes, ThorImplementation::TensorDescriptor::DataType dataType) {
+    MnistDataProcessor(uint64_t numOutputTensorBytes, ThorImplementation::DataType dataType) {
         this->numOutputTensorBytes = numOutputTensorBytes;
         this->dataType = dataType;
     }
@@ -317,7 +317,7 @@ class MnistDataProcessor : public DataProcessor {
     virtual ~MnistDataProcessor() {}
 
     virtual uint64_t outputTensorSizeInBytes() { return numOutputTensorBytes; }
-    virtual ThorImplementation::TensorDescriptor::DataType getDataType() { return dataType; }
+    virtual ThorImplementation::DataType getDataType() { return dataType; }
 
     virtual DataElement operator()(DataElement &input) {
         const uint64_t numElements = outputTensorSizeInBytes() / 4;
@@ -334,7 +334,7 @@ class MnistDataProcessor : public DataProcessor {
 
    private:
     uint64_t numOutputTensorBytes;
-    ThorImplementation::TensorDescriptor::DataType dataType;
+    ThorImplementation::DataType dataType;
 };
 
 TEST(ShardedRawDatasetCreator, createMnist) {
@@ -352,7 +352,7 @@ TEST(ShardedRawDatasetCreator, createMnist) {
     std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
     creator.createDataset(unique_ptr<MnistDataProcessor>(new MnistDataProcessor(NUM_GRAYSCALE_PIXELS_PER_IMAGE * sizeof(float),
-                                                                                ThorImplementation::TensorDescriptor::DataType::FP32)),
+                                                                                ThorImplementation::DataType::FP32)),
                           shards);
 }
 */

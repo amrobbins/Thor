@@ -47,9 +47,9 @@ class Convolution3d : public TrainableLayer {
     static const char *epilogueOutputName() { return "__convolution_3d_epilogue_output"; }
 
     [[nodiscard]] static ThorImplementation::Expression epilogueInput(
-        std::optional<ThorImplementation::TensorDescriptor::DataType> computeDType =
+        std::optional<ThorImplementation::DataType> computeDType =
             std::nullopt,
-        std::optional<ThorImplementation::TensorDescriptor::DataType> outputDType =
+        std::optional<ThorImplementation::DataType> outputDType =
             std::nullopt) {
         return LayerEpilogue::input(epilogueInputName(), computeDType, outputDType);
     }

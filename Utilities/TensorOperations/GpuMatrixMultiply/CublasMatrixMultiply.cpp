@@ -337,7 +337,7 @@ void CublasMatrixMultiply::multiply(Tensor A,
                                     bool transposeB,
                                     const bool accumulate,
                                     const bool negate,
-                                    const TensorDescriptor::DataType ABCDataType,
+                                    const DataType ABCDataType,
                                     Stream stream) {
     multiply(A,
              B,
@@ -405,7 +405,7 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                 bool transposeC,
                                 const float *alpha,
                                 const float *beta,
-                                const TensorDescriptor::DataType ABCDDataType,
+                                const DataType ABCDDataType,
                                 Stream stream,
                                 CublasScalarPointerMode pointerMode) {
     gemm(A,
@@ -574,19 +574,19 @@ void CublasMatrixMultiply::gemm(Tensor A,
     cublasKernel.executeKernel(A, B, C, D, ld_A, ld_B, ld_C, ld_D, workspace, alpha, beta, stream, pointerMode, fp8Scales);
 }
 
-cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(TensorDescriptor::DataType dataType) {
+cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(DataType dataType) {
     switch (dataType) {
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             return CUDA_R_32F;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             return CUDA_R_16BF;
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             return CUDA_R_16F;
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             return CUDA_R_8F_E4M3;
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             return CUDA_R_8F_E5M2;
-        case TensorDescriptor::DataType::INT8:
+        case DataType::INT8:
             return CUDA_R_8I;
         default:
             THOR_UNREACHABLE();
@@ -594,15 +594,15 @@ cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(TensorDescriptor::DataT
     }
 }
 
-std::optional<cublasComputeType_t> CublasMatrixMultiply::mapToCublasComputeType(TensorDescriptor::DataType dataType) {
+std::optional<cublasComputeType_t> CublasMatrixMultiply::mapToCublasComputeType(DataType dataType) {
     switch (dataType) {
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             return CUBLAS_COMPUTE_32F;
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             return CUBLAS_COMPUTE_32F_FAST_16F;
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             return CUBLAS_COMPUTE_32F_FAST_16BF;
-        case TensorDescriptor::DataType::INT32:
+        case DataType::INT32:
             return CUBLAS_COMPUTE_32I;
         default:
             return std::nullopt;
@@ -611,48 +611,48 @@ std::optional<cublasComputeType_t> CublasMatrixMultiply::mapToCublasComputeType(
 
 bool CublasMatrixMultiply::isSupportedMatmulDataTypes(MatmulDataTypes dataTypes) {
     switch (dataTypes.A) {
-        case TensorDescriptor::DataType::FP32:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::FP8_E4M3:
-        case TensorDescriptor::DataType::FP8_E5M2:
-        case TensorDescriptor::DataType::INT8:
+        case DataType::FP32:
+        case DataType::BF16:
+        case DataType::FP16:
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+        case DataType::INT8:
             break;
         default:
             return false;
     }
 
     switch (dataTypes.B) {
-        case TensorDescriptor::DataType::FP32:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::FP8_E4M3:
-        case TensorDescriptor::DataType::FP8_E5M2:
-        case TensorDescriptor::DataType::INT8:
+        case DataType::FP32:
+        case DataType::BF16:
+        case DataType::FP16:
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+        case DataType::INT8:
             break;
         default:
             return false;
     }
 
     switch (dataTypes.C) {
-        case TensorDescriptor::DataType::FP32:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::FP8_E4M3:
-        case TensorDescriptor::DataType::FP8_E5M2:
-        case TensorDescriptor::DataType::INT8:
+        case DataType::FP32:
+        case DataType::BF16:
+        case DataType::FP16:
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+        case DataType::INT8:
             break;
         default:
             return false;
     }
 
     switch (dataTypes.D) {
-        case TensorDescriptor::DataType::FP32:
-        case TensorDescriptor::DataType::BF16:
-        case TensorDescriptor::DataType::FP16:
-        case TensorDescriptor::DataType::FP8_E4M3:
-        case TensorDescriptor::DataType::FP8_E5M2:
-        case TensorDescriptor::DataType::INT8:
+        case DataType::FP32:
+        case DataType::BF16:
+        case DataType::FP16:
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+        case DataType::INT8:
             break;
         default:
             return false;
@@ -670,11 +670,11 @@ bool CublasMatrixMultiply::isSupportedMatmulDataTypes(MatmulDataTypes dataTypes)
     return isSupportedCublasLtOperationType(computeType.value(), CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
 }
 
-bool CublasMatrixMultiply::isSupportedSameDataTypeMatmul(TensorDescriptor::DataType ABCDDataType) {
+bool CublasMatrixMultiply::isSupportedSameDataTypeMatmul(DataType ABCDDataType) {
     return isSupportedMatmulDataTypes(MatmulDataTypes::same(ABCDDataType));
 }
 
-OperationType CublasMatrixMultiply::makeOperationType(TensorDescriptor::DataType ABCDDataType) {
+OperationType CublasMatrixMultiply::makeOperationType(DataType ABCDDataType) {
     return makeOperationType(MatmulDataTypes::same(ABCDDataType));
 }
 
@@ -695,21 +695,21 @@ OperationType CublasMatrixMultiply::makeOperationType(MatmulDataTypes dataTypes)
     return OperationType(computeType.value(), CUDA_R_32F, ADataType, BDataType, CDataType, DDataType);
 }
 
-std::string CublasMatrixMultiply::dataTypeToString(TensorDescriptor::DataType dataType) {
+std::string CublasMatrixMultiply::dataTypeToString(DataType dataType) {
     switch (dataType) {
-        case TensorDescriptor::DataType::FP32:
+        case DataType::FP32:
             return "FP32";
-        case TensorDescriptor::DataType::BF16:
+        case DataType::BF16:
             return "BF16";
-        case TensorDescriptor::DataType::FP16:
+        case DataType::FP16:
             return "FP16";
-        case TensorDescriptor::DataType::FP8_E4M3:
+        case DataType::FP8_E4M3:
             return "FP8_E4M3";
-        case TensorDescriptor::DataType::FP8_E5M2:
+        case DataType::FP8_E5M2:
             return "FP8_E5M2";
-        case TensorDescriptor::DataType::INT8:
+        case DataType::INT8:
             return "INT8";
-        case TensorDescriptor::DataType::INT32:
+        case DataType::INT32:
             return "INT32";
         default:
             return "unsupported";
@@ -722,8 +722,8 @@ std::string CublasMatrixMultiply::dataTypesToString(MatmulDataTypes dataTypes) {
            ", compute=" + dataTypeToString(dataTypes.compute) + "}";
 }
 
-bool CublasMatrixMultiply::isFp8DataType(TensorDescriptor::DataType dataType) {
-    return dataType == TensorDescriptor::DataType::FP8_E4M3 || dataType == TensorDescriptor::DataType::FP8_E5M2;
+bool CublasMatrixMultiply::isFp8DataType(DataType dataType) {
+    return dataType == DataType::FP8_E4M3 || dataType == DataType::FP8_E5M2;
 }
 
 bool CublasMatrixMultiply::isFp8Matmul(MatmulDataTypes dataTypes) {
@@ -731,8 +731,8 @@ bool CublasMatrixMultiply::isFp8Matmul(MatmulDataTypes dataTypes) {
 }
 
 bool CublasMatrixMultiply::isFp8InputsWithFp32Output(MatmulDataTypes dataTypes) {
-    return (isFp8DataType(dataTypes.A) || isFp8DataType(dataTypes.B)) && dataTypes.C == TensorDescriptor::DataType::FP32 &&
-           dataTypes.D == TensorDescriptor::DataType::FP32;
+    return (isFp8DataType(dataTypes.A) || isFp8DataType(dataTypes.B)) && dataTypes.C == DataType::FP32 &&
+           dataTypes.D == DataType::FP32;
 }
 
 bool CublasMatrixMultiply::hasRequiredExplicitFp8Scales(MatmulDataTypes dataTypes, Fp8MatmulScales fp8Scales) {
@@ -798,7 +798,7 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                               bool transposeB,
                                                               const bool accumulate,
                                                               const bool negate,
-                                                              const TensorDescriptor::DataType ABCDataType,
+                                                              const DataType ABCDataType,
                                                               Stream stream) {
     multiplyUsingHeuristicKernelChoice(
         A, B, C, A_rows, A_cols, B_rows, B_cols, transposeA, transposeB, accumulate, negate, MatmulDataTypes::same(ABCDataType), stream);
@@ -873,7 +873,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     bool transposeC,
     const float *alpha,
     const float *beta,
-    const TensorDescriptor::DataType ABCDDataType,
+    const DataType ABCDDataType,
     Stream stream,
     CublasScalarPointerMode pointerMode) {
     gemmUsingHeuristicKernelChoice(A,
@@ -1704,7 +1704,7 @@ void CublasMatrixMultiply::gemmWithBackwardEpilogueUsingHeuristicKernelChoice(Te
             void *workspacePtr = nullptr;
             if (algoWorkspaceSize > 0) {
                 TensorPlacement workspacePlacement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
-                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {algoWorkspaceSize});
+                TensorDescriptor workspaceDescriptor(DataType::UINT8, {algoWorkspaceSize});
                 backwardEpilogueWorkspace = Tensor(workspacePlacement, workspaceDescriptor);
                 workspacePtr = backwardEpilogueWorkspace.getMemPtr();
             }
@@ -2135,7 +2135,7 @@ void CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
                                                    bool transposeA,
                                                    bool transposeB,
                                                    bool transposeC,
-                                                   TensorDescriptor::DataType ABCDataType,
+                                                   DataType ABCDataType,
                                                    bool printResults) {
     chooseOptimalGemmKernel(gpuNum,
                             rowsA,
@@ -2531,7 +2531,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     }
     for (int i = 0; i < numWorkspaceInstances; ++i) {
         workspace.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                               TensorDescriptor(TensorDescriptor::DataType::UINT8, {maxWorkspaceSizeInBytes}));
+                               TensorDescriptor(DataType::UINT8, {maxWorkspaceSizeInBytes}));
     }
 
     vector<CublasKernel> prunedKernels;
@@ -2947,7 +2947,7 @@ unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
                                                                bool transposeA,
                                                                bool transposeB,
                                                                bool transposeC,
-                                                               TensorDescriptor::DataType ABCDataType,
+                                                               DataType ABCDataType,
                                                                bool &kernelWillRunOnGpu) {
     return getGemmWorkspaceSizeInBytes(gpuNum,
                                        rowsA,
@@ -3063,7 +3063,7 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
                                                   bool transposeA,
                                                   bool transposeB,
                                                   bool transposeC,
-                                                  TensorDescriptor::DataType ABCDataType,
+                                                  DataType ABCDataType,
                                                   bool workspaceAllowed) {
     return getOptimalKernelTime(gpuType,
                                 rowsA,
@@ -3141,7 +3141,7 @@ double CublasMatrixMultiply::getOptimalKernelTime(int gpuNum,
                                                   bool transposeA,
                                                   bool transposeB,
                                                   bool transposeC,
-                                                  TensorDescriptor::DataType ABCDataType,
+                                                  DataType ABCDataType,
                                                   bool workspaceAllowed) {
     return getOptimalKernelTime(gpuNum,
                                 rowsA,

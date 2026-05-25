@@ -24,8 +24,8 @@ class TypeConverter {
     // All tensor types are convertible to all tensor types, the conversion rules follow the C++ rule for the base type
     static void convertType(void *source,
                             void *dest,
-                            TensorDescriptor::DataType sourceDataType,
-                            TensorDescriptor::DataType destDataType,
+                            DataType sourceDataType,
+                            DataType destDataType,
                             long numElements,
                             Stream stream,
                             int deviceNum);
@@ -38,13 +38,13 @@ class TypeConverter {
         void *source;
         void *dest;
         long numElements;
-        TensorDescriptor::DataType sourceDataType;
-        TensorDescriptor::DataType destDataType;
+        DataType sourceDataType;
+        DataType destDataType;
 
         Args(void *source,
              void *dest,
-             TensorDescriptor::DataType sourceDataType,
-             TensorDescriptor::DataType destDataType,
+             DataType sourceDataType,
+             DataType destDataType,
              long numElements) {
             this->source = source;
             this->dest = dest;
@@ -67,8 +67,8 @@ class TypeConverter {
     // Convert on GPU between two types. In place or out of place is supported.
     static void gpuConvertType(void *source_d,
                                void *dest_d,
-                               TensorDescriptor::DataType sourceDataType,
-                               TensorDescriptor::DataType destDataType,
+                               DataType sourceDataType,
+                               DataType destDataType,
                                long numElements,
                                Stream stream);
 

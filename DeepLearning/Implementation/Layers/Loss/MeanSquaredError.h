@@ -17,7 +17,7 @@ class MeanSquaredError : public Loss {
    public:
     ~MeanSquaredError() override;
 
-    MeanSquaredError(TensorDescriptor::DataType lossDataType = TensorDescriptor::DataType::FP32);
+    MeanSquaredError(DataType lossDataType = DataType::FP32);
 
     void compileImpl() override;
 

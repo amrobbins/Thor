@@ -26,21 +26,21 @@ enum class AttentionTensorLayout {
 struct AttentionTensorSpec {
     std::vector<int64_t> dimensions;
     std::vector<int64_t> strides;
-    TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP16;
+    DataType dataType = DataType::FP16;
     bool ragged = false;
 
     static AttentionTensorSpec bhsd(
-        int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, TensorDescriptor::DataType dataType);
+        int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, DataType dataType);
 
     static AttentionTensorSpec bshd(
-        int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, TensorDescriptor::DataType dataType);
+        int64_t batch, int64_t heads, int64_t sequenceLength, int64_t headDim, DataType dataType);
 
     static AttentionTensorSpec fromLayout(AttentionTensorLayout layout,
                                           int64_t batch,
                                           int64_t heads,
                                           int64_t sequenceLength,
                                           int64_t headDim,
-                                          TensorDescriptor::DataType dataType);
+                                          DataType dataType);
 
     std::string toString() const;
 };
@@ -81,8 +81,8 @@ struct CudnnAttentionDescriptor {
     // allocation instead of assuming the Q/K/V IO dtype.
     std::optional<AttentionTensorSpec> dBias;
 
-    TensorDescriptor::DataType computeDataType = TensorDescriptor::DataType::FP32;
-    TensorDescriptor::DataType intermediateDataType = TensorDescriptor::DataType::FP32;
+    DataType computeDataType = DataType::FP32;
+    DataType intermediateDataType = DataType::FP32;
 
     // Default is the usual 1 / sqrt(Dqk).  Set attentionScale explicitly when a model uses a custom softcap/scale policy.
     std::optional<float> attentionScale;
