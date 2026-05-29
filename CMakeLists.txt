@@ -1,5 +1,77 @@
 cmake_minimum_required(VERSION 3.22)
 
+# ============================================================
+# CUDA compiler bootstrap
+# ============================================================
+# CMake has to identify the CUDA compiler while project() is executing, so
+# the compiler path and target architectures must be initialized before the
+# CUDA language is enabled. CUDA 13.x no longer supports some older default
+# probe architectures, and CMake's automatic architecture detection can fail
+# before Thor's normal configuration code runs.
+set(THOR_MIN_CUDA_TOOLKIT_VERSION 13.3)
+set(
+        THOR_CUDA_ARCHITECTURES
+        "120"
+        CACHE STRING
+        "CUDA architectures for Thor AOT CUDA compilation. Default is sm_120 for RTX 50-series / Blackwell."
+)
+set_property(CACHE THOR_CUDA_ARCHITECTURES PROPERTY STRINGS 120)
+
+if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
+    set(CMAKE_CUDA_ARCHITECTURES "${THOR_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architectures" FORCE)
+endif ()
+
+# Do not require /usr/local/cuda to be a valid symlink. Prefer an explicitly
+# requested compiler, then CUDA_HOME/CUDA_PATH, then the versioned CUDA 13.3
+# install path, and finally PATH. Setting this before project() avoids CMake
+# caching a stale /usr/local/cuda/bin/nvcc path.
+if (NOT DEFINED CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX})
+    set(_thor_nvcc_hints "")
+    if (DEFINED ENV{CUDA_HOME} AND NOT "$ENV{CUDA_HOME}" STREQUAL "")
+        list(APPEND _thor_nvcc_hints "$ENV{CUDA_HOME}/bin")
+    endif ()
+    if (DEFINED ENV{CUDA_PATH} AND NOT "$ENV{CUDA_PATH}" STREQUAL "")
+        list(APPEND _thor_nvcc_hints "$ENV{CUDA_PATH}/bin")
+    endif ()
+    list(APPEND _thor_nvcc_hints
+            "/usr/local/cuda-13/bin"
+            "/usr/local/cuda-13.3/bin"
+            "/usr/local/cuda/bin"
+    )
+
+    find_program(_thor_detected_nvcc
+            NAMES nvcc
+            HINTS ${_thor_nvcc_hints}
+            NO_DEFAULT_PATH
+    )
+    if (NOT _thor_detected_nvcc)
+        find_program(_thor_detected_nvcc NAMES nvcc)
+    endif ()
+    if (_thor_detected_nvcc)
+        set(CMAKE_CUDA_COMPILER "${_thor_detected_nvcc}" CACHE FILEPATH "CUDA compiler for Thor" FORCE)
+    endif ()
+endif ()
+
+set(_thor_cuda_compiler_for_root "")
+if (DEFINED CMAKE_CUDA_COMPILER AND CMAKE_CUDA_COMPILER)
+    set(_thor_cuda_compiler_for_root "${CMAKE_CUDA_COMPILER}")
+elseif (DEFINED ENV{CUDACXX} AND NOT "$ENV{CUDACXX}" STREQUAL "")
+    set(_thor_cuda_compiler_for_root "$ENV{CUDACXX}")
+endif ()
+
+if (_thor_cuda_compiler_for_root)
+    get_filename_component(_thor_cuda_bin_dir "${_thor_cuda_compiler_for_root}" DIRECTORY)
+    get_filename_component(_thor_cuda_root_dir "${_thor_cuda_bin_dir}" DIRECTORY)
+    if (EXISTS "${_thor_cuda_root_dir}/include/cuda.h")
+        if (NOT DEFINED CUDAToolkit_ROOT OR "${CUDAToolkit_ROOT}" STREQUAL "")
+            set(CUDAToolkit_ROOT "${_thor_cuda_root_dir}" CACHE PATH "CUDA Toolkit root for Thor" FORCE)
+        endif ()
+        if (NOT DEFINED CUDA_TOOLKIT_ROOT_DIR OR "${CUDA_TOOLKIT_ROOT_DIR}" STREQUAL "")
+            set(CUDA_TOOLKIT_ROOT_DIR "${_thor_cuda_root_dir}" CACHE PATH "CUDA Toolkit root for legacy CMake find modules" FORCE)
+        endif ()
+    endif ()
+endif ()
+
 # Prefer Boost's own CMake config instead of the deprecated FindBoost module.
 if (POLICY CMP0167)
     cmake_policy(SET CMP0167 OLD)
@@ -37,7 +109,7 @@ endif ()
 set(THOR_VERSION_NUMERIC "${CMAKE_MATCH_0}")  # "0.1.1"
 
 # 3) Use numeric for CMake's project version
-project(Thor VERSION ${THOR_VERSION_NUMERIC} LANGUAGES CXX CUDA)
+project(Thor VERSION ${THOR_VERSION_NUMERIC} LANGUAGES C CXX CUDA)
 
 
 # ============================================================
@@ -81,21 +153,43 @@ set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
 set(CMAKE_CUDA_COMPILER_LAUNCHER ccache)
 
 # ============================================================
+# CUDA 13.3 / CompileIQ settings
+# ============================================================
+set(THOR_CUDA_CXX_STANDARD 20 CACHE STRING "C++ dialect used for CUDA translation units and NVRTC generated kernels")
+set_property(CACHE THOR_CUDA_CXX_STANDARD PROPERTY STRINGS 20)
+
+set(
+        THOR_CUDA_COMPILEIQ_ACF
+        ""
+        CACHE FILEPATH
+        "Optional NVIDIA CompileIQ Advanced Controls File (.acf) passed to nvcc/ptxas via --apply-controls for Thor AOT CUDA sources."
+)
+
+if (CMAKE_CUDA_COMPILER_VERSION VERSION_LESS THOR_MIN_CUDA_TOOLKIT_VERSION)
+    message(FATAL_ERROR
+            "Thor now requires CUDA ${THOR_MIN_CUDA_TOOLKIT_VERSION}+ for CUDA 13.3 libraries, C++20 CUDA, and CompileIQ ACF support. "
+            "Detected CUDA compiler ${CMAKE_CUDA_COMPILER_VERSION} at ${CMAKE_CUDA_COMPILER}.")
+endif ()
+
+message(STATUS "Thor: CUDA compiler = ${CMAKE_CUDA_COMPILER}")
+message(STATUS "Thor: CUDA compiler version = ${CMAKE_CUDA_COMPILER_VERSION}")
+message(STATUS "Thor: CUDA architectures = ${CMAKE_CUDA_ARCHITECTURES}")
+
+# ============================================================
 # Global settings
 # ============================================================
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
 
-enable_language(CUDA)
-set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD})
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS ON)
-set(CMAKE_CUDA_ARCHITECTURES 120)
 set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE}")
-#set(CMAKE_CUDA_ARCHITECTURES 75 120)
 
 # Default to Release if not specified
 if (NOT CMAKE_BUILD_TYPE)
@@ -321,7 +415,7 @@ file(GLOB_RECURSE THOR_SOURCES
 add_library(Thor SHARED ${THOR_SOURCES})
 set_target_properties(Thor PROPERTIES
         CXX_STANDARD 20
-        CUDA_STANDARD 17
+        CUDA_STANDARD ${THOR_CUDA_CXX_STANDARD}
         BUILD_RPATH "\$ORIGIN"
         INSTALL_RPATH "\$ORIGIN"
 )
@@ -352,7 +446,7 @@ thor_apply_linker_settings(Thor)
 find_package(OpenMP REQUIRED)
 target_link_libraries(Thor PRIVATE OpenMP::OpenMP_CXX)
 
-find_package(CUDAToolkit REQUIRED)
+find_package(CUDAToolkit ${THOR_MIN_CUDA_TOOLKIT_VERSION} REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 # Main CUDA headers directory for things like cuda.h.
@@ -524,13 +618,28 @@ target_compile_options(Thor PRIVATE
 target_compile_definitions(Thor PUBLIC
         $<$<CONFIG:Release>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64>
         $<$<CONFIG:RelWithDebInfo>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64>
-        $<$<CONFIG:Debug>:THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64 _GLIBCXX_DEBUG>
+        $<$<CONFIG:Debug>:THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64> # _GLIBCXX_DEBUG
 )
 
 # CUDA-specific extra flags
-target_compile_options(Thor PRIVATE
+set(_thor_cuda_compile_options
         $<$<COMPILE_LANGUAGE:CUDA>:--Werror all-warnings>
 )
+
+if (THOR_CUDA_COMPILEIQ_ACF)
+    cmake_path(ABSOLUTE_PATH THOR_CUDA_COMPILEIQ_ACF NORMALIZE)
+    if (NOT EXISTS "${THOR_CUDA_COMPILEIQ_ACF}")
+        message(FATAL_ERROR "THOR_CUDA_COMPILEIQ_ACF does not exist: ${THOR_CUDA_COMPILEIQ_ACF}")
+    endif ()
+    message(STATUS "Thor: applying CompileIQ ACF to AOT CUDA compilation: ${THOR_CUDA_COMPILEIQ_ACF}")
+    list(APPEND _thor_cuda_compile_options
+            $<$<COMPILE_LANGUAGE:CUDA>:--apply-controls=${THOR_CUDA_COMPILEIQ_ACF}>
+    )
+else ()
+    message(STATUS "Thor: CompileIQ ACF not configured; pass -DTHOR_CUDA_COMPILEIQ_ACF=/path/to/file.acf after tuning to enable it for AOT CUDA sources")
+endif ()
+
+target_compile_options(Thor PRIVATE ${_thor_cuda_compile_options})
 
 option(THOR_ENABLE_SANITIZERS "Enable ASan/UBSan in Debug builds" OFF)
 if (THOR_ENABLE_SANITIZERS)
