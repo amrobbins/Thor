@@ -20,15 +20,15 @@ authors = [
 dependencies = [
     "numpy>=2.3.4",
     "ml_dtypes>=0.5.4",
-    "nvidia-cuda-runtime>=13,<14",
-    "nvidia-cuda-nvrtc>=13,<14",
-    "nvidia-cublas>=13,<14",
-    "nvidia-nvjitlink>=13,<14",
+    "nvidia-cuda-runtime>=13.3.29,<14",
+    "nvidia-cuda-nvrtc>=13.3.33,<14",
+    "nvidia-cublas>=13.5.1.27,<14",
+    "nvidia-nvjitlink>=13.3.33,<14",
     "nvidia-cudnn-cu13>=9.22,<10",
-    "nvidia-cusparse>=12,<13",
-    "nvidia-cusolver>=12,<13",
+    "nvidia-cusparse>=12.8.1.7,<13",
+    "nvidia-cusolver>=12.2.2.18,<13",
     "nvidia-cudnn-frontend>=1.23.0, <2",
-    "nvidia-cuda-cccl>=13,<14"
+    "nvidia-cuda-cccl>=13.3.3.3.1,<14"
 ]
 readme = { file = "README.md", content-type = "text/markdown" }
 
@@ -54,6 +54,9 @@ dev = [
     "wheel",
     "isort",
     "yapf>=0.43.0,<0.44",
+]
+compileiq = [
+    "compileiq>=1.0.0",
 ]
 
 [project.urls]

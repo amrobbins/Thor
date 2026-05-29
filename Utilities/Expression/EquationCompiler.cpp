@@ -1384,7 +1384,7 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
     for (const string& include_dir : cuda_include_dirs)
         cuda_include_paths.emplace_back(std::string("--include-path=") + include_dir);
 
-    vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++17", "-fmad=true"};
+    vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++20", "-fmad=true"};
     for (const string& include_path : cuda_include_paths)
         opts.push_back(include_path.c_str());
     if (sig.use_fast_math)

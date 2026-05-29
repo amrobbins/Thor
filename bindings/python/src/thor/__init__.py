@@ -69,11 +69,19 @@ def _preload_cuda_user_space_libs() -> None:
         "libcublasLt.so.13",
         "libcusolver.so.12",
         "libcusparse.so.12",
-        "libnvrtc-builtins.so.13.2",
         "libcudnn.so.9",
+    ]
+    lib_globs = [
+        "libnvrtc-builtins.so.13.*",
     ]
 
     rtld_global = getattr(os, "RTLD_GLOBAL", 0)
+
+    def preload(path: Path) -> None:
+        try:
+            ctypes.CDLL(str(path), mode=rtld_global)
+        except OSError:
+            pass
 
     for lib_dir in lib_dirs:
         if not lib_dir.is_dir():
@@ -81,10 +89,10 @@ def _preload_cuda_user_space_libs() -> None:
         for lib in libs:
             p = lib_dir / lib
             if p.exists():
-                try:
-                    ctypes.CDLL(str(p), mode=rtld_global)
-                except OSError:
-                    pass
+                preload(p)
+        for pattern in lib_globs:
+            for p in sorted(lib_dir.glob(pattern)):
+                preload(p)
 
 
 def _configure_cudnn_frontend_include_dir() -> None:
