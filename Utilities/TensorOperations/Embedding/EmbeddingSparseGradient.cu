@@ -793,8 +793,12 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType,
         ss << "  const unsigned long long count = static_cast<unsigned long long>(runCounts[row]);\n";
         ss << "  const unsigned long long firstToken = static_cast<unsigned long long>(sortedTokenIds[begin]);\n";
         ss << "  const unsigned int dimBase = globalVectorIndex * dimsPerThread;\n";
-        ss << "  const unsigned int vectorValidLanes = (dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : (embeddingDim - "
-              "dimBase);\n";
+        if (embeddingDim % 4ULL == 0ULL) {
+            ss << "  constexpr unsigned int vectorValidLanes = dimsPerThread;\n";
+        } else {
+            ss << "  const unsigned int vectorValidLanes = (dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : (embeddingDim - "
+                  "dimBase);\n";
+        }
 
         auto emitLoad = [&](const std::string& tokenExpr, const std::string& valueName) {
             if (embeddingDim % 4ULL != 0ULL) {
@@ -956,8 +960,12 @@ std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
     ss << "  if (bucketRow >= static_cast<unsigned long long>(numRunRows[0])) return;\n";
     ss << "  const bool validVector = globalVectorIndex < numVectors;\n";
     ss << "  const unsigned int dimBase = globalVectorIndex * dimsPerThread;\n";
-    ss << "  const unsigned int vectorValidLanes = validVector ? ((dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : "
-          "(embeddingDim - dimBase)) : 0U;\n";
+    if (embeddingDim % 4ULL == 0ULL) {
+        ss << "  const unsigned int vectorValidLanes = validVector ? dimsPerThread : 0U;\n";
+    } else {
+        ss << "  const unsigned int vectorValidLanes = validVector ? ((dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : "
+              "(embeddingDim - dimBase)) : 0U;\n";
+    }
     ss << "  const unsigned long long row = static_cast<unsigned long long>(runRowIndices[bucketRow]);\n";
     ss << "  const unsigned long long begin = static_cast<unsigned long long>(runOffsets[row]);\n";
     ss << "  const unsigned long long count = static_cast<unsigned long long>(runCounts[row]);\n";
@@ -1080,8 +1088,12 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(
     ss << "  if (partialIndex >= static_cast<unsigned long long>(numUltraHighPartials[0])) return;\n";
     ss << "  const bool validVector = globalVectorIndex < numVectors;\n";
     ss << "  const unsigned int dimBase = globalVectorIndex * dimsPerThread;\n";
-    ss << "  const unsigned int vectorValidLanes = validVector ? ((dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : "
-          "(embeddingDim - dimBase)) : 0U;\n";
+    if (embeddingDim % 4ULL == 0ULL) {
+        ss << "  const unsigned int vectorValidLanes = validVector ? dimsPerThread : 0U;\n";
+    } else {
+        ss << "  const unsigned int vectorValidLanes = validVector ? ((dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : "
+              "(embeddingDim - dimBase)) : 0U;\n";
+    }
     ss << "  const unsigned long long row = static_cast<unsigned long long>(partialRunRows[partialIndex]);\n";
     ss << "  const unsigned long long tokenOffset = static_cast<unsigned long long>(partialTokenOffsets[partialIndex]);\n";
     ss << "  const unsigned long long begin = static_cast<unsigned long long>(runOffsets[row]) + tokenOffset;\n";
@@ -1201,8 +1213,12 @@ std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType
     ss << "  if (bucketRow >= static_cast<unsigned long long>(numRunRows[0])) return;\n";
     ss << "  const bool validVector = globalVectorIndex < numVectors;\n";
     ss << "  const unsigned int dimBase = globalVectorIndex * dimsPerThread;\n";
-    ss << "  const unsigned int vectorValidLanes = validVector ? ((dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : "
-          "(embeddingDim - dimBase)) : 0U;\n";
+    if (embeddingDim % 4ULL == 0ULL) {
+        ss << "  const unsigned int vectorValidLanes = validVector ? dimsPerThread : 0U;\n";
+    } else {
+        ss << "  const unsigned int vectorValidLanes = validVector ? ((dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : "
+              "(embeddingDim - dimBase)) : 0U;\n";
+    }
     ss << "  const unsigned long long row = static_cast<unsigned long long>(runRowIndices[bucketRow]);\n";
     ss << "  const unsigned long long partialBegin = static_cast<unsigned long long>(ultraHighRunPartialOffsets[bucketRow]);\n";
     ss << "  const unsigned long long partialCount = static_cast<unsigned long long>(ultraHighRunPartialCounts[bucketRow]);\n";
