@@ -951,7 +951,8 @@ SparseRowUpdateFusionSource emitVector4SparseRowUpdateFusionSource(
     const PhysicalOutputs& outputs,
     const std::vector<SparseRowUpdatePlan::RuntimeInputSlot>& inputSlots,
     const std::vector<SparseRowUpdatePlan::RuntimeOutputSlot>& outputSlots,
-    const std::unordered_map<std::string, std::string>& localDenseLogicalInputExpressions) {
+    const std::unordered_map<std::string, std::string>& localDenseLogicalInputExpressions,
+    bool fullVectorRows) {
     SparseRowUpdateFusionSource source;
     source.helperSource = emitSparseRowUpdateFusionHelperSource();
     source.outputSlots = outputSlots;
@@ -1013,7 +1014,9 @@ SparseRowUpdateFusionSource emitVector4SparseRowUpdateFusionSource(
                 }
                 const std::string offset = slot.tensorKind == SparseRowUpdateTensorKind::IndexedRows ? "sru_indexed_offset" : "sru_logical_offset";
                 body << "  const float4 " << ref(nodeIdx) << " = "
-                     << maskedVectorLoadExpr("sru_in" + std::to_string(node.input_slot), offset) << ";\n";
+                     << (fullVectorRows ? vectorLoadExpr("sru_in" + std::to_string(node.input_slot), offset)
+                                        : maskedVectorLoadExpr("sru_in" + std::to_string(node.input_slot), offset))
+                     << ";\n";
                 break;
             }
             case ExprOp::RUNTIME_SCALAR: {
@@ -1053,7 +1056,10 @@ SparseRowUpdateFusionSource emitVector4SparseRowUpdateFusionSource(
         if (out.node_idx >= outputs.expr->nodes.size()) {
             throw std::runtime_error("Sparse row update fusion source output node index is out of range.");
         }
-        body << "  " << maskedVectorOutputStoreStmt("sru_out" + std::to_string(outputIdx), "sru_indexed_offset", ref(out.node_idx)) << "\n";
+        body << "  "
+             << (fullVectorRows ? vectorOutputStoreStmt("sru_out" + std::to_string(outputIdx), "sru_indexed_offset", ref(out.node_idx))
+                                : maskedVectorOutputStoreStmt("sru_out" + std::to_string(outputIdx), "sru_indexed_offset", ref(out.node_idx)))
+             << "\n";
     }
     source.bodySource = body.str();
     return source;
@@ -1114,10 +1120,12 @@ SparseRowUpdateFusionSource SparseRowUpdatePlan::emitFusionSource(
                                                                        inputs,
                                                                        indexedOutputs,
                                                                        localDenseLogicalInputExpressions);
+    const bool fullVectorRows = (build.embeddingDim % 4ULL) == 0ULL;
     return emitVector4SparseRowUpdateFusionSource(build.outputs,
                                                   build.inputSlots,
                                                   build.outputSlots,
-                                                  localDenseLogicalInputExpressions);
+                                                  localDenseLogicalInputExpressions,
+                                                  fullVectorRows);
 }
 
 std::unique_ptr<SparseRowUpdatePlan> SparseRowUpdatePlan::compile(
