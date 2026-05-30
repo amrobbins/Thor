@@ -1330,6 +1330,15 @@ struct PreparedEmbeddingSparseGradient {
     Tensor numHighRunRows;
     Tensor numUltraHighRunRows;
     Tensor numUltraHighPartials;
+    Tensor twoStageLowRunRowsScratch;
+    Tensor twoStageHighRunRowsScratch;
+    Tensor twoStageUltraHighRunRowsScratch;
+    Tensor twoStageUltraHighRunPartialCountsScratch;
+    Tensor twoStageUltraHighRunPartialOffsetsScratch;
+    Tensor twoStageLowRunRowCounts;
+    Tensor twoStageHighRunRowCounts;
+    Tensor twoStageUltraHighRunRowCounts;
+    Tensor twoStageUltraHighPartialCounts;
     Tensor sortTempStorage;
     Tensor rleTempStorage;
     Tensor scanTempStorage;
@@ -1594,6 +1603,19 @@ void allocateTypedPreparedBuffers(PreparedEmbeddingSparseGradient& prepared,
     prepared.numHighRunRows = Tensor(placement, TensorDescriptor(DataType::UINT32, {1}));
     prepared.numUltraHighRunRows = Tensor(placement, TensorDescriptor(DataType::UINT32, {1}));
     prepared.numUltraHighPartials = Tensor(placement, TensorDescriptor(DataType::UINT32, {1}));
+
+    if (useTwoStageEmbeddingSparseGradientFinalize(numTokens)) {
+        const uint64_t stageBlocks = twoStageEmbeddingSparseGradientFinalizeBlockCount(numTokens);
+        prepared.twoStageLowRunRowsScratch = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
+        prepared.twoStageHighRunRowsScratch = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
+        prepared.twoStageUltraHighRunRowsScratch = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
+        prepared.twoStageUltraHighRunPartialCountsScratch = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
+        prepared.twoStageUltraHighRunPartialOffsetsScratch = Tensor(placement, TensorDescriptor(DataType::UINT32, {numTokens}));
+        prepared.twoStageLowRunRowCounts = Tensor(placement, TensorDescriptor(DataType::UINT32, {stageBlocks}));
+        prepared.twoStageHighRunRowCounts = Tensor(placement, TensorDescriptor(DataType::UINT32, {stageBlocks}));
+        prepared.twoStageUltraHighRunRowCounts = Tensor(placement, TensorDescriptor(DataType::UINT32, {stageBlocks}));
+        prepared.twoStageUltraHighPartialCounts = Tensor(placement, TensorDescriptor(DataType::UINT32, {stageBlocks}));
+    }
 
     prepared.sortTempBytes = querySortTempBytes(prepared.rowKeys.getMemPtr<RowT>(),
                                                 prepared.sortedRowKeys.getMemPtr<RowT>(),
@@ -2284,6 +2306,26 @@ void launchFinalizeRows(PreparedEmbeddingSparseGradient& prepared,
                         SparseRowGradient& outputGradient,
                         Stream stream,
                         OptionalReduceGridUpdate reduceGridUpdate = {}) {
+    const bool useTwoStageFinalize = useTwoStageEmbeddingSparseGradientFinalize(prepared.numTokens);
+    uint32_t* twoStageLowRunRowsScratch =
+        useTwoStageFinalize ? prepared.twoStageLowRunRowsScratch.getMemPtr<uint32_t>() : nullptr;
+    uint32_t* twoStageHighRunRowsScratch =
+        useTwoStageFinalize ? prepared.twoStageHighRunRowsScratch.getMemPtr<uint32_t>() : nullptr;
+    uint32_t* twoStageUltraHighRunRowsScratch =
+        useTwoStageFinalize ? prepared.twoStageUltraHighRunRowsScratch.getMemPtr<uint32_t>() : nullptr;
+    uint32_t* twoStageUltraHighRunPartialCountsScratch =
+        useTwoStageFinalize ? prepared.twoStageUltraHighRunPartialCountsScratch.getMemPtr<uint32_t>() : nullptr;
+    uint32_t* twoStageUltraHighRunPartialOffsetsScratch =
+        useTwoStageFinalize ? prepared.twoStageUltraHighRunPartialOffsetsScratch.getMemPtr<uint32_t>() : nullptr;
+    uint32_t* twoStageLowRunRowCounts =
+        useTwoStageFinalize ? prepared.twoStageLowRunRowCounts.getMemPtr<uint32_t>() : nullptr;
+    uint32_t* twoStageHighRunRowCounts =
+        useTwoStageFinalize ? prepared.twoStageHighRunRowCounts.getMemPtr<uint32_t>() : nullptr;
+    uint32_t* twoStageUltraHighRunRowCounts =
+        useTwoStageFinalize ? prepared.twoStageUltraHighRunRowCounts.getMemPtr<uint32_t>() : nullptr;
+    uint32_t* twoStageUltraHighPartialCounts =
+        useTwoStageFinalize ? prepared.twoStageUltraHighPartialCounts.getMemPtr<uint32_t>() : nullptr;
+
     launchFinalizeAndBucketizeEmbeddingSparseGradientRows(outputGradient.rows.getMemPtr<void>(),
                                                           prepared.numRuns.getMemPtr<uint32_t>(),
                                                           outputGradient.numRows.getMemPtr<void>(),
@@ -2297,6 +2339,15 @@ void launchFinalizeRows(PreparedEmbeddingSparseGradient& prepared,
                                                           prepared.numLowRunRows.getMemPtr<uint32_t>(),
                                                           prepared.numHighRunRows.getMemPtr<uint32_t>(),
                                                           prepared.numUltraHighRunRows.getMemPtr<uint32_t>(),
+                                                          twoStageLowRunRowsScratch,
+                                                          twoStageHighRunRowsScratch,
+                                                          twoStageUltraHighRunRowsScratch,
+                                                          twoStageUltraHighRunPartialCountsScratch,
+                                                          twoStageUltraHighRunPartialOffsetsScratch,
+                                                          twoStageLowRunRowCounts,
+                                                          twoStageHighRunRowCounts,
+                                                          twoStageUltraHighRunRowCounts,
+                                                          twoStageUltraHighPartialCounts,
                                                           prepared.vocabularySize,
                                                           static_cast<uint32_t>(prepared.numTokens),
                                                           prepared.rowDataType,
