@@ -1,3 +1,7 @@
 #pragma once
 
-#include <cstdint>
+namespace ThorImplementation {
+
+void initializeEmbeddingKernelsSharedAttributes();
+
+}  // namespace ThorImplementation

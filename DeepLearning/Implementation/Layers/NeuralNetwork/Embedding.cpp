@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Embedding.h"
+#include "Utilities/TensorOperations/Embedding/ReduceStageController.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
@@ -112,6 +113,8 @@ void Embedding::compileImpl() {
 
     attachGradientUpdateStream();
 
+    initializeEmbeddingKernelsSharedAttributes();
+
     // Do not call PhysicalParameter::compileOptimizer here. The default optimizer path materializes a dense
     // weightsGradient tensor, which is exactly what Embedding must avoid for large vocabularies. Embedding instead
     // asks the optimizer for an optimizer-owned reduced sparse-gradient sink and sparse-row update plan.
@@ -130,7 +133,8 @@ void Embedding::compileImpl() {
 
                 if (numBackwardConnections != 1) {
                     throw std::invalid_argument(
-                        "Embedding sparse-gradient reduction currently supports exactly one backward connection. Multiple backward connections "
+                        "Embedding sparse-gradient reduction currently supports exactly one backward connection. Multiple backward "
+                        "connections "
                         "require merging reduced SparseRowGradient sinks before a single optimizer-state update, and silent per-connection "
                         "updates are intentionally forbidden.");
                 }
@@ -146,17 +150,18 @@ void Embedding::compileImpl() {
                 weightsSparseGradientProducerFusesOptimizerUpdate =
                     optimizer->supportsSparseRowUpdateFusion() && hasFixedSparseOptimizerFusionReducer(embeddingDim);
                 if (weightsSparseGradientProducerFusesOptimizerUpdate) {
-                    SparseRowOptimizerExpression updateExpression = optimizer->toSparseRowUpdateExpression(storage, weightsSparseGradient.value());
+                    SparseRowOptimizerExpression updateExpression =
+                        optimizer->toSparseRowUpdateExpression(storage, weightsSparseGradient.value());
                     weightsSparseGradientProducer = prepareEmbeddingSparseGradientWithSparseRowUpdate(aFeatureInput.value(),
-                                                                                                     aErrorInput.value(),
-                                                                                                     weightsSparseGradient.value(),
-                                                                                                     updateExpression.outputs,
-                                                                                                     updateExpression.inputs,
-                                                                                                     updateExpression.indexedOutputs,
-                                                                                                     paddingIndex);
+                                                                                                      aErrorInput.value(),
+                                                                                                      weightsSparseGradient.value(),
+                                                                                                      updateExpression.outputs,
+                                                                                                      updateExpression.inputs,
+                                                                                                      updateExpression.indexedOutputs,
+                                                                                                      paddingIndex);
                 } else {
-                    weightsSparseGradientProducer =
-                        prepareEmbeddingSparseGradient(aFeatureInput.value(), aErrorInput.value(), weightsSparseGradient.value(), paddingIndex);
+                    weightsSparseGradientProducer = prepareEmbeddingSparseGradient(
+                        aFeatureInput.value(), aErrorInput.value(), weightsSparseGradient.value(), paddingIndex);
                 }
             }
         }
@@ -192,7 +197,10 @@ void Embedding::computeFeatureOut(uint32_t connectionNumber) {
     THOR_THROW_IF_FALSE(featureOutputs[connectionNumber].has_value());
 
     Tensor weightsTensor = weights();
-    launchEmbeddingForward(featureInputs[connectionNumber].value(), weightsTensor, featureOutputs[connectionNumber].value(), paddingIndex,
+    launchEmbeddingForward(featureInputs[connectionNumber].value(),
+                           weightsTensor,
+                           featureOutputs[connectionNumber].value(),
+                           paddingIndex,
                            streams[connectionNumber]);
 }
 

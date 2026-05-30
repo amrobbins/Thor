@@ -31,7 +31,7 @@ namespace ThorImplementation {
 namespace {
 
 constexpr uint32_t THREADS_PER_BLOCK = 256;
-constexpr bool PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS = true;
+constexpr bool PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS = false;
 constexpr uint32_t WARP_SIZE_EMBEDDING = 32;
 constexpr uint32_t WARPS_PER_BLOCK = THREADS_PER_BLOCK / WARP_SIZE_EMBEDDING;
 constexpr uint32_t DEFAULT_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX = 16U;
