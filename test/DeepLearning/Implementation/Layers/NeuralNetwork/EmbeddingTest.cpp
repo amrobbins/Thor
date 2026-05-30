@@ -608,6 +608,98 @@ TEST(EmbeddingSparseBackwardTest, SparseGradientProducerBucketizesLowHighAndUltr
     expectAllClose(values, expected, 1e-5f, 1e-5f, "bucketized sparse gradient values");
 }
 
+TEST(EmbeddingSparseBackwardTest, SparseGradientProducerBucketizesMoreThanOneLowRunBufferHalf) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 1300;
+    constexpr uint64_t embeddingDim = 1;
+    std::vector<uint32_t> indices;
+    indices.reserve(vocabularySize);
+    for (uint32_t row = 0; row < vocabularySize; ++row) {
+        indices.push_back(row);
+    }
+    std::vector<float> upstream(indices.size() * embeddingDim, 1.0f);
+
+    Tensor cpuIndices = makeCpuUint32Tensor({indices.size()}, indices);
+    Tensor cpuUpstream = makeCpuFloatTensor(DataType::FP32, {indices.size(), embeddingDim}, upstream);
+    Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+    Tensor gpuUpstream = copyCpuToGpu(cpuUpstream, stream);
+
+    SparseRowGradient gradient = SparseRowGradient::allocate(gpuPlacement,
+                                                             /*capacity=*/vocabularySize,
+                                                             vocabularySize,
+                                                             embeddingDim,
+                                                             DataType::FP32,
+                                                             SparseRowGradient::chooseRowDataType(vocabularySize));
+    auto prepared = prepareEmbeddingSparseGradient(gpuIndices, gpuUpstream, gradient, std::nullopt);
+    launchPreparedEmbeddingSparseGradient(*prepared, gpuIndices, gpuUpstream, gradient, stream);
+    stream.synchronize();
+
+    const std::vector<uint64_t> numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+    ASSERT_EQ(numRows[0], vocabularySize);
+
+    std::vector<uint64_t> rows = copyGpuRowTensorToUint64Values(gradient.rows, stream);
+    rows.resize(numRows[0]);
+    ASSERT_EQ(rows.size(), vocabularySize);
+    for (uint64_t row = 0; row < vocabularySize; ++row) {
+        EXPECT_EQ(rows[row], row);
+    }
+
+    std::vector<float> values = copyGpuFloatTensorToValues(gradient.values, stream);
+    values.resize(vocabularySize * embeddingDim);
+    for (float value : values) {
+        EXPECT_FLOAT_EQ(value, 1.0f);
+    }
+}
+
+TEST(EmbeddingSparseBackwardTest, SparseGradientProducerBucketizesMoreThanOneHighRunBufferHalf) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 1100;
+    constexpr uint64_t embeddingDim = 1;
+    constexpr uint32_t repeatsPerRow = 17;
+    std::vector<uint32_t> indices;
+    indices.reserve(vocabularySize * repeatsPerRow);
+    for (uint32_t row = 0; row < vocabularySize; ++row) {
+        for (uint32_t i = 0; i < repeatsPerRow; ++i) {
+            indices.push_back(row);
+        }
+    }
+    std::vector<float> upstream(indices.size() * embeddingDim, 1.0f);
+
+    Tensor cpuIndices = makeCpuUint32Tensor({indices.size()}, indices);
+    Tensor cpuUpstream = makeCpuFloatTensor(DataType::FP32, {indices.size(), embeddingDim}, upstream);
+    Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+    Tensor gpuUpstream = copyCpuToGpu(cpuUpstream, stream);
+
+    SparseRowGradient gradient = SparseRowGradient::allocate(gpuPlacement,
+                                                             /*capacity=*/vocabularySize,
+                                                             vocabularySize,
+                                                             embeddingDim,
+                                                             DataType::FP32,
+                                                             SparseRowGradient::chooseRowDataType(vocabularySize));
+    auto prepared = prepareEmbeddingSparseGradient(gpuIndices, gpuUpstream, gradient, std::nullopt);
+    launchPreparedEmbeddingSparseGradient(*prepared, gpuIndices, gpuUpstream, gradient, stream);
+    stream.synchronize();
+
+    const std::vector<uint64_t> numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+    ASSERT_EQ(numRows[0], vocabularySize);
+
+    std::vector<uint64_t> rows = copyGpuRowTensorToUint64Values(gradient.rows, stream);
+    rows.resize(numRows[0]);
+    ASSERT_EQ(rows.size(), vocabularySize);
+    for (uint64_t row = 0; row < vocabularySize; ++row) {
+        EXPECT_EQ(rows[row], row);
+    }
+
+    std::vector<float> values = copyGpuFloatTensorToValues(gradient.values, stream);
+    values.resize(vocabularySize * embeddingDim);
+    for (float value : values) {
+        EXPECT_FLOAT_EQ(value, static_cast<float>(repeatsPerRow));
+    }
+}
+
+
 TEST(EmbeddingSparseBackwardTest, PreparedSparseGradientProducerReadsCurrentIndicesAcrossRelaunches) {
     Stream stream(gpuPlacement);
 

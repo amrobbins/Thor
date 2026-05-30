@@ -5,6 +5,7 @@
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradientCudaCompile.h"
+#include "Utilities/TensorOperations/Embedding/ReduceStageController.h"
 
 #include <cuda.h>
 #include <cuda_bf16.h>
@@ -292,153 +293,6 @@ __global__ void materializeEmbeddingSparseGradientSortPairsKernel(const IndexT* 
     const bool valid = row < vocabularySize && (!hasPaddingIndex || row != paddingIndex);
     rowKeys[token] = static_cast<RowT>(valid ? row : vocabularySize);
     tokenIds[token] = static_cast<uint32_t>(token);
-}
-
-__device__ __forceinline__ cudaGraphDeviceNode_t loadEmbeddingSparseGradientTargetNode(const cudaGraphDeviceNode_t* targetNode) {
-    if (targetNode == nullptr) {
-        asm("trap;");
-    }
-    cudaGraphDeviceNode_t node = *targetNode;
-    if (node == nullptr) {
-        asm("trap;");
-    }
-    return node;
-}
-
-__device__ __forceinline__ uint32_t checkedEmbeddingSparseGradientGridDim(uint64_t value, uint32_t minGrid, uint32_t maxGrid) {
-    if (minGrid == 0U || maxGrid == 0U || minGrid > maxGrid) {
-        asm("trap;");
-    }
-    uint64_t clamped = value;
-    if (clamped < static_cast<uint64_t>(minGrid)) {
-        clamped = static_cast<uint64_t>(minGrid);
-    }
-    if (clamped > static_cast<uint64_t>(maxGrid) || clamped > 0xffffffffULL) {
-        asm("trap;");
-    }
-    return static_cast<uint32_t>(clamped);
-}
-
-struct EmbeddingSparseGradientReduceGridUpdateConfig {
-    uint32_t reduceRowsPerGridX = 1U;
-    uint32_t reduceGridDimY = 1U;
-    uint32_t minReduceGridDimX = 1U;
-    uint32_t maxReduceGridDimX = 1U;
-    uint32_t maxReduceGridDimY = 1U;
-};
-
-__device__ __forceinline__ void updateEmbeddingSparseGradientBucketReduceGrid(const cudaGraphDeviceNode_t* reduceNode,
-                                                                              uint32_t numRows,
-                                                                              EmbeddingSparseGradientReduceGridUpdateConfig config) {
-    if (reduceNode == nullptr) {
-        return;
-    }
-    if (config.reduceRowsPerGridX == 0U || config.reduceGridDimY == 0U || config.reduceGridDimY > config.maxReduceGridDimY) {
-        asm("trap;");
-    }
-    const uint64_t packedGridX = (static_cast<uint64_t>(numRows) + config.reduceRowsPerGridX - 1ULL) / config.reduceRowsPerGridX;
-    const uint32_t gridX = checkedEmbeddingSparseGradientGridDim(packedGridX, config.minReduceGridDimX, config.maxReduceGridDimX);
-    cudaError_t status =
-        cudaGraphKernelNodeSetGridDim(loadEmbeddingSparseGradientTargetNode(reduceNode), dim3(gridX, config.reduceGridDimY, 1U));
-    if (status != cudaSuccess) {
-        asm("trap;");
-    }
-}
-
-// This needs to be done by hand and fixed.
-//  scan with buffering and coalescing
-// This will be a single block running all by itself, so need to maximize bandwidth.
-//      read 4 per thread. have a shared view of 4 lines as uint4[32]. After reading all write to shared. Then will process one at a time.
-// have 3 buffer offsets and 3 double length buffers, shared mem banks are 32 bits. What when I need to write 3 sequential on one thread?
-//    optimize by not writing out lowrunrows, just high and ultra, and not_low_run_rows
-//    well, output a sequence of offsets for high run counts, a sequence of offsets for ultra
-//    then iterate over the offsets, one per thread in the high/ultra reducer
-//    but how to handle the low reducer? Low receives reads 1 not-mine flag at every runOffset, not-mine threads are skipped.
-//      I could pack them as bit-flags, but then I need to launch 1 low thread group for every token, some will just do nothing.
-// load 4 elements
-// figure out the bucket and then scan to see where to fill in shared buffer
-// fill in
-// When to write out? When previous iteration finished a buffer line, write it out using all threads
-// update buffer base: bottom vs top
-// when fully done, flush all non-empty buffers
-template <typename RowT>
-__global__ void finalizeAndBucketizeEmbeddingSparseGradientRowsKernel(
-    const RowT* __restrict__ outputRows,
-    const uint32_t* __restrict__ numRuns,
-    RowT* __restrict__ outputNumRows,
-    const uint32_t* __restrict__ runCounts,
-    uint32_t* __restrict__ lowRunRows,
-    uint32_t* __restrict__ highRunRows,
-    uint32_t* __restrict__ ultraHighRunRows,
-    uint32_t* __restrict__ ultraHighRunPartialCounts,
-    uint32_t* __restrict__ ultraHighRunPartialOffsets,
-    uint32_t* __restrict__ numUltraHighPartials,
-    uint32_t* __restrict__ numLowRunRows,
-    uint32_t* __restrict__ numHighRunRows,
-    uint32_t* __restrict__ numUltraHighRunRows,
-    uint64_t vocabularySize,
-    uint32_t lowRunMax,
-    uint32_t ultraHighRunMin,
-    uint32_t ultraHighTokensPerPartial,
-    const cudaGraphDeviceNode_t* lowReduceNode,
-    const cudaGraphDeviceNode_t* highReduceNode,
-    const cudaGraphDeviceNode_t* ultraHighPartialReduceNode,
-    const cudaGraphDeviceNode_t* ultraHighReduceNode,
-    EmbeddingSparseGradientReduceGridUpdateConfig lowReduceGridConfig,
-    EmbeddingSparseGradientReduceGridUpdateConfig highReduceGridConfig,
-    EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridConfig,
-    EmbeddingSparseGradientReduceGridUpdateConfig ultraHighReduceGridConfig) {
-    __shared__ uint32_t validRunsShared;
-    __shared__ uint32_t lowCountShared;
-    __shared__ uint32_t highCountShared;
-    __shared__ uint32_t ultraHighCountShared;
-    __shared__ uint32_t ultraHighPartialCountShared;
-
-    if (threadIdx.x == 0U) {
-        uint32_t validRuns = numRuns[0];
-        if (validRuns != 0U && static_cast<uint64_t>(outputRows[validRuns - 1U]) == vocabularySize) {
-            validRuns -= 1U;
-        }
-        outputNumRows[0] = static_cast<RowT>(validRuns);
-        lowCountShared = 0U;
-        highCountShared = 0U;
-        ultraHighCountShared = 0U;
-        ultraHighPartialCountShared = 0U;
-        validRunsShared = validRuns;
-    }
-    __syncthreads();
-
-    const uint32_t validRuns = validRunsShared;
-    for (uint32_t run = threadIdx.x; run < validRuns; run += blockDim.x) {
-        const uint32_t count = runCounts[run];
-        if (count <= lowRunMax) {
-            const uint32_t out = atomicAdd(&lowCountShared, 1U);
-            lowRunRows[out] = run;
-        } else if (count < ultraHighRunMin) {
-            const uint32_t out = atomicAdd(&highCountShared, 1U);
-            highRunRows[out] = run;
-        } else {
-            const uint32_t out = atomicAdd(&ultraHighCountShared, 1U);
-            ultraHighRunRows[out] = run;
-            const uint32_t partialCount = (count + ultraHighTokensPerPartial - 1U) / ultraHighTokensPerPartial;
-            ultraHighRunPartialCounts[out] = partialCount;
-            ultraHighRunPartialOffsets[out] = atomicAdd(&ultraHighPartialCountShared, partialCount);
-        }
-    }
-    __syncthreads();
-
-    if (threadIdx.x == 0U) {
-        numLowRunRows[0] = lowCountShared;
-        numHighRunRows[0] = highCountShared;
-        numUltraHighRunRows[0] = ultraHighCountShared;
-        numUltraHighPartials[0] = ultraHighPartialCountShared;
-
-        updateEmbeddingSparseGradientBucketReduceGrid(lowReduceNode, lowCountShared, lowReduceGridConfig);
-        updateEmbeddingSparseGradientBucketReduceGrid(highReduceNode, highCountShared, highReduceGridConfig);
-        updateEmbeddingSparseGradientBucketReduceGrid(
-            ultraHighPartialReduceNode, ultraHighPartialCountShared, ultraHighPartialReduceGridConfig);
-        updateEmbeddingSparseGradientBucketReduceGrid(ultraHighReduceNode, ultraHighCountShared, ultraHighReduceGridConfig);
-    }
 }
 
 template <uint32_t EmbeddingDim>
@@ -2291,25 +2145,13 @@ struct OptionalReduceGridUpdate {
     EmbeddingSparseGradientReduceGridUpdateConfig ultraHighReduceGridConfig;
 };
 
-template <typename RowT>
-void launchFinalizeRowsTyped(PreparedEmbeddingSparseGradient& prepared,
-                             SparseRowGradient& outputGradient,
-                             Stream stream,
-                             OptionalReduceGridUpdate reduceGridUpdate) {
-    const cudaGraphDeviceNode_t* lowReduceNodePtr =
-        reduceGridUpdate.lowReduceNodeHandle != nullptr ? reduceGridUpdate.lowReduceNodeHandle->devicePtr() : nullptr;
-    const cudaGraphDeviceNode_t* highReduceNodePtr =
-        reduceGridUpdate.highReduceNodeHandle != nullptr ? reduceGridUpdate.highReduceNodeHandle->devicePtr() : nullptr;
-    const cudaGraphDeviceNode_t* ultraHighPartialReduceNodePtr = reduceGridUpdate.ultraHighPartialReduceNodeHandle != nullptr
-                                                                     ? reduceGridUpdate.ultraHighPartialReduceNodeHandle->devicePtr()
-                                                                     : nullptr;
-    const cudaGraphDeviceNode_t* ultraHighReduceNodePtr =
-        reduceGridUpdate.ultraHighReduceNodeHandle != nullptr ? reduceGridUpdate.ultraHighReduceNodeHandle->devicePtr() : nullptr;
-
-    finalizeAndBucketizeEmbeddingSparseGradientRowsKernel<RowT>
-        <<<1, THREADS_PER_BLOCK, 0, stream.getStream()>>>(outputGradient.rows.getMemPtr<RowT>(),
+void launchFinalizeRows(PreparedEmbeddingSparseGradient& prepared,
+                        SparseRowGradient& outputGradient,
+                        Stream stream,
+                        OptionalReduceGridUpdate reduceGridUpdate = {}) {
+    launchFinalizeAndBucketizeEmbeddingSparseGradientRows(outputGradient.rows.getMemPtr<void>(),
                                                           prepared.numRuns.getMemPtr<uint32_t>(),
-                                                          outputGradient.numRows.getMemPtr<RowT>(),
+                                                          outputGradient.numRows.getMemPtr<void>(),
                                                           prepared.runCounts.getMemPtr<uint32_t>(),
                                                           prepared.lowRunRows.getMemPtr<uint32_t>(),
                                                           prepared.highRunRows.getMemPtr<uint32_t>(),
@@ -2321,37 +2163,20 @@ void launchFinalizeRowsTyped(PreparedEmbeddingSparseGradient& prepared,
                                                           prepared.numHighRunRows.getMemPtr<uint32_t>(),
                                                           prepared.numUltraHighRunRows.getMemPtr<uint32_t>(),
                                                           prepared.vocabularySize,
+                                                          static_cast<uint32_t>(prepared.numTokens),
+                                                          prepared.rowDataType,
                                                           prepared.runBucketConfig.lowRunMax,
                                                           prepared.runBucketConfig.ultraHighRunMin,
                                                           prepared.runBucketConfig.ultraHighTokensPerPartial,
-                                                          lowReduceNodePtr,
-                                                          highReduceNodePtr,
-                                                          ultraHighPartialReduceNodePtr,
-                                                          ultraHighReduceNodePtr,
+                                                          reduceGridUpdate.lowReduceNodeHandle,
+                                                          reduceGridUpdate.highReduceNodeHandle,
+                                                          reduceGridUpdate.ultraHighPartialReduceNodeHandle,
+                                                          reduceGridUpdate.ultraHighReduceNodeHandle,
                                                           reduceGridUpdate.lowReduceGridConfig,
                                                           reduceGridUpdate.highReduceGridConfig,
                                                           reduceGridUpdate.ultraHighPartialReduceGridConfig,
-                                                          reduceGridUpdate.ultraHighReduceGridConfig);
-    CUDA_CHECK(cudaPeekAtLastError());
-}
-
-void launchFinalizeRows(PreparedEmbeddingSparseGradient& prepared,
-                        SparseRowGradient& outputGradient,
-                        Stream stream,
-                        OptionalReduceGridUpdate reduceGridUpdate = {}) {
-    switch (prepared.rowDataType) {
-        case DataType::UINT16:
-            launchFinalizeRowsTyped<uint16_t>(prepared, outputGradient, stream, reduceGridUpdate);
-            break;
-        case DataType::UINT32:
-            launchFinalizeRowsTyped<uint32_t>(prepared, outputGradient, stream, reduceGridUpdate);
-            break;
-        case DataType::UINT64:
-            launchFinalizeRowsTyped<uint64_t>(prepared, outputGradient, stream, reduceGridUpdate);
-            break;
-        default:
-            throw std::runtime_error("Prepared Embedding sparse-gradient producer has unsupported row dtype.");
-    }
+                                                          reduceGridUpdate.ultraHighReduceGridConfig,
+                                                          stream);
 }
 
 template <typename RowT>
