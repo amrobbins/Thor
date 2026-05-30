@@ -589,6 +589,30 @@ uint32_t ultraHighPartialReduceGridDimYForEmbeddingSparseGradient(uint64_t embed
     return reduceGridDimYForEmbeddingSparseGradient(embeddingDim);
 }
 
+uint64_t maxRowsWithAtLeastTokensPerRun(uint64_t capacity, uint64_t numTokens, uint32_t minTokensPerRun) {
+    if (minTokensPerRun == 0U) {
+        throw std::invalid_argument("Embedding sparse-gradient bucket max-row estimate requires min_tokens_per_run > 0.");
+    }
+    const uint64_t rows = numTokens / static_cast<uint64_t>(minTokensPerRun);
+    return std::max<uint64_t>(1ULL, std::min<uint64_t>(capacity, rows));
+}
+
+uint64_t maxHighRunRowsForEmbeddingSparseGradient(uint64_t capacity,
+                                                  uint64_t numTokens,
+                                                  const EmbeddingSparseGradientRunBucketConfig& config) {
+    // Every high-run row has at least lowRunMax + 1 contributing tokens. This is a tight, data-independent upper bound that
+    // keeps the non-graph/raw launch path from launching the high-run reducer over the full sparse-gradient capacity.
+    return maxRowsWithAtLeastTokensPerRun(capacity, numTokens, config.lowRunMax + 1U);
+}
+
+uint64_t maxUltraHighRunRowsForEmbeddingSparseGradient(uint64_t capacity,
+                                                       uint64_t numTokens,
+                                                       const EmbeddingSparseGradientRunBucketConfig& config) {
+    // Every ultra-high row has at least ultraHighRunMin contributing tokens. Graph execution is updated to the exact runtime
+    // row count by the finalizer; raw launches use this conservative upper bound instead of outputGradient.capacity.
+    return maxRowsWithAtLeastTokensPerRun(capacity, numTokens, config.ultraHighRunMin);
+}
+
 uint64_t maxUltraHighPartialsForEmbeddingSparseGradient(uint64_t numTokens, const EmbeddingSparseGradientRunBucketConfig& config) {
     const uint64_t byTokenChunks = (numTokens + config.ultraHighTokensPerPartial - 1ULL) / config.ultraHighTokensPerPartial;
     const uint64_t byUltraRows = (numTokens + config.ultraHighRunMin - 1ULL) / config.ultraHighRunMin;
@@ -1360,19 +1384,10 @@ __global__ void expandEmbeddingSparseGradientUltraHighPartialMetadataKernel(cons
                                                                             const uint32_t* __restrict__ ultraHighRunRows,
                                                                             const uint32_t* __restrict__ ultraHighRunPartialCounts,
                                                                             const uint32_t* __restrict__ ultraHighRunPartialOffsets,
-                                                                            uint32_t* __restrict__ numUltraHighPartials,
                                                                             uint32_t* __restrict__ ultraHighPartialRunRows,
                                                                             uint32_t* __restrict__ ultraHighPartialTokenOffsets,
                                                                             uint32_t ultraHighTokensPerPartial) {
     const uint32_t rows = numUltraHighRunRows[0];
-    if (blockIdx.x == 0U && threadIdx.x == 0U) {
-        uint32_t totalPartials = 0U;
-        if (rows != 0U) {
-            const uint32_t last = rows - 1U;
-            totalPartials = ultraHighRunPartialOffsets[last] + ultraHighRunPartialCounts[last];
-        }
-        numUltraHighPartials[0] = totalPartials;
-    }
 
     for (uint32_t bucketRow = blockIdx.x * blockDim.x + threadIdx.x; bucketRow < rows; bucketRow += blockDim.x * gridDim.x) {
         const uint32_t runRow = ultraHighRunRows[bucketRow];
@@ -2031,7 +2046,7 @@ void launchReduceValuesWithSparseRowUpdateForRunRows(PreparedEmbeddingSparseGrad
 void prepareUltraHighPartialMetadata(PreparedEmbeddingSparseGradient& prepared, Stream stream) {
     const uint32_t block = THREADS_PER_BLOCK;
     const uint64_t maxUltraRows =
-        (prepared.numTokens + prepared.runBucketConfig.ultraHighRunMin - 1ULL) / prepared.runBucketConfig.ultraHighRunMin;
+        maxUltraHighRunRowsForEmbeddingSparseGradient(prepared.numTokens, prepared.numTokens, prepared.runBucketConfig);
     const uint32_t grid =
         static_cast<uint32_t>(std::max<uint64_t>(1ULL, std::min<uint64_t>((maxUltraRows + block - 1ULL) / block, 4096ULL)));
     expandEmbeddingSparseGradientUltraHighPartialMetadataKernel<<<grid, block, 0, stream.getStream()>>>(
@@ -2039,7 +2054,6 @@ void prepareUltraHighPartialMetadata(PreparedEmbeddingSparseGradient& prepared, 
         prepared.ultraHighRunRows.getMemPtr<uint32_t>(),
         prepared.ultraHighRunPartialCounts.getMemPtr<uint32_t>(),
         prepared.ultraHighRunPartialOffsets.getMemPtr<uint32_t>(),
-        prepared.numUltraHighPartials.getMemPtr<uint32_t>(),
         prepared.ultraHighPartialRunRows.getMemPtr<uint32_t>(),
         prepared.ultraHighPartialTokenOffsets.getMemPtr<uint32_t>(),
         prepared.runBucketConfig.ultraHighTokensPerPartial);
@@ -2118,7 +2132,9 @@ void launchUltraHighFinalReduceKernel(PreparedEmbeddingSparseGradient& prepared,
     }
 
     const uint32_t blockThreads = ultraHighReduceBlockThreadsForEmbeddingSparseGradient(prepared.embeddingDim);
-    const uint32_t gridX = ultraHighFinalReduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim);
+    const uint64_t maxUltraRows =
+        maxUltraHighRunRowsForEmbeddingSparseGradient(outputGradient.capacity, prepared.numTokens, prepared.runBucketConfig);
+    const uint32_t gridX = ultraHighFinalReduceGridDimXForEmbeddingSparseGradient(maxUltraRows, prepared.embeddingDim);
     const uint32_t gridY = ultraHighFinalReduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim);
     CU_CHECK(cuLaunchKernel(prepared.ultraHighFinalReduceKernel, gridX, gridY, 1, blockThreads, 1, 1, 0, stream, args.data(), nullptr));
 }
@@ -2192,8 +2208,12 @@ void launchReduceValuesWithSparseRowUpdateForRunRows(PreparedEmbeddingSparseGrad
                                                   : reduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim);
     const uint32_t reduceBlockThreads = highRunBucket ? highRunReduceBlockThreadsForEmbeddingSparseGradient(prepared.embeddingDim)
                                                       : reduceBlockThreadsForEmbeddingSparseGradient(prepared.embeddingDim);
-    const uint32_t gridX = highRunBucket ? highRunReduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim)
-                                         : reduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim);
+    const uint64_t maxBucketRows = highRunBucket
+                                       ? maxHighRunRowsForEmbeddingSparseGradient(
+                                             outputGradient.capacity, prepared.numTokens, prepared.runBucketConfig)
+                                       : outputGradient.capacity;
+    const uint32_t gridX = highRunBucket ? highRunReduceGridDimXForEmbeddingSparseGradient(maxBucketRows, prepared.embeddingDim)
+                                         : reduceGridDimXForEmbeddingSparseGradient(maxBucketRows, prepared.embeddingDim);
     const dim3 grid(gridX, reduceGridDimY, 1U);
     const dim3 block(reduceBlockThreads, 1U, 1U);
 
@@ -2762,12 +2782,16 @@ void capturePreparedEmbeddingSparseGradientImpl(CudaGraphCaptureBuilder& builder
 
     const EmbeddingSparseGradientReduceGridUpdateConfig normalReduceGridConfig =
         reduceGridUpdateConfigForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim);
+    const uint64_t maxHighRows =
+        maxHighRunRowsForEmbeddingSparseGradient(outputGradient.capacity, prepared.numTokens, prepared.runBucketConfig);
     const EmbeddingSparseGradientReduceGridUpdateConfig highRunReduceGridConfig =
-        highRunReduceGridUpdateConfigForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim);
+        highRunReduceGridUpdateConfigForEmbeddingSparseGradient(maxHighRows, prepared.embeddingDim);
     const EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridConfig =
         ultraHighPartialReduceGridUpdateConfigForEmbeddingSparseGradient(prepared.maxUltraHighPartials, prepared.embeddingDim);
+    const uint64_t maxUltraRows =
+        maxUltraHighRunRowsForEmbeddingSparseGradient(outputGradient.capacity, prepared.numTokens, prepared.runBucketConfig);
     const EmbeddingSparseGradientReduceGridUpdateConfig ultraHighFinalReduceGridConfig =
-        ultraHighFinalReduceGridUpdateConfigForEmbeddingSparseGradient(outputGradient.capacity, prepared.embeddingDim);
+        ultraHighFinalReduceGridUpdateConfigForEmbeddingSparseGradient(maxUltraRows, prepared.embeddingDim);
     if (normalReduceGridConfig.reduceRowsPerGridX == 0 || normalReduceGridConfig.reduceGridDimY == 0 ||
         highRunReduceGridConfig.reduceRowsPerGridX == 0 || highRunReduceGridConfig.reduceGridDimY == 0 ||
         ultraHighPartialReduceGridConfig.reduceRowsPerGridX == 0 || ultraHighPartialReduceGridConfig.reduceGridDimY == 0 ||
