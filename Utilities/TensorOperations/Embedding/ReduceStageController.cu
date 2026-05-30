@@ -154,16 +154,6 @@ struct BucketAppendCounts {
     uint32_t ultraPartials;
 };
 
-__device__ __forceinline__ BucketAppendCounts blockAppendCounts(const uint32_t* __restrict__ warpBaseCountsLowShared,
-                                                                const uint32_t* __restrict__ warpBaseCountsHighShared,
-                                                                const uint32_t* __restrict__ warpBaseCountsUltraShared,
-                                                                const uint32_t* __restrict__ warpBaseCountsUltraPartialShared) {
-    return BucketAppendCounts{warpBaseCountsLowShared[FINALIZE_BUCKETIZE_WARPS],
-                              warpBaseCountsHighShared[FINALIZE_BUCKETIZE_WARPS],
-                              warpBaseCountsUltraShared[FINALIZE_BUCKETIZE_WARPS],
-                              warpBaseCountsUltraPartialShared[FINALIZE_BUCKETIZE_WARPS]};
-}
-
 template <typename RowT>
 __global__ void finalizeAndBucketizeEmbeddingSparseGradientRowsKernel(
     const RowT* __restrict__ outputRows,
@@ -355,10 +345,10 @@ __global__ void finalizeAndBucketizeEmbeddingSparseGradientRowsKernel(
             }
 
             if (tid == activeThreads - 1U) {
-                const BucketAppendCounts appendCounts = blockAppendCounts(warpBaseCountsLowShared,
-                                                                          warpBaseCountsHighShared,
-                                                                          warpBaseCountsUltraShared,
-                                                                          warpBaseCountsUltraPartialShared);
+                const BucketAppendCounts appendCounts{warpBaseCountsLowShared[FINALIZE_BUCKETIZE_WARPS],
+                                                      warpBaseCountsHighShared[FINALIZE_BUCKETIZE_WARPS],
+                                                      warpBaseCountsUltraShared[FINALIZE_BUCKETIZE_WARPS],
+                                                      warpBaseCountsUltraPartialShared[FINALIZE_BUCKETIZE_WARPS]};
                 const uint32_t lowTotalAfter = lowTotalBefore + appendCounts.low;
                 const uint32_t highTotalAfter = highTotalBefore + appendCounts.high;
                 const uint32_t ultraTotalAfter = ultraTotalBefore + appendCounts.ultra;
