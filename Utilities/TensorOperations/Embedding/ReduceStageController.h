@@ -8,6 +8,32 @@
 
 namespace ThorImplementation {
 
+
+#ifndef THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD
+#define THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD 65536ULL
+#endif
+
+#ifndef THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK
+#define THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK 4096ULL
+#endif
+
+constexpr uint64_t EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD =
+    THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD;
+constexpr uint64_t EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK =
+    THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK;
+static_assert(EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK != 0ULL,
+              "THOR_EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK must be non-zero.");
+
+inline bool useTwoStageEmbeddingSparseGradientFinalize(uint64_t maxPossibleRuns) {
+    return EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD != 0ULL &&
+           maxPossibleRuns >= EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUN_THRESHOLD;
+}
+
+inline uint64_t twoStageEmbeddingSparseGradientFinalizeBlockCount(uint64_t maxPossibleRuns) {
+    return (maxPossibleRuns + EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK - 1ULL) /
+           EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK;
+}
+
 struct EmbeddingSparseGradientReduceGridUpdateConfig {
     uint32_t reduceRowsPerGridX = 1U;
     uint32_t reduceGridDimY = 1U;
@@ -31,6 +57,15 @@ void launchFinalizeAndBucketizeEmbeddingSparseGradientRows(const void* outputRow
                                                            uint32_t* numLowRunRows,
                                                            uint32_t* numHighRunRows,
                                                            uint32_t* numUltraHighRunRows,
+                                                           uint32_t* twoStageLowRunRowsScratch,
+                                                           uint32_t* twoStageHighRunRowsScratch,
+                                                           uint32_t* twoStageUltraHighRunRowsScratch,
+                                                           uint32_t* twoStageUltraHighRunPartialCountsScratch,
+                                                           uint32_t* twoStageUltraHighRunPartialOffsetsScratch,
+                                                           uint32_t* twoStageLowRunRowCounts,
+                                                           uint32_t* twoStageHighRunRowCounts,
+                                                           uint32_t* twoStageUltraHighRunRowCounts,
+                                                           uint32_t* twoStageUltraHighPartialCounts,
                                                            uint64_t vocabularySize,
                                                            uint32_t maxPossibleRuns,
                                                            DataType rowDataType,

@@ -58,6 +58,17 @@ static_assert((FINALIZE_BUCKETIZE_BUFFER_WORDS & FINALIZE_BUCKETIZE_BUFFER_MASK)
 static_assert(sizeof(FinalizeBucketizeSharedState) == 5U * sizeof(uint32_t));
 static_assert(FINALIZE_BUCKETIZE_SHARED_STATE_WORDS % 4U == 0U);
 static_assert(FINALIZE_BUCKETIZE_SHARED_BYTES == 57908U);
+static_assert(EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK <= 0xffffffffULL,
+              "Two-stage embedding sparse-gradient finalize block size must fit in uint32_t.");
+
+constexpr uint32_t TWO_STAGE_FINALIZE_THREADS = 1024U;
+constexpr uint32_t TWO_STAGE_FINALIZE_WARPS = TWO_STAGE_FINALIZE_THREADS / 32U;
+constexpr uint32_t TWO_STAGE_FINALIZE_WARP_COUNT_WORDS = TWO_STAGE_FINALIZE_WARPS + 1U;
+constexpr uint32_t TWO_STAGE_FINALIZE_RUNS_PER_BLOCK =
+    static_cast<uint32_t>(EMBEDDING_SPARSE_GRADIENT_TWO_STAGE_FINALIZE_RUNS_PER_BLOCK);
+static_assert(TWO_STAGE_FINALIZE_THREADS == 1024U);
+static_assert(TWO_STAGE_FINALIZE_WARPS == 32U);
+static_assert(TWO_STAGE_FINALIZE_WARP_COUNT_WORDS == 33U);
 
 #ifndef NDEBUG
 #define THOR_DEVICE_TRAP_IF(cond) \
@@ -405,6 +416,273 @@ __global__ void finalizeAndBucketizeEmbeddingSparseGradientRowsKernel(
     }
 }
 
+struct TwoStageFinalizeSharedState {
+    uint32_t lowTotal;
+    uint32_t highTotal;
+    uint32_t ultraTotal;
+    uint32_t ultraPartialTotal;
+};
+
+__device__ __forceinline__ uint32_t sumEmbeddingSparseGradientStageCounts(const uint32_t* __restrict__ counts, uint32_t blocks) {
+    uint32_t total = 0U;
+    for (uint32_t i = 0U; i < blocks; ++i) {
+        total += counts[i];
+    }
+    return total;
+}
+
+template <typename RowT>
+__global__ void finalizeAndBucketizeEmbeddingSparseGradientRowsTwoStageClassifyKernel(
+    const RowT* __restrict__ outputRows,
+    const uint32_t* __restrict__ numRuns,
+    RowT* __restrict__ outputNumRows,
+    const uint32_t* __restrict__ runCounts,
+    uint32_t* __restrict__ lowRunRowsScratch,
+    uint32_t* __restrict__ highRunRowsScratch,
+    uint32_t* __restrict__ ultraRunRowsScratch,
+    uint32_t* __restrict__ ultraRunPartialCountsScratch,
+    uint32_t* __restrict__ ultraRunPartialOffsetsScratch,
+    uint32_t* __restrict__ lowRunRowCounts,
+    uint32_t* __restrict__ highRunRowCounts,
+    uint32_t* __restrict__ ultraRunRowCounts,
+    uint32_t* __restrict__ ultraPartialCounts,
+    uint64_t vocabularySize,
+    uint32_t lowRunMax,
+    uint32_t ultraRunMin,
+    uint32_t ultraTokensPerPartial) {
+    __shared__ uint32_t warpBaseCountsLowShared[TWO_STAGE_FINALIZE_WARP_COUNT_WORDS];
+    __shared__ uint32_t warpBaseCountsHighShared[TWO_STAGE_FINALIZE_WARP_COUNT_WORDS];
+    __shared__ uint32_t warpBaseCountsUltraShared[TWO_STAGE_FINALIZE_WARP_COUNT_WORDS];
+    __shared__ uint32_t warpBaseCountsUltraPartialShared[TWO_STAGE_FINALIZE_WARP_COUNT_WORDS];
+    __shared__ TwoStageFinalizeSharedState sharedState;
+
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> warpGroup = cg::tiled_partition<32>(block);
+
+    const uint32_t tid = threadIdx.x;
+    const uint32_t warp = tid >> 5U;
+    const uint32_t lane = tid & 31U;
+    const uint32_t leLaneMask = (1U << lane) | ((1U << lane) - 1U);
+    const uint32_t activeThreads = blockDim.x;
+    const uint32_t activeWarps = activeThreads >> 5U;
+    const uint64_t blockRunBase = static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(TWO_STAGE_FINALIZE_RUNS_PER_BLOCK);
+
+    uint32_t validRuns = numRuns[0];
+    if (validRuns != 0U && static_cast<uint64_t>(outputRows[validRuns - 1U]) == vocabularySize) {
+        --validRuns;
+    }
+
+    if (blockIdx.x == 0U && tid == 0U) {
+        outputNumRows[0] = static_cast<RowT>(validRuns);
+    }
+    if (tid == 0U) {
+        sharedState.lowTotal = 0U;
+        sharedState.highTotal = 0U;
+        sharedState.ultraTotal = 0U;
+        sharedState.ultraPartialTotal = 0U;
+    }
+    if (warp == 0U) {
+        warpBaseCountsLowShared[lane] = 0U;
+        warpBaseCountsHighShared[lane] = 0U;
+        warpBaseCountsUltraShared[lane] = 0U;
+        warpBaseCountsUltraPartialShared[lane] = 0U;
+    }
+    __syncthreads();
+
+    uint32_t blockRunCount = 0U;
+    if (blockRunBase < static_cast<uint64_t>(validRuns)) {
+        const uint64_t remainingRuns = static_cast<uint64_t>(validRuns) - blockRunBase;
+        blockRunCount = static_cast<uint32_t>(remainingRuns < static_cast<uint64_t>(TWO_STAGE_FINALIZE_RUNS_PER_BLOCK)
+                                                 ? remainingRuns
+                                                 : static_cast<uint64_t>(TWO_STAGE_FINALIZE_RUNS_PER_BLOCK));
+    }
+
+    for (uint32_t localRunBase = 0U; localRunBase < blockRunCount; localRunBase += activeThreads) {
+        const uint32_t localRun = localRunBase + tid;
+        const bool validRun = localRun < blockRunCount;
+        const uint32_t runIndex = static_cast<uint32_t>(blockRunBase + static_cast<uint64_t>(localRun));
+        const uint32_t myRunCount = validRun ? runCounts[runIndex] : 0U;
+        const bool isUltra = validRun && myRunCount >= ultraRunMin;
+        const bool isHigh = validRun && myRunCount > lowRunMax && !isUltra;
+        const bool isLow = validRun && !(isHigh || isUltra);
+        const uint32_t myUltraPartialCount = isUltra ? ceilDivU32(myRunCount, ultraTokensPerPartial) : 0U;
+
+        const uint32_t ultraMask = __ballot_sync(0xffffffffU, isUltra);
+        const uint32_t highMask = __ballot_sync(0xffffffffU, isHigh);
+        const uint32_t lowMask = __ballot_sync(0xffffffffU, isLow);
+
+        const uint32_t ultraBeforeIncludingMe = __popc(ultraMask & leLaneMask);
+        const uint32_t highBeforeIncludingMe = __popc(highMask & leLaneMask);
+        const uint32_t lowBeforeIncludingMe = __popc(lowMask & leLaneMask);
+        const uint32_t ultraPartialBeforeInWarp = cg::exclusive_scan(warpGroup, myUltraPartialCount);
+        const uint32_t ultraPartialIncludingMe = ultraPartialBeforeInWarp + myUltraPartialCount;
+
+        if (lane == 31U) {
+            warpBaseCountsUltraShared[warp] = ultraBeforeIncludingMe;
+            warpBaseCountsHighShared[warp] = highBeforeIncludingMe;
+            warpBaseCountsLowShared[warp] = lowBeforeIncludingMe;
+            warpBaseCountsUltraPartialShared[warp] = ultraPartialIncludingMe;
+        }
+
+        const uint32_t lowTotalBefore = sharedState.lowTotal;
+        const uint32_t highTotalBefore = sharedState.highTotal;
+        const uint32_t ultraTotalBefore = sharedState.ultraTotal;
+        const uint32_t ultraPartialTotalBefore = sharedState.ultraPartialTotal;
+        __syncthreads();
+
+        if (warp == 0U) {
+            const uint32_t ultraCount = lane < activeWarps ? warpBaseCountsUltraShared[lane] : 0U;
+            const uint32_t highCount = lane < activeWarps ? warpBaseCountsHighShared[lane] : 0U;
+            const uint32_t lowCount = lane < activeWarps ? warpBaseCountsLowShared[lane] : 0U;
+            const uint32_t ultraPartialCount = lane < activeWarps ? warpBaseCountsUltraPartialShared[lane] : 0U;
+
+            const uint32_t ultraBase = cg::exclusive_scan(warpGroup, ultraCount);
+            const uint32_t highBase = cg::exclusive_scan(warpGroup, highCount);
+            const uint32_t lowBase = cg::exclusive_scan(warpGroup, lowCount);
+            const uint32_t ultraPartialBase = cg::exclusive_scan(warpGroup, ultraPartialCount);
+
+            if (lane < activeWarps) {
+                warpBaseCountsUltraShared[lane] = ultraBase;
+                warpBaseCountsHighShared[lane] = highBase;
+                warpBaseCountsLowShared[lane] = lowBase;
+                warpBaseCountsUltraPartialShared[lane] = ultraPartialBase;
+            }
+            if (lane == activeWarps - 1U) {
+                warpBaseCountsUltraShared[TWO_STAGE_FINALIZE_WARPS] = ultraBase + ultraCount;
+                warpBaseCountsHighShared[TWO_STAGE_FINALIZE_WARPS] = highBase + highCount;
+                warpBaseCountsLowShared[TWO_STAGE_FINALIZE_WARPS] = lowBase + lowCount;
+                warpBaseCountsUltraPartialShared[TWO_STAGE_FINALIZE_WARPS] = ultraPartialBase + ultraPartialCount;
+            }
+        }
+        __syncthreads();
+
+        if (isLow) {
+            const uint32_t localOut = lowTotalBefore + warpBaseCountsLowShared[warp] + lowBeforeIncludingMe - 1U;
+            lowRunRowsScratch[blockRunBase + static_cast<uint64_t>(localOut)] = runIndex;
+        } else if (isHigh) {
+            const uint32_t localOut = highTotalBefore + warpBaseCountsHighShared[warp] + highBeforeIncludingMe - 1U;
+            highRunRowsScratch[blockRunBase + static_cast<uint64_t>(localOut)] = runIndex;
+        } else if (isUltra) {
+            const uint32_t localOut = ultraTotalBefore + warpBaseCountsUltraShared[warp] + ultraBeforeIncludingMe - 1U;
+            const uint64_t scratchOut = blockRunBase + static_cast<uint64_t>(localOut);
+            ultraRunRowsScratch[scratchOut] = runIndex;
+            ultraRunPartialCountsScratch[scratchOut] = myUltraPartialCount;
+            ultraRunPartialOffsetsScratch[scratchOut] =
+                ultraPartialTotalBefore + warpBaseCountsUltraPartialShared[warp] + ultraPartialBeforeInWarp;
+        }
+
+        if (tid == activeThreads - 1U) {
+            sharedState.lowTotal = lowTotalBefore + warpBaseCountsLowShared[TWO_STAGE_FINALIZE_WARPS];
+            sharedState.highTotal = highTotalBefore + warpBaseCountsHighShared[TWO_STAGE_FINALIZE_WARPS];
+            sharedState.ultraTotal = ultraTotalBefore + warpBaseCountsUltraShared[TWO_STAGE_FINALIZE_WARPS];
+            sharedState.ultraPartialTotal = ultraPartialTotalBefore + warpBaseCountsUltraPartialShared[TWO_STAGE_FINALIZE_WARPS];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0U) {
+        lowRunRowCounts[blockIdx.x] = sharedState.lowTotal;
+        highRunRowCounts[blockIdx.x] = sharedState.highTotal;
+        ultraRunRowCounts[blockIdx.x] = sharedState.ultraTotal;
+        ultraPartialCounts[blockIdx.x] = sharedState.ultraPartialTotal;
+    }
+}
+
+__global__ void finalizeAndBucketizeEmbeddingSparseGradientRowsTwoStageAccumulateKernel(
+    const uint32_t* __restrict__ lowRunRowsScratch,
+    const uint32_t* __restrict__ highRunRowsScratch,
+    const uint32_t* __restrict__ ultraRunRowsScratch,
+    const uint32_t* __restrict__ ultraRunPartialCountsScratch,
+    const uint32_t* __restrict__ ultraRunPartialOffsetsScratch,
+    const uint32_t* __restrict__ lowRunRowCounts,
+    const uint32_t* __restrict__ highRunRowCounts,
+    const uint32_t* __restrict__ ultraRunRowCounts,
+    const uint32_t* __restrict__ ultraPartialCounts,
+    uint32_t* __restrict__ lowRunRowIndices,
+    uint32_t* __restrict__ highRunRowIndices,
+    uint32_t* __restrict__ ultraRunRowIndices,
+    uint32_t* __restrict__ ultraRunPartialCounts,
+    uint32_t* __restrict__ ultraRunPartialOffsets,
+    uint32_t* __restrict__ numUltraPartials,
+    uint32_t* __restrict__ numLowRunRows,
+    uint32_t* __restrict__ numHighRunRows,
+    uint32_t* __restrict__ numUltraRunRows,
+    const cudaGraphDeviceNode_t* lowReduceNode,
+    const cudaGraphDeviceNode_t* highReduceNode,
+    const cudaGraphDeviceNode_t* ultraPartialReduceNode,
+    const cudaGraphDeviceNode_t* ultraReduceNode,
+    EmbeddingSparseGradientReduceGridUpdateConfig lowReduceGridConfig,
+    EmbeddingSparseGradientReduceGridUpdateConfig highReduceGridConfig,
+    EmbeddingSparseGradientReduceGridUpdateConfig ultraPartialReduceGridConfig,
+    EmbeddingSparseGradientReduceGridUpdateConfig ultraReduceGridConfig) {
+    __shared__ uint32_t lowBaseShared;
+    __shared__ uint32_t highBaseShared;
+    __shared__ uint32_t ultraBaseShared;
+    __shared__ uint32_t ultraPartialBaseShared;
+
+    const uint32_t stageBlock = blockIdx.x;
+    const uint32_t stageBlocks = gridDim.x;
+    const uint32_t tid = threadIdx.x;
+
+    if (tid == 0U) {
+        uint32_t lowBase = 0U;
+        uint32_t highBase = 0U;
+        uint32_t ultraBase = 0U;
+        uint32_t ultraPartialBase = 0U;
+        for (uint32_t i = 0U; i < stageBlock; ++i) {
+            lowBase += lowRunRowCounts[i];
+            highBase += highRunRowCounts[i];
+            ultraBase += ultraRunRowCounts[i];
+            ultraPartialBase += ultraPartialCounts[i];
+        }
+        lowBaseShared = lowBase;
+        highBaseShared = highBase;
+        ultraBaseShared = ultraBase;
+        ultraPartialBaseShared = ultraPartialBase;
+    }
+    __syncthreads();
+
+    const uint32_t lowBase = lowBaseShared;
+    const uint32_t highBase = highBaseShared;
+    const uint32_t ultraBase = ultraBaseShared;
+    const uint32_t ultraPartialBase = ultraPartialBaseShared;
+    const uint32_t lowCount = lowRunRowCounts[stageBlock];
+    const uint32_t highCount = highRunRowCounts[stageBlock];
+    const uint32_t ultraCount = ultraRunRowCounts[stageBlock];
+    const uint64_t scratchBase = static_cast<uint64_t>(stageBlock) * static_cast<uint64_t>(TWO_STAGE_FINALIZE_RUNS_PER_BLOCK);
+
+    for (uint32_t i = tid; i < lowCount; i += blockDim.x) {
+        lowRunRowIndices[lowBase + i] = lowRunRowsScratch[scratchBase + static_cast<uint64_t>(i)];
+    }
+    for (uint32_t i = tid; i < highCount; i += blockDim.x) {
+        highRunRowIndices[highBase + i] = highRunRowsScratch[scratchBase + static_cast<uint64_t>(i)];
+    }
+    for (uint32_t i = tid; i < ultraCount; i += blockDim.x) {
+        const uint64_t scratchIndex = scratchBase + static_cast<uint64_t>(i);
+        const uint32_t dst = ultraBase + i;
+        ultraRunRowIndices[dst] = ultraRunRowsScratch[scratchIndex];
+        ultraRunPartialCounts[dst] = ultraRunPartialCountsScratch[scratchIndex];
+        ultraRunPartialOffsets[dst] = ultraPartialBase + ultraRunPartialOffsetsScratch[scratchIndex];
+    }
+
+    if (stageBlock == 0U && tid == 0U) {
+        const uint32_t lowTotal = sumEmbeddingSparseGradientStageCounts(lowRunRowCounts, stageBlocks);
+        const uint32_t highTotal = sumEmbeddingSparseGradientStageCounts(highRunRowCounts, stageBlocks);
+        const uint32_t ultraTotal = sumEmbeddingSparseGradientStageCounts(ultraRunRowCounts, stageBlocks);
+        const uint32_t ultraPartialTotal = sumEmbeddingSparseGradientStageCounts(ultraPartialCounts, stageBlocks);
+
+        numLowRunRows[0] = lowTotal;
+        numHighRunRows[0] = highTotal;
+        numUltraRunRows[0] = ultraTotal;
+        numUltraPartials[0] = ultraPartialTotal;
+
+        updateEmbeddingSparseGradientBucketReduceGrid(lowReduceNode, lowTotal, lowReduceGridConfig);
+        updateEmbeddingSparseGradientBucketReduceGrid(highReduceNode, highTotal, highReduceGridConfig);
+        updateEmbeddingSparseGradientBucketReduceGrid(ultraPartialReduceNode, ultraPartialTotal, ultraPartialReduceGridConfig);
+        updateEmbeddingSparseGradientBucketReduceGrid(ultraReduceNode, ultraTotal, ultraReduceGridConfig);
+    }
+}
+
 template <typename RowT>
 void launchFinalizeAndBucketizeEmbeddingSparseGradientRowsTyped(
     const void* outputRows,
@@ -420,6 +698,15 @@ void launchFinalizeAndBucketizeEmbeddingSparseGradientRowsTyped(
     uint32_t* numLowRunRows,
     uint32_t* numHighRunRows,
     uint32_t* numUltraHighRunRows,
+    uint32_t* twoStageLowRunRowsScratch,
+    uint32_t* twoStageHighRunRowsScratch,
+    uint32_t* twoStageUltraHighRunRowsScratch,
+    uint32_t* twoStageUltraHighRunPartialCountsScratch,
+    uint32_t* twoStageUltraHighRunPartialOffsetsScratch,
+    uint32_t* twoStageLowRunRowCounts,
+    uint32_t* twoStageHighRunRowCounts,
+    uint32_t* twoStageUltraHighRunRowCounts,
+    uint32_t* twoStageUltraHighPartialCounts,
     uint64_t vocabularySize,
     uint32_t maxPossibleRuns,
     uint32_t lowRunMax,
@@ -434,6 +721,69 @@ void launchFinalizeAndBucketizeEmbeddingSparseGradientRowsTyped(
     EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridConfig,
     EmbeddingSparseGradientReduceGridUpdateConfig ultraHighReduceGridConfig,
     Stream stream) {
+    if (useTwoStageEmbeddingSparseGradientFinalize(maxPossibleRuns)) {
+        if (twoStageLowRunRowsScratch == nullptr || twoStageHighRunRowsScratch == nullptr ||
+            twoStageUltraHighRunRowsScratch == nullptr || twoStageUltraHighRunPartialCountsScratch == nullptr ||
+            twoStageUltraHighRunPartialOffsetsScratch == nullptr || twoStageLowRunRowCounts == nullptr ||
+            twoStageHighRunRowCounts == nullptr || twoStageUltraHighRunRowCounts == nullptr ||
+            twoStageUltraHighPartialCounts == nullptr) {
+            throw std::invalid_argument(
+                "two-stage embedding sparse-gradient finalizer selected but scratch buffers were not provided.");
+        }
+
+        const uint32_t stageBlocks =
+            static_cast<uint32_t>(twoStageEmbeddingSparseGradientFinalizeBlockCount(static_cast<uint64_t>(maxPossibleRuns)));
+        finalizeAndBucketizeEmbeddingSparseGradientRowsTwoStageClassifyKernel<RowT>
+            <<<stageBlocks, TWO_STAGE_FINALIZE_THREADS, 0, stream.getStream()>>>(static_cast<const RowT*>(outputRows),
+                                                                                 numRuns,
+                                                                                 static_cast<RowT*>(outputNumRows),
+                                                                                 runCounts,
+                                                                                 twoStageLowRunRowsScratch,
+                                                                                 twoStageHighRunRowsScratch,
+                                                                                 twoStageUltraHighRunRowsScratch,
+                                                                                 twoStageUltraHighRunPartialCountsScratch,
+                                                                                 twoStageUltraHighRunPartialOffsetsScratch,
+                                                                                 twoStageLowRunRowCounts,
+                                                                                 twoStageHighRunRowCounts,
+                                                                                 twoStageUltraHighRunRowCounts,
+                                                                                 twoStageUltraHighPartialCounts,
+                                                                                 vocabularySize,
+                                                                                 lowRunMax,
+                                                                                 ultraHighRunMin,
+                                                                                 ultraHighTokensPerPartial);
+        CUDA_CHECK(cudaPeekAtLastError());
+
+        finalizeAndBucketizeEmbeddingSparseGradientRowsTwoStageAccumulateKernel
+            <<<stageBlocks, TWO_STAGE_FINALIZE_THREADS, 0, stream.getStream()>>>(twoStageLowRunRowsScratch,
+                                                                                 twoStageHighRunRowsScratch,
+                                                                                 twoStageUltraHighRunRowsScratch,
+                                                                                 twoStageUltraHighRunPartialCountsScratch,
+                                                                                 twoStageUltraHighRunPartialOffsetsScratch,
+                                                                                 twoStageLowRunRowCounts,
+                                                                                 twoStageHighRunRowCounts,
+                                                                                 twoStageUltraHighRunRowCounts,
+                                                                                 twoStageUltraHighPartialCounts,
+                                                                                 lowRunRowIndices,
+                                                                                 highRunRowIndices,
+                                                                                 ultraHighRunRowIndices,
+                                                                                 ultraHighRunPartialCounts,
+                                                                                 ultraHighRunPartialOffsets,
+                                                                                 numUltraHighPartials,
+                                                                                 numLowRunRows,
+                                                                                 numHighRunRows,
+                                                                                 numUltraHighRunRows,
+                                                                                 lowReduceNodePtr,
+                                                                                 highReduceNodePtr,
+                                                                                 ultraHighPartialReduceNodePtr,
+                                                                                 ultraHighReduceNodePtr,
+                                                                                 lowReduceGridConfig,
+                                                                                 highReduceGridConfig,
+                                                                                 ultraHighPartialReduceGridConfig,
+                                                                                 ultraHighReduceGridConfig);
+        CUDA_CHECK(cudaPeekAtLastError());
+        return;
+    }
+
     const uint32_t meaningfulThreads =
         maxPossibleRuns == 0U ? 32U : (maxPossibleRuns < FINALIZE_BUCKETIZE_THREADS ? maxPossibleRuns : FINALIZE_BUCKETIZE_THREADS);
     const uint32_t blockThreads = ((meaningfulThreads + 31U) / 32U) * 32U;
@@ -517,6 +867,15 @@ void launchFinalizeAndBucketizeEmbeddingSparseGradientRows(const void* outputRow
                                                            uint32_t* numLowRunRows,
                                                            uint32_t* numHighRunRows,
                                                            uint32_t* numUltraHighRunRows,
+                                                           uint32_t* twoStageLowRunRowsScratch,
+                                                           uint32_t* twoStageHighRunRowsScratch,
+                                                           uint32_t* twoStageUltraHighRunRowsScratch,
+                                                           uint32_t* twoStageUltraHighRunPartialCountsScratch,
+                                                           uint32_t* twoStageUltraHighRunPartialOffsetsScratch,
+                                                           uint32_t* twoStageLowRunRowCounts,
+                                                           uint32_t* twoStageHighRunRowCounts,
+                                                           uint32_t* twoStageUltraHighRunRowCounts,
+                                                           uint32_t* twoStageUltraHighPartialCounts,
                                                            uint64_t vocabularySize,
                                                            uint32_t maxPossibleRuns,
                                                            DataType rowDataType,
@@ -556,6 +915,15 @@ void launchFinalizeAndBucketizeEmbeddingSparseGradientRows(const void* outputRow
                                                                                  numLowRunRows,
                                                                                  numHighRunRows,
                                                                                  numUltraHighRunRows,
+                                                                                 twoStageLowRunRowsScratch,
+                                                                                 twoStageHighRunRowsScratch,
+                                                                                 twoStageUltraHighRunRowsScratch,
+                                                                                 twoStageUltraHighRunPartialCountsScratch,
+                                                                                 twoStageUltraHighRunPartialOffsetsScratch,
+                                                                                 twoStageLowRunRowCounts,
+                                                                                 twoStageHighRunRowCounts,
+                                                                                 twoStageUltraHighRunRowCounts,
+                                                                                 twoStageUltraHighPartialCounts,
                                                                                  vocabularySize,
                                                                                  maxPossibleRuns,
                                                                                  lowRunMax,
@@ -585,6 +953,15 @@ void launchFinalizeAndBucketizeEmbeddingSparseGradientRows(const void* outputRow
                                                                                  numLowRunRows,
                                                                                  numHighRunRows,
                                                                                  numUltraHighRunRows,
+                                                                                 twoStageLowRunRowsScratch,
+                                                                                 twoStageHighRunRowsScratch,
+                                                                                 twoStageUltraHighRunRowsScratch,
+                                                                                 twoStageUltraHighRunPartialCountsScratch,
+                                                                                 twoStageUltraHighRunPartialOffsetsScratch,
+                                                                                 twoStageLowRunRowCounts,
+                                                                                 twoStageHighRunRowCounts,
+                                                                                 twoStageUltraHighRunRowCounts,
+                                                                                 twoStageUltraHighPartialCounts,
                                                                                  vocabularySize,
                                                                                  maxPossibleRuns,
                                                                                  lowRunMax,
@@ -614,6 +991,15 @@ void launchFinalizeAndBucketizeEmbeddingSparseGradientRows(const void* outputRow
                                                                                  numLowRunRows,
                                                                                  numHighRunRows,
                                                                                  numUltraHighRunRows,
+                                                                                 twoStageLowRunRowsScratch,
+                                                                                 twoStageHighRunRowsScratch,
+                                                                                 twoStageUltraHighRunRowsScratch,
+                                                                                 twoStageUltraHighRunPartialCountsScratch,
+                                                                                 twoStageUltraHighRunPartialOffsetsScratch,
+                                                                                 twoStageLowRunRowCounts,
+                                                                                 twoStageHighRunRowCounts,
+                                                                                 twoStageUltraHighRunRowCounts,
+                                                                                 twoStageUltraHighPartialCounts,
                                                                                  vocabularySize,
                                                                                  maxPossibleRuns,
                                                                                  lowRunMax,
