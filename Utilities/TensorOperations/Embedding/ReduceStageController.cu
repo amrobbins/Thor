@@ -8,7 +8,6 @@
 #include <cooperative_groups/scan.h>
 #include <cuda_runtime.h>
 
-#include <cstdint>
 #include <mutex>
 #include <stdexcept>
 #include <string>

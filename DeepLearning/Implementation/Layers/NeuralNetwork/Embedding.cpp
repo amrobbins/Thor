@@ -36,7 +36,7 @@ bool isSupportedValueType(DataType dtype) {
 std::string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
 bool hasFixedSparseOptimizerFusionReducer(uint64_t embeddingDim) {
-    return embeddingDim == 16ULL || embeddingDim == 32ULL || embeddingDim == 64ULL || embeddingDim == 128ULL || embeddingDim == 256ULL;
+    return embeddingDim != 0ULL && embeddingDim <= 4096ULL;
 }
 
 }  // namespace

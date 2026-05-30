@@ -190,6 +190,14 @@ std::string vectorOutputStoreStmt(const std::string& ptrName, const std::string&
     return "thor_sparse_store_float4(" + ptrName + ", " + offsetExpr + ", " + valueExpr + ");";
 }
 
+std::string maskedVectorLoadExpr(const std::string& ptrName, const std::string& offsetExpr) {
+    return "thor_sparse_load_float4_masked(" + ptrName + ", " + offsetExpr + ", sru_vector_valid_lanes)";
+}
+
+std::string maskedVectorOutputStoreStmt(const std::string& ptrName, const std::string& offsetExpr, const std::string& valueExpr) {
+    return "thor_sparse_store_float4_masked(" + ptrName + ", " + offsetExpr + ", " + valueExpr + ", sru_vector_valid_lanes);";
+}
+
 std::string splatFloat4(const std::string& valueExpr) {
     return "make_float4(" + valueExpr + ", " + valueExpr + ", " + valueExpr + ", " + valueExpr + ")";
 }
@@ -846,9 +854,6 @@ SparseRowUpdateFusionBuild buildSparseRowUpdateFusionBuild(
     if (vocabularySize == 0 || embeddingDim == 0) {
         throw std::invalid_argument("Sparse row update fusion source requires at least one indexed input or output tensor to infer [vocabulary, D].");
     }
-    if (embeddingDim % 4ULL != 0ULL) {
-        throw std::invalid_argument("Sparse row update fusion source currently requires embedding_dim divisible by 4 for float4 lanes.");
-    }
     if (!rowDTypeCanRepresentVocabularySize(rows.getDataType(), vocabularySize)) {
         throw std::invalid_argument("Sparse row update fusion source row dtype " + dtypeName(rows.getDataType()) +
                                     " cannot represent vocabulary_size as the invalid-row sentinel.");
@@ -892,6 +897,52 @@ std::string emitSparseRowUpdateFusionHelperSource() {
     ss << "  p[i + 1ULL] = __float2bfloat16(v.y);\n";
     ss << "  p[i + 2ULL] = __float2bfloat16(v.z);\n";
     ss << "  p[i + 3ULL] = __float2bfloat16(v.w);\n";
+    ss << "}\n";
+    ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const float* p, unsigned long long i, unsigned int lanes) {\n";
+    ss << "  if (lanes >= 4U && ((i & 3ULL) == 0ULL)) return thor_sparse_load_float4(p, i);\n";
+    ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+    ss << "  if (lanes > 0U) v.x = p[i];\n";
+    ss << "  if (lanes > 1U) v.y = p[i + 1ULL];\n";
+    ss << "  if (lanes > 2U) v.z = p[i + 2ULL];\n";
+    ss << "  if (lanes > 3U) v.w = p[i + 3ULL];\n";
+    ss << "  return v;\n";
+    ss << "}\n";
+    ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const __half* p, unsigned long long i, unsigned int lanes) {\n";
+    ss << "  if (lanes >= 4U && ((i & 1ULL) == 0ULL)) return thor_sparse_load_float4(p, i);\n";
+    ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+    ss << "  if (lanes > 0U) v.x = __half2float(p[i]);\n";
+    ss << "  if (lanes > 1U) v.y = __half2float(p[i + 1ULL]);\n";
+    ss << "  if (lanes > 2U) v.z = __half2float(p[i + 2ULL]);\n";
+    ss << "  if (lanes > 3U) v.w = __half2float(p[i + 3ULL]);\n";
+    ss << "  return v;\n";
+    ss << "}\n";
+    ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const __nv_bfloat16* p, unsigned long long i, unsigned int lanes) {\n";
+    ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+    ss << "  if (lanes > 0U) v.x = __bfloat162float(p[i]);\n";
+    ss << "  if (lanes > 1U) v.y = __bfloat162float(p[i + 1ULL]);\n";
+    ss << "  if (lanes > 2U) v.z = __bfloat162float(p[i + 2ULL]);\n";
+    ss << "  if (lanes > 3U) v.w = __bfloat162float(p[i + 3ULL]);\n";
+    ss << "  return v;\n";
+    ss << "}\n";
+    ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(float* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
+    ss << "  if (lanes >= 4U && ((i & 3ULL) == 0ULL)) { thor_sparse_store_float4(p, i, v); return; }\n";
+    ss << "  if (lanes > 0U) p[i] = v.x;\n";
+    ss << "  if (lanes > 1U) p[i + 1ULL] = v.y;\n";
+    ss << "  if (lanes > 2U) p[i + 2ULL] = v.z;\n";
+    ss << "  if (lanes > 3U) p[i + 3ULL] = v.w;\n";
+    ss << "}\n";
+    ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(__half* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
+    ss << "  if (lanes >= 4U && ((i & 1ULL) == 0ULL)) { thor_sparse_store_float4(p, i, v); return; }\n";
+    ss << "  if (lanes > 0U) p[i] = __float2half_rn(v.x);\n";
+    ss << "  if (lanes > 1U) p[i + 1ULL] = __float2half_rn(v.y);\n";
+    ss << "  if (lanes > 2U) p[i + 2ULL] = __float2half_rn(v.z);\n";
+    ss << "  if (lanes > 3U) p[i + 3ULL] = __float2half_rn(v.w);\n";
+    ss << "}\n";
+    ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(__nv_bfloat16* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
+    ss << "  if (lanes > 0U) p[i] = __float2bfloat16(v.x);\n";
+    ss << "  if (lanes > 1U) p[i + 1ULL] = __float2bfloat16(v.y);\n";
+    ss << "  if (lanes > 2U) p[i + 2ULL] = __float2bfloat16(v.z);\n";
+    ss << "  if (lanes > 3U) p[i + 3ULL] = __float2bfloat16(v.w);\n";
     ss << "}\n\n";
     return ss.str();
 }
@@ -962,7 +1013,7 @@ SparseRowUpdateFusionSource emitVector4SparseRowUpdateFusionSource(
                 }
                 const std::string offset = slot.tensorKind == SparseRowUpdateTensorKind::IndexedRows ? "sru_indexed_offset" : "sru_logical_offset";
                 body << "  const float4 " << ref(nodeIdx) << " = "
-                     << vectorLoadExpr("sru_in" + std::to_string(node.input_slot), offset) << ";\n";
+                     << maskedVectorLoadExpr("sru_in" + std::to_string(node.input_slot), offset) << ";\n";
                 break;
             }
             case ExprOp::RUNTIME_SCALAR: {
@@ -1002,7 +1053,7 @@ SparseRowUpdateFusionSource emitVector4SparseRowUpdateFusionSource(
         if (out.node_idx >= outputs.expr->nodes.size()) {
             throw std::runtime_error("Sparse row update fusion source output node index is out of range.");
         }
-        body << "  " << vectorOutputStoreStmt("sru_out" + std::to_string(outputIdx), "sru_indexed_offset", ref(out.node_idx)) << "\n";
+        body << "  " << maskedVectorOutputStoreStmt("sru_out" + std::to_string(outputIdx), "sru_indexed_offset", ref(out.node_idx)) << "\n";
     }
     source.bodySource = body.str();
     return source;

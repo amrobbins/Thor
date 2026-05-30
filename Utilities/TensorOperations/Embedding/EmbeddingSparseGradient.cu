@@ -451,43 +451,76 @@ __global__ void reduceEmbeddingSparseGradientValuesTiledKernel(const uint32_t* _
     outputValues[row * embeddingDim + dim] = sum;
 }
 
-bool hasFixedDimEmbeddingSparseGradientReducer(uint64_t embeddingDim) {
-    return embeddingDim == 4ULL || embeddingDim == 8ULL || embeddingDim == 16ULL || embeddingDim == 32ULL || embeddingDim == 64ULL ||
-           embeddingDim == 128ULL || embeddingDim == 768ULL ||
-           (embeddingDim >= 256ULL && embeddingDim <= MAX_FIXED_EMBEDDING_SPARSE_GRADIENT_DIM && embeddingDim % 256ULL == 0ULL);
+bool hasVectorizedJitEmbeddingSparseGradientReducer(uint64_t embeddingDim) {
+    return embeddingDim != 0ULL && embeddingDim <= MAX_FIXED_EMBEDDING_SPARSE_GRADIENT_DIM;
+}
+
+uint64_t gcdUint64(uint64_t a, uint64_t b) {
+    while (b != 0ULL) {
+        const uint64_t r = a % b;
+        a = b;
+        b = r;
+    }
+    return a;
+}
+
+uint64_t lcmUint64(uint64_t a, uint64_t b) { return (a / gcdUint64(a, b)) * b; }
+
+uint32_t vectorizedReducerVectorCountForEmbeddingSparseGradient(uint64_t embeddingDim) {
+    return static_cast<uint32_t>((embeddingDim + 3ULL) / 4ULL);
+}
+
+uint32_t vectorizedReducerVectorsPerTileForEmbeddingSparseGradient(uint64_t embeddingDim) {
+    const uint64_t vectorCount = vectorizedReducerVectorCountForEmbeddingSparseGradient(embeddingDim);
+    if (vectorCount == 0ULL) {
+        return 1U;
+    }
+
+    const uint64_t maxVectorsPerTile = std::min<uint64_t>(vectorCount, 256ULL);
+    for (uint64_t candidate = maxVectorsPerTile; candidate >= 1ULL; --candidate) {
+        if (lcmUint64(candidate, static_cast<uint64_t>(WARP_SIZE_EMBEDDING)) <= 1024ULL) {
+            return static_cast<uint32_t>(candidate);
+        }
+    }
+    return 1U;
+}
+
+uint32_t vectorizedReducerBlockThreadsForEmbeddingSparseGradient(uint64_t embeddingDim) {
+    const uint64_t vectorsPerTile = vectorizedReducerVectorsPerTileForEmbeddingSparseGradient(embeddingDim);
+    const uint64_t quantum = lcmUint64(vectorsPerTile, static_cast<uint64_t>(WARP_SIZE_EMBEDDING));
+    return static_cast<uint32_t>((1024ULL / quantum) * quantum);
 }
 
 uint32_t reduceBlockThreadsForEmbeddingSparseGradient(uint64_t embeddingDim) {
-    if (!hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
-        return THREADS_PER_BLOCK;
+    if (hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim)) {
+        return vectorizedReducerBlockThreadsForEmbeddingSparseGradient(embeddingDim);
     }
-    if (embeddingDim <= THREADS_PER_BLOCK) {
-        return THREADS_PER_BLOCK;
-    }
-    return static_cast<uint32_t>(std::min<uint64_t>(embeddingDim, 1024ULL));
+    return THREADS_PER_BLOCK;
 }
 
 uint32_t fixedReducerVectorsPerTileForEmbeddingSparseGradient(uint64_t embeddingDim) {
-    const uint64_t numVectors = embeddingDim / 4ULL;
-    const uint64_t blockThreads = reduceBlockThreadsForEmbeddingSparseGradient(embeddingDim);
-    return static_cast<uint32_t>(std::min<uint64_t>(numVectors, blockThreads / 4ULL));
+    if (hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim)) {
+        return vectorizedReducerVectorsPerTileForEmbeddingSparseGradient(embeddingDim);
+    }
+    const uint64_t numVectors = (embeddingDim + 3ULL) / 4ULL;
+    return static_cast<uint32_t>(std::max<uint64_t>(1ULL, std::min<uint64_t>(numVectors, THREADS_PER_BLOCK / 4ULL)));
 }
 
 uint32_t fixedReducerVectorTileCountForEmbeddingSparseGradient(uint64_t embeddingDim) {
-    if (!hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
+    if (!hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim)) {
         return static_cast<uint32_t>((embeddingDim + THREADS_PER_BLOCK - 1ULL) / THREADS_PER_BLOCK);
     }
-    const uint64_t numVectors = embeddingDim / 4ULL;
+    const uint64_t numVectors = vectorizedReducerVectorCountForEmbeddingSparseGradient(embeddingDim);
     const uint32_t vectorsPerTile = fixedReducerVectorsPerTileForEmbeddingSparseGradient(embeddingDim);
     return static_cast<uint32_t>((numVectors + vectorsPerTile - 1ULL) / vectorsPerTile);
 }
 
 uint32_t reduceRowsPerGridXForEmbeddingSparseGradient(uint64_t embeddingDim) {
-    if (!hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
+    if (!hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim)) {
         return 1U;
     }
-    // Fixed-D reducers use one 16-byte FP32 output vector per thread. D>1024 is split across grid.y D-tiles,
-    // keeping the CTA at 1024 threads while still packing several low-run rows into each CTA.
+    // JIT reducers use one 4-value vector lane per thread. Choose the vector tile so blockDim.x is both a full-warp
+    // multiple and a full-row multiple; otherwise awkward dimensions like D=96 leave stray lanes that touch the next row.
     return static_cast<uint32_t>(reduceBlockThreadsForEmbeddingSparseGradient(embeddingDim) /
                                  fixedReducerVectorsPerTileForEmbeddingSparseGradient(embeddingDim));
 }
@@ -498,13 +531,15 @@ uint32_t reduceGridDimXForEmbeddingSparseGradient(uint64_t numRows, uint64_t emb
 }
 
 uint32_t reduceGridDimYForEmbeddingSparseGradient(uint64_t embeddingDim) {
-    if (hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
+    if (hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim)) {
         return fixedReducerVectorTileCountForEmbeddingSparseGradient(embeddingDim);
     }
     return static_cast<uint32_t>((embeddingDim + THREADS_PER_BLOCK - 1ULL) / THREADS_PER_BLOCK);
 }
 
-bool hasHighRunCtaEmbeddingSparseGradientReducer(uint64_t embeddingDim) { return hasFixedDimEmbeddingSparseGradientReducer(embeddingDim); }
+bool hasHighRunCtaEmbeddingSparseGradientReducer(uint64_t embeddingDim) {
+    return hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim);
+}
 
 uint32_t highRunReduceRowsPerGridXForEmbeddingSparseGradient(uint64_t embeddingDim) {
     if (!hasHighRunCtaEmbeddingSparseGradientReducer(embeddingDim)) {
@@ -527,7 +562,7 @@ uint32_t highRunReduceBlockThreadsForEmbeddingSparseGradient(uint64_t embeddingD
 }
 
 bool hasUltraHighTwoStageEmbeddingSparseGradientReducer(uint64_t embeddingDim) {
-    return hasFixedDimEmbeddingSparseGradientReducer(embeddingDim);
+    return hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim);
 }
 
 uint32_t ultraHighReduceBlockThreadsForEmbeddingSparseGradient(uint64_t embeddingDim) {
@@ -698,10 +733,9 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType,
                                                  uint64_t embeddingDim,
                                                  const std::string& kernelName,
                                                  const SparseRowUpdateFusionSource* sparseRowUpdate) {
-    if (sparseRowUpdate != nullptr && !hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
+    if (sparseRowUpdate != nullptr && !hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim)) {
         throw std::invalid_argument(
-            "Embedding sparse-gradient fused sparse-row update currently requires a fixed D={4,8,16,32,64,128,768} or 256-multiple up to "
-            "4096 reducer.");
+            "Embedding sparse-gradient fused sparse-row update currently requires a vectorized JIT reducer with embedding_dim <= 4096.");
     }
 
     const std::string rowType = sparseGradientScalarType(rowDType);
@@ -738,9 +772,9 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType,
     }
     ss << ") {\n";
 
-    if (hasFixedDimEmbeddingSparseGradientReducer(embeddingDim)) {
+    if (hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim)) {
         const uint64_t threadsPerBlock = reduceBlockThreadsForEmbeddingSparseGradient(embeddingDim);
-        const uint64_t numVectors = embeddingDim / 4ULL;
+        const uint64_t numVectors = (embeddingDim + 3ULL) / 4ULL;
         const uint64_t vectorsPerTile = fixedReducerVectorsPerTileForEmbeddingSparseGradient(embeddingDim);
         const uint64_t rowsPerBlock = threadsPerBlock / vectorsPerTile;
         ss << "  constexpr unsigned int THREADS_PER_BLOCK_LOCAL = " << threadsPerBlock << "U;\n";
@@ -758,8 +792,25 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType,
         ss << "  const unsigned long long begin = static_cast<unsigned long long>(runOffsets[row]);\n";
         ss << "  const unsigned long long count = static_cast<unsigned long long>(runCounts[row]);\n";
         ss << "  const unsigned long long firstToken = static_cast<unsigned long long>(sortedTokenIds[begin]);\n";
+        ss << "  const unsigned int dimBase = globalVectorIndex * dimsPerThread;\n";
+        ss << "  const unsigned int vectorValidLanes = (dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : (embeddingDim - "
+              "dimBase);\n";
 
         auto emitLoad = [&](const std::string& tokenExpr, const std::string& valueName) {
+            if (embeddingDim % 4ULL != 0ULL) {
+                ss << "  const unsigned long long base_" << valueName << " = (" << tokenExpr
+                   << ") * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long long>(dimBase);\n";
+                ss << "  float4 " << valueName << " = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+                ss << "  if (vectorValidLanes > 0U) " << valueName << ".x = thor_embedding_grad_to_float(upstreamGradient[base_"
+                   << valueName << "]);\n";
+                ss << "  if (vectorValidLanes > 1U) " << valueName << ".y = thor_embedding_grad_to_float(upstreamGradient[base_"
+                   << valueName << " + 1ULL]);\n";
+                ss << "  if (vectorValidLanes > 2U) " << valueName << ".z = thor_embedding_grad_to_float(upstreamGradient[base_"
+                   << valueName << " + 2ULL]);\n";
+                ss << "  if (vectorValidLanes > 3U) " << valueName << ".w = thor_embedding_grad_to_float(upstreamGradient[base_"
+                   << valueName << " + 3ULL]);\n";
+                return;
+            }
             if (gradDType == DataType::FP32) {
                 ss << "  const float4* __restrict__ input_" << valueName << " = reinterpret_cast<const float4*>(upstreamGradient + ("
                    << tokenExpr << ") * embeddingDim);\n";
@@ -800,40 +851,26 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType,
         emitLoad("firstToken", "sum");
         ss << "  for (unsigned long long i = 1ULL; i < count; ++i) {\n";
         ss << "    const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin + i]);\n";
-        if (gradDType == DataType::FP32) {
-            ss << "    const float4* __restrict__ input_v = reinterpret_cast<const float4*>(upstreamGradient + token * embeddingDim);\n";
-            ss << "    const float4 v = input_v[globalVectorIndex];\n";
-        } else if (gradDType == DataType::FP16) {
-            ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + "
-                  "token * embeddingDim);\n";
-            ss << "    const unsigned long long packed_v = input_v[globalVectorIndex];\n";
-            ss << "    const float2 lo_v = thor_embedding_half2_bits_to_float2(static_cast<unsigned int>(packed_v));\n";
-            ss << "    const float2 hi_v = thor_embedding_half2_bits_to_float2(static_cast<unsigned int>(packed_v >> 32U));\n";
-            ss << "    const float4 v = make_float4(lo_v.x, lo_v.y, hi_v.x, hi_v.y);\n";
-        } else if (gradDType == DataType::BF16) {
-            ss << "    const unsigned long long* __restrict__ input_v = reinterpret_cast<const unsigned long long*>(upstreamGradient + "
-                  "token * embeddingDim);\n";
-            ss << "    const unsigned long long packed_v = input_v[globalVectorIndex];\n";
-            ss << "    const float2 lo_v = thor_embedding_bfloat162_bits_to_float2(static_cast<unsigned int>(packed_v));\n";
-            ss << "    const float2 hi_v = thor_embedding_bfloat162_bits_to_float2(static_cast<unsigned int>(packed_v >> 32U));\n";
-            ss << "    const float4 v = make_float4(lo_v.x, lo_v.y, hi_v.x, hi_v.y);\n";
-        } else {
-            ss << "    const unsigned long long base_v = token * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long "
-                  "long>(globalVectorIndex) * dimsPerThread;\n";
-            ss << "    const float4 v = make_float4(thor_embedding_grad_to_float(upstreamGradient[base_v + 0ULL]), "
-                  "thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]), thor_embedding_grad_to_float(upstreamGradient[base_v + "
-                  "2ULL]), thor_embedding_grad_to_float(upstreamGradient[base_v + 3ULL]));\n";
-        }
+        emitLoad("token", "v");
         ss << "    sum = thor_embedding_add_float4(sum, v);\n";
         ss << "  }\n";
         if (sparseRowUpdate != nullptr) {
             ss << "  const unsigned long long sru_logical_row = row;\n";
             ss << "  const unsigned long long sru_indexed_row = static_cast<unsigned long long>(outputRows[row]);\n";
             ss << "  const unsigned long long sru_vector_index = static_cast<unsigned long long>(globalVectorIndex);\n";
+            ss << "  const unsigned int sru_vector_valid_lanes = vectorValidLanes;\n";
             ss << sparseRowUpdate->bodySource;
         } else {
-            ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * embeddingDim);\n";
-            ss << "  output[globalVectorIndex] = sum;\n";
+            if (embeddingDim % 4ULL == 0ULL) {
+                ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * embeddingDim);\n";
+                ss << "  output[globalVectorIndex] = sum;\n";
+            } else {
+                ss << "  float* __restrict__ output = outputValues + row * static_cast<unsigned long long>(embeddingDim) + dimBase;\n";
+                ss << "  if (vectorValidLanes > 0U) output[0] = sum.x;\n";
+                ss << "  if (vectorValidLanes > 1U) output[1] = sum.y;\n";
+                ss << "  if (vectorValidLanes > 2U) output[2] = sum.z;\n";
+                ss << "  if (vectorValidLanes > 3U) output[3] = sum.w;\n";
+            }
         }
     } else {
         ss << "  constexpr unsigned int THREADS_PER_BLOCK_LOCAL = " << THREADS_PER_BLOCK << "U;\n";
@@ -865,14 +902,13 @@ std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
                                                         const SparseRowUpdateFusionSource* sparseRowUpdate) {
     if (!hasHighRunCtaEmbeddingSparseGradientReducer(embeddingDim)) {
         throw std::invalid_argument(
-            "Embedding sparse-gradient high-run reducer currently requires a fixed D={4,8,16,32,64,128,768} or 256-multiple up to 4096 "
-            "reducer.");
+            "Embedding sparse-gradient high-run reducer currently requires a vectorized JIT reducer with embedding_dim <= 4096.");
     }
 
     const std::string rowType = sparseGradientScalarType(rowDType);
     const std::string gradType = sparseGradientScalarType(gradDType);
     const uint64_t threadsPerBlock = highRunReduceBlockThreadsForEmbeddingSparseGradient(embeddingDim);
-    const uint64_t numVectors = embeddingDim / 4ULL;
+    const uint64_t numVectors = (embeddingDim + 3ULL) / 4ULL;
     const uint64_t vectorsPerTile = fixedReducerVectorsPerTileForEmbeddingSparseGradient(embeddingDim);
     const uint64_t duplicateLanes = threadsPerBlock / vectorsPerTile;
 
@@ -919,6 +955,9 @@ std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
     ss << "  const unsigned long long bucketRow = static_cast<unsigned long long>(blockIdx.x);\n";
     ss << "  if (bucketRow >= static_cast<unsigned long long>(numRunRows[0])) return;\n";
     ss << "  const bool validVector = globalVectorIndex < numVectors;\n";
+    ss << "  const unsigned int dimBase = globalVectorIndex * dimsPerThread;\n";
+    ss << "  const unsigned int vectorValidLanes = validVector ? ((dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : "
+          "(embeddingDim - dimBase)) : 0U;\n";
     ss << "  const unsigned long long row = static_cast<unsigned long long>(runRowIndices[bucketRow]);\n";
     ss << "  const unsigned long long begin = static_cast<unsigned long long>(runOffsets[row]);\n";
     ss << "  const unsigned long long count = static_cast<unsigned long long>(runCounts[row]);\n";
@@ -926,7 +965,15 @@ std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
     ss << "  if (validVector) {\n";
     ss << "  for (unsigned long long i = static_cast<unsigned long long>(duplicateLane); i < count; i += duplicateLanes) {\n";
     ss << "    const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin + i]);\n";
-    if (gradDType == DataType::FP32) {
+    if (embeddingDim % 4ULL != 0ULL) {
+        ss << "    const unsigned long long base_v = token * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long "
+              "long>(dimBase);\n";
+        ss << "    float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+        ss << "    if (vectorValidLanes > 0U) v.x = thor_embedding_grad_to_float(upstreamGradient[base_v]);\n";
+        ss << "    if (vectorValidLanes > 1U) v.y = thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]);\n";
+        ss << "    if (vectorValidLanes > 2U) v.z = thor_embedding_grad_to_float(upstreamGradient[base_v + 2ULL]);\n";
+        ss << "    if (vectorValidLanes > 3U) v.w = thor_embedding_grad_to_float(upstreamGradient[base_v + 3ULL]);\n";
+    } else if (gradDType == DataType::FP32) {
         ss << "    const float4* __restrict__ input_v = reinterpret_cast<const float4*>(upstreamGradient + token * embeddingDim);\n";
         ss << "    const float4 v = input_v[globalVectorIndex];\n";
     } else if (gradDType == DataType::FP16) {
@@ -964,10 +1011,19 @@ std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
         ss << "  const unsigned long long sru_logical_row = row;\n";
         ss << "  const unsigned long long sru_indexed_row = static_cast<unsigned long long>(outputRows[row]);\n";
         ss << "  const unsigned long long sru_vector_index = static_cast<unsigned long long>(globalVectorIndex);\n";
+        ss << "  const unsigned int sru_vector_valid_lanes = vectorValidLanes;\n";
         ss << sparseRowUpdate->bodySource;
     } else {
-        ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * embeddingDim);\n";
-        ss << "  output[globalVectorIndex] = sum;\n";
+        if (embeddingDim % 4ULL == 0ULL) {
+            ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * embeddingDim);\n";
+            ss << "  output[globalVectorIndex] = sum;\n";
+        } else {
+            ss << "  float* __restrict__ output = outputValues + row * static_cast<unsigned long long>(embeddingDim) + dimBase;\n";
+            ss << "  if (vectorValidLanes > 0U) output[0] = sum.x;\n";
+            ss << "  if (vectorValidLanes > 1U) output[1] = sum.y;\n";
+            ss << "  if (vectorValidLanes > 2U) output[2] = sum.z;\n";
+            ss << "  if (vectorValidLanes > 3U) output[3] = sum.w;\n";
+        }
     }
     ss << "}\n";
     return ss.str();
@@ -978,13 +1034,12 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(
     (void)rowDType;
     if (!hasUltraHighTwoStageEmbeddingSparseGradientReducer(embeddingDim)) {
         throw std::invalid_argument(
-            "Embedding sparse-gradient ultra-high partial reducer currently requires a fixed D={4,8,16,32,64,128,768} or 256-multiple up "
-            "to 4096 reducer.");
+            "Embedding sparse-gradient ultra-high partial reducer currently requires a vectorized JIT reducer with embedding_dim <= 4096.");
     }
 
     const std::string gradType = sparseGradientScalarType(gradDType);
     const uint64_t threadsPerBlock = ultraHighReduceBlockThreadsForEmbeddingSparseGradient(embeddingDim);
-    const uint64_t numVectors = embeddingDim / 4ULL;
+    const uint64_t numVectors = (embeddingDim + 3ULL) / 4ULL;
     const uint64_t vectorsPerTile = fixedReducerVectorsPerTileForEmbeddingSparseGradient(embeddingDim);
     const uint64_t duplicateLanes = threadsPerBlock / vectorsPerTile;
 
@@ -1024,6 +1079,9 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(
     ss << "  const unsigned long long partialIndex = static_cast<unsigned long long>(blockIdx.x);\n";
     ss << "  if (partialIndex >= static_cast<unsigned long long>(numUltraHighPartials[0])) return;\n";
     ss << "  const bool validVector = globalVectorIndex < numVectors;\n";
+    ss << "  const unsigned int dimBase = globalVectorIndex * dimsPerThread;\n";
+    ss << "  const unsigned int vectorValidLanes = validVector ? ((dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : "
+          "(embeddingDim - dimBase)) : 0U;\n";
     ss << "  const unsigned long long row = static_cast<unsigned long long>(partialRunRows[partialIndex]);\n";
     ss << "  const unsigned long long tokenOffset = static_cast<unsigned long long>(partialTokenOffsets[partialIndex]);\n";
     ss << "  const unsigned long long begin = static_cast<unsigned long long>(runOffsets[row]) + tokenOffset;\n";
@@ -1035,7 +1093,15 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(
     ss << "  if (validVector) {\n";
     ss << "  for (unsigned long long i = static_cast<unsigned long long>(duplicateLane); i < count; i += duplicateLanes) {\n";
     ss << "    const unsigned long long token = static_cast<unsigned long long>(sortedTokenIds[begin + i]);\n";
-    if (gradDType == DataType::FP32) {
+    if (embeddingDim % 4ULL != 0ULL) {
+        ss << "    const unsigned long long base_v = token * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long "
+              "long>(dimBase);\n";
+        ss << "    float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+        ss << "    if (vectorValidLanes > 0U) v.x = thor_embedding_grad_to_float(upstreamGradient[base_v]);\n";
+        ss << "    if (vectorValidLanes > 1U) v.y = thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]);\n";
+        ss << "    if (vectorValidLanes > 2U) v.z = thor_embedding_grad_to_float(upstreamGradient[base_v + 2ULL]);\n";
+        ss << "    if (vectorValidLanes > 3U) v.w = thor_embedding_grad_to_float(upstreamGradient[base_v + 3ULL]);\n";
+    } else if (gradDType == DataType::FP32) {
         ss << "    const float4* __restrict__ input_v = reinterpret_cast<const float4*>(upstreamGradient + token * embeddingDim);\n";
         ss << "    const float4 v = input_v[globalVectorIndex];\n";
     } else if (gradDType == DataType::FP16) {
@@ -1069,9 +1135,17 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(
     ss << "  for (unsigned int lane = 1U; lane < duplicateLanes; ++lane) {\n";
     ss << "    sum = thor_embedding_add_float4(sum, partialSumsShared[lane * vectorsPerTile + vectorInTile]);\n";
     ss << "  }\n";
-    ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(partialSums + partialIndex * static_cast<unsigned long "
-          "long>(embeddingDim));\n";
-    ss << "  output[globalVectorIndex] = sum;\n";
+    if (embeddingDim % 4ULL == 0ULL) {
+        ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(partialSums + partialIndex * static_cast<unsigned long "
+              "long>(embeddingDim));\n";
+        ss << "  output[globalVectorIndex] = sum;\n";
+    } else {
+        ss << "  float* __restrict__ output = partialSums + partialIndex * static_cast<unsigned long long>(embeddingDim) + dimBase;\n";
+        ss << "  if (vectorValidLanes > 0U) output[0] = sum.x;\n";
+        ss << "  if (vectorValidLanes > 1U) output[1] = sum.y;\n";
+        ss << "  if (vectorValidLanes > 2U) output[2] = sum.z;\n";
+        ss << "  if (vectorValidLanes > 3U) output[3] = sum.w;\n";
+    }
     ss << "}\n";
     return ss.str();
 }
@@ -1084,13 +1158,12 @@ std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType
     (void)gradDType;
     if (!hasUltraHighTwoStageEmbeddingSparseGradientReducer(embeddingDim)) {
         throw std::invalid_argument(
-            "Embedding sparse-gradient ultra-high final reducer currently requires a fixed D={4,8,16,32,64,128,768} or 256-multiple up to "
-            "4096 reducer.");
+            "Embedding sparse-gradient ultra-high final reducer currently requires a vectorized JIT reducer with embedding_dim <= 4096.");
     }
 
     const std::string rowType = sparseGradientScalarType(rowDType);
     const uint64_t threadsPerBlock = ultraHighReduceBlockThreadsForEmbeddingSparseGradient(embeddingDim);
-    const uint64_t numVectors = embeddingDim / 4ULL;
+    const uint64_t numVectors = (embeddingDim + 3ULL) / 4ULL;
     const uint64_t vectorsPerTile = fixedReducerVectorsPerTileForEmbeddingSparseGradient(embeddingDim);
     const uint64_t duplicateLanes = threadsPerBlock / vectorsPerTile;
 
@@ -1117,6 +1190,7 @@ std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType
     ss << "  constexpr unsigned int THREADS_PER_BLOCK_LOCAL = " << threadsPerBlock << "U;\n";
     ss << "  constexpr unsigned int embeddingDim = " << embeddingDim << "U;\n";
     ss << "  constexpr unsigned int numVectors = " << numVectors << "U;\n";
+    ss << "  constexpr unsigned int dimsPerThread = 4U;\n";
     ss << "  constexpr unsigned int vectorsPerTile = " << vectorsPerTile << "U;\n";
     ss << "  constexpr unsigned int duplicateLanes = " << duplicateLanes << "U;\n";
     ss << "  __shared__ float4 partialSumsShared[THREADS_PER_BLOCK_LOCAL];\n";
@@ -1126,15 +1200,29 @@ std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType
     ss << "  const unsigned long long bucketRow = static_cast<unsigned long long>(blockIdx.x);\n";
     ss << "  if (bucketRow >= static_cast<unsigned long long>(numRunRows[0])) return;\n";
     ss << "  const bool validVector = globalVectorIndex < numVectors;\n";
+    ss << "  const unsigned int dimBase = globalVectorIndex * dimsPerThread;\n";
+    ss << "  const unsigned int vectorValidLanes = validVector ? ((dimBase + dimsPerThread <= embeddingDim) ? dimsPerThread : "
+          "(embeddingDim - dimBase)) : 0U;\n";
     ss << "  const unsigned long long row = static_cast<unsigned long long>(runRowIndices[bucketRow]);\n";
     ss << "  const unsigned long long partialBegin = static_cast<unsigned long long>(ultraHighRunPartialOffsets[bucketRow]);\n";
     ss << "  const unsigned long long partialCount = static_cast<unsigned long long>(ultraHighRunPartialCounts[bucketRow]);\n";
     ss << "  float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
     ss << "  if (validVector) {\n";
     ss << "  for (unsigned long long p = static_cast<unsigned long long>(duplicateLane); p < partialCount; p += duplicateLanes) {\n";
-    ss << "    const float4* __restrict__ input = reinterpret_cast<const float4*>(partialSums + (partialBegin + p) * static_cast<unsigned "
-          "long long>(embeddingDim));\n";
-    ss << "    const float4 v = input[globalVectorIndex];\n";
+    if (embeddingDim % 4ULL == 0ULL) {
+        ss << "    const float4* __restrict__ input = reinterpret_cast<const float4*>(partialSums + (partialBegin + p) * "
+              "static_cast<unsigned "
+              "long long>(embeddingDim));\n";
+        ss << "    const float4 v = input[globalVectorIndex];\n";
+    } else {
+        ss << "    const unsigned long long base_v = (partialBegin + p) * static_cast<unsigned long long>(embeddingDim) + "
+              "static_cast<unsigned long long>(dimBase);\n";
+        ss << "    float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+        ss << "    if (vectorValidLanes > 0U) v.x = partialSums[base_v];\n";
+        ss << "    if (vectorValidLanes > 1U) v.y = partialSums[base_v + 1ULL];\n";
+        ss << "    if (vectorValidLanes > 2U) v.z = partialSums[base_v + 2ULL];\n";
+        ss << "    if (vectorValidLanes > 3U) v.w = partialSums[base_v + 3ULL];\n";
+    }
     ss << "    sum = thor_embedding_add_float4(sum, v);\n";
     ss << "  }\n";
     ss << "  }\n";
@@ -1148,11 +1236,20 @@ std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType
         ss << "  const unsigned long long sru_logical_row = row;\n";
         ss << "  const unsigned long long sru_indexed_row = static_cast<unsigned long long>(outputRows[row]);\n";
         ss << "  const unsigned long long sru_vector_index = static_cast<unsigned long long>(globalVectorIndex);\n";
+        ss << "  const unsigned int sru_vector_valid_lanes = vectorValidLanes;\n";
         ss << sparseRowUpdate->bodySource;
     } else {
-        ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * static_cast<unsigned long "
-              "long>(embeddingDim));\n";
-        ss << "  output[globalVectorIndex] = sum;\n";
+        if (embeddingDim % 4ULL == 0ULL) {
+            ss << "  float4* __restrict__ output = reinterpret_cast<float4*>(outputValues + row * static_cast<unsigned long "
+                  "long>(embeddingDim));\n";
+            ss << "  output[globalVectorIndex] = sum;\n";
+        } else {
+            ss << "  float* __restrict__ output = outputValues + row * static_cast<unsigned long long>(embeddingDim) + dimBase;\n";
+            ss << "  if (vectorValidLanes > 0U) output[0] = sum.x;\n";
+            ss << "  if (vectorValidLanes > 1U) output[1] = sum.y;\n";
+            ss << "  if (vectorValidLanes > 2U) output[2] = sum.z;\n";
+            ss << "  if (vectorValidLanes > 3U) output[3] = sum.w;\n";
+        }
     }
     ss << "}\n";
     return ss.str();
@@ -1536,10 +1633,11 @@ void launchReduceValuesFixedDim(PreparedEmbeddingSparseGradient& prepared,
                                 const Tensor& runRows,
                                 const Tensor& numRunRows,
                                 Stream stream) {
-    constexpr uint32_t BLOCK_THREADS = FixedEmbeddingReducerBlockThreads<EmbeddingDim>::value;
+    using Geometry = FixedEmbeddingReducerGeometry<EmbeddingDim>;
+    constexpr uint32_t BLOCK_THREADS = Geometry::BLOCK_THREADS;
     const dim3 block(BLOCK_THREADS);
-    const dim3 grid(reduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, EmbeddingDim),
-                    reduceGridDimYForEmbeddingSparseGradient(EmbeddingDim));
+    const dim3 grid(static_cast<uint32_t>((outputGradient.capacity + Geometry::ROWS_PER_LOW_BLOCK - 1ULL) / Geometry::ROWS_PER_LOW_BLOCK),
+                    static_cast<uint32_t>((Geometry::NUM_VECTORS + Geometry::VECTORS_PER_TILE - 1ULL) / Geometry::VECTORS_PER_TILE));
     reduceEmbeddingSparseGradientValuesFixedDimKernel<RowT, GradT, EmbeddingDim>
         <<<grid, block, 0, stream.getStream()>>>(prepared.sortedTokenIds.getMemPtr<uint32_t>(),
                                                  prepared.runOffsets.getMemPtr<uint32_t>(),
@@ -1565,10 +1663,11 @@ void launchHighRunReduceValuesFixedDim(PreparedEmbeddingSparseGradient& prepared
                                        const Tensor& runRows,
                                        const Tensor& numRunRows,
                                        Stream stream) {
-    constexpr uint32_t BLOCK_THREADS = FixedEmbeddingReducerBlockThreads<EmbeddingDim>::value;
+    using Geometry = FixedEmbeddingReducerGeometry<EmbeddingDim>;
+    constexpr uint32_t BLOCK_THREADS = Geometry::BLOCK_THREADS;
     const dim3 block(BLOCK_THREADS);
-    const dim3 grid(highRunReduceGridDimXForEmbeddingSparseGradient(outputGradient.capacity, EmbeddingDim),
-                    highRunReduceGridDimYForEmbeddingSparseGradient(EmbeddingDim));
+    const dim3 grid(static_cast<uint32_t>(outputGradient.capacity),
+                    static_cast<uint32_t>((Geometry::NUM_VECTORS + Geometry::VECTORS_PER_TILE - 1ULL) / Geometry::VECTORS_PER_TILE));
     reduceEmbeddingSparseGradientValuesHighRunFixedDimKernel<RowT, GradT, EmbeddingDim>
         <<<grid, block, 0, stream.getStream()>>>(prepared.sortedTokenIds.getMemPtr<uint32_t>(),
                                                  prepared.runOffsets.getMemPtr<uint32_t>(),
@@ -1746,8 +1845,8 @@ void launchReduceValuesTyped(PreparedEmbeddingSparseGradient& prepared,
             break;
         default: {
             const dim3 block(THREADS_PER_BLOCK);
-            const dim3 grid(reduceGridDimXForEmbeddingSparseGradient(maxRows, prepared.embeddingDim),
-                            reduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim));
+            const dim3 grid(static_cast<uint32_t>(maxRows),
+                            static_cast<uint32_t>((prepared.embeddingDim + THREADS_PER_BLOCK - 1ULL) / THREADS_PER_BLOCK));
             reduceEmbeddingSparseGradientValuesTiledKernel<RowT, GradT>
                 <<<grid, block, 0, stream.getStream()>>>(prepared.sortedTokenIds.getMemPtr<uint32_t>(),
                                                          prepared.runOffsets.getMemPtr<uint32_t>(),

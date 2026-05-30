@@ -376,19 +376,55 @@ endfunction()
 # ============================================================
 # Automatic Git versioning
 # ============================================================
-find_package(Git QUIET)
-if (Git_FOUND)
-    execute_process(
-            COMMAND ${GIT_EXECUTABLE} describe --tags --always
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            OUTPUT_VARIABLE GIT_VERSION
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-else ()
+set(
+        THOR_GIT_VERSION_MODE
+        "auto"
+        CACHE STRING
+        "Git version mode: auto embeds git describe output; unknown always embeds 'unknown' and does not track .git files."
+)
+set_property(CACHE THOR_GIT_VERSION_MODE PROPERTY STRINGS auto unknown)
+
+if (THOR_GIT_VERSION_MODE STREQUAL "unknown")
     set(GIT_VERSION "unknown")
+elseif (THOR_GIT_VERSION_MODE STREQUAL "auto")
+    set(_thor_git_describe_result 1)
+    find_package(Git QUIET)
+    if (Git_FOUND)
+        execute_process(
+                COMMAND ${GIT_EXECUTABLE} describe --always --dirty --tags
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                OUTPUT_VARIABLE GIT_VERSION
+                RESULT_VARIABLE _thor_git_describe_result
+                ERROR_QUIET
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    endif ()
+
+    if (NOT Git_FOUND OR NOT _thor_git_describe_result EQUAL 0 OR GIT_VERSION STREQUAL "")
+        set(GIT_VERSION "unknown")
+    endif ()
+
+    if (EXISTS "${CMAKE_SOURCE_DIR}/.git/HEAD")
+        # Reconfigure only when embedding a real git version. Development builds
+        # can use -DTHOR_GIT_VERSION_MODE=unknown to keep generated/ThorVersion.h
+        # stable across commits, pushes, dirty-state changes, and index updates.
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                "${CMAKE_SOURCE_DIR}/.git/HEAD"
+                "${CMAKE_SOURCE_DIR}/.git/index"
+                "${CMAKE_SOURCE_DIR}/.git/packed-refs"
+        )
+
+        file(READ "${CMAKE_SOURCE_DIR}/.git/HEAD" _git_head LIMIT 200)
+        if (_git_head MATCHES "^ref: (.+)$")
+            set(_git_ref "${CMAKE_SOURCE_DIR}/.git/${CMAKE_MATCH_1}")
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_git_ref}")
+        endif ()
+    endif ()
+else ()
+    message(FATAL_ERROR "Invalid THOR_GIT_VERSION_MODE='${THOR_GIT_VERSION_MODE}'. Use auto or unknown.")
 endif ()
 
-message(STATUS "Git version: ${GIT_VERSION}")
+message(STATUS "Git version (${THOR_GIT_VERSION_MODE}): ${GIT_VERSION}")
 
 configure_file(
         ${CMAKE_SOURCE_DIR}/ThorVersion.h.in
@@ -963,32 +999,6 @@ endif ()
 
 # For convenience, rebuild the python bindings before rebuilding the c++ tests
 add_dependencies(thor_tests _thor)
-
-# Compute GIT_VERSION at configure time
-execute_process(
-        COMMAND git describe --always --dirty --tags
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE GIT_VERSION
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-configure_file(${CMAKE_SOURCE_DIR}/ThorVersion.h.in
-        ${CMAKE_BINARY_DIR}/generated/ThorVersion.h
-        @ONLY)
-
-# Reconfigure when HEAD changes (and when refs/index change)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${CMAKE_SOURCE_DIR}/.git/HEAD"
-        "${CMAKE_SOURCE_DIR}/.git/index"
-        "${CMAKE_SOURCE_DIR}/.git/packed-refs"
-)
-
-# Also depend on the currently checked-out branch ref, if available
-file(READ "${CMAKE_SOURCE_DIR}/.git/HEAD" _git_head LIMIT 200)
-if (_git_head MATCHES "^ref: (.+)$")
-    set(_git_ref "${CMAKE_SOURCE_DIR}/.git/${CMAKE_MATCH_1}")
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_git_ref}")
-endif ()
 
 execute_process(
         COMMAND "${Python3_EXECUTABLE}" -c
