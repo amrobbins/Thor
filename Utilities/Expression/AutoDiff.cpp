@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <optional>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
@@ -12,6 +13,47 @@
 
 namespace ThorImplementation {
 namespace {
+
+double digammaApproxForMl(double x) {
+    constexpr double pi = 3.14159265358979323846264338327950288;
+
+    if (std::isnan(x)) {
+        return x;
+    }
+    if (std::isinf(x)) {
+        return x > 0.0 ? x : std::numeric_limits<double>::quiet_NaN();
+    }
+
+    double result = 0.0;
+    if (x <= 0.0) {
+        const double floored = std::floor(x);
+        if (x == floored) {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        result -= pi / std::tan(pi * x);
+        x = 1.0 - x;
+    }
+
+    while (x < 8.0) {
+        result -= 1.0 / x;
+        x += 1.0;
+    }
+
+    const double inv = 1.0 / x;
+    const double inv2 = inv * inv;
+    const double inv4 = inv2 * inv2;
+    const double inv6 = inv4 * inv2;
+    const double inv8 = inv4 * inv4;
+    const double inv10 = inv8 * inv2;
+
+    result += std::log(x) - 0.5 * inv;
+    result -= inv2 * (1.0 / 12.0);
+    result += inv4 * (1.0 / 120.0);
+    result -= inv6 * (1.0 / 252.0);
+    result += inv8 * (1.0 / 240.0);
+    result -= inv10 * (1.0 / 132.0);
+    return result;
+}
 
 bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
     const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE");
@@ -303,6 +345,9 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::ERFCX:
             case ExprOp::ERFINV:
             case ExprOp::ERFCINV:
+            case ExprOp::TGAMMA:
+            case ExprOp::LGAMMA:
+            case ExprOp::DIGAMMA:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -718,6 +763,24 @@ class BackwardGraphBuilder {
                 return false;
             case ExprOp::ERFINV:
             case ExprOp::ERFCINV:
+                return false;
+            case ExprOp::TGAMMA:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::tgamma(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::LGAMMA:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::lgamma(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::DIGAMMA:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = digammaApproxForMl(value);
+                    return true;
+                }
                 return false;
             case ExprOp::ADD:
             case ExprOp::SUB:
@@ -1323,6 +1386,7 @@ class BackwardGraphBuilder {
     uint32_t cosh(uint32_t value) { return unary(ExprOp::COSH, value); }
     uint32_t sqrt(uint32_t value) { return unary(ExprOp::SQRT, value); }
     uint32_t exp(uint32_t value) { return unary(ExprOp::EXP, value); }
+    uint32_t digamma(uint32_t value) { return unary(ExprOp::DIGAMMA, value); }
     uint32_t add(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::ADD, lhs, rhs); }
     uint32_t sub(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::SUB, lhs, rhs); }
     uint32_t mul(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::MUL, lhs, rhs); }
@@ -2082,6 +2146,9 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::ERFCX:
             case ExprOp::ERFINV:
             case ExprOp::ERFCINV:
+            case ExprOp::TGAMMA:
+            case ExprOp::LGAMMA:
+            case ExprOp::DIGAMMA:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -2814,6 +2881,26 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 }
                 break;
             }
+
+            case ExprOp::TGAMMA: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.mul(out, builder.digamma(lhs))), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::LGAMMA: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.digamma(lhs)), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::DIGAMMA:
+                throw std::runtime_error("Thor expressions autodiff does not support backward for digamma yet; digamma backward requires trigamma.");
 
             case ExprOp::TRANSPOSE: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {

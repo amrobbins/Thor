@@ -1478,6 +1478,9 @@ Return the absolute value of the input expression x
     expr.def_static("erfcx", [](const Expression& x) { return x.erfcx(); }, "x"_a);
     expr.def_static("erfinv", [](const Expression& x) { return x.erfinv(); }, "x"_a);
     expr.def_static("erfcinv", [](const Expression& x) { return x.erfcinv(); }, "x"_a);
+    expr.def_static("tgamma", [](const Expression& x) { return x.tgamma(); }, "x"_a);
+    expr.def_static("lgamma", [](const Expression& x) { return x.lgamma(); }, "x"_a);
+    expr.def_static("digamma", [](const Expression& x) { return x.digamma(); }, "x"_a);
 
     expr.def_static("exp", [](const Expression& x) { return x.exp(); }, "x"_a);
     expr.def_static("expm1", [](const Expression& x) { return x.expm1(); }, "x"_a);

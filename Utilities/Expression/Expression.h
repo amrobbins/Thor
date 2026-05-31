@@ -58,6 +58,9 @@ enum class ExprOp : uint16_t {
     ERFCX,
     ERFINV,
     ERFCINV,
+    TGAMMA,
+    LGAMMA,
+    DIGAMMA,
     EXP,
     EXPM1,
     EXP2,
@@ -496,6 +499,9 @@ class Expression {
     [[nodiscard]] Expression erfcx() const;
     [[nodiscard]] Expression erfinv() const;
     [[nodiscard]] Expression erfcinv() const;
+    [[nodiscard]] Expression tgamma() const;
+    [[nodiscard]] Expression lgamma() const;
+    [[nodiscard]] Expression digamma() const;
     [[nodiscard]] Expression ln() const;
     [[nodiscard]] Expression log1p() const;
     [[nodiscard]] Expression log2() const;

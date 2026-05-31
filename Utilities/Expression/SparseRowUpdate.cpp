@@ -130,6 +130,12 @@ std::string unaryFunctionName(ExprOp op) {
             return "erfinvf";
         case ExprOp::ERFCINV:
             return "erfcinvf";
+        case ExprOp::TGAMMA:
+            return "tgammaf";
+        case ExprOp::LGAMMA:
+            return "lgammaf";
+        case ExprOp::DIGAMMA:
+            return "thor_digammaf";
         case ExprOp::EXP:
             return "expf";
         case ExprOp::EXPM1:
@@ -181,6 +187,9 @@ bool isUnaryOpSupported(ExprOp op) {
         case ExprOp::ERFCX:
         case ExprOp::ERFINV:
         case ExprOp::ERFCINV:
+        case ExprOp::TGAMMA:
+        case ExprOp::LGAMMA:
+        case ExprOp::DIGAMMA:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -306,6 +315,12 @@ std::string unaryVectorFunctionName(ExprOp op) {
             return "erfinvf";
         case ExprOp::ERFCINV:
             return "erfcinvf";
+        case ExprOp::TGAMMA:
+            return "tgammaf";
+        case ExprOp::LGAMMA:
+            return "lgammaf";
+        case ExprOp::DIGAMMA:
+            return "thor_digammaf";
         case ExprOp::EXP:
             return "expf";
         case ExprOp::EXPM1:
@@ -443,6 +458,37 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
     ss << "#include <cuda_fp16.h>\n";
     ss << "#include <cuda_bf16.h>\n";
     ss << "#include <math_functions.h>\n\n";
+    ss << R"(__device__ __forceinline__ float thor_digammaf(float x) {
+  constexpr float pi = 3.14159265358979323846264338327950288f;
+  if (isnan(x)) return x;
+  if (isinf(x)) return x > 0.0f ? x : nanf("");
+  float result = 0.0f;
+  if (x <= 0.0f) {
+    const float floored = floorf(x);
+    if (x == floored) return nanf("");
+    result -= pi / tanf(pi * x);
+    x = 1.0f - x;
+  }
+  while (x < 8.0f) {
+    result -= 1.0f / x;
+    x += 1.0f;
+  }
+  const float inv = 1.0f / x;
+  const float inv2 = inv * inv;
+  const float inv4 = inv2 * inv2;
+  const float inv6 = inv4 * inv2;
+  const float inv8 = inv4 * inv4;
+  const float inv10 = inv8 * inv2;
+  result += logf(x) - 0.5f * inv;
+  result -= inv2 * (1.0f / 12.0f);
+  result += inv4 * (1.0f / 120.0f);
+  result -= inv6 * (1.0f / 252.0f);
+  result += inv8 * (1.0f / 240.0f);
+  result -= inv10 * (1.0f / 132.0f);
+  return result;
+}
+
+)";
     ss << "__device__ __forceinline__ float4 thor_sparse_load_float4(const float* p, unsigned long long i) { return "
           "*reinterpret_cast<const float4*>(p + i); }\n";
     ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_full(const float* p, unsigned long long i) {\n";

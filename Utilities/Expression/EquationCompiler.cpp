@@ -815,6 +815,12 @@ static const char* fusedOpTag(ExprOp op) {
             return "ERFINV";
         case ExprOp::ERFCINV:
             return "ERFCINV";
+        case ExprOp::TGAMMA:
+            return "TGAMMA";
+        case ExprOp::LGAMMA:
+            return "LGAMMA";
+        case ExprOp::DIGAMMA:
+            return "DIGAMMA";
         case ExprOp::EXP:
             return "EXP";
         case ExprOp::EXPM1:
