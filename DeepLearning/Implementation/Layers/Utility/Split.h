@@ -239,17 +239,31 @@ class Split : public MultiConnectionLayer {
         TensorPlacement placement = featureInputs[0].value().getPlacement();
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
+        if (splitTensorFeatureOutputMemoriesArray_d != nullptr) {
+            cudaStatus = cudaFree(splitTensorFeatureOutputMemoriesArray_d);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            splitTensorFeatureOutputMemoriesArray_d = nullptr;
+        }
         if (splitTensorErrorInputMemoriesArray_d != nullptr) {
             cudaStatus = cudaFree(splitTensorErrorInputMemoriesArray_d);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             splitTensorErrorInputMemoriesArray_d = nullptr;
         }
-        cudaStatus = cudaFree(axisElementsPerSplitTensor_d);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        axisElementsPerSplitTensor_d = nullptr;
-        cudaStatus = cudaFree(stridePerPackedTensorDimension_d);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        stridePerPackedTensorDimension_d = nullptr;
+        if (axisElementsPerSplitTensor_d != nullptr) {
+            cudaStatus = cudaFree(axisElementsPerSplitTensor_d);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            axisElementsPerSplitTensor_d = nullptr;
+        }
+        if (stridePerPackedTensorDimension_d != nullptr) {
+            cudaStatus = cudaFree(stridePerPackedTensorDimension_d);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            stridePerPackedTensorDimension_d = nullptr;
+        }
+        if (stridePerSplitTensorDimension_d != nullptr) {
+            cudaStatus = cudaFree(stridePerSplitTensorDimension_d);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            stridePerSplitTensorDimension_d = nullptr;
+        }
     }
 
     void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {

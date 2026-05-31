@@ -1,5 +1,7 @@
 #include "Concatenate.h"
 
+#include "Utilities/Common/ScopedGpu.h"
+
 __device__ __forceinline__ void computeDestIndex(long destFlatIndex, long destIndex[], int numDimensions, long stridePerDestDimension[]) {
     for (int i = 0; i < numDimensions - 1; ++i) {
         int dimensionIndex = destFlatIndex / stridePerDestDimension[i];
@@ -92,6 +94,8 @@ void launchConcatenate(half *dest,
                        long stridePerDestDimension[],
                        long stridePerSourceDimension[],
                        Stream stream) {
+    ScopedGpu scopedGpu(stream.getGpuNum());
+
     dim3 blockSize(256);
     dim3 gridSize((numElements + 4095) / 4096);
     int sharedRequirement = (256 * numDimensions + numSourceArrays + numDimensions + numSourceArrays * numDimensions) * sizeof(long);
@@ -104,4 +108,10 @@ void launchConcatenate(half *dest,
                                                                                 axisElementsPerSourceArray,
                                                                                 stridePerDestDimension,
                                                                                 stridePerSourceDimension);
+    cudaError_t cudaStatus = cudaGetLastError();
+    if (cudaStatus != cudaSuccess) {
+        printf("%s launch failed: %s\n", __func__, cudaGetErrorString(cudaStatus));
+        fflush(stdout);
+    }
+    THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
 }

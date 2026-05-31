@@ -1,5 +1,7 @@
 #include "Split.h"
 
+#include "Utilities/Common/ScopedGpu.h"
+
 __device__ __forceinline__ void computeSourceIndex(long sourceFlatIndex,
                                                    long sourceIndex[],
                                                    int numDimensions,
@@ -94,6 +96,8 @@ void launchSplit(half *dest[],
                  long stridePerSourceDimension[],
                  long stridePerDestDimension[],
                  Stream stream) {
+    ScopedGpu scopedGpu(stream.getGpuNum());
+
     dim3 blockSize(256);
     dim3 gridSize((numElements + 4095) / 4096);
     int sharedRequirement = (256 * numDimensions + numDestArrays + numDimensions + numDestArrays * numDimensions) * sizeof(long);
@@ -106,4 +110,10 @@ void launchSplit(half *dest[],
                                                                           axisElementsPerDestArray,
                                                                           stridePerSourceDimension,
                                                                           stridePerDestDimension);
+    cudaError_t cudaStatus = cudaGetLastError();
+    if (cudaStatus != cudaSuccess) {
+        printf("%s launch failed: %s\n", __func__, cudaGetErrorString(cudaStatus));
+        fflush(stdout);
+    }
+    THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
 }
