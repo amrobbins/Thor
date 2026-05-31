@@ -24,6 +24,7 @@ struct EmbeddingSparseGradientRunBucketConfig {
 };
 
 EmbeddingSparseGradientRunBucketConfig defaultEmbeddingSparseGradientRunBucketConfig();
+bool supportsEmbeddingSparseGradientFusedSparseRowUpdate(uint64_t embeddingDim);
 void setEmbeddingSparseGradientRunBucketConfigOverrideForTesting(std::optional<EmbeddingSparseGradientRunBucketConfig> config);
 
 struct EmbeddingSparseGradientProfileResult {
@@ -34,6 +35,7 @@ struct EmbeddingSparseGradientProfileResult {
     DataType indexDataType = DataType::UINT32;
     DataType gradientDataType = DataType::FP32;
     DataType rowDataType = DataType::UINT64;
+    bool fusedSparseRowUpdate = false;
     size_t sortTempBytes = 0;
     size_t rleTempBytes = 0;
     size_t scanTempBytes = 0;

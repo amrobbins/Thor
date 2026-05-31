@@ -35,10 +35,6 @@ bool isSupportedValueType(DataType dtype) {
 
 std::string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
 
-bool hasFixedSparseOptimizerFusionReducer(uint64_t embeddingDim) {
-    return embeddingDim != 0ULL && embeddingDim <= 4096ULL;
-}
-
 }  // namespace
 
 Embedding::Embedding(TensorPlacement placement,
@@ -148,7 +144,7 @@ void Embedding::compileImpl() {
                 weightsSparseGradient = optimizer->compileSparseRows(storage, maxSparseRows, gradientUpdateStream.value());
                 THOR_THROW_IF_FALSE(weightsSparseGradient.has_value());
                 weightsSparseGradientProducerFusesOptimizerUpdate =
-                    optimizer->supportsSparseRowUpdateFusion() && hasFixedSparseOptimizerFusionReducer(embeddingDim);
+                    optimizer->supportsSparseRowUpdateFusion() && supportsEmbeddingSparseGradientFusedSparseRowUpdate(embeddingDim);
                 if (weightsSparseGradientProducerFusesOptimizerUpdate) {
                     SparseRowOptimizerExpression updateExpression =
                         optimizer->toSparseRowUpdateExpression(storage, weightsSparseGradient.value());

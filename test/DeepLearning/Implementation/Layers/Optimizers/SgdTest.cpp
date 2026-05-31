@@ -754,6 +754,51 @@ TEST(SgdTest, SparsePlainSgdUpdatesOnlyRuntimeActiveRows) {
     expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 2e-5f, 2e-5f);
 }
 
+TEST(SgdTest, SparsePlainSgdLargeOddEmbeddingDimUsesMaskedVectorUpdate) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 4;
+    constexpr uint64_t embeddingDim = 257;
+    constexpr uint64_t capacity = 3;
+    constexpr uint64_t activeRows = 2;
+    constexpr uint32_t batchSize = 2;
+    constexpr float initialLearningRate = 0.1f;
+
+    std::vector<float> initialWeights(vocabularySize * embeddingDim);
+    for (uint64_t row = 0; row < vocabularySize; ++row) {
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            initialWeights[row * embeddingDim + d] = static_cast<float>(1000 + row * 100 + d);
+        }
+    }
+
+    const std::vector<uint64_t> rows{2, 1, 3};
+    std::vector<float> sparseValues(capacity * embeddingDim, 1000.0f);
+    for (uint64_t u = 0; u < activeRows; ++u) {
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            sparseValues[u * embeddingDim + d] = static_cast<float>((u + 1ULL) * 10ULL + d);
+        }
+    }
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {vocabularySize, embeddingDim}));
+    copyValuesToGpuFp32Tensor(weights, initialWeights, stream);
+
+    Sgd sgd(82,
+            initialLearningRate,
+            /*decay=*/0.0f,
+            /*momentum=*/0.0f,
+            /*useNesterovMomentum=*/false);
+    SparseRowGradient gradient = sgd.compileSparseRows(weights, capacity, stream);
+    stream.synchronize();
+
+    SgdReferenceState expected;
+    expected.weights = initialWeights;
+    applySparsePlainSgdReferenceStep(expected, rows, sparseValues, activeRows, embeddingDim, batchSize, initialLearningRate);
+
+    runSparseSgdStep(sgd, gradient, rows, sparseValues, activeRows, batchSize, stream);
+
+    expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 2e-5f, 2e-5f);
+}
+
 TEST(SgdTest, SparseClassicalMomentumTwoStepsCarryVelocityOnlyForTouchedRows) {
     Stream stream(gpuPlacement);
 

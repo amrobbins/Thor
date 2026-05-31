@@ -326,15 +326,16 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
                                     uint64_t capacity,
                                     uint64_t vocabularySize,
                                     uint64_t embeddingDim,
-                                    const std::string& kernelName) {
+                                    const std::string& kernelName,
+                                    bool fullVectorRows) {
     if (!outputs.expr) {
         throw std::runtime_error("Sparse row update requires a non-null expression.");
     }
     if (outputs.outputs.empty()) {
         throw std::runtime_error("Sparse row update requires at least one output.");
     }
-    if (embeddingDim == 0 || embeddingDim % 4 != 0) {
-        throw std::runtime_error("Sparse row vector4 update requires embeddingDim to be divisible by 4.");
+    if (embeddingDim == 0) {
+        throw std::runtime_error("Sparse row vector4 update requires a non-zero embeddingDim.");
     }
 
     const std::string rowType = scalarStorageType(rowDataType);
@@ -366,7 +367,56 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
     ss << "  p[i + 1ULL] = __float2bfloat16(v.y);\n";
     ss << "  p[i + 2ULL] = __float2bfloat16(v.z);\n";
     ss << "  p[i + 3ULL] = __float2bfloat16(v.w);\n";
-    ss << "}\n\n";
+    ss << "}\n";
+    if (!fullVectorRows) {
+        ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const float* p, unsigned long long i, unsigned int lanes) {\n";
+        ss << "  if (lanes >= 4U && ((i & 3ULL) == 0ULL)) return thor_sparse_load_float4(p, i);\n";
+        ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+        ss << "  if (lanes > 0U) v.x = p[i];\n";
+        ss << "  if (lanes > 1U) v.y = p[i + 1ULL];\n";
+        ss << "  if (lanes > 2U) v.z = p[i + 2ULL];\n";
+        ss << "  if (lanes > 3U) v.w = p[i + 3ULL];\n";
+        ss << "  return v;\n";
+        ss << "}\n";
+        ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const __half* p, unsigned long long i, unsigned int lanes) {\n";
+        ss << "  if (lanes >= 4U && ((i & 1ULL) == 0ULL)) return thor_sparse_load_float4(p, i);\n";
+        ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+        ss << "  if (lanes > 0U) v.x = __half2float(p[i]);\n";
+        ss << "  if (lanes > 1U) v.y = __half2float(p[i + 1ULL]);\n";
+        ss << "  if (lanes > 2U) v.z = __half2float(p[i + 2ULL]);\n";
+        ss << "  if (lanes > 3U) v.w = __half2float(p[i + 3ULL]);\n";
+        ss << "  return v;\n";
+        ss << "}\n";
+        ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const __nv_bfloat16* p, unsigned long long i, unsigned int lanes) {\n";
+        ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+        ss << "  if (lanes > 0U) v.x = __bfloat162float(p[i]);\n";
+        ss << "  if (lanes > 1U) v.y = __bfloat162float(p[i + 1ULL]);\n";
+        ss << "  if (lanes > 2U) v.z = __bfloat162float(p[i + 2ULL]);\n";
+        ss << "  if (lanes > 3U) v.w = __bfloat162float(p[i + 3ULL]);\n";
+        ss << "  return v;\n";
+        ss << "}\n";
+        ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(float* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
+        ss << "  if (lanes >= 4U && ((i & 3ULL) == 0ULL)) { thor_sparse_store_float4(p, i, v); return; }\n";
+        ss << "  if (lanes > 0U) p[i] = v.x;\n";
+        ss << "  if (lanes > 1U) p[i + 1ULL] = v.y;\n";
+        ss << "  if (lanes > 2U) p[i + 2ULL] = v.z;\n";
+        ss << "  if (lanes > 3U) p[i + 3ULL] = v.w;\n";
+        ss << "}\n";
+        ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(__half* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
+        ss << "  if (lanes >= 4U && ((i & 1ULL) == 0ULL)) { thor_sparse_store_float4(p, i, v); return; }\n";
+        ss << "  if (lanes > 0U) p[i] = __float2half_rn(v.x);\n";
+        ss << "  if (lanes > 1U) p[i + 1ULL] = __float2half_rn(v.y);\n";
+        ss << "  if (lanes > 2U) p[i + 2ULL] = __float2half_rn(v.z);\n";
+        ss << "  if (lanes > 3U) p[i + 3ULL] = __float2half_rn(v.w);\n";
+        ss << "}\n";
+        ss << "__device__ __forceinline__ void thor_sparse_store_float4_masked(__nv_bfloat16* p, unsigned long long i, float4 v, unsigned int lanes) {\n";
+        ss << "  if (lanes > 0U) p[i] = __float2bfloat16(v.x);\n";
+        ss << "  if (lanes > 1U) p[i + 1ULL] = __float2bfloat16(v.y);\n";
+        ss << "  if (lanes > 2U) p[i + 2ULL] = __float2bfloat16(v.z);\n";
+        ss << "  if (lanes > 3U) p[i + 3ULL] = __float2bfloat16(v.w);\n";
+        ss << "}\n";
+    }
+    ss << "\n";
 
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernelName << "(const " << rowType << "* rows, const " << rowType << "* num_rows";
@@ -388,12 +438,17 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
     ss << "  const unsigned long long active_rows = static_cast<unsigned long long>(num_rows[0]);\n";
     ss << "  if (active_rows > " << capacity << "ULL) { asm(\"trap;\"); return; }\n";
     ss << "  const unsigned long long embedding_dim = " << embeddingDim << "ULL;\n";
-    ss << "  const unsigned long long vectors_per_row = " << (embeddingDim / 4ULL) << "ULL;\n";
+    ss << "  const unsigned long long vectors_per_row = " << ((embeddingDim + 3ULL) / 4ULL) << "ULL;\n";
     ss << "  const unsigned long long total = active_rows * vectors_per_row;\n";
     ss << "  if (idx >= total) return;\n";
     ss << "  const unsigned long long logical_row = idx / vectors_per_row;\n";
     ss << "  const unsigned long long vector_idx = idx - logical_row * vectors_per_row;\n";
     ss << "  const unsigned long long dim = vector_idx * 4ULL;\n";
+    if (fullVectorRows) {
+        ss << "  constexpr unsigned int vector_valid_lanes = 4U;\n";
+    } else {
+        ss << "  const unsigned int vector_valid_lanes = (dim + 4ULL <= embedding_dim) ? 4U : static_cast<unsigned int>(embedding_dim - dim);\n";
+    }
     ss << "  const unsigned long long row = static_cast<unsigned long long>(rows[logical_row]);\n";
     ss << "  if (row >= " << vocabularySize << "ULL) { asm(\"trap;\"); return; }\n";
     ss << "  const unsigned long long logical_offset = logical_row * embedding_dim + dim;\n";
@@ -420,7 +475,12 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
                     throw std::runtime_error("Sparse row vector4 update INPUT node was not bound to a tensor input.");
                 }
                 const std::string offset = slot.tensorKind == SparseRowUpdateTensorKind::IndexedRows ? "indexed_offset" : "logical_offset";
-                ss << "  const float4 " << ref(nodeIdx) << " = " << vectorLoadExpr("in" + std::to_string(node.input_slot), offset) << ";\n";
+                const std::string maskedLoad = std::string("thor_sparse_load_float4_masked(in") + std::to_string(node.input_slot) +
+                                               ", " + offset + ", vector_valid_lanes)";
+                ss << "  const float4 " << ref(nodeIdx) << " = "
+                   << (fullVectorRows ? vectorLoadExpr("in" + std::to_string(node.input_slot), offset)
+                                      : maskedLoad)
+                   << ";\n";
                 break;
             }
             case ExprOp::RUNTIME_SCALAR: {
@@ -460,7 +520,12 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
         if (out.node_idx >= outputs.expr->nodes.size()) {
             throw std::runtime_error("Sparse row vector4 update output node index is out of range.");
         }
-        ss << "  " << vectorOutputStoreStmt("out" + std::to_string(outputIdx), "indexed_offset", ref(out.node_idx)) << "\n";
+        const std::string maskedStore = std::string("thor_sparse_store_float4_masked(out") + std::to_string(outputIdx) +
+                                        ", indexed_offset, " + ref(out.node_idx) + ", vector_valid_lanes);";
+        ss << "  "
+           << (fullVectorRows ? vectorOutputStoreStmt("out" + std::to_string(outputIdx), "indexed_offset", ref(out.node_idx))
+                              : maskedStore)
+           << "\n";
     }
 
     ss << "}\n";
@@ -475,8 +540,10 @@ std::string emitKernelSource(const PhysicalOutputs& outputs,
                              uint64_t vocabularySize,
                              uint64_t embeddingDim,
                              const std::string& kernelName) {
-    if (embeddingDim != 0 && embeddingDim % 4 == 0) {
-        return emitVector4KernelSource(outputs, inputSlots, outputSlots, rowDataType, capacity, vocabularySize, embeddingDim, kernelName);
+    if (embeddingDim != 0 && (embeddingDim % 4ULL == 0ULL || embeddingDim >= 256ULL)) {
+        const bool fullVectorRows = (embeddingDim % 4ULL) == 0ULL;
+        return emitVector4KernelSource(
+            outputs, inputSlots, outputSlots, rowDataType, capacity, vocabularySize, embeddingDim, kernelName, fullVectorRows);
     }
     if (!outputs.expr) {
         throw std::runtime_error("Sparse row update requires a non-null expression.");
@@ -1298,9 +1365,11 @@ std::unique_ptr<SparseRowUpdatePlan> SparseRowUpdatePlan::compile(
     }
     checkedProduct(capacity, embeddingDim, "launch domain");
 
-    const bool useVector4Update = (embeddingDim != 0 && embeddingDim % 4 == 0);
+    const bool useVector4Update = (embeddingDim != 0 && (embeddingDim % 4ULL == 0ULL || embeddingDim >= 256ULL));
+    const bool fullVectorRows = (embeddingDim % 4ULL) == 0ULL;
     const std::string kernelName = "thor_sparse_row_update_v" + safeKernelSuffix(vocabularySize) + "_d" + safeKernelSuffix(embeddingDim) +
-                                   (useVector4Update ? "_vec4" : "") + "_r" + safeKernelSuffix(static_cast<uint64_t>(rows.getDataType()));
+                                   (useVector4Update ? (fullVectorRows ? "_vec4" : "_vec4_masked") : "") + "_r" +
+                                   safeKernelSuffix(static_cast<uint64_t>(rows.getDataType()));
     const std::string src =
         emitKernelSource(outputs, inputSlots, outputSlots, rows.getDataType(), capacity, vocabularySize, embeddingDim, kernelName);
 
@@ -1316,7 +1385,7 @@ std::unique_ptr<SparseRowUpdatePlan> SparseRowUpdatePlan::compile(
     plan->capacity = capacity;
     plan->vocabularySize = vocabularySize;
     plan->embeddingDim = embeddingDim;
-    plan->valuesPerThread = (embeddingDim != 0 && embeddingDim % 4 == 0) ? 4U : 1U;
+    plan->valuesPerThread = useVector4Update ? 4U : 1U;
     plan->rowDataType = rows.getDataType();
     plan->rows = rows;
     plan->numRows = numRows;
