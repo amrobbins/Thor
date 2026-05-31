@@ -31,19 +31,34 @@
 namespace ThorImplementation {
 namespace {
 
+#ifndef THOR_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX
+#define THOR_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX 16U
+#endif
+
+#ifndef THOR_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN
+#define THOR_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN 1024U
+#endif
+
+#ifndef THOR_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL
+#define THOR_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL 512U
+#endif
+
+constexpr uint32_t EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX = THOR_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX;
+constexpr uint32_t EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN = THOR_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN;
+constexpr uint32_t EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL = THOR_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL;
+
+static_assert(EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX >= 1U);
+static_assert(EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN > EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX);
+static_assert(EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL >= 1U);
+
 constexpr uint32_t THREADS_PER_BLOCK = 256;
 constexpr bool PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS = false;
 constexpr uint32_t WARP_SIZE_EMBEDDING = 32;
 constexpr uint32_t WARPS_PER_BLOCK = THREADS_PER_BLOCK / WARP_SIZE_EMBEDDING;
-constexpr uint32_t DEFAULT_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX = 16U;
-constexpr uint32_t DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN = 1024U;
 constexpr uint32_t DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL = 512U;
 constexpr uint32_t MAX_FIXED_EMBEDDING_SPARSE_GRADIENT_DIM = 4096U;
 static_assert(THREADS_PER_BLOCK == 256);
 static_assert(WARPS_PER_BLOCK == 8);
-static_assert(DEFAULT_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX + 1U < DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN);
-static_assert(DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL > 0U);
-static_assert(DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL <= DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN);
 
 std::mutex gEmbeddingSparseGradientRunBucketConfigMutex;
 std::optional<EmbeddingSparseGradientRunBucketConfig> gEmbeddingSparseGradientRunBucketConfigOverride;
@@ -60,8 +75,8 @@ void validateEmbeddingSparseGradientRunBucketConfig(const EmbeddingSparseGradien
 EmbeddingSparseGradientRunBucketConfig currentEmbeddingSparseGradientRunBucketConfig() {
     std::lock_guard<std::mutex> lock(gEmbeddingSparseGradientRunBucketConfigMutex);
     return gEmbeddingSparseGradientRunBucketConfigOverride.value_or(
-        EmbeddingSparseGradientRunBucketConfig{DEFAULT_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX,
-                                               DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN,
+        EmbeddingSparseGradientRunBucketConfig{EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX,
+                                               EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN,
                                                DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL});
 }
 
@@ -2230,10 +2245,9 @@ void launchReduceValuesWithSparseRowUpdateForRunRows(PreparedEmbeddingSparseGrad
                                                   : reduceGridDimYForEmbeddingSparseGradient(prepared.embeddingDim);
     const uint32_t reduceBlockThreads = highRunBucket ? highRunReduceBlockThreadsForEmbeddingSparseGradient(prepared.embeddingDim)
                                                       : reduceBlockThreadsForEmbeddingSparseGradient(prepared.embeddingDim);
-    const uint64_t maxBucketRows = highRunBucket
-                                       ? maxHighRunRowsForEmbeddingSparseGradient(
-                                             outputGradient.capacity, prepared.numTokens, prepared.runBucketConfig)
-                                       : outputGradient.capacity;
+    const uint64_t maxBucketRows =
+        highRunBucket ? maxHighRunRowsForEmbeddingSparseGradient(outputGradient.capacity, prepared.numTokens, prepared.runBucketConfig)
+                      : outputGradient.capacity;
     const uint32_t gridX = highRunBucket ? highRunReduceGridDimXForEmbeddingSparseGradient(maxBucketRows, prepared.embeddingDim)
                                          : reduceGridDimXForEmbeddingSparseGradient(maxBucketRows, prepared.embeddingDim);
     const dim3 grid(gridX, reduceGridDimY, 1U);
@@ -2296,35 +2310,21 @@ struct OptionalReduceGridUpdate {
     const DeviceUpdatableKernelNodeDeviceHandle* highReduceNodeHandle = nullptr;
     const DeviceUpdatableKernelNodeDeviceHandle* ultraHighPartialReduceNodeHandle = nullptr;
     const DeviceUpdatableKernelNodeDeviceHandle* ultraHighReduceNodeHandle = nullptr;
+    const DeviceUpdatableKernelNodeDeviceHandle* twoStageClassifyNodeHandle = nullptr;
+    const DeviceUpdatableKernelNodeDeviceHandle* twoStageAccumulateNodeHandle = nullptr;
     EmbeddingSparseGradientReduceGridUpdateConfig lowReduceGridConfig;
     EmbeddingSparseGradientReduceGridUpdateConfig highReduceGridConfig;
     EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridConfig;
     EmbeddingSparseGradientReduceGridUpdateConfig ultraHighReduceGridConfig;
+    bool runtimeTwoStageFinalizeDelegate = false;
 };
 
 void launchFinalizeRows(PreparedEmbeddingSparseGradient& prepared,
                         SparseRowGradient& outputGradient,
                         Stream stream,
                         OptionalReduceGridUpdate reduceGridUpdate = {}) {
-    const bool useTwoStageFinalize = useTwoStageEmbeddingSparseGradientFinalize(prepared.numTokens);
-    uint32_t* twoStageLowRunRowsScratch =
-        useTwoStageFinalize ? prepared.twoStageLowRunRowsScratch.getMemPtr<uint32_t>() : nullptr;
-    uint32_t* twoStageHighRunRowsScratch =
-        useTwoStageFinalize ? prepared.twoStageHighRunRowsScratch.getMemPtr<uint32_t>() : nullptr;
-    uint32_t* twoStageUltraHighRunRowsScratch =
-        useTwoStageFinalize ? prepared.twoStageUltraHighRunRowsScratch.getMemPtr<uint32_t>() : nullptr;
-    uint32_t* twoStageUltraHighRunPartialCountsScratch =
-        useTwoStageFinalize ? prepared.twoStageUltraHighRunPartialCountsScratch.getMemPtr<uint32_t>() : nullptr;
-    uint32_t* twoStageUltraHighRunPartialOffsetsScratch =
-        useTwoStageFinalize ? prepared.twoStageUltraHighRunPartialOffsetsScratch.getMemPtr<uint32_t>() : nullptr;
-    uint32_t* twoStageLowRunRowCounts =
-        useTwoStageFinalize ? prepared.twoStageLowRunRowCounts.getMemPtr<uint32_t>() : nullptr;
-    uint32_t* twoStageHighRunRowCounts =
-        useTwoStageFinalize ? prepared.twoStageHighRunRowCounts.getMemPtr<uint32_t>() : nullptr;
-    uint32_t* twoStageUltraHighRunRowCounts =
-        useTwoStageFinalize ? prepared.twoStageUltraHighRunRowCounts.getMemPtr<uint32_t>() : nullptr;
-    uint32_t* twoStageUltraHighPartialCounts =
-        useTwoStageFinalize ? prepared.twoStageUltraHighPartialCounts.getMemPtr<uint32_t>() : nullptr;
+    const bool runtimeTwoStageFinalizeDelegate =
+        reduceGridUpdate.runtimeTwoStageFinalizeDelegate && useTwoStageEmbeddingSparseGradientFinalize(prepared.numTokens);
 
     launchFinalizeAndBucketizeEmbeddingSparseGradientRows(outputGradient.rows.getMemPtr<void>(),
                                                           prepared.numRuns.getMemPtr<uint32_t>(),
@@ -2339,15 +2339,6 @@ void launchFinalizeRows(PreparedEmbeddingSparseGradient& prepared,
                                                           prepared.numLowRunRows.getMemPtr<uint32_t>(),
                                                           prepared.numHighRunRows.getMemPtr<uint32_t>(),
                                                           prepared.numUltraHighRunRows.getMemPtr<uint32_t>(),
-                                                          twoStageLowRunRowsScratch,
-                                                          twoStageHighRunRowsScratch,
-                                                          twoStageUltraHighRunRowsScratch,
-                                                          twoStageUltraHighRunPartialCountsScratch,
-                                                          twoStageUltraHighRunPartialOffsetsScratch,
-                                                          twoStageLowRunRowCounts,
-                                                          twoStageHighRunRowCounts,
-                                                          twoStageUltraHighRunRowCounts,
-                                                          twoStageUltraHighPartialCounts,
                                                           prepared.vocabularySize,
                                                           static_cast<uint32_t>(prepared.numTokens),
                                                           prepared.rowDataType,
@@ -2358,10 +2349,14 @@ void launchFinalizeRows(PreparedEmbeddingSparseGradient& prepared,
                                                           reduceGridUpdate.highReduceNodeHandle,
                                                           reduceGridUpdate.ultraHighPartialReduceNodeHandle,
                                                           reduceGridUpdate.ultraHighReduceNodeHandle,
+                                                          reduceGridUpdate.twoStageClassifyNodeHandle,
+                                                          reduceGridUpdate.twoStageAccumulateNodeHandle,
                                                           reduceGridUpdate.lowReduceGridConfig,
                                                           reduceGridUpdate.highReduceGridConfig,
                                                           reduceGridUpdate.ultraHighPartialReduceGridConfig,
                                                           reduceGridUpdate.ultraHighReduceGridConfig,
+                                                          runtimeTwoStageFinalizeDelegate,
+                                                          runtimeTwoStageEmbeddingSparseGradientFinalizeRunThreshold(),
                                                           stream);
 }
 
@@ -2813,6 +2808,11 @@ void capturePreparedEmbeddingSparseGradientImpl(CudaGraphCaptureBuilder& builder
         validateReduceNodeHandle(captured.ultraHighPartialReduceNodeHandle, "ultra-high-partial-run");
     }
     validateReduceNodeHandle(captured.ultraHighReduceNodeHandle, "ultra-high-run");
+    const bool useTwoStageFinalize = useTwoStageEmbeddingSparseGradientFinalize(prepared.numTokens);
+    if (useTwoStageFinalize) {
+        validateReduceNodeHandle(captured.twoStageFinalizeClassifyNodeHandle, "two-stage-finalize-classify");
+        validateReduceNodeHandle(captured.twoStageFinalizeAccumulateNodeHandle, "two-stage-finalize-accumulate");
+    }
     if (builder.stream().getGpuNum() != prepared.deviceNum) {
         throw std::invalid_argument("Prepared Embedding sparse-gradient graph capture stream must be on the prepared GPU.");
     }
@@ -2859,10 +2859,57 @@ void capturePreparedEmbeddingSparseGradientImpl(CudaGraphCaptureBuilder& builder
                                                     ? &captured.ultraHighPartialReduceNodeHandle
                                                     : nullptr,
                                                 &captured.ultraHighReduceNodeHandle,
+                                                useTwoStageFinalize ? &captured.twoStageFinalizeClassifyNodeHandle : nullptr,
+                                                useTwoStageFinalize ? &captured.twoStageFinalizeAccumulateNodeHandle : nullptr,
                                                 normalReduceGridConfig,
                                                 highRunReduceGridConfig,
                                                 ultraHighPartialReduceGridConfig,
-                                                ultraHighFinalReduceGridConfig});
+                                                ultraHighFinalReduceGridConfig,
+                                                useTwoStageFinalize});
+
+    if (useTwoStageFinalize) {
+        EmbeddingSparseGradientTwoStageFinalizeCapturedNodes twoStageNodes = captureTwoStageFinalizeAndBucketizeEmbeddingSparseGradientRows(
+            outputGradient.rows.getMemPtr<void>(),
+            prepared.numRuns.getMemPtr<uint32_t>(),
+            outputGradient.numRows.getMemPtr<void>(),
+            prepared.runCounts.getMemPtr<uint32_t>(),
+            prepared.lowRunRows.getMemPtr<uint32_t>(),
+            prepared.highRunRows.getMemPtr<uint32_t>(),
+            prepared.ultraHighRunRows.getMemPtr<uint32_t>(),
+            prepared.ultraHighRunPartialCounts.getMemPtr<uint32_t>(),
+            prepared.ultraHighRunPartialOffsets.getMemPtr<uint32_t>(),
+            prepared.numUltraHighPartials.getMemPtr<uint32_t>(),
+            prepared.numLowRunRows.getMemPtr<uint32_t>(),
+            prepared.numHighRunRows.getMemPtr<uint32_t>(),
+            prepared.numUltraHighRunRows.getMemPtr<uint32_t>(),
+            prepared.twoStageLowRunRowsScratch.getMemPtr<uint32_t>(),
+            prepared.twoStageHighRunRowsScratch.getMemPtr<uint32_t>(),
+            prepared.twoStageUltraHighRunRowsScratch.getMemPtr<uint32_t>(),
+            prepared.twoStageUltraHighRunPartialCountsScratch.getMemPtr<uint32_t>(),
+            prepared.twoStageUltraHighRunPartialOffsetsScratch.getMemPtr<uint32_t>(),
+            prepared.twoStageLowRunRowCounts.getMemPtr<uint32_t>(),
+            prepared.twoStageHighRunRowCounts.getMemPtr<uint32_t>(),
+            prepared.twoStageUltraHighRunRowCounts.getMemPtr<uint32_t>(),
+            prepared.twoStageUltraHighPartialCounts.getMemPtr<uint32_t>(),
+            prepared.vocabularySize,
+            static_cast<uint32_t>(prepared.numTokens),
+            prepared.rowDataType,
+            prepared.runBucketConfig.lowRunMax,
+            prepared.runBucketConfig.ultraHighRunMin,
+            prepared.runBucketConfig.ultraHighTokensPerPartial,
+            &captured.lowReduceNodeHandle,
+            &captured.highReduceNodeHandle,
+            hasUltraHighTwoStageEmbeddingSparseGradientReducer(prepared.embeddingDim) ? &captured.ultraHighPartialReduceNodeHandle
+                                                                                      : nullptr,
+            &captured.ultraHighReduceNodeHandle,
+            normalReduceGridConfig,
+            highRunReduceGridConfig,
+            ultraHighPartialReduceGridConfig,
+            ultraHighFinalReduceGridConfig,
+            stream);
+        captured.twoStageFinalizeClassifyNode = twoStageNodes.classifyNode;
+        captured.twoStageFinalizeAccumulateNode = twoStageNodes.accumulateNode;
+    }
 
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(prepared.scanTempStorage.getMemPtr<void>(),
                                              prepared.scanTempBytes,
@@ -3028,8 +3075,8 @@ void capturePreparedEmbeddingSparseGradientImpl(CudaGraphCaptureBuilder& builder
 }  // namespace
 
 EmbeddingSparseGradientRunBucketConfig defaultEmbeddingSparseGradientRunBucketConfig() {
-    return EmbeddingSparseGradientRunBucketConfig{DEFAULT_EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX,
-                                                  DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN,
+    return EmbeddingSparseGradientRunBucketConfig{EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX,
+                                                  EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN,
                                                   DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL};
 }
 
