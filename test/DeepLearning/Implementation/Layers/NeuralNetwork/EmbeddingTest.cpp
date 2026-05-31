@@ -548,6 +548,62 @@ TEST(EmbeddingSparseBackwardTest, SparseGradientProducerReducesSmallAndWideFixed
     }
 }
 
+TEST(EmbeddingSparseBackwardTest, SparseGradientProducerHandlesOddLargeVectorizedJitEmbeddingDimensions) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 4;
+    const std::vector<uint32_t> indices{2, 1, 2, 3};
+
+    for (uint64_t embeddingDim : {4097ULL, 16385ULL}) {
+        std::vector<float> upstream(indices.size() * embeddingDim);
+        for (uint64_t token = 0; token < indices.size(); ++token) {
+            const float tokenBase = token == 0 ? 1.0f : token == 1 ? 10.0f : token == 2 ? 100.0f : 1000.0f;
+            for (uint64_t d = 0; d < embeddingDim; ++d) {
+                upstream[token * embeddingDim + d] = tokenBase + static_cast<float>(d % 97) * 0.01f;
+            }
+        }
+
+        Tensor cpuIndices = makeCpuUint32Tensor({indices.size()}, indices);
+        Tensor cpuUpstream = makeCpuFloatTensor(DataType::FP32, {indices.size(), embeddingDim}, upstream);
+        Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+        Tensor gpuUpstream = copyCpuToGpu(cpuUpstream, stream);
+
+        SparseRowGradient gradient = SparseRowGradient::allocate(gpuPlacement,
+                                                                 /*capacity=*/std::min<uint64_t>(indices.size(), vocabularySize),
+                                                                 vocabularySize,
+                                                                 embeddingDim,
+                                                                 DataType::FP32,
+                                                                 SparseRowGradient::chooseRowDataType(vocabularySize));
+        auto prepared = prepareEmbeddingSparseGradient(gpuIndices, gpuUpstream, gradient, std::nullopt);
+        launchPreparedEmbeddingSparseGradient(*prepared, gpuIndices, gpuUpstream, gradient, stream);
+        stream.synchronize();
+
+        const std::vector<uint64_t> numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+        ASSERT_EQ(numRows.size(), 1u);
+        ASSERT_EQ(numRows[0], 3u) << "embeddingDim=" << embeddingDim;
+
+        std::vector<uint64_t> rows = copyGpuRowTensorToUint64Values(gradient.rows, stream);
+        rows.resize(numRows[0]);
+        EXPECT_EQ(rows, (std::vector<uint64_t>{1, 2, 3})) << "embeddingDim=" << embeddingDim;
+
+        std::vector<float> expected;
+        expected.reserve(numRows[0] * embeddingDim);
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            expected.push_back(upstream[1ULL * embeddingDim + d]);
+        }
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            expected.push_back(upstream[0ULL * embeddingDim + d] + upstream[2ULL * embeddingDim + d]);
+        }
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            expected.push_back(upstream[3ULL * embeddingDim + d]);
+        }
+
+        std::vector<float> values = copyGpuFloatTensorToValues(gradient.values, stream);
+        values.resize(expected.size());
+        expectAllClose(values, expected, 1e-5f, 1e-5f, "odd large-D sparse gradient values");
+    }
+}
+
 TEST(EmbeddingSparseBackwardTest, SparseGradientProducerBucketizesLowHighAndUltraHighRuns) {
     Stream stream(gpuPlacement);
 
@@ -1215,11 +1271,101 @@ TEST(EmbeddingSparseBackwardTest, SparseOptimizerFusionCapabilityExtendsToLargeJ
     EXPECT_FALSE(supportsEmbeddingSparseGradientFusedSparseRowUpdate(0));
     EXPECT_TRUE(supportsEmbeddingSparseGradientFusedSparseRowUpdate(4096));
     EXPECT_TRUE(supportsEmbeddingSparseGradientFusedSparseRowUpdate(4097));
+    EXPECT_TRUE(supportsEmbeddingSparseGradientFusedSparseRowUpdate(16385));
     EXPECT_TRUE(supportsEmbeddingSparseGradientFusedSparseRowUpdate(32768));
     EXPECT_TRUE(supportsEmbeddingSparseGradientFusedSparseRowUpdate(65536));      // 256 KiB FP32 row.
     EXPECT_TRUE(supportsEmbeddingSparseGradientFusedSparseRowUpdate(262144));     // 1 MiB FP32 row.
     EXPECT_TRUE(supportsEmbeddingSparseGradientFusedSparseRowUpdate(1048576));    // 4 MiB FP32 row.
     EXPECT_FALSE(supportsEmbeddingSparseGradientFusedSparseRowUpdate(1048577));
+}
+
+TEST(EmbeddingSparseBackwardTest, FusedSparseRowUpdateSupportsOddLargeVectorizedJitEmbeddingDimension) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 4;
+    constexpr uint64_t embeddingDim = 16385;
+    constexpr float step = 0.5f;
+    const std::vector<uint32_t> indices{1, 2, 1, 0, 3};  // row 0 is padding and must be skipped.
+
+    std::vector<float> upstream(indices.size() * embeddingDim);
+    for (uint64_t token = 0; token < indices.size(); ++token) {
+        const float tokenBase = static_cast<float>(1 + token * 1000);
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            upstream[token * embeddingDim + d] = tokenBase + static_cast<float>(d % 103) * 0.01f;
+        }
+    }
+
+    std::vector<float> initialWeights(vocabularySize * embeddingDim);
+    for (uint64_t row = 0; row < vocabularySize; ++row) {
+        const float rowBase = static_cast<float>(10000 + row * 1000);
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            initialWeights[row * embeddingDim + d] = rowBase + static_cast<float>(d % 127) * 0.01f;
+        }
+    }
+
+    Tensor cpuIndices = makeCpuUint32Tensor({indices.size()}, indices);
+    Tensor cpuUpstream = makeCpuFloatTensor(DataType::FP32, {indices.size(), embeddingDim}, upstream);
+    Tensor cpuWeights = makeCpuFloatTensor(DataType::FP32, {vocabularySize, embeddingDim}, initialWeights);
+    Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+    Tensor gpuUpstream = copyCpuToGpu(cpuUpstream, stream);
+    Tensor weights = copyCpuToGpu(cpuWeights, stream);
+
+    SparseRowGradient gradient = SparseRowGradient::allocate(gpuPlacement,
+                                                             /*capacity=*/std::min<uint64_t>(indices.size(), vocabularySize),
+                                                             vocabularySize,
+                                                             embeddingDim,
+                                                             DataType::FP32,
+                                                             SparseRowGradient::chooseRowDataType(vocabularySize));
+    std::vector<float> sentinelValues(gradient.capacity * embeddingDim, -777.0f);
+    Tensor cpuSentinelValues = makeCpuFloatTensor(DataType::FP32, {gradient.capacity, embeddingDim}, sentinelValues);
+    copyCpuToExistingGpu(gradient.values, cpuSentinelValues, stream);
+
+    auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
+    auto g = Expression::input("gradient", DataType::FP32, DataType::FP32);
+    auto stepScalar = Expression::runtimeScalar("step", DataType::FP32, DataType::FP32);
+    auto updateOutputs = Expression::outputs({{"weights", (w - stepScalar * g).withOutputDType(DataType::FP32)}});
+
+    std::unordered_map<std::string, SparseRowUpdateTensorBinding> updateInputs;
+    updateInputs["weights_in"] = SparseRowUpdateTensorBinding{weights, SparseRowUpdateTensorKind::IndexedRows};
+    updateInputs["gradient"] = SparseRowUpdateTensorBinding{gradient.values, SparseRowUpdateTensorKind::DenseLogicalRows};
+    std::unordered_map<std::string, Tensor> indexedUpdateOutputs;
+    indexedUpdateOutputs["weights"] = weights;
+
+    auto prepared = prepareEmbeddingSparseGradientWithSparseRowUpdate(gpuIndices,
+                                                                      gpuUpstream,
+                                                                      gradient,
+                                                                      updateOutputs.physicalOutputs(),
+                                                                      updateInputs,
+                                                                      indexedUpdateOutputs,
+                                                                      /*paddingIndex=*/0);
+    ASSERT_TRUE(preparedEmbeddingSparseGradientHasSparseRowUpdate(*prepared));
+
+    launchPreparedEmbeddingSparseGradientWithSparseRowUpdate(*prepared, gpuIndices, gpuUpstream, gradient, {{"step", step}}, stream);
+    stream.synchronize();
+
+    std::vector<float> expectedWeights = initialWeights;
+    for (uint64_t token = 0; token < indices.size(); ++token) {
+        const uint64_t row = indices[token];
+        if (row == 0 || row >= vocabularySize) {
+            continue;
+        }
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            expectedWeights[row * embeddingDim + d] -= step * upstream[token * embeddingDim + d];
+        }
+    }
+    expectAllClose(copyGpuFloatTensorToValues(weights, stream), expectedWeights, 1e-5f, 1e-5f, "odd large-D fused sparse SGD weights");
+
+    const std::vector<uint64_t> numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+    ASSERT_EQ(numRows[0], 3u);
+    std::vector<uint64_t> rows = copyGpuRowTensorToUint64Values(gradient.rows, stream);
+    rows.resize(numRows[0]);
+    EXPECT_EQ(rows, (std::vector<uint64_t>{1, 2, 3}));
+
+    expectAllClose(copyGpuFloatTensorToValues(gradient.values, stream),
+                   sentinelValues,
+                   1e-5f,
+                   1e-5f,
+                   "odd large-D fused sparse SGD should not materialize gradient values");
 }
 
 TEST(EmbeddingSparseBackwardTest, FusedSparseRowUpdateSupportsVeryLargeVectorizedJitEmbeddingDimension) {
