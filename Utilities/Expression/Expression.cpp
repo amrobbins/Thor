@@ -117,6 +117,26 @@ std::string exprOpExternalName(ExprOp op) {
             return "neg";
         case ExprOp::ABS:
             return "abs";
+        case ExprOp::CEIL:
+            return "ceil";
+        case ExprOp::FLOOR:
+            return "floor";
+        case ExprOp::ROUND:
+            return "round";
+        case ExprOp::TRUNC:
+            return "trunc";
+        case ExprOp::SIN:
+            return "sin";
+        case ExprOp::COS:
+            return "cos";
+        case ExprOp::TAN:
+            return "tan";
+        case ExprOp::ASIN:
+            return "asin";
+        case ExprOp::ACOS:
+            return "acos";
+        case ExprOp::ATAN:
+            return "atan";
         case ExprOp::EXP:
             return "exp";
         case ExprOp::EXPM1:
@@ -241,6 +261,16 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"pow", ExprOp::POW},
         {"neg", ExprOp::NEG},
         {"abs", ExprOp::ABS},
+        {"ceil", ExprOp::CEIL},
+        {"floor", ExprOp::FLOOR},
+        {"round", ExprOp::ROUND},
+        {"trunc", ExprOp::TRUNC},
+        {"sin", ExprOp::SIN},
+        {"cos", ExprOp::COS},
+        {"tan", ExprOp::TAN},
+        {"asin", ExprOp::ASIN},
+        {"acos", ExprOp::ACOS},
+        {"atan", ExprOp::ATAN},
         {"exp", ExprOp::EXP},
         {"expm1", ExprOp::EXPM1},
         {"exp2", ExprOp::EXP2},
@@ -642,6 +672,26 @@ std::string opName(ExprOp op) {
             return "NEG";
         case ExprOp::ABS:
             return "ABS";
+        case ExprOp::CEIL:
+            return "CEIL";
+        case ExprOp::FLOOR:
+            return "FLOOR";
+        case ExprOp::ROUND:
+            return "ROUND";
+        case ExprOp::TRUNC:
+            return "TRUNC";
+        case ExprOp::SIN:
+            return "SIN";
+        case ExprOp::COS:
+            return "COS";
+        case ExprOp::TAN:
+            return "TAN";
+        case ExprOp::ASIN:
+            return "ASIN";
+        case ExprOp::ACOS:
+            return "ACOS";
+        case ExprOp::ATAN:
+            return "ATAN";
         case ExprOp::EXP:
             return "EXP";
         case ExprOp::EXPM1:
@@ -830,6 +880,16 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
 
         case ExprOp::NEG:
         case ExprOp::ABS:
+        case ExprOp::CEIL:
+        case ExprOp::FLOOR:
+        case ExprOp::ROUND:
+        case ExprOp::TRUNC:
+        case ExprOp::SIN:
+        case ExprOp::COS:
+        case ExprOp::TAN:
+        case ExprOp::ASIN:
+        case ExprOp::ACOS:
+        case ExprOp::ATAN:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -1693,6 +1753,16 @@ bool Expression::isUnaryOp(const ExprOp op) {
     switch (op) {
         case ExprOp::NEG:
         case ExprOp::ABS:
+        case ExprOp::CEIL:
+        case ExprOp::FLOOR:
+        case ExprOp::ROUND:
+        case ExprOp::TRUNC:
+        case ExprOp::SIN:
+        case ExprOp::COS:
+        case ExprOp::TAN:
+        case ExprOp::ASIN:
+        case ExprOp::ACOS:
+        case ExprOp::ATAN:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -2589,6 +2659,16 @@ static bool isTransposePushThroughUnaryOp(ExprOp op) {
     switch (op) {
         case ExprOp::NEG:
         case ExprOp::ABS:
+        case ExprOp::CEIL:
+        case ExprOp::FLOOR:
+        case ExprOp::ROUND:
+        case ExprOp::TRUNC:
+        case ExprOp::SIN:
+        case ExprOp::COS:
+        case ExprOp::TAN:
+        case ExprOp::ASIN:
+        case ExprOp::ACOS:
+        case ExprOp::ATAN:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -2749,6 +2829,22 @@ Expression Expression::operator*(const Expression& other) const { return binaryO
 Expression Expression::operator/(const Expression& other) const { return binaryOp(*this, other, ExprOp::DIV); }
 Expression Expression::operator-() const { return unaryOp(*this, ExprOp::NEG); }
 Expression Expression::abs() const { return unaryOp(*this, ExprOp::ABS); }
+Expression Expression::ceil() const { return unaryOp(*this, ExprOp::CEIL); }
+Expression Expression::floor() const { return unaryOp(*this, ExprOp::FLOOR); }
+Expression Expression::round() const { return unaryOp(*this, ExprOp::ROUND); }
+Expression Expression::trunc() const { return unaryOp(*this, ExprOp::TRUNC); }
+Expression Expression::sin() const { return unaryOp(*this, ExprOp::SIN); }
+Expression Expression::cos() const { return unaryOp(*this, ExprOp::COS); }
+Expression Expression::tan() const { return unaryOp(*this, ExprOp::TAN); }
+Expression Expression::csc() const { return Expression::constantScalar(1.0) / this->sin(); }
+Expression Expression::sec() const { return Expression::constantScalar(1.0) / this->cos(); }
+Expression Expression::cot() const { return Expression::constantScalar(1.0) / this->tan(); }
+Expression Expression::asin() const { return unaryOp(*this, ExprOp::ASIN); }
+Expression Expression::acos() const { return unaryOp(*this, ExprOp::ACOS); }
+Expression Expression::atan() const { return unaryOp(*this, ExprOp::ATAN); }
+Expression Expression::acsc() const { return (Expression::constantScalar(1.0) / *this).asin(); }
+Expression Expression::asec() const { return (Expression::constantScalar(1.0) / *this).acos(); }
+Expression Expression::acot() const { return (Expression::constantScalar(1.0) / *this).atan(); }
 Expression Expression::expm1() const { return unaryOp(*this, ExprOp::EXPM1); }
 Expression Expression::log1p() const { return unaryOp(*this, ExprOp::LOG1P); }
 Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
@@ -3827,6 +3923,46 @@ Expression Expression::log(double base) const {
 
 Expression Expression::min(const Expression& other) const { return binaryOp(*this, other, ExprOp::MIN); }
 Expression Expression::max(const Expression& other) const { return binaryOp(*this, other, ExprOp::MAX); }
+
+Expression Expression::clamp(const Expression& lower_bound, const Expression& upper_bound) const {
+    return this->max(lower_bound).min(upper_bound);
+}
+
+Expression Expression::clamp(double lower_bound, double upper_bound) const {
+    if (lower_bound > upper_bound) {
+        throw std::invalid_argument("Expression::clamp requires lower_bound <= upper_bound.");
+    }
+    return clamp(Expression::constantScalar(lower_bound), Expression::constantScalar(upper_bound));
+}
+
+Expression Expression::clamp(const Expression& input, const Expression& lower_bound, const Expression& upper_bound) {
+    return input.clamp(lower_bound, upper_bound);
+}
+
+Expression Expression::clamp(const Expression& input, double lower_bound, double upper_bound) {
+    return input.clamp(lower_bound, upper_bound);
+}
+
+Expression Expression::dotProduct(const Expression& other, std::optional<DataType> compute_dtype) const {
+    return dotProduct(*this, other, compute_dtype);
+}
+
+Expression Expression::dotProduct(const Expression& lhs, const Expression& rhs, std::optional<DataType> compute_dtype) {
+    return (lhs * rhs).reduce_sum(/*reduction_axes=*/{}, /*squeeze_axes=*/{UINT64_MAX}, compute_dtype);
+}
+
+Expression Expression::outerProduct(const Expression& other,
+                                    std::optional<DataType> compute_dtype,
+                                    std::optional<DataType> output_dtype) const {
+    return outerProduct(*this, other, compute_dtype, output_dtype);
+}
+
+Expression Expression::outerProduct(const Expression& lhs,
+                                    const Expression& rhs,
+                                    std::optional<DataType> compute_dtype,
+                                    std::optional<DataType> output_dtype) {
+    return matmul(lhs.unsqueeze({1}), rhs.unsqueeze({0}), false, false, compute_dtype, output_dtype);
+}
 
 // e^x_i
 Expression Expression::exp() const { return unaryOp(*this, ExprOp::EXP); }

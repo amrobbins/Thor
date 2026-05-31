@@ -1043,6 +1043,16 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             }
             case ExprOp::NEG:
             case ExprOp::ABS:
+            case ExprOp::CEIL:
+            case ExprOp::FLOOR:
+            case ExprOp::ROUND:
+            case ExprOp::TRUNC:
+            case ExprOp::SIN:
+            case ExprOp::COS:
+            case ExprOp::TAN:
+            case ExprOp::ASIN:
+            case ExprOp::ACOS:
+            case ExprOp::ATAN:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -2805,6 +2815,16 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             }
             case ExprOp::NEG:
             case ExprOp::ABS:
+            case ExprOp::CEIL:
+            case ExprOp::FLOOR:
+            case ExprOp::ROUND:
+            case ExprOp::TRUNC:
+            case ExprOp::SIN:
+            case ExprOp::COS:
+            case ExprOp::TAN:
+            case ExprOp::ASIN:
+            case ExprOp::ACOS:
+            case ExprOp::ATAN:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -3018,6 +3038,10 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::DIV:
         case ExprOp::NEG:
         case ExprOp::ABS:
+        case ExprOp::CEIL:
+        case ExprOp::FLOOR:
+        case ExprOp::ROUND:
+        case ExprOp::TRUNC:
         case ExprOp::SQRT:
         case ExprOp::MIN:
         case ExprOp::MAX:
@@ -3028,6 +3052,12 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
             return 1;
 
         case ExprOp::POW:
+        case ExprOp::SIN:
+        case ExprOp::COS:
+        case ExprOp::TAN:
+        case ExprOp::ASIN:
+        case ExprOp::ACOS:
+        case ExprOp::ATAN:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -3126,6 +3156,16 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             }
             case ExprOp::NEG:
             case ExprOp::ABS:
+            case ExprOp::CEIL:
+            case ExprOp::FLOOR:
+            case ExprOp::ROUND:
+            case ExprOp::TRUNC:
+            case ExprOp::SIN:
+            case ExprOp::COS:
+            case ExprOp::TAN:
+            case ExprOp::ASIN:
+            case ExprOp::ACOS:
+            case ExprOp::ATAN:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -3274,6 +3314,16 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::POW:
             case ExprOp::NEG:
             case ExprOp::ABS:
+            case ExprOp::CEIL:
+            case ExprOp::FLOOR:
+            case ExprOp::ROUND:
+            case ExprOp::TRUNC:
+            case ExprOp::SIN:
+            case ExprOp::COS:
+            case ExprOp::TAN:
+            case ExprOp::ASIN:
+            case ExprOp::ACOS:
+            case ExprOp::ATAN:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -3977,6 +4027,16 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         }
         case ExprOp::NEG:
         case ExprOp::ABS:
+        case ExprOp::CEIL:
+        case ExprOp::FLOOR:
+        case ExprOp::ROUND:
+        case ExprOp::TRUNC:
+        case ExprOp::SIN:
+        case ExprOp::COS:
+        case ExprOp::TAN:
+        case ExprOp::ASIN:
+        case ExprOp::ACOS:
+        case ExprOp::ATAN:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:

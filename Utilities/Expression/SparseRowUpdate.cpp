@@ -90,6 +90,26 @@ std::string unaryFunctionName(ExprOp op) {
     switch (op) {
         case ExprOp::ABS:
             return "fabsf";
+        case ExprOp::CEIL:
+            return "ceilf";
+        case ExprOp::FLOOR:
+            return "floorf";
+        case ExprOp::ROUND:
+            return "roundf";
+        case ExprOp::TRUNC:
+            return "truncf";
+        case ExprOp::SIN:
+            return "sinf";
+        case ExprOp::COS:
+            return "cosf";
+        case ExprOp::TAN:
+            return "tanf";
+        case ExprOp::ASIN:
+            return "asinf";
+        case ExprOp::ACOS:
+            return "acosf";
+        case ExprOp::ATAN:
+            return "atanf";
         case ExprOp::EXP:
             return "expf";
         case ExprOp::EXPM1:
@@ -121,6 +141,16 @@ bool isUnaryOpSupported(ExprOp op) {
     switch (op) {
         case ExprOp::NEG:
         case ExprOp::ABS:
+        case ExprOp::CEIL:
+        case ExprOp::FLOOR:
+        case ExprOp::ROUND:
+        case ExprOp::TRUNC:
+        case ExprOp::SIN:
+        case ExprOp::COS:
+        case ExprOp::TAN:
+        case ExprOp::ASIN:
+        case ExprOp::ACOS:
+        case ExprOp::ATAN:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -206,6 +236,26 @@ std::string unaryVectorFunctionName(ExprOp op) {
     switch (op) {
         case ExprOp::ABS:
             return "fabsf";
+        case ExprOp::CEIL:
+            return "ceilf";
+        case ExprOp::FLOOR:
+            return "floorf";
+        case ExprOp::ROUND:
+            return "roundf";
+        case ExprOp::TRUNC:
+            return "truncf";
+        case ExprOp::SIN:
+            return "sinf";
+        case ExprOp::COS:
+            return "cosf";
+        case ExprOp::TAN:
+            return "tanf";
+        case ExprOp::ASIN:
+            return "asinf";
+        case ExprOp::ACOS:
+            return "acosf";
+        case ExprOp::ATAN:
+            return "atanf";
         case ExprOp::EXP:
             return "expf";
         case ExprOp::EXPM1:
