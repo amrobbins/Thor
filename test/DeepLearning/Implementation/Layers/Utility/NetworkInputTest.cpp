@@ -85,7 +85,10 @@ class DelayedConnectedInputCaptureLayer : public Layer {
         THOR_UNREACHABLE();
     }
 
-    void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream backPropStream) override {
+    void backProp(std::optional<Tensor> dataIn,
+                  std::optional<Tensor> errorIn,
+                  std::optional<Tensor> errorOut,
+                  Stream backPropStream) override {
         (void)dataIn;
         (void)errorIn;
         (void)errorOut;
@@ -133,69 +136,70 @@ void expectAllEqual(const vector<float> &values, float expected) {
 
 }  // namespace
 
-TEST(NetworkInput, ConnectedInputCopySeesBackingSwapsAndInactiveBackingWaitsForPriorConsumers) {
-    if (MachineEvaluator::instance().getNumGpus() == 0) {
-        GTEST_SKIP() << "NetworkInput ping-pong synchronization test requires a GPU";
-    }
-
-    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-    TensorDescriptor descriptor(DataType::FP32, {4096});
-    Stream setupStream(0);
-
-    Tensor batch1 = makeFilledGpuTensor(descriptor, 1.0f, setupStream);
-    Tensor batch2 = makeFilledGpuTensor(descriptor, 2.0f, setupStream);
-    Tensor batch3 = makeFilledGpuTensor(descriptor, 3.0f, setupStream);
-    setupStream.synchronize();
-
-    auto firstReadGate = make_shared<HostGate>();
-    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
-    DelayedConnectedInputCaptureLayer capture(firstReadGate);
-    input.connectToNextLayer(&capture);
-
-    // Batch 1 uses backing A.  Its downstream read is intentionally delayed on the compute stream.
-    input.forward(batch1, false, 1);
-
-    // Batch 2 uses backing B while batch 1 still has queued consumers of backing A.
-    input.forward(batch2, false, 1);
-
-    // Batch 3 wants to reuse backing A.  Correct synchronization queues the upload behind batch 1's reusable event
-    // instead of overwriting backing A before the delayed batch-1 consumer has copied from it.  It should still
-    // return immediately on the host because the wait is enqueued on the upload stream, not synchronized here.
-    auto thirdForward = async(launch::async, [&] { input.forward(batch3, false, 1); });
-    if (thirdForward.wait_for(chrono::seconds(2)) != future_status::ready) {
-        releaseHostGate(firstReadGate);
-        thirdForward.wait();
-        FAIL() << "NetworkInput::forward blocked the host while waiting for the inactive backing to become reusable";
-    }
-    try {
-        thirdForward.get();
-    } catch (...) {
-        releaseHostGate(firstReadGate);
-        throw;
-    }
-
-    releaseHostGate(firstReadGate);
-    capture.synchronize();
-
-    ASSERT_EQ(capture.invocationCount, 3u);
-    ASSERT_EQ(capture.forwardedTensorIds.size(), 3u);
-    ASSERT_EQ(capture.connectedTensorIds.size(), 3u);
-    ASSERT_EQ(capture.forwardedMemPtrs.size(), 3u);
-    ASSERT_EQ(capture.connectedMemPtrs.size(), 3u);
-
-    // The logical tensor identity is stable for an already-connected/stamped downstream layer.
-    EXPECT_EQ(capture.forwardedTensorIds[0], capture.forwardedTensorIds[1]);
-    EXPECT_EQ(capture.forwardedTensorIds[1], capture.forwardedTensorIds[2]);
-    EXPECT_EQ(capture.connectedTensorIds[0], capture.forwardedTensorIds[0]);
-    EXPECT_EQ(capture.connectedTensorIds[1], capture.forwardedTensorIds[1]);
-    EXPECT_EQ(capture.connectedTensorIds[2], capture.forwardedTensorIds[2]);
-
-    // The backing allocation alternates, and the third batch reuses the first backing only after the first consumer
-    // has completed.
-    EXPECT_NE(capture.connectedMemPtrs[0], capture.connectedMemPtrs[1]);
-    EXPECT_EQ(capture.connectedMemPtrs[0], capture.connectedMemPtrs[2]);
-
-    expectAllEqual(capture.readCapture(0), 1.0f);
-    expectAllEqual(capture.readCapture(1), 2.0f);
-    expectAllEqual(capture.readCapture(2), 3.0f);
-}
+// Ping-pong was backed out.
+// TEST(NetworkInput, ConnectedInputCopySeesBackingSwapsAndInactiveBackingWaitsForPriorConsumers) {
+//     if (MachineEvaluator::instance().getNumGpus() == 0) {
+//         GTEST_SKIP() << "NetworkInput ping-pong synchronization test requires a GPU";
+//     }
+//
+//     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+//     TensorDescriptor descriptor(DataType::FP32, {4096});
+//     Stream setupStream(0);
+//
+//     Tensor batch1 = makeFilledGpuTensor(descriptor, 1.0f, setupStream);
+//     Tensor batch2 = makeFilledGpuTensor(descriptor, 2.0f, setupStream);
+//     Tensor batch3 = makeFilledGpuTensor(descriptor, 3.0f, setupStream);
+//     setupStream.synchronize();
+//
+//     auto firstReadGate = make_shared<HostGate>();
+//     NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+//     DelayedConnectedInputCaptureLayer capture(firstReadGate);
+//     input.connectToNextLayer(&capture);
+//
+//     // Batch 1 uses backing A.  Its downstream read is intentionally delayed on the compute stream.
+//     input.forward(batch1, false, 1);
+//
+//     // Batch 2 uses backing B while batch 1 still has queued consumers of backing A.
+//     input.forward(batch2, false, 1);
+//
+//     // Batch 3 wants to reuse backing A.  Correct synchronization queues the upload behind batch 1's reusable event
+//     // instead of overwriting backing A before the delayed batch-1 consumer has copied from it.  It should still
+//     // return immediately on the host because the wait is enqueued on the upload stream, not synchronized here.
+//     auto thirdForward = async(launch::async, [&] { input.forward(batch3, false, 1); });
+//     if (thirdForward.wait_for(chrono::seconds(2)) != future_status::ready) {
+//         releaseHostGate(firstReadGate);
+//         thirdForward.wait();
+//         FAIL() << "NetworkInput::forward blocked the host while waiting for the inactive backing to become reusable";
+//     }
+//     try {
+//         thirdForward.get();
+//     } catch (...) {
+//         releaseHostGate(firstReadGate);
+//         throw;
+//     }
+//
+//     releaseHostGate(firstReadGate);
+//     capture.synchronize();
+//
+//     ASSERT_EQ(capture.invocationCount, 3u);
+//     ASSERT_EQ(capture.forwardedTensorIds.size(), 3u);
+//     ASSERT_EQ(capture.connectedTensorIds.size(), 3u);
+//     ASSERT_EQ(capture.forwardedMemPtrs.size(), 3u);
+//     ASSERT_EQ(capture.connectedMemPtrs.size(), 3u);
+//
+//     // The logical tensor identity is stable for an already-connected/stamped downstream layer.
+//     EXPECT_EQ(capture.forwardedTensorIds[0], capture.forwardedTensorIds[1]);
+//     EXPECT_EQ(capture.forwardedTensorIds[1], capture.forwardedTensorIds[2]);
+//     EXPECT_EQ(capture.connectedTensorIds[0], capture.forwardedTensorIds[0]);
+//     EXPECT_EQ(capture.connectedTensorIds[1], capture.forwardedTensorIds[1]);
+//     EXPECT_EQ(capture.connectedTensorIds[2], capture.forwardedTensorIds[2]);
+//
+//     // The backing allocation alternates, and the third batch reuses the first backing only after the first consumer
+//     // has completed.
+//     EXPECT_NE(capture.connectedMemPtrs[0], capture.connectedMemPtrs[1]);
+//     EXPECT_EQ(capture.connectedMemPtrs[0], capture.connectedMemPtrs[2]);
+//
+//     expectAllEqual(capture.readCapture(0), 1.0f);
+//     expectAllEqual(capture.readCapture(1), 2.0f);
+//     expectAllEqual(capture.readCapture(2), 3.0f);
+// }

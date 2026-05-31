@@ -1059,7 +1059,11 @@ SparseRowUpdateFusionSource emitVector4SparseRowUpdateFusionSource(
             parameters << ", const " << scalarStorageType(slot.dtype) << "* __restrict__ sru_in" << slotIdx;
             source.kernelInputSlots.push_back(slot);
         } else if (slot.inputKind == NamedInput::Kind::RuntimeScalarFp32) {
-            parameters << ", float sru_in" << slotIdx;
+            // Fused embedding sparse-row updates use graph-cached reducer kernels. Runtime scalars
+            // therefore enter the generated reducer through persistent device scalar storage rather
+            // than by-value kernel parameters, so the cached graph can be reused across optimizer
+            // steps without re-capture or host-side graph node parameter patching.
+            parameters << ", const float* __restrict__ sru_in" << slotIdx;
             source.kernelInputSlots.push_back(slot);
         } else {
             throw std::runtime_error("Sparse row update fusion source encountered unsupported input kind.");
@@ -1117,7 +1121,7 @@ SparseRowUpdateFusionSource emitVector4SparseRowUpdateFusionSource(
                 if (slot.inputKind != NamedInput::Kind::RuntimeScalarFp32) {
                     throw std::runtime_error("Sparse row update fusion source runtime scalar node was not bound to a runtime scalar input.");
                 }
-                body << "  const float4 " << ref(nodeIdx) << " = " << splatFloat4("sru_in" + std::to_string(node.input_slot)) << ";\n";
+                body << "  const float4 " << ref(nodeIdx) << " = " << splatFloat4("sru_in" + std::to_string(node.input_slot) + "[0]") << ";\n";
                 break;
             }
             case ExprOp::SCALAR_FP:
