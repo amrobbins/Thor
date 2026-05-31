@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace ThorImplementation {
 namespace {
@@ -108,8 +109,14 @@ void CudaGraphKernelLaunch::validate() const {
     checkedDim("blockDim.z", blockDim.z);
 }
 
-CudaGraphExecutable::CudaGraphExecutable(cudaGraphExec_t graphExec, int gpuNum, bool containsDeviceUpdatableNodes)
-    : graphExec_(graphExec), gpuNum_(gpuNum), containsDeviceUpdatableNodes_(containsDeviceUpdatableNodes) {}
+CudaGraphExecutable::CudaGraphExecutable(cudaGraphExec_t graphExec,
+                                           int gpuNum,
+                                           bool containsDeviceUpdatableNodes,
+                                           cudaGraph_t retainedSourceGraph)
+    : graphExec_(graphExec),
+      retainedSourceGraph_(retainedSourceGraph),
+      gpuNum_(gpuNum),
+      containsDeviceUpdatableNodes_(containsDeviceUpdatableNodes) {}
 
 CudaGraphExecutable::CudaGraphExecutable(CudaGraphExecutable&& other) noexcept { *this = std::move(other); }
 
@@ -117,10 +124,12 @@ CudaGraphExecutable& CudaGraphExecutable::operator=(CudaGraphExecutable&& other)
     if (this != &other) {
         reset();
         graphExec_ = other.graphExec_;
+        retainedSourceGraph_ = other.retainedSourceGraph_;
         gpuNum_ = other.gpuNum_;
         containsDeviceUpdatableNodes_ = other.containsDeviceUpdatableNodes_;
         uploaded_ = other.uploaded_;
         other.graphExec_ = nullptr;
+        other.retainedSourceGraph_ = nullptr;
         other.gpuNum_ = -1;
         other.containsDeviceUpdatableNodes_ = false;
         other.uploaded_ = false;
@@ -131,9 +140,31 @@ CudaGraphExecutable& CudaGraphExecutable::operator=(CudaGraphExecutable&& other)
 CudaGraphExecutable::~CudaGraphExecutable() { reset(); }
 
 void CudaGraphExecutable::reset() noexcept {
-    if (graphExec_ != nullptr) {
-        (void)cudaGraphExecDestroy(graphExec_);
-        graphExec_ = nullptr;
+    if (graphExec_ != nullptr || retainedSourceGraph_ != nullptr) {
+        try {
+            ScopedGpu scopedGpu(gpuNum_);
+            if (graphExec_ != nullptr) {
+                cudaError_t status = cudaGraphExecDestroy(graphExec_);
+                if (status != cudaSuccess) {
+                    // Destructors cannot report CUDA failures, but they also must not leave a
+                    // swallowed failure in CUDA's per-thread last-error slot for the next test
+                    // or operation to trip over.
+                    (void)cudaGetLastError();
+                }
+                graphExec_ = nullptr;
+            }
+            if (retainedSourceGraph_ != nullptr) {
+                cudaError_t status = cudaGraphDestroy(retainedSourceGraph_);
+                if (status != cudaSuccess) {
+                    (void)cudaGetLastError();
+                }
+                retainedSourceGraph_ = nullptr;
+            }
+        } catch (...) {
+            // Best effort cleanup only; this is a noexcept destructor/reset path.
+            graphExec_ = nullptr;
+            retainedSourceGraph_ = nullptr;
+        }
     }
     gpuNum_ = -1;
     containsDeviceUpdatableNodes_ = false;
@@ -150,6 +181,17 @@ void CudaGraphExecutable::upload(Stream stream) {
     ScopedGpu scopedGpu(stream.getGpuNum());
     CUDA_CHECK(cudaGraphUpload(graphExec_, stream.getStream()));
     uploaded_ = true;
+}
+
+void CudaGraphExecutable::setKernelNodeParams(cudaGraphNode_t sourceNode, const cudaKernelNodeParams& params) {
+    if (graphExec_ == nullptr) {
+        throw std::runtime_error("Cannot update an uninitialized CUDA graph executable.");
+    }
+    if (sourceNode == nullptr) {
+        throw std::invalid_argument("Cannot update an uninitialized CUDA graph kernel node.");
+    }
+    ScopedGpu scopedGpu(gpuNum_);
+    CUDA_CHECK(cudaGraphExecKernelNodeSetParams(graphExec_, sourceNode, &params));
 }
 
 void CudaGraphExecutable::launch(Stream stream) const {
@@ -192,7 +234,15 @@ CudaGraph::~CudaGraph() { reset(); }
 
 void CudaGraph::reset() noexcept {
     if (graph_ != nullptr) {
-        (void)cudaGraphDestroy(graph_);
+        try {
+            ScopedGpu scopedGpu(gpuNum_);
+            cudaError_t status = cudaGraphDestroy(graph_);
+            if (status != cudaSuccess) {
+                // Do not leak swallowed destructor/reset errors into CUDA's sticky last-error state.
+                (void)cudaGetLastError();
+            }
+        } catch (...) {
+        }
         graph_ = nullptr;
     }
     gpuNum_ = -1;
@@ -200,7 +250,68 @@ void CudaGraph::reset() noexcept {
     instantiated_ = false;
 }
 
-CudaGraphExecutable CudaGraph::instantiate() {
+std::vector<cudaGraphNode_t> CudaGraph::nodes() const {
+    if (graph_ == nullptr) {
+        throw std::runtime_error("Cannot inspect an uninitialized CUDA graph.");
+    }
+
+    ScopedGpu scopedGpu(gpuNum_);
+
+    size_t count = 0;
+    CUDA_CHECK(cudaGraphGetNodes(graph_, nullptr, &count));
+    std::vector<cudaGraphNode_t> out(count);
+    if (count != 0) {
+        CUDA_CHECK(cudaGraphGetNodes(graph_, out.data(), &count));
+        out.resize(count);
+    }
+    return out;
+}
+
+cudaGraphNode_t CudaGraph::findSingleKernelNodeByFunction(const void* function) const {
+    if (function == nullptr) {
+        throw std::invalid_argument("Cannot find a CUDA graph kernel node for a null function pointer.");
+    }
+
+    ScopedGpu scopedGpu(gpuNum_);
+
+    cudaGraphNode_t match = nullptr;
+    for (cudaGraphNode_t node : nodes()) {
+        cudaGraphNodeType type{};
+        CUDA_CHECK(cudaGraphNodeGetType(node, &type));
+        if (type != cudaGraphNodeTypeKernel) {
+            continue;
+        }
+
+        cudaKernelNodeParams params{};
+        cudaError_t paramsStatus = cudaGraphKernelNodeGetParams(node, &params);
+        if (paramsStatus == cudaErrorInvalidDeviceFunction) {
+            // CUDA can report invalid-device-function when runtime graph introspection is
+            // asked to decode kernel nodes captured through driver-only launch paths, for
+            // example device-updatable reducer nodes captured with cuLaunchKernelEx. Those
+            // nodes cannot be the ordinary runtime kernel node we are looking for here, so
+            // skip them instead of failing before reaching later inspectable nodes. Because
+            // later kernel launch checks often use cudaGetLastError(), clear the swallowed
+            // status from CUDA's per-thread last-error slot before continuing.
+            (void)cudaGetLastError();
+            continue;
+        }
+        CUDA_CHECK(paramsStatus);
+        if (params.func != function) {
+            continue;
+        }
+        if (match != nullptr) {
+            throw std::runtime_error("CUDA graph contains multiple matching kernel nodes for the requested function.");
+        }
+        match = node;
+    }
+
+    if (match == nullptr) {
+        throw std::runtime_error("CUDA graph does not contain a kernel node for the requested function.");
+    }
+    return match;
+}
+
+CudaGraphExecutable CudaGraph::instantiate(bool retainSourceGraph) {
     if (graph_ == nullptr) {
         throw std::runtime_error("Cannot instantiate an uninitialized CUDA graph.");
     }
@@ -214,7 +325,13 @@ CudaGraphExecutable CudaGraph::instantiate() {
     ScopedGpu scopedGpu(gpuNum_);
     CUDA_CHECK(cudaGraphInstantiate(&graphExec, graph_, 0));
     instantiated_ = true;
-    return CudaGraphExecutable(graphExec, gpuNum_, containsDeviceUpdatableNodes_);
+
+    cudaGraph_t retainedSourceGraph = nullptr;
+    if (retainSourceGraph) {
+        retainedSourceGraph = graph_;
+        graph_ = nullptr;
+    }
+    return CudaGraphExecutable(graphExec, gpuNum_, containsDeviceUpdatableNodes_, retainedSourceGraph);
 }
 
 CudaGraphCaptureBuilder::CudaGraphCaptureBuilder(Stream stream, cudaStreamCaptureMode mode) : stream_(stream) {
@@ -322,10 +439,19 @@ void CudaGraphCaptureBuilder::abortCaptureNoThrow() noexcept {
         return;
     }
 
-    cudaGraph_t graph = nullptr;
-    cudaError_t status = cudaStreamEndCapture(stream_.getStream(), &graph);
-    if (status == cudaSuccess && graph != nullptr) {
-        (void)cudaGraphDestroy(graph);
+    try {
+        ScopedGpu scopedGpu(stream_.getGpuNum());
+        cudaGraph_t graph = nullptr;
+        cudaError_t status = cudaStreamEndCapture(stream_.getStream(), &graph);
+        if (status == cudaSuccess && graph != nullptr) {
+            cudaError_t destroyStatus = cudaGraphDestroy(graph);
+            if (destroyStatus != cudaSuccess) {
+                (void)cudaGetLastError();
+            }
+        } else if (status != cudaSuccess) {
+            (void)cudaGetLastError();
+        }
+    } catch (...) {
     }
     active_ = false;
     containsDeviceUpdatableNodes_ = false;

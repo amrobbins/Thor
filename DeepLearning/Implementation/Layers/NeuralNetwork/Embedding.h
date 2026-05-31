@@ -3,6 +3,8 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/SparseRowGradient.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/CudaDriver/CudaGraph.h"
+#include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradient.h"
 
 #include <cstdint>
 #include <memory>
@@ -10,8 +12,6 @@
 #include <vector>
 
 namespace ThorImplementation {
-
-struct PreparedEmbeddingSparseGradient;
 
 class Embedding final : public TrainableLayer {
    public:
@@ -47,6 +47,8 @@ class Embedding final : public TrainableLayer {
     std::optional<SparseRowGradient> weightsSparseGradient;
     std::shared_ptr<PreparedEmbeddingSparseGradient> weightsSparseGradientProducer;
     bool weightsSparseGradientProducerFusesOptimizerUpdate = false;
+    std::optional<CapturedEmbeddingSparseGradient> weightsSparseGradientCapturedGraph;
+    std::optional<CudaGraphExecutable> weightsSparseGradientGraphExecutable;
 };
 
 }  // namespace ThorImplementation

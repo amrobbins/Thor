@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <utility>
 
+#include <vector>
+
 #include "Utilities/Common/Stream.h"
 
 namespace ThorImplementation {
@@ -70,7 +72,7 @@ class DeviceUpdatableKernelNodeDeviceHandle {
 class CudaGraphExecutable {
    public:
     CudaGraphExecutable() = default;
-    CudaGraphExecutable(cudaGraphExec_t graphExec, int gpuNum, bool containsDeviceUpdatableNodes);
+    CudaGraphExecutable(cudaGraphExec_t graphExec, int gpuNum, bool containsDeviceUpdatableNodes, cudaGraph_t retainedSourceGraph = nullptr);
 
     CudaGraphExecutable(const CudaGraphExecutable&) = delete;
     CudaGraphExecutable& operator=(const CudaGraphExecutable&) = delete;
@@ -86,12 +88,14 @@ class CudaGraphExecutable {
     int getGpuNum() const { return gpuNum_; }
 
     void upload(Stream stream);
+    void setKernelNodeParams(cudaGraphNode_t sourceNode, const cudaKernelNodeParams& params);
     void launch(Stream stream) const;
 
    private:
     void reset() noexcept;
 
     cudaGraphExec_t graphExec_ = nullptr;
+    cudaGraph_t retainedSourceGraph_ = nullptr;
     int gpuNum_ = -1;
     bool containsDeviceUpdatableNodes_ = false;
     bool uploaded_ = false;
@@ -114,7 +118,9 @@ class CudaGraph {
     bool containsDeviceUpdatableNodes() const { return containsDeviceUpdatableNodes_; }
     int getGpuNum() const { return gpuNum_; }
 
-    CudaGraphExecutable instantiate();
+    std::vector<cudaGraphNode_t> nodes() const;
+    cudaGraphNode_t findSingleKernelNodeByFunction(const void* function) const;
+    CudaGraphExecutable instantiate(bool retainSourceGraph = false);
 
    private:
     void reset() noexcept;

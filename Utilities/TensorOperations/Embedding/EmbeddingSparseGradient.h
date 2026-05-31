@@ -105,6 +105,8 @@ struct CapturedEmbeddingSparseGradient {
     DeviceUpdatableKernelNode ultraHighReduceNode;
     DeviceUpdatableKernelNode twoStageFinalizeClassifyNode;
     DeviceUpdatableKernelNode twoStageFinalizeAccumulateNode;
+    bool capturesSparseRowUpdateRuntimeScalarWrite = false;
+    cudaGraphNode_t sparseRowUpdateRuntimeScalarWriteNode = nullptr;
     Stream highRunCaptureStream;
     Stream ultraHighRunCaptureStream;
 };
@@ -140,6 +142,22 @@ void launchPreparedEmbeddingSparseGradientWithSparseRowUpdate(PreparedEmbeddingS
                                                               const std::unordered_map<std::string, float>& runtimeScalars,
                                                               Stream stream);
 
+void uploadPreparedEmbeddingSparseGradientSparseRowUpdateRuntimeScalars(
+    PreparedEmbeddingSparseGradient& prepared,
+    const std::unordered_map<std::string, float>& runtimeScalars,
+    Stream stream);
+
+void updateCapturedEmbeddingSparseGradientSparseRowUpdateRuntimeScalars(
+    PreparedEmbeddingSparseGradient& prepared,
+    CapturedEmbeddingSparseGradient& captured,
+    CudaGraphExecutable& executable,
+    const std::unordered_map<std::string, float>& runtimeScalars);
+
+CudaGraphExecutable endCaptureAndInstantiatePreparedEmbeddingSparseGradientGraph(
+    CudaGraphCaptureBuilder& builder,
+    CapturedEmbeddingSparseGradient& captured,
+    Stream uploadStream);
+
 EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prepared,
                                                                            const Tensor& indices,
                                                                            const Tensor& upstreamGradient,
@@ -160,6 +178,14 @@ void capturePreparedEmbeddingSparseGradient(CudaGraphCaptureBuilder& builder,
                                             const Tensor& upstreamGradient,
                                             SparseRowGradient& outputGradient,
                                             CapturedEmbeddingSparseGradient& captured);
+
+void capturePreparedEmbeddingSparseGradientWithSparseRowUpdateRuntimeScalarStorage(
+    CudaGraphCaptureBuilder& builder,
+    PreparedEmbeddingSparseGradient& prepared,
+    const Tensor& indices,
+    const Tensor& upstreamGradient,
+    SparseRowGradient& outputGradient,
+    CapturedEmbeddingSparseGradient& captured);
 
 void capturePreparedEmbeddingSparseGradientWithSparseRowUpdate(
     CudaGraphCaptureBuilder& builder,

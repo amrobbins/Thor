@@ -159,6 +159,29 @@ void Embedding::compileImpl() {
                     weightsSparseGradientProducer = prepareEmbeddingSparseGradient(
                         aFeatureInput.value(), aErrorInput.value(), weightsSparseGradient.value(), paddingIndex);
                 }
+
+                weightsSparseGradientCapturedGraph.emplace(placement.getDeviceNum());
+                CudaGraphCaptureBuilder builder(gradientUpdateStream.value());
+                if (weightsSparseGradientProducerFusesOptimizerUpdate) {
+                    capturePreparedEmbeddingSparseGradientWithSparseRowUpdateRuntimeScalarStorage(builder,
+                                                                                                  *weightsSparseGradientProducer,
+                                                                                                  aFeatureInput.value(),
+                                                                                                  aErrorInput.value(),
+                                                                                                  weightsSparseGradient.value(),
+                                                                                                  weightsSparseGradientCapturedGraph.value());
+                } else {
+                    capturePreparedEmbeddingSparseGradient(builder,
+                                                           *weightsSparseGradientProducer,
+                                                           aFeatureInput.value(),
+                                                           aErrorInput.value(),
+                                                           weightsSparseGradient.value(),
+                                                           weightsSparseGradientCapturedGraph.value());
+                }
+                weightsSparseGradientGraphExecutable.emplace(
+                    endCaptureAndInstantiatePreparedEmbeddingSparseGradientGraph(builder,
+                                                                                 weightsSparseGradientCapturedGraph.value(),
+                                                                                 gradientUpdateStream.value()));
+                weightsSparseGradientCapturedGraph->uploadTargetNodes(gradientUpdateStream.value());
             }
         }
     }
@@ -223,21 +246,16 @@ void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
         gradientUpdateStream.value().waitEvent(errorInputReady);
         THOR_THROW_IF_FALSE(weightsSparseGradient.has_value());
         THOR_THROW_IF_FALSE(weightsSparseGradientProducer != nullptr);
+        THOR_THROW_IF_FALSE(weightsSparseGradientGraphExecutable.has_value());
         if (weightsSparseGradientProducerFusesOptimizerUpdate) {
-            launchPreparedEmbeddingSparseGradientWithSparseRowUpdate(
+            THOR_THROW_IF_FALSE(weightsSparseGradientCapturedGraph.has_value());
+            updateCapturedEmbeddingSparseGradientSparseRowUpdateRuntimeScalars(
                 *weightsSparseGradientProducer,
-                featureInputs[connectionNumber].value(),
-                errorInput.value(),
-                weightsSparseGradient.value(),
-                parameters[0]->getOptimizer()->sparseRowUpdateRuntimeScalars(batchSize * numBackwardConnections),
-                gradientUpdateStream.value());
-        } else {
-            launchPreparedEmbeddingSparseGradient(*weightsSparseGradientProducer,
-                                                  featureInputs[connectionNumber].value(),
-                                                  errorInput.value(),
-                                                  weightsSparseGradient.value(),
-                                                  gradientUpdateStream.value());
+                weightsSparseGradientCapturedGraph.value(),
+                weightsSparseGradientGraphExecutable.value(),
+                parameters[0]->getOptimizer()->sparseRowUpdateRuntimeScalars(batchSize * numBackwardConnections));
         }
+        weightsSparseGradientGraphExecutable->launch(gradientUpdateStream.value());
     }
 
     numBackwardConnectionsMade += 1;
