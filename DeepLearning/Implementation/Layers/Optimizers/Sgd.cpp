@@ -107,6 +107,77 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
     compiled = true;
 }
 
+
+DenseOptimizerExpression Sgd::toDenseUpdateExpression(const Tensor& weights,
+                                                      const Expression& gradient,
+                                                      const std::string& namePrefix) {
+    THOR_THROW_IF_FALSE(weights.isInitialized());
+    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
+
+    const DataType weightsDType = weights.getDescriptor().getDataType();
+
+    auto w = Expression::input(namePrefix + "weights_in", DataType::FP32, DataType::FP32);
+    auto step = Expression::runtimeScalar(namePrefix + "step", DataType::FP32, DataType::FP32);
+
+    DenseOptimizerExpression result;
+    result.inputs[namePrefix + "weights_in"] = weights;
+    result.preallocatedOutputs["weights"] = weights;
+
+    std::optional<Outputs> expressionOutputs;
+    if (momentum > 0.0f) {
+        if (!hasParameter("momentum")) {
+            shared_ptr<PhysicalParameter> momentumParameter =
+                make_shared<PhysicalParameter>("momentum", false, weights.getDimensions(), weightsDType);
+            shared_ptr<Initializer> paramInitializer = make_shared<ZerosInitializer>();
+            momentumParameter->setInitializer(paramInitializer->clone());
+            addParameter(momentumParameter);
+            momentumParameter->compileStorage(weights);
+            momentumParameter->compileInitializer();
+            momentumParameter->initialize(gradientUpdateStream);
+            THOR_THROW_IF_FALSE(momentumParameter->getStorage().has_value());
+        }
+        shared_ptr<PhysicalParameter> momentumParameter = getParameter("momentum");
+        Tensor momentumTensor = momentumParameter->getStorage().value();
+
+        Expression v = Expression::input(namePrefix + "velocity_in", DataType::FP32, DataType::FP32);
+        std::optional<Expression> vNext;
+        std::optional<Expression> wNext;
+        if (useNesterovMomentum) {
+            vNext.emplace((Expression::constantScalar(momentum) * v - step * gradient).withOutputDType(weightsDType));
+            wNext.emplace((w + Expression::constantScalar(momentum) * (*vNext) - step * gradient).withOutputDType(weightsDType));
+        } else {
+            vNext.emplace((Expression::constantScalar(momentum) * v - step * gradient).withOutputDType(weightsDType));
+            wNext.emplace((w + (*vNext)).withOutputDType(weightsDType));
+        }
+
+        expressionOutputs.emplace(Expression::outputs({
+            {"weights", *wNext},
+            {"velocity", *vNext},
+        }));
+
+        result.inputs[namePrefix + "velocity_in"] = momentumTensor;
+        result.preallocatedOutputs["velocity"] = momentumTensor;
+    } else {
+        auto wNext = (w - step * gradient).withOutputDType(weightsDType);
+        expressionOutputs.emplace(Expression::outputs({
+            {"weights", wNext},
+        }));
+    }
+
+    result.outputs = expressionOutputs->physicalOutputs();
+    return result;
+}
+
+std::unordered_map<std::string, float> Sgd::denseUpdateRuntimeScalars(uint32_t batchSize, const std::string& namePrefix) {
+    std::unordered_map<std::string, float> scalars = sparseRowUpdateRuntimeScalars(batchSize);
+    std::unordered_map<std::string, float> prefixed;
+    prefixed.reserve(scalars.size());
+    for (const auto& [name, value] : scalars) {
+        prefixed[namePrefix + name] = value;
+    }
+    return prefixed;
+}
+
 SparseRowOptimizerExpression Sgd::toSparseRowUpdateExpression(const Tensor& weights, SparseRowGradient& sparseRowGradient) {
     THOR_THROW_IF_FALSE(weights.isInitialized());
     sparseRowGradient.validate();

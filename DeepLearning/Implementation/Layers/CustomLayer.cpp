@@ -1,12 +1,14 @@
 #include <optional>
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 
+#include <algorithm>
 #include <limits>
 #include <set>
 #include <stdexcept>
 #include <unordered_set>
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Expression/AutoDiff.h"
 using namespace std;
 
 namespace ThorImplementation {
@@ -23,6 +25,35 @@ std::string joinNames(const std::set<std::string>& names) {
     }
     return result;
 }
+
+std::string optimizerFusionNamePrefix(const std::string& parameterName) { return "__optimizer_fused_" + parameterName + "__"; }
+
+std::string optimizerFusionOutputName(const std::string& parameterName, const std::string& outputName) {
+    return optimizerFusionNamePrefix(parameterName) + outputName;
+}
+
+PreparedDynamicExpression::TensorMap filterTensorInputsForPhysicalOutputs(
+    const PreparedDynamicExpression::TensorMap& availableInputs,
+    const PhysicalOutputs& outputs) {
+    PreparedDynamicExpression::TensorMap filteredInputs;
+    if (outputs.expr == nullptr) {
+        return filteredInputs;
+    }
+
+    for (const NamedInput& input : outputs.expr->inputs) {
+        if (input.kind != NamedInput::Kind::Tensor) {
+            continue;
+        }
+
+        auto it = availableInputs.find(input.name);
+        if (it == availableInputs.end()) {
+            throw runtime_error("CustomLayer fused optimizer update missing required tensor input: " + input.name);
+        }
+        filteredInputs.emplace(input.name, it->second);
+    }
+    return filteredInputs;
+}
+
 }  // namespace
 
 CustomLayer::CustomLayer(DynamicExpression expr,
@@ -320,8 +351,163 @@ void CustomLayer::recordEffectiveParameterBatchSizeForApplication(uint32_t appli
 
     const ApplicationState& app = applications[applicationIndex];
     for (const std::string& parameterName : app.activeParameterTargetNames) {
+        if (app.optimizerUpdateFusedParameterNames.contains(parameterName)) {
+            continue;
+        }
         effectiveBatchSizeByParameterName[parameterName] += batchSize;
     }
+}
+
+bool CustomLayer::canFuseOptimizerUpdatesForApplication(uint32_t applicationIndex) const {
+    if (applicationIndex >= applications.size()) {
+        return false;
+    }
+
+    // A fused optimizer update consumes the parameter gradient immediately instead of materializing it.
+    // That is only valid when there is one application input connection into the CustomLayer, because
+    // multiple connections/applications need an accumulation boundary before the shared parameter update.
+    return applications.size() == 1 && inputNames.size() == 1;
+}
+
+std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan(
+    uint32_t applicationIndex,
+    const std::vector<std::string>& fusedParameterTargets,
+    const std::unordered_map<std::string, Tensor>& optimizerUpdateInputs) {
+    if (fusedParameterTargets.empty()) {
+        return nullptr;
+    }
+    if (!gradientUpdateStream.has_value()) {
+        throw runtime_error("CustomLayer fused optimizer update requires a gradient update stream.");
+    }
+
+    const ApplicationState& app = applications[applicationIndex];
+
+    PreparedDynamicExpression::ShapeMap forwardInputDims;
+    for (const auto& [name, tensor] : app.forwardPrepared->stampInputs()) {
+        forwardInputDims[name] = tensor.getDimensions();
+    }
+
+    PhysicalOutputs backwardOutputs = buildBackwardOutputs(app.forwardPrepared->equation().physicalOutputs(),
+                                                           fusedParameterTargets,
+                                                           app.upstreamInputNamesByOutput,
+                                                           forwardInputDims,
+                                                           false);
+
+    std::unordered_map<std::string, Expression> gradientsByParameter;
+    for (const NamedOutput& output : backwardOutputs.outputs) {
+        constexpr const char* suffix = "_grad";
+        constexpr size_t suffixLen = 5;
+        if (output.name.size() < suffixLen || output.name.compare(output.name.size() - suffixLen, suffixLen, suffix) != 0) {
+            continue;
+        }
+        const std::string parameterName = output.name.substr(0, output.name.size() - suffixLen);
+        gradientsByParameter.emplace(parameterName, Expression::fromPhysicalNode(backwardOutputs.expr, output.node_idx));
+    }
+
+    std::vector<std::pair<std::string, Expression>> fusedOutputs;
+    std::unordered_map<std::string, Tensor> stampInputs = app.forwardInputsByName;
+    for (const auto& [name, tensor] : app.backwardAdditionalInputsByName) {
+        stampInputs[name] = tensor;
+    }
+
+    std::unordered_map<std::string, Tensor> preallocatedOutputs;
+
+    for (const std::string& parameterName : fusedParameterTargets) {
+        auto gradIt = gradientsByParameter.find(parameterName);
+        if (gradIt == gradientsByParameter.end()) {
+            throw runtime_error("CustomLayer could not build fused optimizer update: missing gradient expression for parameter '" +
+                                parameterName + "'.");
+        }
+        auto storageIt = optimizerUpdateInputs.find(parameterName);
+        if (storageIt == optimizerUpdateInputs.end()) {
+            throw runtime_error("CustomLayer could not build fused optimizer update: missing storage for parameter '" + parameterName + "'.");
+        }
+
+        shared_ptr<Optimizer> optimizer;
+        for (const auto& parameter : parameters) {
+            if (parameter->getName() == parameterName) {
+                optimizer = parameter->getOptimizer();
+                break;
+            }
+        }
+        if (optimizer == nullptr || !optimizer->supportsDenseUpdateFusion()) {
+            throw runtime_error("CustomLayer fused optimizer update requested for unsupported parameter '" + parameterName + "'.");
+        }
+
+        const std::string prefix = optimizerFusionNamePrefix(parameterName);
+
+        // Preserve the public/diagnostic dense-gradient contract even when the optimizer update is fused.
+        // The fused plan consumes the gradient expression directly for the optimizer math, but also exposes
+        // that same expression as a preallocated output to the optimizer-owned gradient buffer.  This keeps
+        // existing tests and user inspection APIs correct while still avoiding a separate optimizer update stamp.
+        if (optimizer->getWeightsGradient().has_value()) {
+            Tensor gradientTensor = optimizer->getWeightsGradient().value();
+            const std::string gradientOutputName = optimizerFusionOutputName(parameterName, parameterName + "_grad");
+            fusedOutputs.emplace_back(gradientOutputName, gradIt->second.withOutputDType(gradientTensor.getDataType()));
+            preallocatedOutputs.emplace(gradientOutputName, gradientTensor);
+        }
+
+        DenseOptimizerExpression updateExpression = optimizer->toDenseUpdateExpression(storageIt->second, gradIt->second, prefix);
+
+        for (const auto& [name, tensor] : updateExpression.inputs) {
+            auto [_, inserted] = stampInputs.emplace(name, tensor);
+            if (!inserted) {
+                throw runtime_error("CustomLayer fused optimizer update input name collision: " + name);
+            }
+        }
+
+        for (const NamedOutput& output : updateExpression.outputs.outputs) {
+            const std::string uniqueOutputName = optimizerFusionOutputName(parameterName, output.name);
+            auto preallocIt = updateExpression.preallocatedOutputs.find(output.name);
+            if (preallocIt == updateExpression.preallocatedOutputs.end()) {
+                throw runtime_error("CustomLayer fused optimizer update missing preallocated output for '" + output.name +
+                                    "' on parameter '" + parameterName + "'.");
+            }
+            fusedOutputs.emplace_back(uniqueOutputName, Expression::fromPhysicalNode(updateExpression.outputs.expr, output.node_idx));
+            preallocatedOutputs.emplace(uniqueOutputName, preallocIt->second);
+        }
+    }
+
+    Outputs outputs = Expression::outputs(fusedOutputs);
+    PhysicalOutputs physicalOutputs = outputs.physicalOutputs();
+    PreparedDynamicExpression::TensorMap filteredStampInputs = filterTensorInputsForPhysicalOutputs(stampInputs, physicalOutputs);
+    FusedEquation fusedUpdateEquation = FusedEquation::compile(physicalOutputs, placement.getDeviceNum(), useFastMath);
+    return std::make_shared<StampedExecutionPlan>(
+        fusedUpdateEquation.stamp(filteredStampInputs, gradientUpdateStream.value(), {}, preallocatedOutputs));
+}
+
+std::unordered_map<std::string, float> CustomLayer::buildFusedOptimizerRuntimeScalars(uint32_t applicationIndex, uint32_t batchSize) {
+    if (batchSize == 0) {
+        throw runtime_error("CustomLayer fused optimizer update requires a non-zero batch size.");
+    }
+    if (applicationIndex >= applications.size()) {
+        return {};
+    }
+
+    const ApplicationState& app = applications[applicationIndex];
+    std::unordered_map<std::string, float> runtimeScalars;
+    for (const std::string& parameterName : app.optimizerUpdateFusedParameterNames) {
+        shared_ptr<Optimizer> optimizer;
+        for (const auto& parameter : parameters) {
+            if (parameter->getName() == parameterName) {
+                optimizer = parameter->getOptimizer();
+                break;
+            }
+        }
+        if (optimizer == nullptr) {
+            throw runtime_error("CustomLayer fused optimizer update lost optimizer for parameter '" + parameterName + "'.");
+        }
+
+        const std::string prefix = optimizerFusionNamePrefix(parameterName);
+        auto scalars = optimizer->denseUpdateRuntimeScalars(batchSize, prefix);
+        for (const auto& [name, value] : scalars) {
+            auto [_, inserted] = runtimeScalars.emplace(name, value);
+            if (!inserted) {
+                throw runtime_error("CustomLayer fused optimizer runtime scalar name collision: " + name);
+            }
+        }
+    }
+    return runtimeScalars;
 }
 
 void CustomLayer::initialize() {
@@ -661,6 +847,8 @@ void CustomLayer::compileImpl() {
         app.backwardErrorStamped = nullptr;
         app.backwardWeightsClearStamped = nullptr;
         app.backwardWeightsAccumulateStamped = nullptr;
+        app.backwardWeightsFusedOptimizerUpdateStamped = nullptr;
+        app.optimizerUpdateFusedParameterNames.clear();
         app.backwardAdditionalInputsByName.clear();
         app.backwardInputGradOutputsByName.clear();
         app.expectedBackwardErrorInputTensorIds.clear();
@@ -679,6 +867,8 @@ void CustomLayer::compileImpl() {
             app.backwardErrorStamped = nullptr;
             app.backwardWeightsClearStamped = nullptr;
             app.backwardWeightsAccumulateStamped = nullptr;
+            app.backwardWeightsFusedOptimizerUpdateStamped = nullptr;
+            app.optimizerUpdateFusedParameterNames.clear();
             app.backwardAdditionalInputsByName.clear();
             app.backwardInputGradOutputsByName.clear();
             app.backwardGradientPatternCompiled = true;
@@ -740,8 +930,26 @@ void CustomLayer::compileImpl() {
             allTrainableParameterTargets, app.upstreamOutputNames);
         app.activeParameterTargetNames = std::unordered_set<std::string>(activeParameterTargets.begin(), activeParameterTargets.end());
 
-        PreparedDynamicExpression::TensorMap allParameterPreallocatedOutputs;
-        PreparedDynamicExpression::TensorMap activeParameterPreallocatedOutputs;
+        std::vector<std::string> fusedParameterTargets;
+        if (canFuseOptimizerUpdatesForApplication(applicationIndex)) {
+            for (const std::string& parameterName : activeParameterTargets) {
+                for (const auto& parameter : parameters) {
+                    if (parameter->getName() == parameterName && parameter->isTrainingEnabled() && parameter->hasOptimizer() &&
+                        parameter->getOptimizer()->supportsDenseUpdateFusion()) {
+                        fusedParameterTargets.push_back(parameterName);
+                        app.optimizerUpdateFusedParameterNames.insert(parameterName);
+                        break;
+                    }
+                }
+            }
+        }
+
+        std::vector<std::string> allMaterializedParameterTargets;
+        std::vector<std::string> activeMaterializedParameterTargets;
+        PreparedDynamicExpression::TensorMap allMaterializedParameterPreallocatedOutputs;
+        PreparedDynamicExpression::TensorMap activeMaterializedParameterPreallocatedOutputs;
+        std::unordered_map<std::string, Tensor> parameterStorageByName;
+
         for (auto& parameter : parameters) {
             if (!parameter->isTrainingEnabled()) {
                 continue;
@@ -750,43 +958,57 @@ void CustomLayer::compileImpl() {
             THOR_THROW_IF_FALSE(parameter->hasOptimizer());
             const shared_ptr<Optimizer>& parameterOptimizer = parameter->getOptimizer();
             THOR_THROW_IF_FALSE(parameterOptimizer != nullptr);
-            THOR_THROW_IF_FALSE(parameterOptimizer->getWeightsGradient().has_value());
+            THOR_THROW_IF_FALSE(parameter->getStorage().has_value());
+            parameterStorageByName[parameter->getName()] = parameter->getStorage().value();
 
+            if (app.optimizerUpdateFusedParameterNames.contains(parameter->getName())) {
+                continue;
+            }
+
+            THOR_THROW_IF_FALSE(parameterOptimizer->getWeightsGradient().has_value());
             const std::string gradName = parameter->getName() + "_grad";
             Tensor gradientTensor = parameterOptimizer->getWeightsGradient().value();
-            allParameterPreallocatedOutputs[gradName] = gradientTensor;
+            allMaterializedParameterTargets.push_back(parameter->getName());
+            allMaterializedParameterPreallocatedOutputs[gradName] = gradientTensor;
             if (app.activeParameterTargetNames.contains(parameter->getName())) {
-                activeParameterPreallocatedOutputs[gradName] = gradientTensor;
+                activeMaterializedParameterTargets.push_back(parameter->getName());
+                activeMaterializedParameterPreallocatedOutputs[gradName] = gradientTensor;
             }
         }
 
         if (!allTrainableParameterTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
             THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
 
-            PreparedDynamicExpression gradientPrepared =
-                layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, gradientUpdateStream.value());
-            validatePreparedExpressionInputs(gradientPrepared);
+            if (!fusedParameterTargets.empty()) {
+                app.backwardWeightsFusedOptimizerUpdateStamped =
+                    buildFusedOptimizerUpdatePlan(applicationIndex, fusedParameterTargets, parameterStorageByName);
+            }
 
-            // Every application with downstream backprop gets a clear-first stamp that writes every trainable
-            // gradient buffer. Whichever application arrives first in a backward pass can therefore initialize
-            // all parameter gradients without a separate memset, while the partial upstream map makes inactive
-            // outputs contribute zeros rather than synthetic zero tensors.
-            app.backwardWeightsClearStamped =
-                std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(allTrainableParameterTargets,
-                                                                                      app.upstreamInputNamesByOutput,
-                                                                                      false,
-                                                                                      app.backwardAdditionalInputsByName,
-                                                                                      {},
-                                                                                      allParameterPreallocatedOutputs));
+            if (!allMaterializedParameterTargets.empty()) {
+                PreparedDynamicExpression gradientPrepared =
+                    layerDefinitionExpression.prepare(app.forwardInputsByName, app.forwardOutputsByName, gradientUpdateStream.value());
+                validatePreparedExpressionInputs(gradientPrepared);
 
-            if (!activeParameterTargets.empty()) {
-                app.backwardWeightsAccumulateStamped =
-                    std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(activeParameterTargets,
+                // Every application with downstream backprop gets a clear-first stamp that writes every materialized
+                // gradient buffer. Parameters handled by backwardWeightsFusedOptimizerUpdateStamped intentionally
+                // skip this dense gradient write/read round trip.
+                app.backwardWeightsClearStamped =
+                    std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(allMaterializedParameterTargets,
                                                                                           app.upstreamInputNamesByOutput,
-                                                                                          true,
+                                                                                          false,
                                                                                           app.backwardAdditionalInputsByName,
                                                                                           {},
-                                                                                          activeParameterPreallocatedOutputs));
+                                                                                          allMaterializedParameterPreallocatedOutputs));
+
+                if (!activeMaterializedParameterTargets.empty()) {
+                    app.backwardWeightsAccumulateStamped =
+                        std::make_shared<StampedExecutionPlan>(gradientPrepared.stampBackward(activeMaterializedParameterTargets,
+                                                                                              app.upstreamInputNamesByOutput,
+                                                                                              true,
+                                                                                              app.backwardAdditionalInputsByName,
+                                                                                              {},
+                                                                                              activeMaterializedParameterPreallocatedOutputs));
+                }
             }
         }
     }
@@ -1045,8 +1267,9 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             errorInputReadyEvent = computeStream(applicationIndex).putEvent();
         }
 
+        std::optional<Event> errorOutHasBeenComputedEvent = std::nullopt;
         if (app.backwardErrorStamped != nullptr) {
-            std::optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(inputFlatIndex(applicationIndex, 0));
+            errorOutHasBeenComputedEvent = computeErrorOut(inputFlatIndex(applicationIndex, 0));
             if (errorOutHasBeenComputedEvent.has_value()) {
                 errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent.value());
             }
@@ -1055,8 +1278,15 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         if (gradientUpdateStream.has_value() && errorInputReadyEvent.has_value()) {
             gradientUpdateStream.value().waitEvent(errorInputReadyEvent.value());
         }
+        if (gradientUpdateStream.has_value() && errorOutHasBeenComputedEvent.has_value() &&
+            app.backwardWeightsFusedOptimizerUpdateStamped != nullptr) {
+            // Fused optimizer stamps update parameter storage directly, so they must preserve the same
+            // ordering as the legacy materialized path: upstream input-gradient computation reads old
+            // weights before the optimizer overwrites them.
+            gradientUpdateStream.value().waitEvent(errorOutHasBeenComputedEvent.value());
+        }
 
-        accumulateWeightsGradient(inputFlatIndex(applicationIndex, 0), clearGradientFirstThisBackwardPass);
+        accumulateWeightsGradientForApplication(applicationIndex, clearGradientFirstThisBackwardPass, batchSize);
         recordEffectiveParameterBatchSizeForApplication(applicationIndex, batchSize);
         clearGradientFirstThisBackwardPass = false;
 
@@ -1081,6 +1311,12 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             }
 
             bool anyWeightsUpdated = false;
+            for (const ApplicationState& app : applications) {
+                if (app.backwardRanThisPass && !app.optimizerUpdateFusedParameterNames.empty()) {
+                    anyWeightsUpdated = true;
+                    break;
+                }
+            }
             for (const auto& parameter : parameters) {
                 if (!parameter->isTrainingEnabled()) {
                     continue;
@@ -1128,20 +1364,21 @@ std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
     return computeStream(decoded.applicationIndex).putEvent();
 }
 
-void CustomLayer::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
+void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIndex, bool clearGradientFirst, uint32_t batchSize) {
     if (!gradientUpdateStream.has_value()) {
         return;
     }
-
-    DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
-    if (decoded.applicationIndex >= applications.size()) {
+    if (applicationIndex >= applications.size()) {
         return;
     }
-    ApplicationState& app = applications[decoded.applicationIndex];
+    ApplicationState& app = applications[applicationIndex];
 
     if (clearGradientFirst) {
         if (app.backwardWeightsClearStamped != nullptr) {
             app.backwardWeightsClearStamped->run();
+        }
+        if (app.backwardWeightsFusedOptimizerUpdateStamped != nullptr) {
+            app.backwardWeightsFusedOptimizerUpdateStamped->run(buildFusedOptimizerRuntimeScalars(applicationIndex, batchSize));
         }
         return;
     }
@@ -1149,6 +1386,11 @@ void CustomLayer::accumulateWeightsGradient(uint32_t connectionNumber, bool clea
     if (app.backwardWeightsAccumulateStamped != nullptr) {
         app.backwardWeightsAccumulateStamped->run();
     }
+}
+
+void CustomLayer::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
+    DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
+    accumulateWeightsGradientForApplication(decoded.applicationIndex, clearGradientFirst, 0);
 }
 
 uint64_t CustomLayer::flopCountForward() {
@@ -1169,6 +1411,9 @@ uint64_t CustomLayer::flopCountBackward() {
         }
         if (app.backwardWeightsAccumulateStamped != nullptr) {
             flops += app.backwardWeightsAccumulateStamped->flopCount();
+        }
+        if (app.backwardWeightsFusedOptimizerUpdateStamped != nullptr) {
+            flops += app.backwardWeightsFusedOptimizerUpdateStamped->flopCount();
         }
     }
     return flops;

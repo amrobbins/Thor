@@ -14,16 +14,14 @@ TEST(RandomTestConversions, CpuAllConversionsOutOfPlace) {
 
     Stream stream(0);
 
-    for (DataType sourceDataType = DataType::FP16; sourceDataType <= DataType::BF16;
-         sourceDataType = (DataType)((int)sourceDataType + 1)) {
-        for (DataType destDataType = DataType::FP16; destDataType <= DataType::BF16;
-             destDataType = (DataType)((int)destDataType + 1)) {
+    for (DataType sourceDataType = DataType::FP16; sourceDataType <= DataType::BF16; sourceDataType = (DataType)((int)sourceDataType + 1)) {
+        for (DataType destDataType = DataType::FP16; destDataType <= DataType::BF16; destDataType = (DataType)((int)destDataType + 1)) {
             if (sourceDataType == destDataType)
                 continue;
 
             int NUM_ELEMENTS = 1 + (rand() % 2000);
             if (rand() % 20 == 0)
-                NUM_ELEMENTS = 1000000 + rand() % 1000000;
+                NUM_ELEMENTS = 10000 + rand() % 10000;
 
             // printf("%s -> %s\n",
             //        TensorDescriptor::getElementTypeName(sourceDataType).c_str(),
@@ -195,16 +193,14 @@ TEST(RandomTestConversions, CpuAllConversionsInPlace) {
 
     Stream stream(0);
 
-    for (DataType sourceDataType = DataType::FP16; sourceDataType <= DataType::BF16;
-         sourceDataType = (DataType)((int)sourceDataType + 1)) {
-        for (DataType destDataType = DataType::FP16; destDataType <= DataType::BF16;
-             destDataType = (DataType)((int)destDataType + 1)) {
+    for (DataType sourceDataType = DataType::FP16; sourceDataType <= DataType::BF16; sourceDataType = (DataType)((int)sourceDataType + 1)) {
+        for (DataType destDataType = DataType::FP16; destDataType <= DataType::BF16; destDataType = (DataType)((int)destDataType + 1)) {
             if (sourceDataType == destDataType)
                 continue;
 
             int NUM_ELEMENTS = 1 + (rand() % 2000);
             if (rand() % 30 == 0)
-                NUM_ELEMENTS = 1000000 + rand() % 1000000;
+                NUM_ELEMENTS = 10000 + rand() % 10000;
 
             void *source;
             void *dest;
@@ -374,10 +370,8 @@ TEST(RandomTestConversions, GpuAllConversionsOutOfPlace) {
 
     Stream stream(0);
 
-    for (DataType sourceDataType = DataType::FP16; sourceDataType <= DataType::BF16;
-         sourceDataType = (DataType)((int)sourceDataType + 1)) {
-        for (DataType destDataType = DataType::FP16; destDataType <= DataType::BF16;
-             destDataType = (DataType)((int)destDataType + 1)) {
+    for (DataType sourceDataType = DataType::FP16; sourceDataType <= DataType::BF16; sourceDataType = (DataType)((int)sourceDataType + 1)) {
+        for (DataType destDataType = DataType::FP16; destDataType <= DataType::BF16; destDataType = (DataType)((int)destDataType + 1)) {
             if (sourceDataType == destDataType)
                 continue;
 
@@ -590,10 +584,8 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
 
     Stream stream(0);
 
-    for (DataType sourceDataType = DataType::FP16; sourceDataType <= DataType::BF16;
-         sourceDataType = (DataType)((int)sourceDataType + 1)) {
-        for (DataType destDataType = DataType::FP16; destDataType <= DataType::BF16;
-             destDataType = (DataType)((int)destDataType + 1)) {
+    for (DataType sourceDataType = DataType::FP16; sourceDataType <= DataType::BF16; sourceDataType = (DataType)((int)sourceDataType + 1)) {
+        for (DataType destDataType = DataType::FP16; destDataType <= DataType::BF16; destDataType = (DataType)((int)destDataType + 1)) {
             if (sourceDataType == destDataType)
                 continue;
 

@@ -101,6 +101,86 @@ void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
     compiled = true;
 }
 
+
+DenseOptimizerExpression Adam::toDenseUpdateExpression(const Tensor& weights,
+                                                       const Expression& gradient,
+                                                       const std::string& namePrefix) {
+    THOR_THROW_IF_FALSE(weights.isInitialized());
+    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
+
+    const DataType weightsDType = weights.getDescriptor().getDataType();
+
+    if (!hasParameter("m")) {
+        THOR_THROW_IF_FALSE(!hasParameter("v"));
+        shared_ptr<PhysicalParameter> mParameter = make_shared<PhysicalParameter>("m", false, weights.getDimensions(), DataType::FP32);
+        shared_ptr<PhysicalParameter> vParameter = make_shared<PhysicalParameter>("v", false, weights.getDimensions(), DataType::FP32);
+        shared_ptr<Initializer> paramInitializer = make_shared<ZerosInitializer>();
+
+        mParameter->setInitializer(paramInitializer->clone());
+        addParameter(mParameter);
+        mParameter->compileStorage(weights);
+        mParameter->compileInitializer();
+
+        vParameter->setInitializer(paramInitializer->clone());
+        addParameter(vParameter);
+        vParameter->compileStorage(weights);
+        vParameter->compileInitializer();
+
+        THOR_THROW_IF_FALSE(mParameter->getStorage().has_value());
+        THOR_THROW_IF_FALSE(vParameter->getStorage().has_value());
+        mParameter->initialize(gradientUpdateStream);
+        vParameter->initialize(gradientUpdateStream);
+    }
+    shared_ptr<PhysicalParameter> mParameter = getParameter("m");
+    shared_ptr<PhysicalParameter> vParameter = getParameter("v");
+    THOR_THROW_IF_FALSE(mParameter->getStorage().has_value());
+    THOR_THROW_IF_FALSE(vParameter->getStorage().has_value());
+
+    auto alphaT = Expression::runtimeScalar(namePrefix + "alphaT", DataType::FP32, DataType::FP32);
+    auto invBatchLossScale = Expression::runtimeScalar(namePrefix + "invBatchLossScale", DataType::FP32, DataType::FP32);
+
+    auto w = Expression::input(namePrefix + "weights_in", DataType::FP32, DataType::FP32);
+    auto g = gradient * invBatchLossScale;
+    auto m = Expression::input(namePrefix + "m_in", DataType::FP32, DataType::FP32);
+    auto v = Expression::input(namePrefix + "v_in", DataType::FP32, DataType::FP32);
+
+    Expression beta1Expr = Expression::constantScalar(beta1);
+    Expression beta2Expr = Expression::constantScalar(beta2);
+    Expression oneMinusBeta1Expr = Expression::constantScalar(1.0 - beta1);
+    Expression oneMinusBeta2Expr = Expression::constantScalar(1.0 - beta2);
+    Expression epsilonExpr = Expression::constantScalar(epsilon);
+
+    Expression mNext = beta1Expr * m + oneMinusBeta1Expr * g;
+    Expression vNext = beta2Expr * v + oneMinusBeta2Expr * g * g;
+    Expression wNext = (w - alphaT * mNext / (Expression::sqrt(vNext) + epsilonExpr)).withOutputDType(weightsDType);
+
+    DenseOptimizerExpression result;
+    result.inputs[namePrefix + "weights_in"] = weights;
+    result.inputs[namePrefix + "m_in"] = mParameter->getStorage().value();
+    result.inputs[namePrefix + "v_in"] = vParameter->getStorage().value();
+    result.preallocatedOutputs["weights"] = weights;
+    result.preallocatedOutputs["m"] = mParameter->getStorage().value();
+    result.preallocatedOutputs["v"] = vParameter->getStorage().value();
+
+    auto outs = Expression::outputs({
+        {"weights", wNext},
+        {"m", mNext},
+        {"v", vNext},
+    });
+    result.outputs = outs.physicalOutputs();
+    return result;
+}
+
+std::unordered_map<std::string, float> Adam::denseUpdateRuntimeScalars(uint32_t batchSize, const std::string& namePrefix) {
+    std::unordered_map<std::string, float> scalars = sparseRowUpdateRuntimeScalars(batchSize);
+    std::unordered_map<std::string, float> prefixed;
+    prefixed.reserve(scalars.size());
+    for (const auto& [name, value] : scalars) {
+        prefixed[namePrefix + name] = value;
+    }
+    return prefixed;
+}
+
 SparseRowOptimizerExpression Adam::toSparseRowUpdateExpression(const Tensor &weights, SparseRowGradient &sparseRowGradient) {
     THOR_THROW_IF_FALSE(weights.isInitialized());
     sparseRowGradient.validate();

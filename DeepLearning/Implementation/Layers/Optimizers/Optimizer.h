@@ -35,6 +35,20 @@ struct SparseRowOptimizerExpression {
     std::unordered_map<std::string, Tensor> indexedOutputs;
 };
 
+// Expression-backed dense optimizer update definition.
+//
+// This is the dense counterpart to SparseRowOptimizerExpression: a layer can provide
+// `gradient` as an expression node instead of as a materialized Tensor, and the
+// optimizer supplies the parameter/state read inputs plus preallocated parameter/state
+// outputs.  CustomLayer uses this to fuse dParameter computation directly into the
+// optimizer update when there is exactly one input application connection, so there is
+// no need for an intermediate dense gradient write/read round trip.
+struct DenseOptimizerExpression {
+    PhysicalOutputs outputs;
+    std::unordered_map<std::string, Tensor> inputs;
+    std::unordered_map<std::string, Tensor> preallocatedOutputs;
+};
+
 class Optimizer : public Parameterizable {
    public:
 
@@ -71,6 +85,24 @@ class Optimizer : public Parameterizable {
     }
 
     [[nodiscard]] virtual bool supportsSparseRowUpdateFusion() const { return false; }
+
+    [[nodiscard]] virtual bool supportsDenseUpdateFusion() const { return false; }
+
+    [[nodiscard]] virtual DenseOptimizerExpression toDenseUpdateExpression(const Tensor &weights,
+                                                                           const Expression &gradient,
+                                                                           const std::string &namePrefix) {
+        (void)weights;
+        (void)gradient;
+        (void)namePrefix;
+        throw std::runtime_error("Optimizer does not support dense update expressions.");
+    }
+
+    [[nodiscard]] virtual std::unordered_map<std::string, float> denseUpdateRuntimeScalars(uint32_t batchSize,
+                                                                                           const std::string &namePrefix) {
+        (void)batchSize;
+        (void)namePrefix;
+        throw std::runtime_error("Optimizer does not expose dense update runtime scalars.");
+    }
 
     [[nodiscard]] virtual std::unordered_map<std::string, float> sparseRowUpdateRuntimeScalars(uint32_t batchSize) {
         (void)batchSize;
