@@ -779,20 +779,19 @@ TEST(Convolution2d, DirectBackwardConnectionNumerical) {
         Tensor convErrorOutput_h = convErrorOutput.clone(cpuPlacement);
         convErrorOutput_h.copyFromAsync(convErrorOutput, stream);
 
-        ASSERT_TRUE(adamWeights->getWeightsGradient().has_value());
-        Tensor weightsGrad_h = copyTensorToCpu(adamWeights->getWeightsGradient().value(), gradientUpdateStream);
+        EXPECT_FALSE(adamWeights->getWeightsGradient().has_value())
+            << "Fused Convolution2d weights update should not allocate a dense gradient tensor.";
         Tensor weightsAfter_h = copyTensorToCpu(conv.getParameter("weights")->getStorage().value(), gradientUpdateStream);
         Tensor weightsM_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("m"), gradientUpdateStream);
         Tensor weightsV_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("v"), gradientUpdateStream);
 
-        std::optional<Tensor> biasesGrad_h;
         std::optional<Tensor> biasesAfter_h;
         std::optional<Tensor> biasesM_h;
         std::optional<Tensor> biasesV_h;
         if (hasBias) {
             ASSERT_TRUE(adamBiases != nullptr);
-            ASSERT_TRUE(adamBiases->getWeightsGradient().has_value());
-            biasesGrad_h = copyTensorToCpu(adamBiases->getWeightsGradient().value(), gradientUpdateStream);
+            EXPECT_FALSE(adamBiases->getWeightsGradient().has_value())
+                << "Fused Convolution2d biases update should not allocate a dense gradient tensor.";
             biasesAfter_h = copyTensorToCpu(conv.getParameter("biases")->getStorage().value(), gradientUpdateStream);
             biasesM_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("m"), gradientUpdateStream);
             biasesV_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("v"), gradientUpdateStream);
@@ -802,7 +801,6 @@ TEST(Convolution2d, DirectBackwardConnectionNumerical) {
         gradientUpdateStream.synchronize();
 
         const vector<float> actualErrorOut = readCpuTensor(convErrorOutput_h);
-        const vector<float> actualWeightsGrad = readCpuTensor(weightsGrad_h);
         const vector<float> actualWeightsAfter = readCpuTensor(weightsAfter_h);
         const vector<float> actualWeightsM = readCpuTensor(weightsM_h);
         const vector<float> actualWeightsV = readCpuTensor(weightsV_h);
@@ -832,18 +830,15 @@ TEST(Convolution2d, DirectBackwardConnectionNumerical) {
 
         expectAllClose(actualFeatureOut, reference.featureOut, 7e-2f, 7e-2f, "featureOut");
         expectAllClose(actualErrorOut, reference.errorOut, 1e-1f, 1e-1f, "errorOut");
-        expectAllClose(actualWeightsGrad, reference.weightsGrad, 1e-1f, 1e-1f, "weightsGrad");
         expectAllClose(actualWeightsM, reference.weightsM, 1e-1f, 1e-1f, "weightsM");
         expectAllClose(actualWeightsV, reference.weightsV, 1e-1f, 1e-1f, "weightsV");
         expectAllClose(actualWeightsAfter, reference.weightsAfter, 1e-1f, 1e-1f, "weightsAfter");
 
         if (hasBias) {
-            const vector<float> actualBiasesGrad = readCpuTensor(biasesGrad_h.value());
             const vector<float> actualBiasesAfter = readCpuTensor(biasesAfter_h.value());
             const vector<float> actualBiasesM = readCpuTensor(biasesM_h.value());
             const vector<float> actualBiasesV = readCpuTensor(biasesV_h.value());
 
-            expectAllClose(actualBiasesGrad, reference.biasesGrad, 1e-1f, 1e-1f, "biasesGrad");
             expectAllClose(actualBiasesM, reference.biasesM, 1e-1f, 1e-1f, "biasesM");
             expectAllClose(actualBiasesV, reference.biasesV, 1e-1f, 1e-1f, "biasesV");
             expectAllClose(actualBiasesAfter, reference.biasesAfter, 1e-1f, 1e-1f, "biasesAfter");
@@ -970,20 +965,19 @@ TEST(Convolution2d, DirectBackwardConnectionNumericalThreePasses) {
             Tensor convErrorOutput_h = convErrorOutput.clone(cpuPlacement);
             convErrorOutput_h.copyFromAsync(convErrorOutput, stream);
 
-            ASSERT_TRUE(adamWeights->getWeightsGradient().has_value());
-            Tensor weightsGrad_h = copyTensorToCpu(adamWeights->getWeightsGradient().value(), gradientUpdateStream);
+            EXPECT_FALSE(adamWeights->getWeightsGradient().has_value())
+                << "Fused Convolution2d weights update should not allocate a dense gradient tensor.";
             Tensor weightsAfter_h = copyTensorToCpu(conv.getParameter("weights")->getStorage().value(), gradientUpdateStream);
             Tensor weightsM_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("m"), gradientUpdateStream);
             Tensor weightsV_h = copyTensorToCpu(adamWeights->getOptimizerParameterTensor("v"), gradientUpdateStream);
 
-            std::optional<Tensor> biasesGrad_h;
             std::optional<Tensor> biasesAfter_h;
             std::optional<Tensor> biasesM_h;
             std::optional<Tensor> biasesV_h;
             if (hasBias) {
                 ASSERT_TRUE(adamBiases != nullptr);
-                ASSERT_TRUE(adamBiases->getWeightsGradient().has_value());
-                biasesGrad_h = copyTensorToCpu(adamBiases->getWeightsGradient().value(), gradientUpdateStream);
+                EXPECT_FALSE(adamBiases->getWeightsGradient().has_value())
+                    << "Fused Convolution2d biases update should not allocate a dense gradient tensor.";
                 biasesAfter_h = copyTensorToCpu(conv.getParameter("biases")->getStorage().value(), gradientUpdateStream);
                 biasesM_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("m"), gradientUpdateStream);
                 biasesV_h = copyTensorToCpu(adamBiases->getOptimizerParameterTensor("v"), gradientUpdateStream);
@@ -994,25 +988,21 @@ TEST(Convolution2d, DirectBackwardConnectionNumericalThreePasses) {
 
             const Convolution2dDirectBackwardReference& reference = references[pass];
             const vector<float> actualErrorOut = readCpuTensor(convErrorOutput_h);
-            const vector<float> actualWeightsGrad = readCpuTensor(weightsGrad_h);
             const vector<float> actualWeightsAfter = readCpuTensor(weightsAfter_h);
             const vector<float> actualWeightsM = readCpuTensor(weightsM_h);
             const vector<float> actualWeightsV = readCpuTensor(weightsV_h);
 
             expectAllClose(actualFeatureOut, reference.featureOut, 7e-2f, 7e-2f, "featureOut");
             expectAllClose(actualErrorOut, reference.errorOut, 1.25e-1f, 1.25e-1f, "errorOut");
-            expectAllClose(actualWeightsGrad, reference.weightsGrad, 1.25e-1f, 1.25e-1f, "weightsGrad");
             expectAllClose(actualWeightsM, reference.weightsM, 1.25e-1f, 1.25e-1f, "weightsM");
             expectAllClose(actualWeightsV, reference.weightsV, 1.25e-1f, 1.25e-1f, "weightsV");
             expectAllClose(actualWeightsAfter, reference.weightsAfter, 1.25e-1f, 1.25e-1f, "weightsAfter");
 
             if (hasBias) {
-                const vector<float> actualBiasesGrad = readCpuTensor(biasesGrad_h.value());
                 const vector<float> actualBiasesAfter = readCpuTensor(biasesAfter_h.value());
                 const vector<float> actualBiasesM = readCpuTensor(biasesM_h.value());
                 const vector<float> actualBiasesV = readCpuTensor(biasesV_h.value());
 
-                expectAllClose(actualBiasesGrad, reference.biasesGrad, 1.25e-1f, 1.25e-1f, "biasesGrad");
                 expectAllClose(actualBiasesM, reference.biasesM, 1.25e-1f, 1.25e-1f, "biasesM");
                 expectAllClose(actualBiasesV, reference.biasesV, 1.25e-1f, 1.25e-1f, "biasesV");
                 expectAllClose(actualBiasesAfter, reference.biasesAfter, 1.25e-1f, 1.25e-1f, "biasesAfter");

@@ -367,9 +367,10 @@ class SparseRowGradientOnlyOptimizer final : public Optimizer {
    public:
     explicit SparseRowGradientOnlyOptimizer(uint64_t id) : Optimizer(id) {}
 
-    void compile(const Tensor& weights, Stream& gradientUpdateStream) override {
+    void compile(const Tensor& weights, Stream& gradientUpdateStream, bool materializeDenseGradient = true) override {
         (void)weights;
         (void)gradientUpdateStream;
+        (void)materializeDenseGradient;
         throw std::runtime_error("SparseRowGradientOnlyOptimizer dense compile should not be used by Embedding.");
     }
 

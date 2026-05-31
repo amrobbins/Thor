@@ -21,7 +21,7 @@ Sgd::Sgd(uint64_t id, float initialLearningRate, float decay, float momentum, bo
       currentBatch(0),
       currentLearningRate(initialLearningRate) {}
 
-void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
+void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream, bool materializeDenseGradient) {
     THOR_THROW_IF_FALSE(!compiled);
     THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
     THOR_THROW_IF_FALSE(weights.isInitialized());
@@ -29,10 +29,33 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
 
     this->gradientUpdateStream = gradientUpdateStream;
     this->weights = weights;
-    this->weightsGradient = weights.clone();
 
     const DataType weightsDType = weights.getDescriptor().getDataType();
     const int32_t gpuNum = weights.getPlacement().getDeviceNum();
+
+    if (momentum > 0.0f && !hasParameter("momentum")) {
+        shared_ptr<PhysicalParameter> momentumParameter =
+            make_shared<PhysicalParameter>("momentum", false, weights.getDimensions(), weightsDType);
+        shared_ptr<Initializer> paramInitializer = make_shared<ZerosInitializer>();
+        momentumParameter->setInitializer(paramInitializer->clone());
+        addParameter(momentumParameter);
+        momentumParameter->compileStorage(weights);
+        momentumParameter->compileInitializer();
+        momentumParameter->initialize(gradientUpdateStream);
+        THOR_THROW_IF_FALSE(momentumParameter->getStorage().has_value());
+    } else if (momentum <= 0.0f && hasParameter("momentum")) {
+        dropParameter("momentum");
+    }
+
+    if (!materializeDenseGradient) {
+        // CustomLayer dense optimizer fusion provides the gradient as an expression and updates the
+        // parameter/state tensors directly.  In that production path the dense gradient tensor and
+        // standalone optimizer update stamp are intentionally not allocated.
+        compiled = true;
+        return;
+    }
+
+    this->weightsGradient = weights.clone();
 
     auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
     auto g = Expression::input("gradient", DataType::FP32, DataType::FP32);
@@ -49,17 +72,6 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
 
     std::optional<Outputs> expressionOutputs;
     if (momentum > 0.0f) {
-        if (!hasParameter("momentum")) {
-            shared_ptr<PhysicalParameter> momentumParameter =
-                make_shared<PhysicalParameter>("momentum", false, weights.getDimensions(), weightsDType);
-            shared_ptr<Initializer> paramInitializer = make_shared<ZerosInitializer>();
-            momentumParameter->setInitializer(paramInitializer->clone());
-            addParameter(momentumParameter);
-            momentumParameter->compileStorage(weights);
-            momentumParameter->compileInitializer();
-            momentumParameter->initialize(gradientUpdateStream);
-            THOR_THROW_IF_FALSE(momentumParameter->getStorage().has_value());
-        }
         shared_ptr<PhysicalParameter> momentumParameter = getParameter("momentum");
         Tensor momentumTensor = momentumParameter->getStorage().value();
 
@@ -89,9 +101,6 @@ void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
         stampInputs["velocity_in"] = momentumTensor;
         preallocatedOutputs["velocity"] = momentumTensor;
     } else {
-        if (hasParameter("momentum"))
-            dropParameter("momentum");
-
         // Plain SGD:
         // w_{t+1} = w_t - step * g
         auto wNext = (w - step * g).withOutputDType(weightsDType);

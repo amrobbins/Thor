@@ -436,16 +436,10 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
 
         const std::string prefix = optimizerFusionNamePrefix(parameterName);
 
-        // Preserve the public/diagnostic dense-gradient contract even when the optimizer update is fused.
-        // The fused plan consumes the gradient expression directly for the optimizer math, but also exposes
-        // that same expression as a preallocated output to the optimizer-owned gradient buffer.  This keeps
-        // existing tests and user inspection APIs correct while still avoiding a separate optimizer update stamp.
-        if (optimizer->getWeightsGradient().has_value()) {
-            Tensor gradientTensor = optimizer->getWeightsGradient().value();
-            const std::string gradientOutputName = optimizerFusionOutputName(parameterName, parameterName + "_grad");
-            fusedOutputs.emplace_back(gradientOutputName, gradIt->second.withOutputDType(gradientTensor.getDataType()));
-            preallocatedOutputs.emplace(gradientOutputName, gradientTensor);
-        }
+        // Dense optimizer fusion consumes the parameter-gradient expression directly.  Do not
+        // materialize the optimizer-owned dense gradient tensor for fused parameters; that memory
+        // exists only for the legacy materialized optimizer path.
+        THOR_THROW_IF_FALSE(!optimizer->getWeightsGradient().has_value());
 
         DenseOptimizerExpression updateExpression = optimizer->toDenseUpdateExpression(storageIt->second, gradIt->second, prefix);
 
@@ -558,8 +552,16 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t ap
             param->compileStorage(parameterStorageContext);
         }
         if (param->isTrainable()) {
-            // Must compile optimizer every time to properly toggle parameter trainability
-            param->compileOptimizer(gradientUpdateStream, isInferenceOnly());
+            // Must compile optimizer every time to properly toggle parameter trainability.
+            // For the single-application CustomLayer dense-fusion path, the optimizer consumes the
+            // parameter gradient expression directly, so the optimizer-owned dense gradient tensor
+            // would be dead storage.  Compile the optimizer state without that dense gradient buffer.
+            bool materializeDenseGradient = true;
+            if (canFuseOptimizerUpdatesForApplication(applicationIndex) && param->hasOptimizer() &&
+                param->getOptimizer()->supportsDenseUpdateFusion()) {
+                materializeDenseGradient = false;
+            }
+            param->compileOptimizer(gradientUpdateStream, isInferenceOnly(), materializeDenseGradient);
         }
 
         std::optional<Tensor> paramStorage = param->getStorage();

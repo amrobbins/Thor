@@ -13,7 +13,7 @@ class Adam final : public Optimizer {
    public:
     Adam(uint64_t id, float alpha, float beta1, float beta2, float epsilon);
 
-    void compile(const Tensor &weights, Stream &gradientUpdateStream) override;
+    void compile(const Tensor &weights, Stream &gradientUpdateStream, bool materializeDenseGradient = true) override;
     SparseRowGradient compileSparseRows(const Tensor &weights, uint64_t maxSparseRows, Stream &gradientUpdateStream) override;
     [[nodiscard]] SparseRowOptimizerExpression toSparseRowUpdateExpression(const Tensor &weights, SparseRowGradient &sparseRowGradient) override;
     [[nodiscard]] bool supportsSparseRowGradients() const override { return true; }

@@ -14,7 +14,7 @@ namespace ThorImplementation {
 Adam::Adam(uint64_t id, float alpha, float beta1, float beta2, float epsilon)
     : Optimizer(id), alpha(alpha), beta1(beta1), beta2(beta2), epsilon(epsilon), t(0) {}
 
-void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
+void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream, bool materializeDenseGradient) {
     THOR_THROW_IF_FALSE(!compiled);
     THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
     THOR_THROW_IF_FALSE(weights.isInitialized());
@@ -22,7 +22,6 @@ void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
 
     this->gradientUpdateStream = gradientUpdateStream;
     this->weights = weights;
-    this->weightsGradient = weights.clone();
 
     const DataType weightsDType = weights.getDescriptor().getDataType();
     const int32_t gpuNum = weights.getPlacement().getDeviceNum();
@@ -50,6 +49,16 @@ void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
     }
     shared_ptr<PhysicalParameter> mParameter = getParameter("m");
     shared_ptr<PhysicalParameter> vParameter = getParameter("v");
+
+    if (!materializeDenseGradient) {
+        // CustomLayer dense optimizer fusion provides the gradient as an expression and updates the
+        // parameter/state tensors directly.  In that production path the dense gradient tensor and
+        // standalone optimizer update stamp are intentionally not allocated.
+        compiled = true;
+        return;
+    }
+
+    this->weightsGradient = weights.clone();
 
     auto alphaT = Expression::runtimeScalar("alphaT", DataType::FP32, DataType::FP32);
     auto invBatchLossScale = Expression::runtimeScalar("invBatchLossScale", DataType::FP32, DataType::FP32);

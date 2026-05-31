@@ -54,7 +54,7 @@ class Optimizer : public Parameterizable {
 
     Optimizer(uint64_t id) : id(id) {}
 
-    virtual void compile(const Tensor &weights, Stream &gradientUpdateStream) = 0;
+    virtual void compile(const Tensor &weights, Stream &gradientUpdateStream, bool materializeDenseGradient = true) = 0;
     virtual SparseRowGradient compileSparseRows(const Tensor &weights, uint64_t maxSparseRows, Stream &gradientUpdateStream) {
         (void)weights;
         (void)maxSparseRows;

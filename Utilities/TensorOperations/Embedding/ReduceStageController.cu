@@ -80,16 +80,8 @@ static_assert(TWO_STAGE_FINALIZE_WARP_COUNT_WORDS == 33U);
 #else
 #define THOR_DEVICE_TRAP_IF(cond) \
     do {                          \
-        if (cond) {               \
-            asm("trap;");         \
-        }                         \
     } while (0)
 #endif
-
-// FIXME: Put back
-// #define THOR_DEVICE_TRAP_IF(cond)
-//     do {
-//     } while (0)
 
 __device__ __forceinline__ cudaGraphDeviceNode_t loadEmbeddingSparseGradientTargetNode(const cudaGraphDeviceNode_t* targetNode) {
     THOR_DEVICE_TRAP_IF(targetNode == nullptr);

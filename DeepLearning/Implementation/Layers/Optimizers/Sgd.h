@@ -12,7 +12,7 @@ class Sgd final : public Optimizer {
    public:
     Sgd(uint64_t id, float initialLearningRate, float decay, float momentum, bool useNesterovMomentum, uint64_t startResumeEpoch = 0);
 
-    void compile(const Tensor &weights, Stream &gradientUpdateStream) override;
+    void compile(const Tensor &weights, Stream &gradientUpdateStream, bool materializeDenseGradient = true) override;
     SparseRowGradient compileSparseRows(const Tensor &weights, uint64_t maxSparseRows, Stream &gradientUpdateStream) override;
     [[nodiscard]] SparseRowOptimizerExpression toSparseRowUpdateExpression(const Tensor &weights, SparseRowGradient &sparseRowGradient) override;
     [[nodiscard]] bool supportsSparseRowGradients() const override { return true; }
