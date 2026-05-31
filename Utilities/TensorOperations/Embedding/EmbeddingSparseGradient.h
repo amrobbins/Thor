@@ -66,6 +66,8 @@ struct CapturedEmbeddingSparseGradient {
           highReduceNodeHandle(deviceNum),
           ultraHighPartialReduceNodeHandle(deviceNum),
           ultraHighReduceNodeHandle(deviceNum),
+          twoStageFinalizeClassifyNodeHandle(deviceNum),
+          twoStageFinalizeAccumulateNodeHandle(deviceNum),
           highRunCaptureStream(deviceNum),
           ultraHighRunCaptureStream(deviceNum) {}
 
@@ -81,16 +83,26 @@ struct CapturedEmbeddingSparseGradient {
             ultraHighPartialReduceNodeHandle.upload(ultraHighPartialReduceNode, stream);
         }
         ultraHighReduceNodeHandle.upload(ultraHighReduceNode, stream);
+        if (twoStageFinalizeClassifyNode) {
+            twoStageFinalizeClassifyNodeHandle.upload(twoStageFinalizeClassifyNode, stream);
+        }
+        if (twoStageFinalizeAccumulateNode) {
+            twoStageFinalizeAccumulateNodeHandle.upload(twoStageFinalizeAccumulateNode, stream);
+        }
     }
 
     DeviceUpdatableKernelNodeDeviceHandle lowReduceNodeHandle;
     DeviceUpdatableKernelNodeDeviceHandle highReduceNodeHandle;
     DeviceUpdatableKernelNodeDeviceHandle ultraHighPartialReduceNodeHandle;
     DeviceUpdatableKernelNodeDeviceHandle ultraHighReduceNodeHandle;
+    DeviceUpdatableKernelNodeDeviceHandle twoStageFinalizeClassifyNodeHandle;
+    DeviceUpdatableKernelNodeDeviceHandle twoStageFinalizeAccumulateNodeHandle;
     DeviceUpdatableKernelNode lowReduceNode;
     DeviceUpdatableKernelNode highReduceNode;
     DeviceUpdatableKernelNode ultraHighPartialReduceNode;
     DeviceUpdatableKernelNode ultraHighReduceNode;
+    DeviceUpdatableKernelNode twoStageFinalizeClassifyNode;
+    DeviceUpdatableKernelNode twoStageFinalizeAccumulateNode;
     Stream highRunCaptureStream;
     Stream ultraHighRunCaptureStream;
 };
