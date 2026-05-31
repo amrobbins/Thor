@@ -240,20 +240,31 @@ class Concatenate : public MultiConnectionLayer {
         TensorPlacement placement = featureInputs[0].value().getPlacement();
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
-        cudaStatus = cudaFree(splitTensorFeatureInputMemoriesArray_d);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        splitTensorFeatureInputMemoriesArray_d = nullptr;
+        if (splitTensorFeatureInputMemoriesArray_d != nullptr) {
+            cudaStatus = cudaFree(splitTensorFeatureInputMemoriesArray_d);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            splitTensorFeatureInputMemoriesArray_d = nullptr;
+        }
         if (splitTensorErrorOutputMemoriesArray_d != nullptr) {
             cudaStatus = cudaFree(splitTensorErrorOutputMemoriesArray_d);
             THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
             splitTensorErrorOutputMemoriesArray_d = nullptr;
         }
-        cudaStatus = cudaFree(axisElementsPerSplitTensor_d);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        axisElementsPerSplitTensor_d = nullptr;
-        cudaStatus = cudaFree(stridePerPackedTensorDimension_d);
-        THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
-        stridePerPackedTensorDimension_d = nullptr;
+        if (axisElementsPerSplitTensor_d != nullptr) {
+            cudaStatus = cudaFree(axisElementsPerSplitTensor_d);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            axisElementsPerSplitTensor_d = nullptr;
+        }
+        if (stridePerPackedTensorDimension_d != nullptr) {
+            cudaStatus = cudaFree(stridePerPackedTensorDimension_d);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            stridePerPackedTensorDimension_d = nullptr;
+        }
+        if (stridePerSplitTensorDimension_d != nullptr) {
+            cudaStatus = cudaFree(stridePerSplitTensorDimension_d);
+            THOR_THROW_IF_FALSE(cudaStatus == cudaSuccess);
+            stridePerSplitTensorDimension_d = nullptr;
+        }
     }
 
     void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
