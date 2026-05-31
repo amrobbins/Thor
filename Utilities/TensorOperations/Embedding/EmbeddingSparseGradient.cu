@@ -55,7 +55,6 @@ constexpr uint32_t THREADS_PER_BLOCK = 256;
 constexpr bool PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS = false;
 constexpr uint32_t WARP_SIZE_EMBEDDING = 32;
 constexpr uint32_t WARPS_PER_BLOCK = THREADS_PER_BLOCK / WARP_SIZE_EMBEDDING;
-constexpr uint32_t DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL = 512U;
 // Keep static fixed-D reducer instantiations bounded so the CUDA TU does not explode in compile time/code size.
 // Larger dimensions are handled by generated vectorized JIT reducers.
 constexpr uint32_t MAX_STATIC_FIXED_EMBEDDING_SPARSE_GRADIENT_DIM = 4096U;
@@ -86,7 +85,7 @@ EmbeddingSparseGradientRunBucketConfig currentEmbeddingSparseGradientRunBucketCo
     return gEmbeddingSparseGradientRunBucketConfigOverride.value_or(
         EmbeddingSparseGradientRunBucketConfig{EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX,
                                                EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN,
-                                               DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL});
+                                               EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL});
 }
 
 std::string dtypeName(DataType dtype) { return TensorDescriptor::getElementTypeName(dtype); }
@@ -787,20 +786,31 @@ std::string sparseGradientUltraHighFinalReduceKernelName(DataType rowDType,
 
 
 std::string emitEmbeddingSparseGradientFloat4LoadHelperSource() {
-    // For odd D, row bases rotate through 16-byte alignments. Do not repair every unaligned
-    // load with two aligned float4 loads plus a shift; that turns D=16K+1 into effectively
-    // D=32K worth of load instructions. Use vector loads only when actually aligned.
+    // For odd D, row bases rotate through 16-byte alignments. Keep the hot full-vector
+    // path vectorized anyway by loading from the surrounding aligned float4 words and
+    // selecting the requested four lanes. Only the final short tail uses scalar masks.
+    // The shifted load can overread by at most three floats; Thor tensors carry enough
+    // trailing padding for that, and non-final rows are followed by the next row.
     std::ostringstream ss;
     ss << "__device__ __forceinline__ float4 thor_embedding_load_float4_aligned(const float* p, unsigned long long i) {\n";
     ss << "  return *reinterpret_cast<const float4*>(p + i);\n";
     ss << "}\n";
+    ss << "__device__ __forceinline__ float4 thor_embedding_load_float4_full(const float* p, unsigned long long i) {\n";
+    ss << "  const unsigned int shift = static_cast<unsigned int>(i & 3ULL);\n";
+    ss << "  if (shift == 0U) return thor_embedding_load_float4_aligned(p, i);\n";
+    ss << "  const unsigned long long aligned = i & ~3ULL;\n";
+    ss << "  const float4 lo = thor_embedding_load_float4_aligned(p, aligned);\n";
+    ss << "  const float4 hi = thor_embedding_load_float4_aligned(p, aligned + 4ULL);\n";
+    ss << "  if (shift == 1U) return make_float4(lo.y, lo.z, lo.w, hi.x);\n";
+    ss << "  if (shift == 2U) return make_float4(lo.z, lo.w, hi.x, hi.y);\n";
+    ss << "  return make_float4(lo.w, hi.x, hi.y, hi.z);\n";
+    ss << "}\n";
     ss << "__device__ __forceinline__ float4 thor_embedding_load_float4_masked(const float* p, unsigned long long i, unsigned int lanes) {\n";
-    ss << "  if (lanes >= 4U && ((i & 3ULL) == 0ULL)) return thor_embedding_load_float4_aligned(p, i);\n";
+    ss << "  if (lanes >= 4U) return thor_embedding_load_float4_full(p, i);\n";
     ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
     ss << "  if (lanes > 0U) v.x = p[i];\n";
     ss << "  if (lanes > 1U) v.y = p[i + 1ULL];\n";
     ss << "  if (lanes > 2U) v.z = p[i + 2ULL];\n";
-    ss << "  if (lanes > 3U) v.w = p[i + 3ULL];\n";
     ss << "  return v;\n";
     ss << "}\n\n";
     return ss.str();
@@ -3140,7 +3150,7 @@ void capturePreparedEmbeddingSparseGradientImpl(CudaGraphCaptureBuilder& builder
 EmbeddingSparseGradientRunBucketConfig defaultEmbeddingSparseGradientRunBucketConfig() {
     return EmbeddingSparseGradientRunBucketConfig{EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX,
                                                   EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN,
-                                                  DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL};
+                                                  EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL};
 }
 
 bool supportsEmbeddingSparseGradientFusedSparseRowUpdate(uint64_t embeddingDim) {
