@@ -1381,6 +1381,62 @@ Important combination rules:
 
     expr.def_static("min", [](const Expression& a, const Expression& b) { return a.min(b); }, "a"_a, "b"_a);
     expr.def_static("max", [](const Expression& a, const Expression& b) { return a.max(b); }, "a"_a, "b"_a);
+    expr.def_static(
+        "clamp",
+        [](const Expression& x, double lower_bound, double upper_bound) { return x.clamp(lower_bound, upper_bound); },
+        "x"_a,
+        "lower_bound"_a,
+        "upper_bound"_a,
+        R"nbdoc(
+Clamp x elementwise to the inclusive scalar range [lower_bound, upper_bound].
+
+This lowers to max(x, lower_bound) followed by min(..., upper_bound), so it
+remains a normal fusable expression graph.
+)nbdoc");
+    expr.def_static(
+        "clamp",
+        [](const Expression& x, const Expression& lower_bound, const Expression& upper_bound) { return x.clamp(lower_bound, upper_bound); },
+        "x"_a,
+        "lower_bound"_a,
+        "upper_bound"_a,
+        R"nbdoc(
+Clamp x elementwise to the inclusive expression range [lower_bound, upper_bound].
+
+The bounds may be scalar expressions or broadcast-compatible expressions. This
+lowers to max(x, lower_bound) followed by min(..., upper_bound), so it remains a
+normal fusable expression graph.
+)nbdoc");
+
+    expr.def_static(
+        "dot_product",
+        [parse_optional_dtype](const Expression& a, const Expression& b, nb::object compute_dtype_obj) {
+            return Expression::dotProduct(a, b, parse_optional_dtype(compute_dtype_obj));
+        },
+        "a"_a,
+        "b"_a,
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Return the dot product of two broadcast-compatible expressions.
+
+This lowers to elementwise multiply followed by reduce_sum over all axes, with
+all singleton dimensions squeezed so the result has shape [1].
+)nbdoc");
+
+    expr.def_static(
+        "outer_product",
+        [parse_optional_dtype](const Expression& a, const Expression& b, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
+            return Expression::outerProduct(a, b, parse_optional_dtype(compute_dtype_obj), parse_optional_dtype(output_dtype_obj));
+        },
+        "a"_a,
+        "b"_a,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Return the outer product of two rank-1 vector expressions.
+
+This lowers to matmul(unsqueeze(a, 1), unsqueeze(b, 0)), producing an [N, M]
+matrix for vector inputs shaped [N] and [M].
+)nbdoc");
 
     expr.def_static(
         "abs",
@@ -1389,6 +1445,23 @@ Important combination rules:
         R"nbdoc(
 Return the absolute value of the input expression x
 )nbdoc");
+    expr.def_static("ceil", [](const Expression& x) { return x.ceil(); }, "x"_a);
+    expr.def_static("floor", [](const Expression& x) { return x.floor(); }, "x"_a);
+    expr.def_static("round", [](const Expression& x) { return x.round(); }, "x"_a);
+    expr.def_static("trunc", [](const Expression& x) { return x.trunc(); }, "x"_a);
+
+    expr.def_static("sin", [](const Expression& x) { return x.sin(); }, "x"_a);
+    expr.def_static("cos", [](const Expression& x) { return x.cos(); }, "x"_a);
+    expr.def_static("tan", [](const Expression& x) { return x.tan(); }, "x"_a);
+    expr.def_static("csc", [](const Expression& x) { return x.csc(); }, "x"_a);
+    expr.def_static("sec", [](const Expression& x) { return x.sec(); }, "x"_a);
+    expr.def_static("cot", [](const Expression& x) { return x.cot(); }, "x"_a);
+    expr.def_static("asin", [](const Expression& x) { return x.asin(); }, "x"_a);
+    expr.def_static("acos", [](const Expression& x) { return x.acos(); }, "x"_a);
+    expr.def_static("atan", [](const Expression& x) { return x.atan(); }, "x"_a);
+    expr.def_static("acsc", [](const Expression& x) { return x.acsc(); }, "x"_a);
+    expr.def_static("asec", [](const Expression& x) { return x.asec(); }, "x"_a);
+    expr.def_static("acot", [](const Expression& x) { return x.acot(); }, "x"_a);
 
     expr.def_static("exp", [](const Expression& x) { return x.exp(); }, "x"_a);
     expr.def_static("expm1", [](const Expression& x) { return x.expm1(); }, "x"_a);

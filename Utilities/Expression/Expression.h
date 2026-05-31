@@ -38,6 +38,16 @@ enum class ExprOp : uint16_t {
     POW,
     NEG,
     ABS,
+    CEIL,
+    FLOOR,
+    ROUND,
+    TRUNC,
+    SIN,
+    COS,
+    TAN,
+    ASIN,
+    ACOS,
+    ATAN,
     EXP,
     EXPM1,
     EXP2,
@@ -444,6 +454,22 @@ class Expression {
     [[nodiscard]] Expression operator-() const;
 
     [[nodiscard]] Expression abs() const;
+    [[nodiscard]] Expression ceil() const;
+    [[nodiscard]] Expression floor() const;
+    [[nodiscard]] Expression round() const;
+    [[nodiscard]] Expression trunc() const;
+    [[nodiscard]] Expression sin() const;
+    [[nodiscard]] Expression cos() const;
+    [[nodiscard]] Expression tan() const;
+    [[nodiscard]] Expression csc() const;
+    [[nodiscard]] Expression sec() const;
+    [[nodiscard]] Expression cot() const;
+    [[nodiscard]] Expression asin() const;
+    [[nodiscard]] Expression acos() const;
+    [[nodiscard]] Expression atan() const;
+    [[nodiscard]] Expression acsc() const;
+    [[nodiscard]] Expression asec() const;
+    [[nodiscard]] Expression acot() const;
     [[nodiscard]] Expression ln() const;
     [[nodiscard]] Expression log1p() const;
     [[nodiscard]] Expression log2() const;
@@ -745,6 +771,24 @@ class Expression {
 
     [[nodiscard]] Expression min(const Expression& other) const;
     [[nodiscard]] Expression max(const Expression& other) const;
+
+    [[nodiscard]] Expression clamp(const Expression& lower_bound, const Expression& upper_bound) const;
+    [[nodiscard]] Expression clamp(double lower_bound, double upper_bound) const;
+    [[nodiscard]] static Expression clamp(const Expression& input, const Expression& lower_bound, const Expression& upper_bound);
+    [[nodiscard]] static Expression clamp(const Expression& input, double lower_bound, double upper_bound);
+
+    [[nodiscard]] Expression dotProduct(const Expression& other, std::optional<DataType> compute_dtype = std::nullopt) const;
+    [[nodiscard]] static Expression dotProduct(const Expression& lhs,
+                                               const Expression& rhs,
+                                               std::optional<DataType> compute_dtype = std::nullopt);
+
+    [[nodiscard]] Expression outerProduct(const Expression& other,
+                                          std::optional<DataType> compute_dtype = std::nullopt,
+                                          std::optional<DataType> output_dtype = std::nullopt) const;
+    [[nodiscard]] static Expression outerProduct(const Expression& lhs,
+                                                 const Expression& rhs,
+                                                 std::optional<DataType> compute_dtype = std::nullopt,
+                                                 std::optional<DataType> output_dtype = std::nullopt);
 
     [[nodiscard]] Expression withDTypes(std::optional<DataType> compute_dtype = std::nullopt,
                                         std::optional<DataType> output_dtype = std::nullopt) const;

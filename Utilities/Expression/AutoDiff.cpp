@@ -283,6 +283,16 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                 break;
             case ExprOp::NEG:
             case ExprOp::ABS:
+            case ExprOp::CEIL:
+            case ExprOp::FLOOR:
+            case ExprOp::ROUND:
+            case ExprOp::TRUNC:
+            case ExprOp::SIN:
+            case ExprOp::COS:
+            case ExprOp::TAN:
+            case ExprOp::ASIN:
+            case ExprOp::ACOS:
+            case ExprOp::ATAN:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -585,6 +595,66 @@ class BackwardGraphBuilder {
             case ExprOp::ABS:
                 if (tryGetConstantLike(node.lhs, value, dims)) {
                     value = std::fabs(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::CEIL:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::ceil(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::FLOOR:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::floor(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::ROUND:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::round(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::TRUNC:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::trunc(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::SIN:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::sin(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::COS:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::cos(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::TAN:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::tan(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::ASIN:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::asin(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::ACOS:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::acos(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::ATAN:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::atan(value);
                     return true;
                 }
                 return false;
@@ -1186,6 +1256,9 @@ class BackwardGraphBuilder {
     }
 
     uint32_t neg(uint32_t value) { return unary(ExprOp::NEG, value); }
+    uint32_t sin(uint32_t value) { return unary(ExprOp::SIN, value); }
+    uint32_t cos(uint32_t value) { return unary(ExprOp::COS, value); }
+    uint32_t sqrt(uint32_t value) { return unary(ExprOp::SQRT, value); }
     uint32_t exp(uint32_t value) { return unary(ExprOp::EXP, value); }
     uint32_t add(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::ADD, lhs, rhs); }
     uint32_t sub(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::SUB, lhs, rhs); }
@@ -1926,6 +1999,16 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             }
             case ExprOp::NEG:
             case ExprOp::ABS:
+            case ExprOp::CEIL:
+            case ExprOp::FLOOR:
+            case ExprOp::ROUND:
+            case ExprOp::TRUNC:
+            case ExprOp::SIN:
+            case ExprOp::COS:
+            case ExprOp::TAN:
+            case ExprOp::ASIN:
+            case ExprOp::ACOS:
+            case ExprOp::ATAN:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -2504,6 +2587,64 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
                     const uint32_t scaled = builder.mul(grad, sign_lhs);
                     addContributionToChild(node.lhs, scaled, node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::CEIL:
+            case ExprOp::FLOOR:
+            case ExprOp::ROUND:
+            case ExprOp::TRUNC:
+                throw std::runtime_error("Thor expressions autodiff does not support backward for op " + opName(node.op) + ".");
+
+            case ExprOp::SIN: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.cos(lhs)), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::COS: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    addContributionToChild(node.lhs, builder.mul(builder.neg(grad), builder.sin(lhs)), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::TAN: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t one_plus_out_squared = builder.add(builder.scalar(1.0), builder.mul(out, out));
+                    addContributionToChild(node.lhs, builder.mul(grad, one_plus_out_squared), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ASIN: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t one_minus_lhs_squared = builder.sub(builder.scalar(1.0), builder.mul(lhs, lhs));
+                    addContributionToChild(node.lhs, builder.div(grad, builder.sqrt(one_minus_lhs_squared)), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ACOS: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t one_minus_lhs_squared = builder.sub(builder.scalar(1.0), builder.mul(lhs, lhs));
+                    addContributionToChild(node.lhs, builder.div(builder.neg(grad), builder.sqrt(one_minus_lhs_squared)), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ATAN: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t one_plus_lhs_squared = builder.add(builder.scalar(1.0), builder.mul(lhs, lhs));
+                    addContributionToChild(node.lhs, builder.div(grad, one_plus_lhs_squared), node_dims);
                 }
                 break;
             }

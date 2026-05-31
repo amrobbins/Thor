@@ -1174,6 +1174,26 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
 
         case ExprOp::ABS:
             return castScalarExpr("fabsf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::CEIL:
+            return castScalarExpr("ceilf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::FLOOR:
+            return castScalarExpr("floorf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ROUND:
+            return castScalarExpr("roundf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::TRUNC:
+            return castScalarExpr("truncf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::SIN:
+            return castScalarExpr("sinf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::COS:
+            return castScalarExpr("cosf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::TAN:
+            return castScalarExpr("tanf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ASIN:
+            return castScalarExpr("asinf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ACOS:
+            return castScalarExpr("acosf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ATAN:
+            return castScalarExpr("atanf(" + x_f + ")", DataType::FP32, compute_dtype);
 
         case ExprOp::EXP:
             return castScalarExpr("expf(" + x_f + ")", DataType::FP32, compute_dtype);
@@ -2898,6 +2918,36 @@ static void emitFloatScalarNodeDefinitions(std::ostringstream& ss,
             case ExprOp::ABS:
                 ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = fabsf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
                 break;
+            case ExprOp::CEIL:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = ceilf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::FLOOR:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = floorf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ROUND:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = roundf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::TRUNC:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = truncf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::SIN:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = sinf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::COS:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = cosf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::TAN:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = tanf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ASIN:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = asinf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ACOS:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = acosf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ATAN:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = atanf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
             case ExprOp::EXP:
                 ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = expf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
                 break;
@@ -3040,6 +3090,16 @@ static std::string emitVector2Half2Tanh(const std::string& x, DataType dtype) {
     return "h2tanh(" + x + ")";
 }
 
+static std::string emitVector2Ceil(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("ceilf", x, dtype); }
+static std::string emitVector2Floor(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("floorf", x, dtype); }
+static std::string emitVector2Round(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("roundf", x, dtype); }
+static std::string emitVector2Trunc(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("truncf", x, dtype); }
+static std::string emitVector2Sin(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("sinf", x, dtype); }
+static std::string emitVector2Cos(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("cosf", x, dtype); }
+static std::string emitVector2Tan(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("tanf", x, dtype); }
+static std::string emitVector2Asin(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("asinf", x, dtype); }
+static std::string emitVector2Acos(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("acosf", x, dtype); }
+static std::string emitVector2Atan(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("atanf", x, dtype); }
 static std::string emitVector2Expm1(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("expm1f", x, dtype); }
 static std::string emitVector2Log1p(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("log1pf", x, dtype); }
 static std::string emitVector2Tanh(const std::string& x, DataType dtype) { return emitVector2Half2Tanh(x, dtype); }
@@ -3168,6 +3228,46 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Abs(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                 break;
+            case ExprOp::CEIL:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Ceil(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::FLOOR:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Floor(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ROUND:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Round(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::TRUNC:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Trunc(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::SIN:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Sin(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::COS:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Cos(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::TAN:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Tan(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ASIN:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Asin(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ACOS:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Acos(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ATAN:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Atan(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
             case ExprOp::EXP:
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Exp(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
@@ -3251,6 +3351,16 @@ static bool isSupportedLogicalTransposeVectorElementwiseOp(ExprOp op) {
         case ExprOp::DIV:
         case ExprOp::NEG:
         case ExprOp::ABS:
+        case ExprOp::CEIL:
+        case ExprOp::FLOOR:
+        case ExprOp::ROUND:
+        case ExprOp::TRUNC:
+        case ExprOp::SIN:
+        case ExprOp::COS:
+        case ExprOp::TAN:
+        case ExprOp::ASIN:
+        case ExprOp::ACOS:
+        case ExprOp::ATAN:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -3557,6 +3667,36 @@ static std::string emitTiledLogicalTransposeConsumerVectorValue(
         case ExprOp::ABS:
             compute_expr = emitVector2Abs(emit_child(n.lhs), vector_compute_dtype);
             break;
+        case ExprOp::CEIL:
+            compute_expr = emitVector2Ceil(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::FLOOR:
+            compute_expr = emitVector2Floor(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ROUND:
+            compute_expr = emitVector2Round(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::TRUNC:
+            compute_expr = emitVector2Trunc(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::SIN:
+            compute_expr = emitVector2Sin(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::COS:
+            compute_expr = emitVector2Cos(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::TAN:
+            compute_expr = emitVector2Tan(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ASIN:
+            compute_expr = emitVector2Asin(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ACOS:
+            compute_expr = emitVector2Acos(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ATAN:
+            compute_expr = emitVector2Atan(emit_child(n.lhs), vector_compute_dtype);
+            break;
         case ExprOp::EXP:
             compute_expr = emitVector2Exp(emit_child(n.lhs), vector_compute_dtype);
             break;
@@ -3665,6 +3805,46 @@ static void emitFloat2NodeDefinitionsForSuffix(std::ostringstream& ss,
             case ExprOp::ABS:
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
                    << emitFloat2UnaryCall("fabsf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::CEIL:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("ceilf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::FLOOR:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("floorf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ROUND:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("roundf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::TRUNC:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("truncf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::SIN:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("sinf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::COS:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("cosf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::TAN:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("tanf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ASIN:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("asinf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ACOS:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("acosf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ATAN:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("atanf", refWithSuffix(n.lhs, suffix)) << ";\n";
                 break;
             case ExprOp::EXP:
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
@@ -3884,6 +4064,46 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                 case ExprOp::ABS:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Abs(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::CEIL:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Ceil(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::FLOOR:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Floor(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ROUND:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Round(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::TRUNC:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Trunc(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::SIN:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Sin(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::COS:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Cos(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::TAN:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Tan(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ASIN:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Asin(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ACOS:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Acos(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ATAN:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Atan(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                     break;
                 case ExprOp::EXP:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
@@ -4284,6 +4504,46 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                 case ExprOp::ABS:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Abs(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::CEIL:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Ceil(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::FLOOR:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Floor(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ROUND:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Round(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::TRUNC:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Trunc(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::SIN:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Sin(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::COS:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Cos(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::TAN:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Tan(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ASIN:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Asin(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ACOS:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Acos(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ATAN:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Atan(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::EXP:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "

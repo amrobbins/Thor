@@ -775,6 +775,26 @@ static const char* fusedOpTag(ExprOp op) {
             return "NEG";
         case ExprOp::ABS:
             return "ABS";
+        case ExprOp::CEIL:
+            return "CEIL";
+        case ExprOp::FLOOR:
+            return "FLOOR";
+        case ExprOp::ROUND:
+            return "ROUND";
+        case ExprOp::TRUNC:
+            return "TRUNC";
+        case ExprOp::SIN:
+            return "SIN";
+        case ExprOp::COS:
+            return "COS";
+        case ExprOp::TAN:
+            return "TAN";
+        case ExprOp::ASIN:
+            return "ASIN";
+        case ExprOp::ACOS:
+            return "ACOS";
+        case ExprOp::ATAN:
+            return "ATAN";
         case ExprOp::EXP:
             return "EXP";
         case ExprOp::EXPM1:
