@@ -787,23 +787,20 @@ std::string sparseGradientUltraHighFinalReduceKernelName(DataType rowDType,
 
 
 std::string emitEmbeddingSparseGradientFloat4LoadHelperSource() {
+    // For odd D, row bases rotate through 16-byte alignments. Do not repair every unaligned
+    // load with two aligned float4 loads plus a shift; that turns D=16K+1 into effectively
+    // D=32K worth of load instructions. Use vector loads only when actually aligned.
     std::ostringstream ss;
-    ss << "__device__ __forceinline__ float4 thor_embedding_load_float4_aligned_or_shifted(const float* p, unsigned long long i) {\n";
-    ss << "  const unsigned long long aligned_i = i & ~3ULL;\n";
-    ss << "  const unsigned int shift = static_cast<unsigned int>(i & 3ULL);\n";
-    ss << "  const float4 a = *reinterpret_cast<const float4*>(p + aligned_i);\n";
-    ss << "  if (shift == 0U) return a;\n";
-    ss << "  const float4 b = *reinterpret_cast<const float4*>(p + aligned_i + 4ULL);\n";
-    ss << "  if (shift == 1U) return make_float4(a.y, a.z, a.w, b.x);\n";
-    ss << "  if (shift == 2U) return make_float4(a.z, a.w, b.x, b.y);\n";
-    ss << "  return make_float4(a.w, b.x, b.y, b.z);\n";
+    ss << "__device__ __forceinline__ float4 thor_embedding_load_float4_aligned(const float* p, unsigned long long i) {\n";
+    ss << "  return *reinterpret_cast<const float4*>(p + i);\n";
     ss << "}\n";
     ss << "__device__ __forceinline__ float4 thor_embedding_load_float4_masked(const float* p, unsigned long long i, unsigned int lanes) {\n";
-    ss << "  if (lanes >= 4U) return thor_embedding_load_float4_aligned_or_shifted(p, i);\n";
+    ss << "  if (lanes >= 4U && ((i & 3ULL) == 0ULL)) return thor_embedding_load_float4_aligned(p, i);\n";
     ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
     ss << "  if (lanes > 0U) v.x = p[i];\n";
     ss << "  if (lanes > 1U) v.y = p[i + 1ULL];\n";
     ss << "  if (lanes > 2U) v.z = p[i + 2ULL];\n";
+    ss << "  if (lanes > 3U) v.w = p[i + 3ULL];\n";
     ss << "  return v;\n";
     ss << "}\n\n";
     return ss.str();
