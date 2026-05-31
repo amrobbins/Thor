@@ -139,8 +139,8 @@ struct Options {
     std::vector<std::string> optimizers = parseStringList(envString("THOR_EMBEDDING_BACKWARD_PROFILE_OPTIMIZERS", "sgd"));
     double zipfAlpha = envDouble("THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ALPHA", 1.1);
     uint64_t zipfRows = envU64("THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ROWS", 0);
-    std::vector<uint64_t> lowRunMaxs = parseU64List(envString("THOR_EMBEDDING_BACKWARD_PROFILE_LOW_RUN_MAXS", "32"));
-    std::vector<uint64_t> ultraHighRunMins = parseU64List(envString("THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_RUN_MINS", "4096"));
+    std::vector<uint64_t> lowRunMaxs = parseU64List(envString("THOR_EMBEDDING_BACKWARD_PROFILE_LOW_RUN_MAXS", "16"));
+    std::vector<uint64_t> ultraHighRunMins = parseU64List(envString("THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_RUN_MINS", "512"));
     std::vector<uint64_t> ultraHighTokensPerPartials = parseU64List(envString("THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_TOKENS_PER_PARTIALS", "1024"));
 };
 struct CaseConfig {
@@ -152,8 +152,8 @@ struct CaseConfig {
     std::string optimizer;
     double zipfAlpha = 1.1;
     uint64_t zipfRows = 0;
-    uint32_t lowRunMax = 32U;
-    uint32_t ultraHighRunMin = 4096U;
+    uint32_t lowRunMax = 16U;
+    uint32_t ultraHighRunMin = 512U;
     uint32_t ultraHighTokensPerPartial = 1024U;
 
     std::string name() const {
@@ -736,8 +736,8 @@ void printUsage() {
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_DUPLICATE_MODES=unique,moderate,high,zipf\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ALPHA=1.1\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_ZIPF_ROWS=0  # 0 means min(tokens, vocab - 1)\n"
-              << "  THOR_EMBEDDING_BACKWARD_PROFILE_LOW_RUN_MAXS=32\n"
-              << "  THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_RUN_MINS=4096\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_LOW_RUN_MAXS=16\n"
+              << "  THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_RUN_MINS=512\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_ULTRA_HIGH_TOKENS_PER_PARTIALS=1024\n"
               << "  THOR_EMBEDDING_BACKWARD_PROFILE_OPTIMIZERS=sgd\n";
 }

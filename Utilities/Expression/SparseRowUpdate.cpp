@@ -345,6 +345,16 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
     ss << "#include <math_functions.h>\n\n";
     ss << "__device__ __forceinline__ float4 thor_sparse_load_float4(const float* p, unsigned long long i) { return "
           "*reinterpret_cast<const float4*>(p + i); }\n";
+    ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_full(const float* p, unsigned long long i) {\n";
+    ss << "  const unsigned int shift = static_cast<unsigned int>(i & 3ULL);\n";
+    ss << "  if (shift == 0U) return thor_sparse_load_float4(p, i);\n";
+    ss << "  const unsigned long long aligned = i & ~3ULL;\n";
+    ss << "  const float4 lo = thor_sparse_load_float4(p, aligned);\n";
+    ss << "  const float4 hi = thor_sparse_load_float4(p, aligned + 4ULL);\n";
+    ss << "  if (shift == 1U) return make_float4(lo.y, lo.z, lo.w, hi.x);\n";
+    ss << "  if (shift == 2U) return make_float4(lo.z, lo.w, hi.x, hi.y);\n";
+    ss << "  return make_float4(lo.w, hi.x, hi.y, hi.z);\n";
+    ss << "}\n";
     ss << "__device__ __forceinline__ float4 thor_sparse_load_float4(const __half* p, unsigned long long i) {\n";
     ss << "  const __half2 lo = *reinterpret_cast<const __half2*>(p + i);\n";
     ss << "  const __half2 hi = *reinterpret_cast<const __half2*>(p + i + 2ULL);\n";
@@ -370,7 +380,7 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
     ss << "}\n";
     if (!fullVectorRows) {
         ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const float* p, unsigned long long i, unsigned int lanes) {\n";
-        ss << "  if (lanes >= 4U && ((i & 3ULL) == 0ULL)) return thor_sparse_load_float4(p, i);\n";
+        ss << "  if (lanes >= 4U) return thor_sparse_load_float4_full(p, i);\n";
         ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
         ss << "  if (lanes > 0U) v.x = p[i];\n";
         ss << "  if (lanes > 1U) v.y = p[i + 1ULL];\n";
@@ -939,11 +949,21 @@ SparseRowUpdateFusionBuild buildSparseRowUpdateFusionBuild(
 }
 
 std::string emitSparseRowUpdateFusionHelperSource() {
-    // Match the embedding reducer's odd-D policy: vectorize only naturally aligned
-    // FP32 lanes, otherwise scalar-load the four values to avoid shifted-load overfetch.
+    // Match the embedding reducer's odd-D policy: full FP32 vectors stay vectorized
+    // even when row starts are not 16-byte aligned; only the final tail is scalar-masked.
     std::ostringstream ss;
     ss << "__device__ __forceinline__ float4 thor_sparse_load_float4(const float* p, unsigned long long i) { return "
           "*reinterpret_cast<const float4*>(p + i); }\n";
+    ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_full(const float* p, unsigned long long i) {\n";
+    ss << "  const unsigned int shift = static_cast<unsigned int>(i & 3ULL);\n";
+    ss << "  if (shift == 0U) return thor_sparse_load_float4(p, i);\n";
+    ss << "  const unsigned long long aligned = i & ~3ULL;\n";
+    ss << "  const float4 lo = thor_sparse_load_float4(p, aligned);\n";
+    ss << "  const float4 hi = thor_sparse_load_float4(p, aligned + 4ULL);\n";
+    ss << "  if (shift == 1U) return make_float4(lo.y, lo.z, lo.w, hi.x);\n";
+    ss << "  if (shift == 2U) return make_float4(lo.z, lo.w, hi.x, hi.y);\n";
+    ss << "  return make_float4(lo.w, hi.x, hi.y, hi.z);\n";
+    ss << "}\n";
     ss << "__device__ __forceinline__ float4 thor_sparse_load_float4(const __half* p, unsigned long long i) {\n";
     ss << "  const __half2 lo = *reinterpret_cast<const __half2*>(p + i);\n";
     ss << "  const __half2 hi = *reinterpret_cast<const __half2*>(p + i + 2ULL);\n";
@@ -968,7 +988,7 @@ std::string emitSparseRowUpdateFusionHelperSource() {
     ss << "  p[i + 3ULL] = __float2bfloat16(v.w);\n";
     ss << "}\n";
     ss << "__device__ __forceinline__ float4 thor_sparse_load_float4_masked(const float* p, unsigned long long i, unsigned int lanes) {\n";
-    ss << "  if (lanes >= 4U && ((i & 3ULL) == 0ULL)) return thor_sparse_load_float4(p, i);\n";
+    ss << "  if (lanes >= 4U) return thor_sparse_load_float4_full(p, i);\n";
     ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
     ss << "  if (lanes > 0U) v.x = p[i];\n";
     ss << "  if (lanes > 1U) v.y = p[i + 1ULL];\n";
