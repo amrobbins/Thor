@@ -48,6 +48,16 @@ enum class ExprOp : uint16_t {
     ASIN,
     ACOS,
     ATAN,
+    SINH,
+    COSH,
+    ASINH,
+    ACOSH,
+    ATANH,
+    ERF,
+    ERFC,
+    ERFCX,
+    ERFINV,
+    ERFCINV,
     EXP,
     EXPM1,
     EXP2,
@@ -470,6 +480,22 @@ class Expression {
     [[nodiscard]] Expression acsc() const;
     [[nodiscard]] Expression asec() const;
     [[nodiscard]] Expression acot() const;
+    [[nodiscard]] Expression sinh() const;
+    [[nodiscard]] Expression cosh() const;
+    [[nodiscard]] Expression csch() const;
+    [[nodiscard]] Expression sech() const;
+    [[nodiscard]] Expression coth() const;
+    [[nodiscard]] Expression asinh() const;
+    [[nodiscard]] Expression acosh() const;
+    [[nodiscard]] Expression atanh() const;
+    [[nodiscard]] Expression acsch() const;
+    [[nodiscard]] Expression asech() const;
+    [[nodiscard]] Expression acoth() const;
+    [[nodiscard]] Expression erf() const;
+    [[nodiscard]] Expression erfc() const;
+    [[nodiscard]] Expression erfcx() const;
+    [[nodiscard]] Expression erfinv() const;
+    [[nodiscard]] Expression erfcinv() const;
     [[nodiscard]] Expression ln() const;
     [[nodiscard]] Expression log1p() const;
     [[nodiscard]] Expression log2() const;

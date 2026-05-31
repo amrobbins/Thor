@@ -1053,6 +1053,16 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::ASIN:
             case ExprOp::ACOS:
             case ExprOp::ATAN:
+            case ExprOp::SINH:
+            case ExprOp::COSH:
+            case ExprOp::ASINH:
+            case ExprOp::ACOSH:
+            case ExprOp::ATANH:
+            case ExprOp::ERF:
+            case ExprOp::ERFC:
+            case ExprOp::ERFCX:
+            case ExprOp::ERFINV:
+            case ExprOp::ERFCINV:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -2825,6 +2835,16 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::ASIN:
             case ExprOp::ACOS:
             case ExprOp::ATAN:
+            case ExprOp::SINH:
+            case ExprOp::COSH:
+            case ExprOp::ASINH:
+            case ExprOp::ACOSH:
+            case ExprOp::ATANH:
+            case ExprOp::ERF:
+            case ExprOp::ERFC:
+            case ExprOp::ERFCX:
+            case ExprOp::ERFINV:
+            case ExprOp::ERFCINV:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -3058,6 +3078,16 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::ASIN:
         case ExprOp::ACOS:
         case ExprOp::ATAN:
+        case ExprOp::SINH:
+        case ExprOp::COSH:
+        case ExprOp::ASINH:
+        case ExprOp::ACOSH:
+        case ExprOp::ATANH:
+        case ExprOp::ERF:
+        case ExprOp::ERFC:
+        case ExprOp::ERFCX:
+        case ExprOp::ERFINV:
+        case ExprOp::ERFCINV:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -3166,6 +3196,16 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::ASIN:
             case ExprOp::ACOS:
             case ExprOp::ATAN:
+            case ExprOp::SINH:
+            case ExprOp::COSH:
+            case ExprOp::ASINH:
+            case ExprOp::ACOSH:
+            case ExprOp::ATANH:
+            case ExprOp::ERF:
+            case ExprOp::ERFC:
+            case ExprOp::ERFCX:
+            case ExprOp::ERFINV:
+            case ExprOp::ERFCINV:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -3324,6 +3364,16 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::ASIN:
             case ExprOp::ACOS:
             case ExprOp::ATAN:
+            case ExprOp::SINH:
+            case ExprOp::COSH:
+            case ExprOp::ASINH:
+            case ExprOp::ACOSH:
+            case ExprOp::ATANH:
+            case ExprOp::ERF:
+            case ExprOp::ERFC:
+            case ExprOp::ERFCX:
+            case ExprOp::ERFINV:
+            case ExprOp::ERFCINV:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -4037,6 +4087,16 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::ASIN:
         case ExprOp::ACOS:
         case ExprOp::ATAN:
+        case ExprOp::SINH:
+        case ExprOp::COSH:
+        case ExprOp::ASINH:
+        case ExprOp::ACOSH:
+        case ExprOp::ATANH:
+        case ExprOp::ERF:
+        case ExprOp::ERFC:
+        case ExprOp::ERFCX:
+        case ExprOp::ERFINV:
+        case ExprOp::ERFCINV:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:

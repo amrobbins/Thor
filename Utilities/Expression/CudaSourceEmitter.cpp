@@ -1194,6 +1194,26 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
             return castScalarExpr("acosf(" + x_f + ")", DataType::FP32, compute_dtype);
         case ExprOp::ATAN:
             return castScalarExpr("atanf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::SINH:
+            return castScalarExpr("sinhf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::COSH:
+            return castScalarExpr("coshf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ASINH:
+            return castScalarExpr("asinhf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ACOSH:
+            return castScalarExpr("acoshf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ATANH:
+            return castScalarExpr("atanhf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ERF:
+            return castScalarExpr("erff(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ERFC:
+            return castScalarExpr("erfcf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ERFCX:
+            return castScalarExpr("erfcxf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ERFINV:
+            return castScalarExpr("erfinvf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::ERFCINV:
+            return castScalarExpr("erfcinvf(" + x_f + ")", DataType::FP32, compute_dtype);
 
         case ExprOp::EXP:
             return castScalarExpr("expf(" + x_f + ")", DataType::FP32, compute_dtype);
@@ -2948,6 +2968,36 @@ static void emitFloatScalarNodeDefinitions(std::ostringstream& ss,
             case ExprOp::ATAN:
                 ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = atanf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
                 break;
+            case ExprOp::SINH:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = sinhf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::COSH:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = coshf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ASINH:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = asinhf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ACOSH:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = acoshf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ATANH:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = atanhf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ERF:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = erff(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ERFC:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = erfcf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ERFCX:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = erfcxf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ERFINV:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = erfinvf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::ERFCINV:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = erfcinvf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
             case ExprOp::EXP:
                 ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = expf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
                 break;
@@ -3100,6 +3150,16 @@ static std::string emitVector2Tan(const std::string& x, DataType dtype) { return
 static std::string emitVector2Asin(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("asinf", x, dtype); }
 static std::string emitVector2Acos(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("acosf", x, dtype); }
 static std::string emitVector2Atan(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("atanf", x, dtype); }
+static std::string emitVector2Sinh(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("sinhf", x, dtype); }
+static std::string emitVector2Cosh(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("coshf", x, dtype); }
+static std::string emitVector2Asinh(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("asinhf", x, dtype); }
+static std::string emitVector2Acosh(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("acoshf", x, dtype); }
+static std::string emitVector2Atanh(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("atanhf", x, dtype); }
+static std::string emitVector2Erf(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("erff", x, dtype); }
+static std::string emitVector2Erfc(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("erfcf", x, dtype); }
+static std::string emitVector2Erfcx(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("erfcxf", x, dtype); }
+static std::string emitVector2Erfinv(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("erfinvf", x, dtype); }
+static std::string emitVector2Erfcinv(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("erfcinvf", x, dtype); }
 static std::string emitVector2Expm1(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("expm1f", x, dtype); }
 static std::string emitVector2Log1p(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("log1pf", x, dtype); }
 static std::string emitVector2Tanh(const std::string& x, DataType dtype) { return emitVector2Half2Tanh(x, dtype); }
@@ -3268,6 +3328,46 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Atan(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                 break;
+            case ExprOp::SINH:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Sinh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::COSH:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Cosh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ASINH:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Asinh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ACOSH:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Acosh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ATANH:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Atanh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ERF:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Erf(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ERFC:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Erfc(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ERFCX:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Erfcx(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ERFINV:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Erfinv(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::ERFCINV:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Erfcinv(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
             case ExprOp::EXP:
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Exp(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
@@ -3361,6 +3461,16 @@ static bool isSupportedLogicalTransposeVectorElementwiseOp(ExprOp op) {
         case ExprOp::ASIN:
         case ExprOp::ACOS:
         case ExprOp::ATAN:
+        case ExprOp::SINH:
+        case ExprOp::COSH:
+        case ExprOp::ASINH:
+        case ExprOp::ACOSH:
+        case ExprOp::ATANH:
+        case ExprOp::ERF:
+        case ExprOp::ERFC:
+        case ExprOp::ERFCX:
+        case ExprOp::ERFINV:
+        case ExprOp::ERFCINV:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -3697,6 +3807,36 @@ static std::string emitTiledLogicalTransposeConsumerVectorValue(
         case ExprOp::ATAN:
             compute_expr = emitVector2Atan(emit_child(n.lhs), vector_compute_dtype);
             break;
+        case ExprOp::SINH:
+            compute_expr = emitVector2Sinh(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::COSH:
+            compute_expr = emitVector2Cosh(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ASINH:
+            compute_expr = emitVector2Asinh(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ACOSH:
+            compute_expr = emitVector2Acosh(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ATANH:
+            compute_expr = emitVector2Atanh(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ERF:
+            compute_expr = emitVector2Erf(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ERFC:
+            compute_expr = emitVector2Erfc(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ERFCX:
+            compute_expr = emitVector2Erfcx(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ERFINV:
+            compute_expr = emitVector2Erfinv(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::ERFCINV:
+            compute_expr = emitVector2Erfcinv(emit_child(n.lhs), vector_compute_dtype);
+            break;
         case ExprOp::EXP:
             compute_expr = emitVector2Exp(emit_child(n.lhs), vector_compute_dtype);
             break;
@@ -3845,6 +3985,46 @@ static void emitFloat2NodeDefinitionsForSuffix(std::ostringstream& ss,
             case ExprOp::ATAN:
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
                    << emitFloat2UnaryCall("atanf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::SINH:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("sinhf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::COSH:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("coshf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ASINH:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("asinhf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ACOSH:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("acoshf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ATANH:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("atanhf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ERF:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("erff", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ERFC:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("erfcf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ERFCX:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("erfcxf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ERFINV:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("erfinvf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::ERFCINV:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("erfcinvf", refWithSuffix(n.lhs, suffix)) << ";\n";
                 break;
             case ExprOp::EXP:
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
@@ -4104,6 +4284,46 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                 case ExprOp::ATAN:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Atan(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::SINH:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Sinh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::COSH:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Cosh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ASINH:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Asinh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ACOSH:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Acosh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ATANH:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Atanh(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ERF:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Erf(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ERFC:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Erfc(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ERFCX:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Erfcx(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ERFINV:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Erfinv(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::ERFCINV:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Erfcinv(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                     break;
                 case ExprOp::EXP:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
@@ -4544,6 +4764,46 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                 case ExprOp::ATAN:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Atan(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::SINH:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Sinh(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::COSH:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Cosh(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ASINH:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Asinh(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ACOSH:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Acosh(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ATANH:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Atanh(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ERF:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Erf(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ERFC:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Erfc(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ERFCX:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Erfcx(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ERFINV:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Erfinv(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::ERFCINV:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Erfcinv(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::EXP:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "

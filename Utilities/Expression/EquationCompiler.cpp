@@ -795,6 +795,26 @@ static const char* fusedOpTag(ExprOp op) {
             return "ACOS";
         case ExprOp::ATAN:
             return "ATAN";
+        case ExprOp::SINH:
+            return "SINH";
+        case ExprOp::COSH:
+            return "COSH";
+        case ExprOp::ASINH:
+            return "ASINH";
+        case ExprOp::ACOSH:
+            return "ACOSH";
+        case ExprOp::ATANH:
+            return "ATANH";
+        case ExprOp::ERF:
+            return "ERF";
+        case ExprOp::ERFC:
+            return "ERFC";
+        case ExprOp::ERFCX:
+            return "ERFCX";
+        case ExprOp::ERFINV:
+            return "ERFINV";
+        case ExprOp::ERFCINV:
+            return "ERFCINV";
         case ExprOp::EXP:
             return "EXP";
         case ExprOp::EXPM1:

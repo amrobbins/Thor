@@ -110,6 +110,26 @@ std::string unaryFunctionName(ExprOp op) {
             return "acosf";
         case ExprOp::ATAN:
             return "atanf";
+        case ExprOp::SINH:
+            return "sinhf";
+        case ExprOp::COSH:
+            return "coshf";
+        case ExprOp::ASINH:
+            return "asinhf";
+        case ExprOp::ACOSH:
+            return "acoshf";
+        case ExprOp::ATANH:
+            return "atanhf";
+        case ExprOp::ERF:
+            return "erff";
+        case ExprOp::ERFC:
+            return "erfcf";
+        case ExprOp::ERFCX:
+            return "erfcxf";
+        case ExprOp::ERFINV:
+            return "erfinvf";
+        case ExprOp::ERFCINV:
+            return "erfcinvf";
         case ExprOp::EXP:
             return "expf";
         case ExprOp::EXPM1:
@@ -151,6 +171,16 @@ bool isUnaryOpSupported(ExprOp op) {
         case ExprOp::ASIN:
         case ExprOp::ACOS:
         case ExprOp::ATAN:
+        case ExprOp::SINH:
+        case ExprOp::COSH:
+        case ExprOp::ASINH:
+        case ExprOp::ACOSH:
+        case ExprOp::ATANH:
+        case ExprOp::ERF:
+        case ExprOp::ERFC:
+        case ExprOp::ERFCX:
+        case ExprOp::ERFINV:
+        case ExprOp::ERFCINV:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -256,6 +286,26 @@ std::string unaryVectorFunctionName(ExprOp op) {
             return "acosf";
         case ExprOp::ATAN:
             return "atanf";
+        case ExprOp::SINH:
+            return "sinhf";
+        case ExprOp::COSH:
+            return "coshf";
+        case ExprOp::ASINH:
+            return "asinhf";
+        case ExprOp::ACOSH:
+            return "acoshf";
+        case ExprOp::ATANH:
+            return "atanhf";
+        case ExprOp::ERF:
+            return "erff";
+        case ExprOp::ERFC:
+            return "erfcf";
+        case ExprOp::ERFCX:
+            return "erfcxf";
+        case ExprOp::ERFINV:
+            return "erfinvf";
+        case ExprOp::ERFCINV:
+            return "erfcinvf";
         case ExprOp::EXP:
             return "expf";
         case ExprOp::EXPM1:
