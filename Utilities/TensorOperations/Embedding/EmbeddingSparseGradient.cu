@@ -56,7 +56,16 @@ constexpr bool PRINT_GENERATED_EMBEDDING_SPARSE_GRADIENT_KERNELS = false;
 constexpr uint32_t WARP_SIZE_EMBEDDING = 32;
 constexpr uint32_t WARPS_PER_BLOCK = THREADS_PER_BLOCK / WARP_SIZE_EMBEDDING;
 constexpr uint32_t DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL = 512U;
-constexpr uint32_t MAX_FIXED_EMBEDDING_SPARSE_GRADIENT_DIM = 4096U;
+// Keep static fixed-D reducer instantiations bounded so the CUDA TU does not explode in compile time/code size.
+// Larger dimensions are handled by generated vectorized JIT reducers.
+constexpr uint32_t MAX_STATIC_FIXED_EMBEDDING_SPARSE_GRADIENT_DIM = 4096U;
+// Keep the generated vectorized JIT path available well past 256 KiB rows.  This is a
+// capability/policy cap, not a geometry cap: for large aligned dimensions the generated
+// kernels still process one 4-element vector per participating thread and scale by adding
+// grid.y vector tiles.  1,048,576 FP32 dims is a 4 MiB row, so memory pressure should be
+// the practical limiter long before the scheduler geometry is.
+constexpr uint64_t MAX_VECTORIZED_JIT_EMBEDDING_SPARSE_GRADIENT_DIM = 1048576ULL;
+static_assert(MAX_VECTORIZED_JIT_EMBEDDING_SPARSE_GRADIENT_DIM <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
 static_assert(THREADS_PER_BLOCK == 256);
 static_assert(WARPS_PER_BLOCK == 8);
 
@@ -315,7 +324,7 @@ struct IsFixedEmbeddingReducerDim {
     static constexpr bool value =
         EmbeddingDim == 4U || EmbeddingDim == 8U || EmbeddingDim == 16U || EmbeddingDim == 32U || EmbeddingDim == 64U ||
         EmbeddingDim == 128U || EmbeddingDim == 768U ||
-        (EmbeddingDim >= 256U && EmbeddingDim <= MAX_FIXED_EMBEDDING_SPARSE_GRADIENT_DIM && EmbeddingDim % 256U == 0U);
+        (EmbeddingDim >= 256U && EmbeddingDim <= MAX_STATIC_FIXED_EMBEDDING_SPARSE_GRADIENT_DIM && EmbeddingDim % 256U == 0U);
 };
 
 template <uint32_t EmbeddingDim>
@@ -467,7 +476,16 @@ __global__ void reduceEmbeddingSparseGradientValuesTiledKernel(const uint32_t* _
 }
 
 bool hasVectorizedJitEmbeddingSparseGradientReducer(uint64_t embeddingDim) {
-    return embeddingDim != 0ULL && embeddingDim <= MAX_FIXED_EMBEDDING_SPARSE_GRADIENT_DIM;
+    return embeddingDim != 0ULL && embeddingDim <= MAX_VECTORIZED_JIT_EMBEDDING_SPARSE_GRADIENT_DIM;
+}
+
+void validateVectorizedJitEmbeddingSparseGradientDim(uint64_t embeddingDim) {
+    if (!hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim)) {
+        throw std::invalid_argument(
+            "Embedding sparse-gradient reducer requires 1 <= embedding_dim <= " +
+            std::to_string(MAX_VECTORIZED_JIT_EMBEDDING_SPARSE_GRADIENT_DIM) +
+            "; above that cap the implementation intentionally refuses to fall back to the old scalar tiled reducer.");
+    }
 }
 
 uint64_t gcdUint64(uint64_t a, uint64_t b) {
@@ -774,7 +792,8 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType,
                                                  const SparseRowUpdateFusionSource* sparseRowUpdate) {
     if (sparseRowUpdate != nullptr && !hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim)) {
         throw std::invalid_argument(
-            "Embedding sparse-gradient fused sparse-row update currently requires a vectorized JIT reducer with embedding_dim <= 4096.");
+            "Embedding sparse-gradient fused sparse-row update currently requires a vectorized JIT reducer with embedding_dim <= " +
+            std::to_string(MAX_VECTORIZED_JIT_EMBEDDING_SPARSE_GRADIENT_DIM) + ".");
     }
 
     const std::string rowType = sparseGradientScalarType(rowDType);
@@ -945,7 +964,8 @@ std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
                                                         const SparseRowUpdateFusionSource* sparseRowUpdate) {
     if (!hasHighRunCtaEmbeddingSparseGradientReducer(embeddingDim)) {
         throw std::invalid_argument(
-            "Embedding sparse-gradient high-run reducer currently requires a vectorized JIT reducer with embedding_dim <= 4096.");
+            "Embedding sparse-gradient high-run reducer currently requires a vectorized JIT reducer with embedding_dim <= " +
+            std::to_string(MAX_VECTORIZED_JIT_EMBEDDING_SPARSE_GRADIENT_DIM) + ".");
     }
 
     const std::string rowType = sparseGradientScalarType(rowDType);
@@ -1081,7 +1101,8 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(
     (void)rowDType;
     if (!hasUltraHighTwoStageEmbeddingSparseGradientReducer(embeddingDim)) {
         throw std::invalid_argument(
-            "Embedding sparse-gradient ultra-high partial reducer currently requires a vectorized JIT reducer with embedding_dim <= 4096.");
+            "Embedding sparse-gradient ultra-high partial reducer currently requires a vectorized JIT reducer with embedding_dim <= " +
+            std::to_string(MAX_VECTORIZED_JIT_EMBEDDING_SPARSE_GRADIENT_DIM) + ".");
     }
 
     const std::string gradType = sparseGradientScalarType(gradDType);
@@ -1209,7 +1230,8 @@ std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType
     (void)gradDType;
     if (!hasUltraHighTwoStageEmbeddingSparseGradientReducer(embeddingDim)) {
         throw std::invalid_argument(
-            "Embedding sparse-gradient ultra-high final reducer currently requires a vectorized JIT reducer with embedding_dim <= 4096.");
+            "Embedding sparse-gradient ultra-high final reducer currently requires a vectorized JIT reducer with embedding_dim <= " +
+            std::to_string(MAX_VECTORIZED_JIT_EMBEDDING_SPARSE_GRADIENT_DIM) + ".");
     }
 
     const std::string rowType = sparseGradientScalarType(rowDType);
@@ -2428,6 +2450,7 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientI
         throw std::invalid_argument("Embedding sparse-gradient indices and upstream gradient tensors must be initialized.");
     }
     outputGradient.validate();
+    validateVectorizedJitEmbeddingSparseGradientDim(outputGradient.embeddingDim);
     if (indices.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
         throw std::invalid_argument("Embedding sparse-gradient indices tensor must live on GPU.");
     }
@@ -2651,6 +2674,7 @@ EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(Prep
     result.indexDataType = prepared.indexDataType;
     result.gradientDataType = prepared.gradientDataType;
     result.rowDataType = prepared.rowDataType;
+    result.fusedSparseRowUpdate = false;
     result.sortTempBytes = prepared.sortTempBytes;
     result.rleTempBytes = prepared.rleTempBytes;
     result.scanTempBytes = prepared.scanTempBytes;
@@ -2725,6 +2749,7 @@ EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradientWithS
     result.indexDataType = prepared.indexDataType;
     result.gradientDataType = prepared.gradientDataType;
     result.rowDataType = prepared.rowDataType;
+    result.fusedSparseRowUpdate = true;
     result.sortTempBytes = prepared.sortTempBytes;
     result.rleTempBytes = prepared.rleTempBytes;
     result.scanTempBytes = prepared.scanTempBytes;
@@ -3082,6 +3107,10 @@ EmbeddingSparseGradientRunBucketConfig defaultEmbeddingSparseGradientRunBucketCo
     return EmbeddingSparseGradientRunBucketConfig{EMBEDDING_SPARSE_GRADIENT_LOW_RUN_MAX,
                                                   EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_RUN_MIN,
                                                   DEFAULT_EMBEDDING_SPARSE_GRADIENT_ULTRA_HIGH_TOKENS_PER_PARTIAL};
+}
+
+bool supportsEmbeddingSparseGradientFusedSparseRowUpdate(uint64_t embeddingDim) {
+    return hasVectorizedJitEmbeddingSparseGradientReducer(embeddingDim);
 }
 
 void setEmbeddingSparseGradientRunBucketConfigOverrideForTesting(std::optional<EmbeddingSparseGradientRunBucketConfig> config) {

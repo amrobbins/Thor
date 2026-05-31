@@ -195,11 +195,6 @@ std::string dtypeName(DataType dtype) {
     }
 }
 
-bool hasFixedSparseOptimizerFusionReducer(uint64_t embeddingDim) {
-    return embeddingDim == 16ULL || embeddingDim == 32ULL || embeddingDim == 64ULL || embeddingDim == 128ULL || embeddingDim == 256ULL;
-}
-
-
 std::vector<std::string> parseStringList(const std::string& raw) {
     std::vector<std::string> out;
     std::stringstream ss(raw);
@@ -494,8 +489,24 @@ std::vector<PoolSlot> buildPool(const Options& opts, const CaseConfig& cfg, int 
         slot.gradient = slot.optimizer->compileSparseRows(slot.weights, capacity, stream);
         stream.synchronize();
 
-        slot.fusedSparseRowUpdate = opts.useFusedUpdate && slot.optimizer->supportsSparseRowUpdateFusion() &&
-                                    hasFixedSparseOptimizerFusionReducer(cfg.embeddingDim);
+        const bool optimizerSupportsSparseRowUpdateFusion = slot.optimizer->supportsSparseRowUpdateFusion();
+        const bool reducerSupportsSparseRowUpdateFusion = supportsEmbeddingSparseGradientFusedSparseRowUpdate(cfg.embeddingDim);
+        if (opts.useFusedUpdate && (!optimizerSupportsSparseRowUpdateFusion || !reducerSupportsSparseRowUpdateFusion)) {
+            std::ostringstream message;
+            message << "THOR_EMBEDDING_BACKWARD_PROFILE_FUSED_UPDATE=1 requested fused sparse-row update profiling for "
+                    << cfg.name() << ", but fusion is not supported by ";
+            if (!optimizerSupportsSparseRowUpdateFusion && !reducerSupportsSparseRowUpdateFusion) {
+                message << "the optimizer and embedding sparse-gradient reducer";
+            } else if (!optimizerSupportsSparseRowUpdateFusion) {
+                message << "the optimizer";
+            } else {
+                message << "the embedding sparse-gradient reducer";
+            }
+            message << ". This benchmark refuses to silently fall back to the materialized path when fused update profiling is requested.";
+            throw std::runtime_error(message.str());
+        }
+
+        slot.fusedSparseRowUpdate = opts.useFusedUpdate && optimizerSupportsSparseRowUpdateFusion && reducerSupportsSparseRowUpdateFusion;
         if (slot.fusedSparseRowUpdate) {
             SparseRowOptimizerExpression updateExpression = slot.optimizer->toSparseRowUpdateExpression(slot.weights, slot.gradient);
             slot.prepared = prepareEmbeddingSparseGradientWithSparseRowUpdate(slot.indices,
@@ -505,6 +516,9 @@ std::vector<PoolSlot> buildPool(const Options& opts, const CaseConfig& cfg, int 
                                                                              updateExpression.inputs,
                                                                              updateExpression.indexedOutputs,
                                                                              std::nullopt);
+            if (!preparedEmbeddingSparseGradientHasSparseRowUpdate(*slot.prepared)) {
+                throw std::runtime_error("Benchmark prepared a producer for fused sparse-row update, but the prepared plan does not contain sparse-row update fusion.");
+            }
         } else {
             slot.prepared = prepareEmbeddingSparseGradient(slot.indices, slot.upstream, slot.gradient, std::nullopt);
         }
