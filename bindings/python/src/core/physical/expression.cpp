@@ -1462,6 +1462,22 @@ Return the absolute value of the input expression x
     expr.def_static("acsc", [](const Expression& x) { return x.acsc(); }, "x"_a);
     expr.def_static("asec", [](const Expression& x) { return x.asec(); }, "x"_a);
     expr.def_static("acot", [](const Expression& x) { return x.acot(); }, "x"_a);
+    expr.def_static("sinh", [](const Expression& x) { return x.sinh(); }, "x"_a);
+    expr.def_static("cosh", [](const Expression& x) { return x.cosh(); }, "x"_a);
+    expr.def_static("csch", [](const Expression& x) { return x.csch(); }, "x"_a);
+    expr.def_static("sech", [](const Expression& x) { return x.sech(); }, "x"_a);
+    expr.def_static("coth", [](const Expression& x) { return x.coth(); }, "x"_a);
+    expr.def_static("asinh", [](const Expression& x) { return x.asinh(); }, "x"_a);
+    expr.def_static("acosh", [](const Expression& x) { return x.acosh(); }, "x"_a);
+    expr.def_static("atanh", [](const Expression& x) { return x.atanh(); }, "x"_a);
+    expr.def_static("acsch", [](const Expression& x) { return x.acsch(); }, "x"_a);
+    expr.def_static("asech", [](const Expression& x) { return x.asech(); }, "x"_a);
+    expr.def_static("acoth", [](const Expression& x) { return x.acoth(); }, "x"_a);
+    expr.def_static("erf", [](const Expression& x) { return x.erf(); }, "x"_a);
+    expr.def_static("erfc", [](const Expression& x) { return x.erfc(); }, "x"_a);
+    expr.def_static("erfcx", [](const Expression& x) { return x.erfcx(); }, "x"_a);
+    expr.def_static("erfinv", [](const Expression& x) { return x.erfinv(); }, "x"_a);
+    expr.def_static("erfcinv", [](const Expression& x) { return x.erfcinv(); }, "x"_a);
 
     expr.def_static("exp", [](const Expression& x) { return x.exp(); }, "x"_a);
     expr.def_static("expm1", [](const Expression& x) { return x.expm1(); }, "x"_a);

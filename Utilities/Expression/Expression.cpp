@@ -137,6 +137,26 @@ std::string exprOpExternalName(ExprOp op) {
             return "acos";
         case ExprOp::ATAN:
             return "atan";
+        case ExprOp::SINH:
+            return "sinh";
+        case ExprOp::COSH:
+            return "cosh";
+        case ExprOp::ASINH:
+            return "asinh";
+        case ExprOp::ACOSH:
+            return "acosh";
+        case ExprOp::ATANH:
+            return "atanh";
+        case ExprOp::ERF:
+            return "erf";
+        case ExprOp::ERFC:
+            return "erfc";
+        case ExprOp::ERFCX:
+            return "erfcx";
+        case ExprOp::ERFINV:
+            return "erfinv";
+        case ExprOp::ERFCINV:
+            return "erfcinv";
         case ExprOp::EXP:
             return "exp";
         case ExprOp::EXPM1:
@@ -271,6 +291,16 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"asin", ExprOp::ASIN},
         {"acos", ExprOp::ACOS},
         {"atan", ExprOp::ATAN},
+        {"sinh", ExprOp::SINH},
+        {"cosh", ExprOp::COSH},
+        {"asinh", ExprOp::ASINH},
+        {"acosh", ExprOp::ACOSH},
+        {"atanh", ExprOp::ATANH},
+        {"erf", ExprOp::ERF},
+        {"erfc", ExprOp::ERFC},
+        {"erfcx", ExprOp::ERFCX},
+        {"erfinv", ExprOp::ERFINV},
+        {"erfcinv", ExprOp::ERFCINV},
         {"exp", ExprOp::EXP},
         {"expm1", ExprOp::EXPM1},
         {"exp2", ExprOp::EXP2},
@@ -692,6 +722,26 @@ std::string opName(ExprOp op) {
             return "ACOS";
         case ExprOp::ATAN:
             return "ATAN";
+        case ExprOp::SINH:
+            return "SINH";
+        case ExprOp::COSH:
+            return "COSH";
+        case ExprOp::ASINH:
+            return "ASINH";
+        case ExprOp::ACOSH:
+            return "ACOSH";
+        case ExprOp::ATANH:
+            return "ATANH";
+        case ExprOp::ERF:
+            return "ERF";
+        case ExprOp::ERFC:
+            return "ERFC";
+        case ExprOp::ERFCX:
+            return "ERFCX";
+        case ExprOp::ERFINV:
+            return "ERFINV";
+        case ExprOp::ERFCINV:
+            return "ERFCINV";
         case ExprOp::EXP:
             return "EXP";
         case ExprOp::EXPM1:
@@ -890,6 +940,16 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::ASIN:
         case ExprOp::ACOS:
         case ExprOp::ATAN:
+        case ExprOp::SINH:
+        case ExprOp::COSH:
+        case ExprOp::ASINH:
+        case ExprOp::ACOSH:
+        case ExprOp::ATANH:
+        case ExprOp::ERF:
+        case ExprOp::ERFC:
+        case ExprOp::ERFCX:
+        case ExprOp::ERFINV:
+        case ExprOp::ERFCINV:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -1763,6 +1823,16 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::ASIN:
         case ExprOp::ACOS:
         case ExprOp::ATAN:
+        case ExprOp::SINH:
+        case ExprOp::COSH:
+        case ExprOp::ASINH:
+        case ExprOp::ACOSH:
+        case ExprOp::ATANH:
+        case ExprOp::ERF:
+        case ExprOp::ERFC:
+        case ExprOp::ERFCX:
+        case ExprOp::ERFINV:
+        case ExprOp::ERFCINV:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -2669,6 +2739,16 @@ static bool isTransposePushThroughUnaryOp(ExprOp op) {
         case ExprOp::ASIN:
         case ExprOp::ACOS:
         case ExprOp::ATAN:
+        case ExprOp::SINH:
+        case ExprOp::COSH:
+        case ExprOp::ASINH:
+        case ExprOp::ACOSH:
+        case ExprOp::ATANH:
+        case ExprOp::ERF:
+        case ExprOp::ERFC:
+        case ExprOp::ERFCX:
+        case ExprOp::ERFINV:
+        case ExprOp::ERFCINV:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -2845,6 +2925,22 @@ Expression Expression::atan() const { return unaryOp(*this, ExprOp::ATAN); }
 Expression Expression::acsc() const { return (Expression::constantScalar(1.0) / *this).asin(); }
 Expression Expression::asec() const { return (Expression::constantScalar(1.0) / *this).acos(); }
 Expression Expression::acot() const { return (Expression::constantScalar(1.0) / *this).atan(); }
+Expression Expression::sinh() const { return unaryOp(*this, ExprOp::SINH); }
+Expression Expression::cosh() const { return unaryOp(*this, ExprOp::COSH); }
+Expression Expression::csch() const { return Expression::constantScalar(1.0) / this->sinh(); }
+Expression Expression::sech() const { return Expression::constantScalar(1.0) / this->cosh(); }
+Expression Expression::coth() const { return Expression::constantScalar(1.0) / this->tanh(); }
+Expression Expression::asinh() const { return unaryOp(*this, ExprOp::ASINH); }
+Expression Expression::acosh() const { return unaryOp(*this, ExprOp::ACOSH); }
+Expression Expression::atanh() const { return unaryOp(*this, ExprOp::ATANH); }
+Expression Expression::acsch() const { return (Expression::constantScalar(1.0) / *this).asinh(); }
+Expression Expression::asech() const { return (Expression::constantScalar(1.0) / *this).acosh(); }
+Expression Expression::acoth() const { return (Expression::constantScalar(1.0) / *this).atanh(); }
+Expression Expression::erf() const { return unaryOp(*this, ExprOp::ERF); }
+Expression Expression::erfc() const { return unaryOp(*this, ExprOp::ERFC); }
+Expression Expression::erfcx() const { return unaryOp(*this, ExprOp::ERFCX); }
+Expression Expression::erfinv() const { return unaryOp(*this, ExprOp::ERFINV); }
+Expression Expression::erfcinv() const { return unaryOp(*this, ExprOp::ERFCINV); }
 Expression Expression::expm1() const { return unaryOp(*this, ExprOp::EXPM1); }
 Expression Expression::log1p() const { return unaryOp(*this, ExprOp::LOG1P); }
 Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }

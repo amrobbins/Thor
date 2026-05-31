@@ -293,6 +293,16 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::ASIN:
             case ExprOp::ACOS:
             case ExprOp::ATAN:
+            case ExprOp::SINH:
+            case ExprOp::COSH:
+            case ExprOp::ASINH:
+            case ExprOp::ACOSH:
+            case ExprOp::ATANH:
+            case ExprOp::ERF:
+            case ExprOp::ERFC:
+            case ExprOp::ERFCX:
+            case ExprOp::ERFINV:
+            case ExprOp::ERFCINV:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -657,6 +667,57 @@ class BackwardGraphBuilder {
                     value = std::atan(value);
                     return true;
                 }
+                return false;
+            case ExprOp::SINH:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::sinh(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::COSH:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::cosh(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::ASINH:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::asinh(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::ACOSH:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::acosh(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::ATANH:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::atanh(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::ERF:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::erf(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::ERFC:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::erfc(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::ERFCX:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::exp(value * value) * std::erfc(value);
+                    return true;
+                }
+                return false;
+            case ExprOp::ERFINV:
+            case ExprOp::ERFCINV:
                 return false;
             case ExprOp::ADD:
             case ExprOp::SUB:
@@ -1258,6 +1319,8 @@ class BackwardGraphBuilder {
     uint32_t neg(uint32_t value) { return unary(ExprOp::NEG, value); }
     uint32_t sin(uint32_t value) { return unary(ExprOp::SIN, value); }
     uint32_t cos(uint32_t value) { return unary(ExprOp::COS, value); }
+    uint32_t sinh(uint32_t value) { return unary(ExprOp::SINH, value); }
+    uint32_t cosh(uint32_t value) { return unary(ExprOp::COSH, value); }
     uint32_t sqrt(uint32_t value) { return unary(ExprOp::SQRT, value); }
     uint32_t exp(uint32_t value) { return unary(ExprOp::EXP, value); }
     uint32_t add(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::ADD, lhs, rhs); }
@@ -2009,6 +2072,16 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::ASIN:
             case ExprOp::ACOS:
             case ExprOp::ATAN:
+            case ExprOp::SINH:
+            case ExprOp::COSH:
+            case ExprOp::ASINH:
+            case ExprOp::ACOSH:
+            case ExprOp::ATANH:
+            case ExprOp::ERF:
+            case ExprOp::ERFC:
+            case ExprOp::ERFCX:
+            case ExprOp::ERFINV:
+            case ExprOp::ERFCINV:
             case ExprOp::EXP:
             case ExprOp::EXPM1:
             case ExprOp::EXP2:
@@ -2645,6 +2718,99 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     const uint32_t lhs = builder.cloneForward(node.lhs);
                     const uint32_t one_plus_lhs_squared = builder.add(builder.scalar(1.0), builder.mul(lhs, lhs));
                     addContributionToChild(node.lhs, builder.div(grad, one_plus_lhs_squared), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::SINH: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.cosh(lhs)), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::COSH: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.sinh(lhs)), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ASINH: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t denom = builder.sqrt(builder.add(builder.mul(lhs, lhs), builder.scalar(1.0)));
+                    addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ACOSH: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t denom = builder.mul(builder.sqrt(builder.sub(lhs, builder.scalar(1.0))),
+                                                       builder.sqrt(builder.add(lhs, builder.scalar(1.0))));
+                    addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ATANH: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t denom = builder.sub(builder.scalar(1.0), builder.mul(lhs, lhs));
+                    addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ERF: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs_squared = builder.mul(lhs, lhs);
+                    const uint32_t scale = builder.scalar(1.1283791670955126);  // 2 / sqrt(pi)
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.mul(scale, builder.exp(builder.neg(lhs_squared)))), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ERFC: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs_squared = builder.mul(lhs, lhs);
+                    const uint32_t scale = builder.scalar(-1.1283791670955126);  // -2 / sqrt(pi)
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.mul(scale, builder.exp(builder.neg(lhs_squared)))), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ERFCX: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t two_x_erfcx = builder.mul(builder.scalar(2.0), builder.mul(lhs, out));
+                    const uint32_t two_over_sqrt_pi = builder.scalar(1.1283791670955126);
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.sub(two_x_erfcx, two_over_sqrt_pi)), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ERFINV: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t scale = builder.scalar(0.8862269254527580);  // sqrt(pi) / 2
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.mul(scale, builder.exp(builder.mul(out, out)))), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::ERFCINV: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t scale = builder.scalar(-0.8862269254527580);  // -sqrt(pi) / 2
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.mul(scale, builder.exp(builder.mul(out, out)))), node_dims);
                 }
                 break;
             }
