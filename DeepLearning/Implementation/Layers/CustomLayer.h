@@ -103,6 +103,9 @@ class CustomLayer : public TrainableLayer {
         std::shared_ptr<StampedExecutionPlan> backwardErrorStamped;
         std::shared_ptr<StampedExecutionPlan> backwardWeightsClearStamped;
         std::shared_ptr<StampedExecutionPlan> backwardWeightsAccumulateStamped;
+        std::shared_ptr<StampedExecutionPlan> backwardWeightsFusedOptimizerUpdateStamped;
+
+        std::unordered_set<std::string> optimizerUpdateFusedParameterNames;
 
         std::unordered_map<std::string, Tensor> forwardInputsByName;
         std::unordered_map<std::string, Tensor> forwardOutputsByName;
@@ -139,6 +142,13 @@ class CustomLayer : public TrainableLayer {
     void clearBackwardArrivalBookkeeping();
     bool applicationHasAnyDownstreamBackprop(uint32_t applicationIndex) const;
     void recordEffectiveParameterBatchSizeForApplication(uint32_t applicationIndex, uint32_t batchSize);
+    bool canFuseOptimizerUpdatesForApplication(uint32_t applicationIndex) const;
+    std::shared_ptr<StampedExecutionPlan> buildFusedOptimizerUpdatePlan(
+        uint32_t applicationIndex,
+        const std::vector<std::string>& fusedParameterTargets,
+        const std::unordered_map<std::string, Tensor>& optimizerUpdateInputs);
+    std::unordered_map<std::string, float> buildFusedOptimizerRuntimeScalars(uint32_t applicationIndex, uint32_t batchSize);
+    void accumulateWeightsGradientForApplication(uint32_t applicationIndex, bool clearGradientFirst, uint32_t batchSize);
 
     PreparedDynamicExpression::TensorMap buildForwardInputs(uint32_t applicationIndex);
     PreparedDynamicExpression::TensorMap buildForwardOutputs(uint32_t applicationIndex) const;

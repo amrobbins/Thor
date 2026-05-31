@@ -1,5 +1,6 @@
 #include <optional>
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
 
@@ -18,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
 #include "Helpers/GradientRivet.h"
 
@@ -134,6 +136,51 @@ void subtractScaledInPlace(std::vector<float>& lhs, const std::vector<float>& rh
     requireSameSize(lhs, rhs, "subtractScaledInPlace");
     for (uint64_t i = 0; i < lhs.size(); ++i) {
         lhs[i] -= scale * rhs[i];
+    }
+}
+
+
+struct AdamDenseReferenceState {
+    std::vector<float> weights;
+    std::vector<float> m;
+    std::vector<float> v;
+    float t = 0.0f;
+};
+
+std::vector<float> featureWiseScaleGradient(const std::vector<float>& input,
+                                            const std::vector<float>& outputGradient,
+                                            uint64_t features) {
+    requireSameSize(input, outputGradient, "featureWiseScaleGradient flat input/gradient");
+    std::vector<float> gradient(features, 0.0f);
+    for (uint64_t i = 0; i < input.size(); ++i) {
+        gradient[i % features] += input[i] * outputGradient[i];
+    }
+    return gradient;
+}
+
+void applyAdamDenseReference(AdamDenseReferenceState& state,
+                             const std::vector<float>& rawGradient,
+                             uint32_t batchSize,
+                             float alpha,
+                             float beta1,
+                             float beta2,
+                             float epsilon) {
+    requireSameSize(state.weights, rawGradient, "applyAdamDenseReference weights/gradient");
+    requireSameSize(state.m, rawGradient, "applyAdamDenseReference m/gradient");
+    requireSameSize(state.v, rawGradient, "applyAdamDenseReference v/gradient");
+
+    const float lossScalingFactor = Loss::getLossScalingFactor();
+    state.t += 1.0f;
+    const float alphaT = alpha * std::sqrt(1.0f - std::pow(beta2, state.t)) / (1.0f - std::pow(beta1, state.t));
+    const float invBatchLossScale = 1.0f / (static_cast<float>(batchSize) * lossScalingFactor);
+
+    for (uint64_t i = 0; i < rawGradient.size(); ++i) {
+        const float g = rawGradient[i] * invBatchLossScale;
+        const float mNext = beta1 * state.m[i] + (1.0f - beta1) * g;
+        const float vNext = beta2 * state.v[i] + (1.0f - beta2) * g * g;
+        state.weights[i] = state.weights[i] - alphaT * mNext / (std::sqrt(vNext) + epsilon);
+        state.m[i] = mNext;
+        state.v[i] = vNext;
     }
 }
 
@@ -302,6 +349,23 @@ DynamicExpression buildSharedScaleBiasTwoInputTwoOutputExpression(const TensorPl
     });
 }
 
+DynamicExpression buildSingleInputScaleExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        auto x = Expression::input("x");
+        auto scale = Expression::input("scale");
+        auto expressionOutputs = Expression::outputs({{"out", x * scale}});
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
 DynamicExpression buildThreeInputThreeOutputExpression(const TensorPlacement& placement) {
     return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
                                          const DynamicExpression::TensorMap& outputs,
@@ -350,6 +414,230 @@ TEST(CustomLayer, SingleInputSingleOutputForwardCompatibility) {
     expectAllClose(actual, expected);
 
     cleanupLayers({&input, &custom, &sink});
+}
+
+TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoSgdUpdate) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    writeCpuTensor(featureIn_h, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+
+    auto scale = std::make_shared<FixedVectorParameter>("scale", std::vector<float>{2.0f, 3.0f, 4.0f}, true);
+    // step = learningRate / (batchSize * Loss::lossScalingFactor) = 8 / (2 * 4) = 1
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(901, 8.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    CustomLayer custom(buildSingleInputScaleExpression(gpuPlacement), {"x"}, {"out"}, gpuPlacement, {scale}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
+    ASSERT_TRUE(scale->getStorage().has_value());
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    Tensor sentinelGrad_h(cpuPlacement, TensorDescriptor(DataType::FP32, {features}));
+    writeCpuTensor(sentinelGrad_h, {123.0f, 124.0f, 125.0f});
+    scale->getOptimizer()->getWeightsGradient().value().copyFromAsync(sentinelGrad_h, gradientUpdateStream);
+    Event sentinelReady = gradientUpdateStream.putEvent();
+    sentinelReady.synchronize();
+
+    input.forward(featureIn_h, false, batchSize);
+    ASSERT_EQ(sink.forwardCalls, 1);
+    Tensor out_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(out_h), {2.0f, 6.0f, 12.0f, 8.0f, 15.0f, 24.0f});
+
+    Tensor gradOut_h(cpuPlacement, descriptor);
+    writeCpuTensor(gradOut_h, {1.0f, 0.0f, -1.0f, 2.0f, 1.0f, 0.5f});
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    Event gradsReady = custom.getStreams()[0].putEvent();
+    gradsReady.synchronize();
+
+    sink.backward(sink.getErrorOutput(), batchSize);
+    ASSERT_EQ(bridge.backwardCalls, 1);
+
+    Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
+    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+
+    expectAllClose(readCpuTensor(xGrad_h), {2.0f, 0.0f, -4.0f, 4.0f, 3.0f, 2.0f});
+    expectAllClose(readCpuTensor(scaleWeights_h), {-7.0f, -2.0f, 4.0f});
+    // The fused CustomLayer optimizer path consumes the dScale expression directly for the update,
+    // but still materializes the optimizer-owned gradient buffer for public inspection/debug compatibility.
+    expectAllClose(readCpuTensor(scaleGrad_h), {9.0f, 5.0f, 0.0f});
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+
+TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoAdamUpdateAcrossPasses) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+    const float alpha = 0.2f;
+    const float beta1 = 0.5f;
+    const float beta2 = 0.25f;
+    const float epsilon = 1.0e-4f;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+
+    const std::vector<float> initialScale{1.5f, -2.0f, 0.5f};
+    auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
+    auto adam = std::make_shared<Adam>(902, alpha, beta1, beta2, epsilon);
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(adam));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    CustomLayer custom(buildSingleInputScaleExpression(gpuPlacement), {"x"}, {"out"}, gpuPlacement, {scale}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
+    ASSERT_TRUE(scale->getStorage().has_value());
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    Tensor sentinelGrad_h(cpuPlacement, TensorDescriptor(DataType::FP32, {features}));
+    writeCpuTensor(sentinelGrad_h, {77.0f, 78.0f, 79.0f});
+    scale->getOptimizer()->getWeightsGradient().value().copyFromAsync(sentinelGrad_h, gradientUpdateStream);
+    Event sentinelReady = gradientUpdateStream.putEvent();
+    sentinelReady.synchronize();
+
+    AdamDenseReferenceState expected{initialScale, std::vector<float>(features, 0.0f), std::vector<float>(features, 0.0f), 0.0f};
+
+    auto runPass = [&](const std::vector<float>& featureIn,
+                       const std::vector<float>& outputGradient,
+                       int expectedForwardCalls,
+                       int expectedBackwardCalls) {
+        Tensor featureIn_h(cpuPlacement, descriptor);
+        writeCpuTensor(featureIn_h, featureIn);
+
+        const std::vector<float> expectedOut = scaleBiasForward(featureIn, expected.weights, std::vector<float>(features, 0.0f));
+        const std::vector<float> expectedInputGrad = scaleInputGradient(outputGradient, expected.weights);
+        const std::vector<float> rawScaleGradient = featureWiseScaleGradient(featureIn, outputGradient, features);
+        applyAdamDenseReference(expected, rawScaleGradient, static_cast<uint32_t>(batchSize), alpha, beta1, beta2, epsilon);
+
+        input.forward(featureIn_h, false, batchSize);
+        ASSERT_EQ(sink.forwardCalls, expectedForwardCalls);
+        Tensor out_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+        expectAllClose(readCpuTensor(out_h), expectedOut, 2e-5f, 2e-5f);
+
+        Tensor gradOut_h(cpuPlacement, descriptor);
+        writeCpuTensor(gradOut_h, outputGradient);
+        sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+        Event gradsReady = custom.getStreams()[0].putEvent();
+        gradsReady.synchronize();
+
+        sink.backward(sink.getErrorOutput(), batchSize);
+        ASSERT_EQ(bridge.backwardCalls, expectedBackwardCalls);
+
+        Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+        expectAllClose(readCpuTensor(xGrad_h), expectedInputGrad, 3e-5f, 3e-5f);
+    };
+
+    runPass({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {0.5f, -1.0f, 2.0f, -0.25f, 0.75f, -1.5f}, 1, 1);
+    runPass({-2.0f, 1.0f, 0.5f, 3.0f, -4.0f, 2.0f}, {1.25f, -0.5f, 0.75f, -1.0f, 2.0f, -0.25f}, 2, 2);
+
+    Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
+    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+    Tensor m_h = copyTensorToCpu(adam->getOptimizerParameterTensor("m"), gradientUpdateStream);
+    Tensor v_h = copyTensorToCpu(adam->getOptimizerParameterTensor("v"), gradientUpdateStream);
+
+    expectAllClose(readCpuTensor(scaleWeights_h), expected.weights, 4e-5f, 4e-5f);
+    expectAllClose(readCpuTensor(m_h), expected.m, 4e-5f, 4e-5f);
+    expectAllClose(readCpuTensor(v_h), expected.v, 4e-5f, 4e-5f);
+    EXPECT_FLOAT_EQ(adam->getT(), expected.t);
+    // The fused CustomLayer Adam path consumes dScale directly for the update, but still materializes
+    // the optimizer-owned gradient buffer for public inspection/debug compatibility.
+    expectAllClose(readCpuTensor(scaleGrad_h), {-5.5f, -8.5f, -0.125f});
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, MultipleApplicationsDoNotUseSingleApplicationOptimizerFusion) {
+    const uint64_t batchSize = 1;
+    const uint64_t features = 2;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureA_h(cpuPlacement, descriptor);
+    Tensor featureB_h(cpuPlacement, descriptor);
+    writeCpuTensor(featureA_h, {2.0f, 3.0f});
+    writeCpuTensor(featureB_h, {-1.0f, 4.0f});
+
+    auto scale = std::make_shared<FixedVectorParameter>("scale", std::vector<float>{1.0f, -2.0f}, true);
+    // Both applications contribute one sample, so the materialized optimizer step is
+    // learningRate / ((1 + 1) * Loss::lossScalingFactor) = 8 / 8 = 1.
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(903, 8.0f, 0.0f, 0.0f, false)));
+
+    NetworkInput inputA(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput inputB(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    CountingPassthrough bridgeA;
+    CountingPassthrough bridgeB;
+    CustomLayer custom(buildSingleInputScaleExpression(gpuPlacement), {"x"}, {"out"}, gpuPlacement, {scale}, false);
+    CountingPassthrough sinkA;
+    CountingPassthrough sinkB;
+
+    inputA.connectToNextLayer(&bridgeA);
+    inputB.connectToNextLayer(&bridgeB);
+    bridgeA.connectToNextLayer(&custom, 0, 0);
+    bridgeB.connectToNextLayer(&custom, 0, 1);
+    custom.connectToNextLayer(&sinkA, 0, 0);
+    custom.connectToNextLayer(&sinkB, 1, 0);
+    compileAndInitialize({&inputA, &inputB, &bridgeA, &bridgeB, &custom, &sinkA, &sinkB});
+
+    ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+
+    Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+    Tensor sentinelGrad_h(cpuPlacement, TensorDescriptor(DataType::FP32, {features}));
+    writeCpuTensor(sentinelGrad_h, {501.0f, 502.0f});
+    scale->getOptimizer()->getWeightsGradient().value().copyFromAsync(sentinelGrad_h, gradientUpdateStream);
+    Event sentinelReady = gradientUpdateStream.putEvent();
+    sentinelReady.synchronize();
+
+    inputA.forward(featureA_h, false, batchSize);
+    inputB.forward(featureB_h, false, batchSize);
+
+    Tensor gradA_h(cpuPlacement, descriptor);
+    Tensor gradB_h(cpuPlacement, descriptor);
+    writeCpuTensor(gradA_h, {0.5f, -2.0f});
+    writeCpuTensor(gradB_h, {1.5f, 0.25f});
+    sinkA.getErrorOutput().value().copyFromAsync(gradA_h, custom.getStreams()[0]);
+    sinkB.getErrorOutput().value().copyFromAsync(gradB_h, custom.getStreams()[1]);
+    Event gradAReady = custom.getStreams()[0].putEvent();
+    Event gradBReady = custom.getStreams()[1].putEvent();
+    gradAReady.synchronize();
+    gradBReady.synchronize();
+
+    sinkA.backward(sinkA.getErrorOutput(), batchSize);
+    Tensor scaleAfterFirstBackward_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
+    expectAllClose(readCpuTensor(scaleAfterFirstBackward_h), {1.0f, -2.0f});
+
+    sinkB.backward(sinkB.getErrorOutput(), batchSize);
+
+    Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
+    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+
+    // Combined raw dScale = {2*0.5 + (-1)*1.5, 3*(-2) + 4*0.25} = {-0.5, -5.0}.
+    // With the two-application materialized path the effective batch is 2, so step = 1.
+    expectAllClose(readCpuTensor(scaleGrad_h), {-0.5f, -5.0f}, 3e-5f, 3e-5f);
+    expectAllClose(readCpuTensor(scaleWeights_h), {1.5f, 3.0f}, 3e-5f, 3e-5f);
+
+    cleanupLayers({&inputA, &inputB, &bridgeA, &bridgeB, &custom, &sinkA, &sinkB});
 }
 
 TEST(CustomLayer, MultiInputMultiOutputWaitsForAllInputsAndRoutesByPortIndex) {

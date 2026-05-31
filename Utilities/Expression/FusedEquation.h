@@ -488,6 +488,8 @@ class FusedEquation {
 
     std::vector<std::string> getOutputNames() const;
 
+    [[nodiscard]] const PhysicalOutputs& physicalOutputs() const { return outputs_template; }
+
     [[nodiscard]] std::vector<std::string> filterTensorInputNamesReachableFromOutputs(
         const std::vector<std::string>& input_names, const std::unordered_set<std::string>& output_names) const;
 
