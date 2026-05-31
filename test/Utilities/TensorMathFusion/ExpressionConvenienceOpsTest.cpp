@@ -85,6 +85,16 @@ void expectNear(const std::vector<float>& actual, const std::vector<float>& expe
     }
 }
 
+template <typename Fn>
+std::vector<float> mapFloatValues(const std::vector<float>& values, Fn&& fn) {
+    std::vector<float> expected;
+    expected.reserve(values.size());
+    for (float value : values) {
+        expected.push_back(static_cast<float>(fn(static_cast<double>(value))));
+    }
+    return expected;
+}
+
 Tensor runExpressionOutput(const Outputs& expression_outputs,
                            const std::unordered_map<std::string, Tensor>& inputs,
                            const std::string& output_name,
@@ -430,6 +440,162 @@ TEST(ExpressionTrigOps, CircularTrigPrimitiveAutodiffRulesAreSupported) {
     EXPECT_NO_THROW((void)buildBackwardOutputs(outputs, {"x"}));
 }
 
+TEST(ExpressionTrigOps, SinProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-0.75f, -0.5f, -0.25f, 0.0f, 0.25f, 0.5f, 0.75f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").sin()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::sin(v); }), 1.0e-5f);
+}
+
+TEST(ExpressionTrigOps, CosProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-0.75f, -0.5f, -0.25f, 0.0f, 0.25f, 0.5f, 0.75f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").cos()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::cos(v); }), 1.0e-5f);
+}
+
+TEST(ExpressionTrigOps, TanProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-0.75f, -0.5f, -0.25f, 0.25f, 0.5f, 0.75f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").tan()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::tan(v); }), 1.0e-5f);
+}
+
+TEST(ExpressionTrigOps, AsinProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-0.75f, -0.5f, -0.25f, 0.0f, 0.25f, 0.5f, 0.75f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").asin()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::asin(v); }), 1.0e-5f);
+}
+
+TEST(ExpressionTrigOps, AcosProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-0.75f, -0.5f, -0.25f, 0.0f, 0.25f, 0.5f, 0.75f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").acos()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::acos(v); }), 1.0e-5f);
+}
+
+TEST(ExpressionTrigOps, AtanProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-3.0f, -1.0f, -0.25f, 0.0f, 0.25f, 1.0f, 3.0f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").atan()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::atan(v); }), 1.0e-5f);
+}
+
+TEST(ExpressionTrigOps, CscProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-1.25f, -0.75f, -0.25f, 0.25f, 0.75f, 1.25f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").csc()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return 1.0 / std::sin(v); }), 2.0e-5f);
+}
+
+TEST(ExpressionTrigOps, SecProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-1.25f, -0.75f, -0.25f, 0.25f, 0.75f, 1.25f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").sec()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return 1.0 / std::cos(v); }), 2.0e-5f);
+}
+
+TEST(ExpressionTrigOps, CotProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-1.25f, -0.75f, -0.25f, 0.25f, 0.75f, 1.25f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").cot()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return 1.0 / std::tan(v); }), 2.0e-5f);
+}
+
+TEST(ExpressionTrigOps, AcscProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-4.0f, -2.0f, -1.25f, 1.25f, 2.0f, 4.0f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").acsc()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::asin(1.0 / v); }), 1.0e-5f);
+}
+
+TEST(ExpressionTrigOps, AsecProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-4.0f, -2.0f, -1.25f, 1.25f, 2.0f, 4.0f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").asec()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::acos(1.0 / v); }), 1.0e-5f);
+}
+
+TEST(ExpressionTrigOps, AcotProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-4.0f, -2.0f, -0.5f, 0.5f, 2.0f, 4.0f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").acot()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::atan(1.0 / v); }), 1.0e-5f);
+}
+
 TEST(ExpressionHyperbolicTrigOps, PrimitiveHyperbolicTrigOpsLowerToUnaryExpressionNodes) {
     auto x = Expression::input("x");
 
@@ -525,6 +691,149 @@ TEST(ExpressionHyperbolicTrigOps, HyperbolicTrigPrimitiveAutodiffRulesAreSupport
     EXPECT_NO_THROW((void)buildBackwardOutputs(outputs, {"x"}));
 }
 
+TEST(ExpressionHyperbolicTrigOps, SinhProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-2.0f, -1.0f, -0.25f, 0.0f, 0.25f, 1.0f, 2.0f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").sinh()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::sinh(v); }), 2.0e-5f);
+}
+
+TEST(ExpressionHyperbolicTrigOps, CoshProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-2.0f, -1.0f, -0.25f, 0.0f, 0.25f, 1.0f, 2.0f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").cosh()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::cosh(v); }), 2.0e-5f);
+}
+
+TEST(ExpressionHyperbolicTrigOps, AsinhProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-8.0f, -2.0f, -0.25f, 0.0f, 0.25f, 2.0f, 8.0f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").asinh()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::asinh(v); }), 1.0e-5f);
+}
+
+TEST(ExpressionHyperbolicTrigOps, AcoshProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {1.0f, 1.125f, 1.5f, 2.0f, 4.0f, 8.0f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").acosh()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::acosh(v); }), 1.0e-5f);
+}
+
+TEST(ExpressionHyperbolicTrigOps, AtanhProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-0.75f, -0.5f, -0.25f, 0.0f, 0.25f, 0.5f, 0.75f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").atanh()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::atanh(v); }), 1.0e-5f);
+}
+
+TEST(ExpressionHyperbolicTrigOps, CschProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-2.0f, -1.0f, -0.5f, 0.5f, 1.0f, 2.0f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").csch()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return 1.0 / std::sinh(v); }), 2.0e-5f);
+}
+
+TEST(ExpressionHyperbolicTrigOps, SechProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-2.0f, -1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 2.0f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").sech()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return 1.0 / std::cosh(v); }), 2.0e-5f);
+}
+
+TEST(ExpressionHyperbolicTrigOps, CothProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-2.0f, -1.0f, -0.5f, 0.5f, 1.0f, 2.0f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").coth()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return 1.0 / std::tanh(v); }), 2.0e-5f);
+}
+
+TEST(ExpressionHyperbolicTrigOps, AcschProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-4.0f, -2.0f, -0.5f, 0.5f, 2.0f, 4.0f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").acsch()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::asinh(1.0 / v); }), 1.0e-5f);
+}
+
+TEST(ExpressionHyperbolicTrigOps, AsechProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {0.125f, 0.25f, 0.5f, 0.75f, 1.0f};
+    Tensor x = makeGpuTensor({5}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").asech()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{5}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::acosh(1.0 / v); }), 1.0e-5f);
+}
+
+TEST(ExpressionHyperbolicTrigOps, AcothProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-4.0f, -2.0f, -1.25f, 1.25f, 2.0f, 4.0f};
+    Tensor x = makeGpuTensor({2, 3}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").acoth()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::atanh(1.0 / v); }), 1.0e-5f);
+}
+
 TEST(ExpressionErrorFunctionOps, PrimitiveErrorFunctionOpsLowerToUnaryExpressionNodes) {
     auto x = Expression::input("x");
 
@@ -563,6 +872,91 @@ TEST(ExpressionErrorFunctionOps, ErrorFunctionPrimitiveAutodiffRulesAreSupported
 
     auto outputs = Expression::outputs({{"y", y}}).physicalOutputs();
     EXPECT_NO_THROW((void)buildBackwardOutputs(outputs, {"x"}));
+}
+
+TEST(ExpressionErrorFunctionOps, ErfProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-2.0f, -1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 2.0f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").erf()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::erf(v); }), 1.0e-5f);
+}
+
+TEST(ExpressionErrorFunctionOps, ErfcProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-2.0f, -1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 2.0f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").erfc()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::erfc(v); }), 1.0e-5f);
+}
+
+TEST(ExpressionErrorFunctionOps, ErfcxProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-1.5f, -1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 1.5f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").erfcx()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::exp(v * v) * std::erfc(v); }), 1.0e-4f);
+}
+
+TEST(ExpressionErrorFunctionOps, ErfinvProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-0.9f, -0.5f, -0.25f, 0.0f, 0.25f, 0.5f, 0.9f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").erfinv()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), {-1.163087154f, -0.476936276f, -0.225312055f, 0.0f, 0.225312055f, 0.476936276f, 1.163087154f}, 2.0e-5f);
+}
+
+TEST(ExpressionErrorFunctionOps, ErfcinvProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {0.1f, 0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.9f};
+    Tensor x = makeGpuTensor({2, 4}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").erfcinv()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 4}));
+    expectNear(copyToCpuValues(y, stream), {1.163087154f, 0.813419848f, 0.476936276f, 0.225312055f, 0.0f, -0.225312055f, -0.476936276f, -1.163087154f}, 2.0e-5f);
+}
+
+TEST(ExpressionErrorFunctionOps, InverseErrorFunctionsRoundTripThroughForwardFunctions) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> erf_values = {-0.9f, -0.5f, -0.1f, 0.0f, 0.1f, 0.5f, 0.9f};
+    Tensor erf_x = makeGpuTensor({7}, erf_values, stream);
+    auto erf_outputs = Expression::outputs({{"y", Expression::input("x").erfinv().erf()}});
+    Tensor erf_roundtrip = runExpressionOutput(erf_outputs, {{"x", erf_x}}, "y", stream);
+
+    EXPECT_EQ(erf_roundtrip.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(erf_roundtrip, stream), erf_values, 2.0e-5f);
+
+    const std::vector<float> erfc_values = {0.1f, 0.25f, 0.5f, 0.9f, 1.1f, 1.5f, 1.9f};
+    Tensor erfc_x = makeGpuTensor({7}, erfc_values, stream);
+    auto erfc_outputs = Expression::outputs({{"y", Expression::input("x").erfcinv().erfc()}});
+    Tensor erfc_roundtrip = runExpressionOutput(erfc_outputs, {{"x", erfc_x}}, "y", stream);
+
+    EXPECT_EQ(erfc_roundtrip.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(erfc_roundtrip, stream), erfc_values, 3.0e-5f);
 }
 
 
@@ -616,4 +1010,69 @@ TEST(ExpressionGammaFunctionOps, DigammaAutodiffRejectsUntilTrigammaExists) {
     auto outputs = Expression::outputs({{"y", x.digamma()}}).physicalOutputs();
 
     EXPECT_THROW((void)buildBackwardOutputs(outputs, {"x"}), std::runtime_error);
+}
+
+TEST(ExpressionGammaFunctionOps, TgammaProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-0.5f, 0.5f, 1.0f, 1.5f, 2.0f, 3.5f, 5.0f};
+    Tensor x = makeGpuTensor({7}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").tgamma()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::tgamma(v); }), 2.0e-5f);
+}
+
+TEST(ExpressionGammaFunctionOps, LgammaProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-0.5f, 0.25f, 0.5f, 1.0f, 1.5f, 2.0f, 3.5f, 5.0f};
+    Tensor x = makeGpuTensor({2, 4}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").lgamma()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 4}));
+    expectNear(copyToCpuValues(y, stream), mapFloatValues(values, [](double v) { return std::lgamma(v); }), 2.0e-5f);
+}
+
+TEST(ExpressionGammaFunctionOps, DigammaProducesExpectedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const std::vector<float> values = {-0.5f, 0.25f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 8.0f};
+    Tensor x = makeGpuTensor({9}, values, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").digamma()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{9}));
+    expectNear(copyToCpuValues(y, stream), {
+        0.036489974f,
+        -4.227453709f,
+        -1.963510036f,
+        -0.577215672f,
+        0.036489974f,
+        0.422784328f,
+        0.922784328f,
+        1.256117702f,
+        2.015641451f,
+    }, 2.0e-5f);
+}
+
+TEST(ExpressionGammaFunctionOps, DigammaProducesNanAtNonpositiveIntegerPoles) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor x = makeGpuTensor({4}, {0.0f, -1.0f, -2.0f, -3.0f}, stream);
+
+    auto expression_outputs = Expression::outputs({{"y", Expression::input("x").digamma()}});
+    Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{4}));
+    const std::vector<float> values = copyToCpuValues(y, stream);
+    ASSERT_EQ(values.size(), 4U);
+    for (float value : values) {
+        EXPECT_TRUE(std::isnan(value));
+    }
 }
