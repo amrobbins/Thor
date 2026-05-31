@@ -123,6 +123,8 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientW
 
 bool preparedEmbeddingSparseGradientHasSparseRowUpdate(const PreparedEmbeddingSparseGradient& prepared);
 
+bool preparedEmbeddingSparseGradientUsesTwoStageFinalize(const PreparedEmbeddingSparseGradient& prepared);
+
 void launchPreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prepared,
                                            const Tensor& indices,
                                            const Tensor& upstreamGradient,

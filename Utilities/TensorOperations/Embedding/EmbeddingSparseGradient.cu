@@ -2536,6 +2536,10 @@ bool preparedEmbeddingSparseGradientHasSparseRowUpdate(const PreparedEmbeddingSp
     return prepared.sparseRowUpdate.has_value();
 }
 
+bool preparedEmbeddingSparseGradientUsesTwoStageFinalize(const PreparedEmbeddingSparseGradient& prepared) {
+    return useTwoStageEmbeddingSparseGradientFinalize(prepared.numTokens);
+}
+
 void validatePreparedEmbeddingSparseGradientInvocation(PreparedEmbeddingSparseGradient& prepared,
                                                        const Tensor& indices,
                                                        const Tensor& upstreamGradient,
