@@ -157,6 +157,12 @@ std::string exprOpExternalName(ExprOp op) {
             return "erfinv";
         case ExprOp::ERFCINV:
             return "erfcinv";
+        case ExprOp::TGAMMA:
+            return "tgamma";
+        case ExprOp::LGAMMA:
+            return "lgamma";
+        case ExprOp::DIGAMMA:
+            return "digamma";
         case ExprOp::EXP:
             return "exp";
         case ExprOp::EXPM1:
@@ -301,6 +307,9 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"erfcx", ExprOp::ERFCX},
         {"erfinv", ExprOp::ERFINV},
         {"erfcinv", ExprOp::ERFCINV},
+        {"tgamma", ExprOp::TGAMMA},
+        {"lgamma", ExprOp::LGAMMA},
+        {"digamma", ExprOp::DIGAMMA},
         {"exp", ExprOp::EXP},
         {"expm1", ExprOp::EXPM1},
         {"exp2", ExprOp::EXP2},
@@ -742,6 +751,12 @@ std::string opName(ExprOp op) {
             return "ERFINV";
         case ExprOp::ERFCINV:
             return "ERFCINV";
+        case ExprOp::TGAMMA:
+            return "TGAMMA";
+        case ExprOp::LGAMMA:
+            return "LGAMMA";
+        case ExprOp::DIGAMMA:
+            return "DIGAMMA";
         case ExprOp::EXP:
             return "EXP";
         case ExprOp::EXPM1:
@@ -950,6 +965,9 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::ERFCX:
         case ExprOp::ERFINV:
         case ExprOp::ERFCINV:
+        case ExprOp::TGAMMA:
+        case ExprOp::LGAMMA:
+        case ExprOp::DIGAMMA:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -1833,6 +1851,9 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::ERFCX:
         case ExprOp::ERFINV:
         case ExprOp::ERFCINV:
+        case ExprOp::TGAMMA:
+        case ExprOp::LGAMMA:
+        case ExprOp::DIGAMMA:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -2749,6 +2770,9 @@ static bool isTransposePushThroughUnaryOp(ExprOp op) {
         case ExprOp::ERFCX:
         case ExprOp::ERFINV:
         case ExprOp::ERFCINV:
+        case ExprOp::TGAMMA:
+        case ExprOp::LGAMMA:
+        case ExprOp::DIGAMMA:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -2941,6 +2965,9 @@ Expression Expression::erfc() const { return unaryOp(*this, ExprOp::ERFC); }
 Expression Expression::erfcx() const { return unaryOp(*this, ExprOp::ERFCX); }
 Expression Expression::erfinv() const { return unaryOp(*this, ExprOp::ERFINV); }
 Expression Expression::erfcinv() const { return unaryOp(*this, ExprOp::ERFCINV); }
+Expression Expression::tgamma() const { return unaryOp(*this, ExprOp::TGAMMA); }
+Expression Expression::lgamma() const { return unaryOp(*this, ExprOp::LGAMMA); }
+Expression Expression::digamma() const { return unaryOp(*this, ExprOp::DIGAMMA); }
 Expression Expression::expm1() const { return unaryOp(*this, ExprOp::EXPM1); }
 Expression Expression::log1p() const { return unaryOp(*this, ExprOp::LOG1P); }
 Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }

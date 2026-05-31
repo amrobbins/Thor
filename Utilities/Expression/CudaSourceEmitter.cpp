@@ -525,6 +525,55 @@ static void emitFp8RawLaneHelperDefinition(std::ostringstream& ss, DataType dtyp
 
 static bool isHalf2ComputeStorageDType(DataType dtype) { return dtype == DataType::FP16 || isFp8DType(dtype); }
 
+static bool expressionUsesOp(const PhysicalExpression& expr, ExprOp op) {
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [&](const ExprNode& node) { return node.op == op; });
+}
+
+static void emitDigammaHelperDefinition(std::ostringstream& ss) {
+    ss << R"(__device__ __forceinline__ float thor_digammaf(float x) {
+  constexpr float pi = 3.14159265358979323846264338327950288f;
+
+  if (isnan(x)) {
+    return x;
+  }
+  if (isinf(x)) {
+    return x > 0.0f ? x : nanf("");
+  }
+
+  float result = 0.0f;
+  if (x <= 0.0f) {
+    const float floored = floorf(x);
+    if (x == floored) {
+      return nanf("");
+    }
+    result -= pi / tanf(pi * x);
+    x = 1.0f - x;
+  }
+
+  while (x < 8.0f) {
+    result -= 1.0f / x;
+    x += 1.0f;
+  }
+
+  const float inv = 1.0f / x;
+  const float inv2 = inv * inv;
+  const float inv4 = inv2 * inv2;
+  const float inv6 = inv4 * inv2;
+  const float inv8 = inv4 * inv4;
+  const float inv10 = inv8 * inv2;
+
+  result += logf(x) - 0.5f * inv;
+  result -= inv2 * (1.0f / 12.0f);
+  result += inv4 * (1.0f / 120.0f);
+  result -= inv6 * (1.0f / 252.0f);
+  result += inv8 * (1.0f / 240.0f);
+  result -= inv10 * (1.0f / 132.0f);
+  return result;
+}
+
+)";
+}
+
 static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstream& ss) {
     bool need_fp16 = false;
     bool need_bf16 = false;
@@ -570,6 +619,14 @@ static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstre
     }
     if (need_fp8) {
         ss << "#include <cuda_fp8.h>\n";
+    }
+    const bool needs_gamma_math_header = expressionUsesOp(expr, ExprOp::TGAMMA) || expressionUsesOp(expr, ExprOp::LGAMMA) ||
+                                          expressionUsesOp(expr, ExprOp::DIGAMMA);
+    if (needs_gamma_math_header) {
+        ss << "#include <math_functions.h>\n";
+    }
+    if (expressionUsesOp(expr, ExprOp::DIGAMMA)) {
+        emitDigammaHelperDefinition(ss);
     }
 }
 
@@ -1214,6 +1271,12 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
             return castScalarExpr("erfinvf(" + x_f + ")", DataType::FP32, compute_dtype);
         case ExprOp::ERFCINV:
             return castScalarExpr("erfcinvf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::TGAMMA:
+            return castScalarExpr("tgammaf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::LGAMMA:
+            return castScalarExpr("lgammaf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::DIGAMMA:
+            return castScalarExpr("thor_digammaf(" + x_f + ")", DataType::FP32, compute_dtype);
 
         case ExprOp::EXP:
             return castScalarExpr("expf(" + x_f + ")", DataType::FP32, compute_dtype);
@@ -2998,6 +3061,15 @@ static void emitFloatScalarNodeDefinitions(std::ostringstream& ss,
             case ExprOp::ERFCINV:
                 ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = erfcinvf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
                 break;
+            case ExprOp::TGAMMA:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = tgammaf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::LGAMMA:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = lgammaf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::DIGAMMA:
+                ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = thor_digammaf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+                break;
             case ExprOp::EXP:
                 ss << indent << "float " << CudaSourceEmitter::ref(node_idx) << " = expf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
                 break;
@@ -3160,6 +3232,9 @@ static std::string emitVector2Erfc(const std::string& x, DataType dtype) { retur
 static std::string emitVector2Erfcx(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("erfcxf", x, dtype); }
 static std::string emitVector2Erfinv(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("erfinvf", x, dtype); }
 static std::string emitVector2Erfcinv(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("erfcinvf", x, dtype); }
+static std::string emitVector2Tgamma(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("tgammaf", x, dtype); }
+static std::string emitVector2Lgamma(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("lgammaf", x, dtype); }
+static std::string emitVector2Digamma(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("thor_digammaf", x, dtype); }
 static std::string emitVector2Expm1(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("expm1f", x, dtype); }
 static std::string emitVector2Log1p(const std::string& x, DataType dtype) { return emitVector2SpecialUnary("log1pf", x, dtype); }
 static std::string emitVector2Tanh(const std::string& x, DataType dtype) { return emitVector2Half2Tanh(x, dtype); }
@@ -3368,6 +3443,18 @@ static void emitVector2NodeDefinitionsForSuffix(std::ostringstream& ss,
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Erfcinv(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                 break;
+            case ExprOp::TGAMMA:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Tgamma(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::LGAMMA:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Lgamma(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
+            case ExprOp::DIGAMMA:
+                ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitVector2Digamma(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                break;
             case ExprOp::EXP:
                 ss << indent << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                    << emitVector2Exp(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
@@ -3471,6 +3558,9 @@ static bool isSupportedLogicalTransposeVectorElementwiseOp(ExprOp op) {
         case ExprOp::ERFCX:
         case ExprOp::ERFINV:
         case ExprOp::ERFCINV:
+        case ExprOp::TGAMMA:
+        case ExprOp::LGAMMA:
+        case ExprOp::DIGAMMA:
         case ExprOp::EXP:
         case ExprOp::EXPM1:
         case ExprOp::EXP2:
@@ -3837,6 +3927,15 @@ static std::string emitTiledLogicalTransposeConsumerVectorValue(
         case ExprOp::ERFCINV:
             compute_expr = emitVector2Erfcinv(emit_child(n.lhs), vector_compute_dtype);
             break;
+        case ExprOp::TGAMMA:
+            compute_expr = emitVector2Tgamma(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::LGAMMA:
+            compute_expr = emitVector2Lgamma(emit_child(n.lhs), vector_compute_dtype);
+            break;
+        case ExprOp::DIGAMMA:
+            compute_expr = emitVector2Digamma(emit_child(n.lhs), vector_compute_dtype);
+            break;
         case ExprOp::EXP:
             compute_expr = emitVector2Exp(emit_child(n.lhs), vector_compute_dtype);
             break;
@@ -4025,6 +4124,18 @@ static void emitFloat2NodeDefinitionsForSuffix(std::ostringstream& ss,
             case ExprOp::ERFCINV:
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
                    << emitFloat2UnaryCall("erfcinvf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::TGAMMA:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("tgammaf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::LGAMMA:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("lgammaf", refWithSuffix(n.lhs, suffix)) << ";\n";
+                break;
+            case ExprOp::DIGAMMA:
+                ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
+                   << emitFloat2UnaryCall("thor_digammaf", refWithSuffix(n.lhs, suffix)) << ";\n";
                 break;
             case ExprOp::EXP:
                 ss << indent << "float2 " << refWithSuffix(node_idx, suffix) << " = "
@@ -4324,6 +4435,18 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                 case ExprOp::ERFCINV:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Erfcinv(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::TGAMMA:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Tgamma(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::LGAMMA:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Lgamma(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::DIGAMMA:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Digamma(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                     break;
                 case ExprOp::EXP:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
@@ -4804,6 +4927,18 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                 case ExprOp::ERFCINV:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Erfcinv(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::TGAMMA:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Tgamma(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::LGAMMA:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Lgamma(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::DIGAMMA:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Digamma(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::EXP:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
