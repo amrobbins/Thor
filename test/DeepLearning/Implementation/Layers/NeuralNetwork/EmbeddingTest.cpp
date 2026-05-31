@@ -6,6 +6,7 @@
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradient.h"
+#include "Utilities/TensorOperations/Embedding/ReduceStageController.h"
 
 #include "cuda_bf16.h"
 #include "cuda_fp16.h"
@@ -697,6 +698,270 @@ TEST(EmbeddingSparseBackwardTest, SparseGradientProducerBucketizesMoreThanOneHig
     for (float value : values) {
         EXPECT_FLOAT_EQ(value, static_cast<float>(repeatsPerRow));
     }
+}
+
+
+TEST(EmbeddingSparseBackwardTest, CapturedSparseGradientTwoStageFinalizerHandlesLargeUniqueRowsAndRuntimeDisablesWhenSmall) {
+    const uint32_t threshold = runtimeTwoStageEmbeddingSparseGradientFinalizeRunThreshold();
+    if (threshold == 0U || threshold > 200000U) {
+        GTEST_SKIP() << "two-stage embedding sparse-gradient finalizer threshold is disabled or too large for this unit test.";
+    }
+
+    constexpr int deviceNum = 0;
+    Stream stream(deviceNum);
+
+    const uint64_t vocabularySize = static_cast<uint64_t>(threshold) + 512ULL;
+    const uint64_t embeddingDim = 1;
+    std::vector<uint32_t> indices(static_cast<size_t>(vocabularySize));
+    for (uint32_t row = 0; row < indices.size(); ++row) {
+        indices[row] = row;
+    }
+    std::vector<float> upstream(indices.size(), 1.0f);
+
+    Tensor cpuIndices = makeCpuUint32Tensor({indices.size()}, indices);
+    Tensor cpuUpstream = makeCpuFloatTensor(DataType::FP32, {indices.size(), embeddingDim}, upstream);
+    Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+    Tensor gpuUpstream = copyCpuToGpu(cpuUpstream, stream);
+
+    SparseRowGradient gradient = SparseRowGradient::allocate(gpuPlacement,
+                                                             /*capacity=*/vocabularySize,
+                                                             vocabularySize,
+                                                             embeddingDim,
+                                                             DataType::FP32,
+                                                             SparseRowGradient::chooseRowDataType(vocabularySize));
+    auto prepared = prepareEmbeddingSparseGradient(gpuIndices, gpuUpstream, gradient, std::nullopt);
+    ASSERT_TRUE(useTwoStageEmbeddingSparseGradientFinalize(indices.size()));
+    ASSERT_TRUE(preparedEmbeddingSparseGradientUsesTwoStageFinalize(*prepared));
+
+    CapturedEmbeddingSparseGradient captured(deviceNum);
+    CudaGraphCaptureBuilder builder(stream);
+    capturePreparedEmbeddingSparseGradient(builder, *prepared, gpuIndices, gpuUpstream, gradient, captured);
+    CudaGraphExecutable executable = builder.endCaptureAndInstantiate(stream);
+    captured.uploadTargetNodes(stream);
+
+    executable.launch(stream);
+    stream.synchronize();
+
+    std::vector<uint64_t> numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+    ASSERT_EQ(numRows[0], vocabularySize);
+    std::vector<uint64_t> rows = copyGpuRowTensorToUint64Values(gradient.rows, stream);
+    rows.resize(numRows[0]);
+    ASSERT_EQ(rows.size(), vocabularySize);
+    std::vector<float> values = copyGpuFloatTensorToValues(gradient.values, stream);
+    values.resize(numRows[0]);
+    for (uint64_t row = 0; row < vocabularySize; row += 9973ULL) {
+        EXPECT_EQ(rows[row], row) << "sampled two-stage row mismatch at " << row;
+        EXPECT_FLOAT_EQ(values[row], 1.0f) << "sampled two-stage value mismatch at row " << row;
+    }
+    EXPECT_EQ(rows.back(), vocabularySize - 1ULL);
+    EXPECT_FLOAT_EQ(values.back(), 1.0f);
+
+    // Reuse the same captured graph, but make the runtime RLE output much smaller than the two-stage threshold.
+    // The first-stage finalizer must disable the two-stage classify/accumulate nodes and complete the finalize itself.
+    std::fill(indices.begin(), indices.end(), 7U);
+    std::fill(upstream.begin(), upstream.end(), 1.0f);
+    Tensor smallCpuIndices = makeCpuUint32Tensor({indices.size()}, indices);
+    Tensor smallCpuUpstream = makeCpuFloatTensor(DataType::FP32, {indices.size(), embeddingDim}, upstream);
+    copyCpuToExistingGpu(gpuIndices, smallCpuIndices, stream);
+    copyCpuToExistingGpu(gpuUpstream, smallCpuUpstream, stream);
+
+    executable.launch(stream);
+    stream.synchronize();
+
+    numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+    ASSERT_EQ(numRows[0], 1u);
+    rows = copyGpuRowTensorToUint64Values(gradient.rows, stream);
+    rows.resize(numRows[0]);
+    EXPECT_EQ(rows, (std::vector<uint64_t>{7}));
+    values = copyGpuFloatTensorToValues(gradient.values, stream);
+    values.resize(numRows[0]);
+    EXPECT_FLOAT_EQ(values[0], static_cast<float>(indices.size()));
+}
+
+TEST(EmbeddingSparseBackwardTest, CapturedSparseGradientTwoStageFinalizerBucketizesAcrossStageBlocksAndTrimsSentinel) {
+    const uint32_t threshold = runtimeTwoStageEmbeddingSparseGradientFinalizeRunThreshold();
+    if (threshold == 0U || threshold > 200000U) {
+        GTEST_SKIP() << "two-stage embedding sparse-gradient finalizer threshold is disabled or too large for this unit test.";
+    }
+
+    constexpr int deviceNum = 0;
+    Stream stream(deviceNum);
+
+    const uint32_t lowUniqueRows = threshold + 4U;
+    const uint32_t highRow = lowUniqueRows;
+    const uint32_t ultraRow = lowUniqueRows + 1U;
+    const uint32_t sentinelRow = lowUniqueRows + 2U;
+    const uint64_t vocabularySize = sentinelRow;
+    constexpr uint64_t embeddingDim = 1;
+    constexpr uint32_t highRepeats = 17U;
+    constexpr uint32_t ultraRepeats = 1025U;
+    constexpr uint32_t sentinelRepeats = 9U;
+
+    std::vector<uint32_t> indices;
+    indices.reserve(static_cast<size_t>(lowUniqueRows) + highRepeats + ultraRepeats + sentinelRepeats);
+    for (uint32_t row = 0; row < lowUniqueRows; ++row) {
+        indices.push_back(row);
+    }
+    for (uint32_t i = 0; i < highRepeats; ++i) {
+        indices.push_back(highRow);
+    }
+    for (uint32_t i = 0; i < ultraRepeats; ++i) {
+        indices.push_back(ultraRow);
+    }
+    for (uint32_t i = 0; i < sentinelRepeats; ++i) {
+        indices.push_back(sentinelRow);  // out-of-range sentinel row; finalizer must trim it.
+    }
+
+    std::vector<float> upstream(indices.size(), 1.0f);
+    Tensor cpuIndices = makeCpuUint32Tensor({indices.size()}, indices);
+    Tensor cpuUpstream = makeCpuFloatTensor(DataType::FP32, {indices.size(), embeddingDim}, upstream);
+    Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+    Tensor gpuUpstream = copyCpuToGpu(cpuUpstream, stream);
+
+    SparseRowGradient gradient = SparseRowGradient::allocate(gpuPlacement,
+                                                             /*capacity=*/std::min<uint64_t>(indices.size(), vocabularySize),
+                                                             vocabularySize,
+                                                             embeddingDim,
+                                                             DataType::FP32,
+                                                             SparseRowGradient::chooseRowDataType(vocabularySize));
+    auto prepared = prepareEmbeddingSparseGradient(gpuIndices, gpuUpstream, gradient, std::nullopt);
+    ASSERT_TRUE(useTwoStageEmbeddingSparseGradientFinalize(indices.size()));
+    ASSERT_TRUE(preparedEmbeddingSparseGradientUsesTwoStageFinalize(*prepared));
+
+    CapturedEmbeddingSparseGradient captured(deviceNum);
+    CudaGraphCaptureBuilder builder(stream);
+    capturePreparedEmbeddingSparseGradient(builder, *prepared, gpuIndices, gpuUpstream, gradient, captured);
+    CudaGraphExecutable executable = builder.endCaptureAndInstantiate(stream);
+    captured.uploadTargetNodes(stream);
+
+    executable.launch(stream);
+    stream.synchronize();
+
+    const uint64_t expectedRows = static_cast<uint64_t>(lowUniqueRows) + 2ULL;
+    const std::vector<uint64_t> numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+    ASSERT_EQ(numRows[0], expectedRows);
+
+    std::vector<uint64_t> rows = copyGpuRowTensorToUint64Values(gradient.rows, stream);
+    rows.resize(numRows[0]);
+    ASSERT_EQ(rows.size(), expectedRows);
+    for (uint64_t row = 0; row < static_cast<uint64_t>(lowUniqueRows); row += 8191ULL) {
+        EXPECT_EQ(rows[row], row) << "sampled low row mismatch at " << row;
+    }
+    EXPECT_EQ(rows[lowUniqueRows], static_cast<uint64_t>(highRow));
+    EXPECT_EQ(rows[lowUniqueRows + 1ULL], static_cast<uint64_t>(ultraRow));
+
+    std::vector<float> values = copyGpuFloatTensorToValues(gradient.values, stream);
+    values.resize(numRows[0]);
+    for (uint64_t row = 0; row < static_cast<uint64_t>(lowUniqueRows); row += 8191ULL) {
+        EXPECT_FLOAT_EQ(values[row], 1.0f) << "sampled low value mismatch at row " << row;
+    }
+    EXPECT_FLOAT_EQ(values[lowUniqueRows], static_cast<float>(highRepeats));
+    EXPECT_FLOAT_EQ(values[lowUniqueRows + 1ULL], static_cast<float>(ultraRepeats));
+
+}
+
+TEST(EmbeddingSparseBackwardTest, CapturedFusedSparseRowUpdateUsesTwoStageFinalizerWithoutMaterializingValues) {
+    const uint32_t threshold = runtimeTwoStageEmbeddingSparseGradientFinalizeRunThreshold();
+    if (threshold == 0U || threshold > 200000U) {
+        GTEST_SKIP() << "two-stage embedding sparse-gradient finalizer threshold is disabled or too large for this unit test.";
+    }
+
+    constexpr int deviceNum = 0;
+    Stream stream(deviceNum);
+
+    const uint64_t vocabularySize = static_cast<uint64_t>(threshold) + 256ULL;
+    const uint64_t embeddingDim = 1;
+    constexpr float step = 0.25f;
+
+    std::vector<uint32_t> indices(static_cast<size_t>(vocabularySize));
+    for (uint32_t row = 0; row < indices.size(); ++row) {
+        indices[row] = row;
+    }
+    // Add duplicates to prove the captured two-stage bucket metadata still drives the fused update reducer.
+    indices.push_back(3U);
+    indices.push_back(3U);
+    indices.push_back(11U);
+
+    std::vector<float> upstream(indices.size(), 1.0f);
+    std::vector<float> initialWeights(vocabularySize, 2.0f);
+
+    Tensor cpuIndices = makeCpuUint32Tensor({indices.size()}, indices);
+    Tensor cpuUpstream = makeCpuFloatTensor(DataType::FP32, {indices.size(), embeddingDim}, upstream);
+    Tensor cpuWeights = makeCpuFloatTensor(DataType::FP32, {vocabularySize, embeddingDim}, initialWeights);
+    Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+    Tensor gpuUpstream = copyCpuToGpu(cpuUpstream, stream);
+    Tensor weights = copyCpuToGpu(cpuWeights, stream);
+
+    SparseRowGradient gradient = SparseRowGradient::allocate(gpuPlacement,
+                                                             /*capacity=*/std::min<uint64_t>(indices.size(), vocabularySize),
+                                                             vocabularySize,
+                                                             embeddingDim,
+                                                             DataType::FP32,
+                                                             SparseRowGradient::chooseRowDataType(vocabularySize));
+    std::vector<float> sentinelValues(gradient.capacity * embeddingDim, -777.0f);
+    Tensor cpuSentinelValues = makeCpuFloatTensor(DataType::FP32, {gradient.capacity, embeddingDim}, sentinelValues);
+    copyCpuToExistingGpu(gradient.values, cpuSentinelValues, stream);
+
+    auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
+    auto g = Expression::input("gradient", DataType::FP32, DataType::FP32);
+    auto stepScalar = Expression::runtimeScalar("step", DataType::FP32, DataType::FP32);
+    auto updateOutputs = Expression::outputs({{"weights", (w - stepScalar * g).withOutputDType(DataType::FP32)}});
+
+    std::unordered_map<std::string, SparseRowUpdateTensorBinding> updateInputs;
+    updateInputs["weights_in"] = SparseRowUpdateTensorBinding{weights, SparseRowUpdateTensorKind::IndexedRows};
+    updateInputs["gradient"] = SparseRowUpdateTensorBinding{gradient.values, SparseRowUpdateTensorKind::DenseLogicalRows};
+    std::unordered_map<std::string, Tensor> indexedUpdateOutputs;
+    indexedUpdateOutputs["weights"] = weights;
+
+    auto prepared = prepareEmbeddingSparseGradientWithSparseRowUpdate(gpuIndices,
+                                                                      gpuUpstream,
+                                                                      gradient,
+                                                                      updateOutputs.physicalOutputs(),
+                                                                      updateInputs,
+                                                                      indexedUpdateOutputs,
+                                                                      std::nullopt);
+    ASSERT_TRUE(preparedEmbeddingSparseGradientHasSparseRowUpdate(*prepared));
+    ASSERT_TRUE(useTwoStageEmbeddingSparseGradientFinalize(indices.size()));
+    ASSERT_TRUE(preparedEmbeddingSparseGradientUsesTwoStageFinalize(*prepared));
+
+    CapturedEmbeddingSparseGradient captured(deviceNum);
+    CudaGraphCaptureBuilder builder(stream);
+    capturePreparedEmbeddingSparseGradientWithSparseRowUpdate(builder,
+                                                             *prepared,
+                                                             gpuIndices,
+                                                             gpuUpstream,
+                                                             gradient,
+                                                             {{"step", step}},
+                                                             captured);
+    CudaGraphExecutable executable = builder.endCaptureAndInstantiate(stream);
+    captured.uploadTargetNodes(stream);
+
+    executable.launch(stream);
+    stream.synchronize();
+
+    std::vector<float> expectedWeights = initialWeights;
+    for (uint64_t row = 0; row < vocabularySize; ++row) {
+        expectedWeights[row] -= step;
+    }
+    expectedWeights[3] -= 2.0f * step;
+    expectedWeights[11] -= step;
+
+    std::vector<float> weightsActual = copyGpuFloatTensorToValues(weights, stream);
+    ASSERT_EQ(weightsActual.size(), expectedWeights.size());
+    for (uint64_t row = 0; row < vocabularySize; row += 9973ULL) {
+        EXPECT_FLOAT_EQ(weightsActual[row], expectedWeights[row]) << "sampled fused two-stage weight mismatch at row " << row;
+    }
+    EXPECT_FLOAT_EQ(weightsActual[3], expectedWeights[3]);
+    EXPECT_FLOAT_EQ(weightsActual[11], expectedWeights[11]);
+    EXPECT_FLOAT_EQ(weightsActual.back(), expectedWeights.back());
+
+    const std::vector<uint64_t> numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+    ASSERT_EQ(numRows[0], vocabularySize);
+    expectAllClose(copyGpuFloatTensorToValues(gradient.values, stream),
+                   sentinelValues,
+                   1e-5f,
+                   1e-5f,
+                   "captured fused two-stage should not materialize gradient values");
 }
 
 
