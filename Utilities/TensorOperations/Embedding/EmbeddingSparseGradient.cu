@@ -785,6 +785,30 @@ std::string sparseGradientUltraHighFinalReduceKernelName(DataType rowDType,
     return ss.str();
 }
 
+
+std::string emitEmbeddingSparseGradientFloat4LoadHelperSource() {
+    std::ostringstream ss;
+    ss << "__device__ __forceinline__ float4 thor_embedding_load_float4_aligned_or_shifted(const float* p, unsigned long long i) {\n";
+    ss << "  const unsigned long long aligned_i = i & ~3ULL;\n";
+    ss << "  const unsigned int shift = static_cast<unsigned int>(i & 3ULL);\n";
+    ss << "  const float4 a = *reinterpret_cast<const float4*>(p + aligned_i);\n";
+    ss << "  if (shift == 0U) return a;\n";
+    ss << "  const float4 b = *reinterpret_cast<const float4*>(p + aligned_i + 4ULL);\n";
+    ss << "  if (shift == 1U) return make_float4(a.y, a.z, a.w, b.x);\n";
+    ss << "  if (shift == 2U) return make_float4(a.z, a.w, b.x, b.y);\n";
+    ss << "  return make_float4(a.w, b.x, b.y, b.z);\n";
+    ss << "}\n";
+    ss << "__device__ __forceinline__ float4 thor_embedding_load_float4_masked(const float* p, unsigned long long i, unsigned int lanes) {\n";
+    ss << "  if (lanes >= 4U) return thor_embedding_load_float4_aligned_or_shifted(p, i);\n";
+    ss << "  float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+    ss << "  if (lanes > 0U) v.x = p[i];\n";
+    ss << "  if (lanes > 1U) v.y = p[i + 1ULL];\n";
+    ss << "  if (lanes > 2U) v.z = p[i + 2ULL];\n";
+    ss << "  return v;\n";
+    ss << "}\n\n";
+    return ss.str();
+}
+
 std::string emitSparseGradientReduceKernelSource(DataType rowDType,
                                                  DataType gradDType,
                                                  uint64_t embeddingDim,
@@ -820,6 +844,7 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType,
     ss << "__device__ __forceinline__ float4 thor_embedding_add_float4(float4 a, float4 b) {\n";
     ss << "  return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);\n";
     ss << "}\n\n";
+    ss << emitEmbeddingSparseGradientFloat4LoadHelperSource();
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernelName << "(const unsigned int* sortedTokenIds, const unsigned int* runOffsets, const unsigned int* runCounts, ";
     ss << "const unsigned int* numRunRows, const unsigned int* runRowIndices, const " << gradType << "* upstreamGradient";
@@ -862,15 +887,20 @@ std::string emitSparseGradientReduceKernelSource(DataType rowDType,
             if (embeddingDim % 4ULL != 0ULL) {
                 ss << "  const unsigned long long base_" << valueName << " = (" << tokenExpr
                    << ") * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long long>(dimBase);\n";
-                ss << "  float4 " << valueName << " = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
-                ss << "  if (vectorValidLanes > 0U) " << valueName << ".x = thor_embedding_grad_to_float(upstreamGradient[base_"
-                   << valueName << "]);\n";
-                ss << "  if (vectorValidLanes > 1U) " << valueName << ".y = thor_embedding_grad_to_float(upstreamGradient[base_"
-                   << valueName << " + 1ULL]);\n";
-                ss << "  if (vectorValidLanes > 2U) " << valueName << ".z = thor_embedding_grad_to_float(upstreamGradient[base_"
-                   << valueName << " + 2ULL]);\n";
-                ss << "  if (vectorValidLanes > 3U) " << valueName << ".w = thor_embedding_grad_to_float(upstreamGradient[base_"
-                   << valueName << " + 3ULL]);\n";
+                if (gradDType == DataType::FP32) {
+                    ss << "  " << (valueName == "sum" ? "float4 " : "const float4 ") << valueName
+                       << " = thor_embedding_load_float4_masked(upstreamGradient, base_" << valueName << ", vectorValidLanes);\n";
+                } else {
+                    ss << "  float4 " << valueName << " = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+                    ss << "  if (vectorValidLanes > 0U) " << valueName << ".x = thor_embedding_grad_to_float(upstreamGradient[base_"
+                       << valueName << "]);\n";
+                    ss << "  if (vectorValidLanes > 1U) " << valueName << ".y = thor_embedding_grad_to_float(upstreamGradient[base_"
+                       << valueName << " + 1ULL]);\n";
+                    ss << "  if (vectorValidLanes > 2U) " << valueName << ".z = thor_embedding_grad_to_float(upstreamGradient[base_"
+                       << valueName << " + 2ULL]);\n";
+                    ss << "  if (vectorValidLanes > 3U) " << valueName << ".w = thor_embedding_grad_to_float(upstreamGradient[base_"
+                       << valueName << " + 3ULL]);\n";
+                }
                 return;
             }
             if (gradDType == DataType::FP32) {
@@ -996,6 +1026,7 @@ std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
     ss << "__device__ __forceinline__ float4 thor_embedding_add_float4(float4 a, float4 b) {\n";
     ss << "  return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);\n";
     ss << "}\n\n";
+    ss << emitEmbeddingSparseGradientFloat4LoadHelperSource();
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernelName << "(const unsigned int* sortedTokenIds, const unsigned int* runOffsets, const unsigned int* runCounts, ";
     ss << "const unsigned int* numRunRows, const unsigned int* runRowIndices, const " << gradType << "* upstreamGradient";
@@ -1035,11 +1066,15 @@ std::string emitSparseGradientHighRunReduceKernelSource(DataType rowDType,
     if (embeddingDim % 4ULL != 0ULL) {
         ss << "    const unsigned long long base_v = token * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long "
               "long>(dimBase);\n";
-        ss << "    float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
-        ss << "    if (vectorValidLanes > 0U) v.x = thor_embedding_grad_to_float(upstreamGradient[base_v]);\n";
-        ss << "    if (vectorValidLanes > 1U) v.y = thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]);\n";
-        ss << "    if (vectorValidLanes > 2U) v.z = thor_embedding_grad_to_float(upstreamGradient[base_v + 2ULL]);\n";
-        ss << "    if (vectorValidLanes > 3U) v.w = thor_embedding_grad_to_float(upstreamGradient[base_v + 3ULL]);\n";
+        if (gradDType == DataType::FP32) {
+            ss << "    const float4 v = thor_embedding_load_float4_masked(upstreamGradient, base_v, vectorValidLanes);\n";
+        } else {
+            ss << "    float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+            ss << "    if (vectorValidLanes > 0U) v.x = thor_embedding_grad_to_float(upstreamGradient[base_v]);\n";
+            ss << "    if (vectorValidLanes > 1U) v.y = thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]);\n";
+            ss << "    if (vectorValidLanes > 2U) v.z = thor_embedding_grad_to_float(upstreamGradient[base_v + 2ULL]);\n";
+            ss << "    if (vectorValidLanes > 3U) v.w = thor_embedding_grad_to_float(upstreamGradient[base_v + 3ULL]);\n";
+        }
     } else if (gradDType == DataType::FP32) {
         ss << "    const float4* __restrict__ input_v = reinterpret_cast<const float4*>(upstreamGradient + token * embeddingDim);\n";
         ss << "    const float4 v = input_v[globalVectorIndex];\n";
@@ -1129,6 +1164,7 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(
     ss << "__device__ __forceinline__ float4 thor_embedding_add_float4(float4 a, float4 b) {\n";
     ss << "  return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);\n";
     ss << "}\n\n";
+    ss << emitEmbeddingSparseGradientFloat4LoadHelperSource();
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernelName << "(const unsigned int* sortedTokenIds, const unsigned int* runOffsets, const unsigned int* runCounts, ";
     ss << "const unsigned int* numUltraHighPartials, const unsigned int* partialRunRows, ";
@@ -1168,11 +1204,15 @@ std::string emitSparseGradientUltraHighPartialReduceKernelSource(
     if (embeddingDim % 4ULL != 0ULL) {
         ss << "    const unsigned long long base_v = token * static_cast<unsigned long long>(embeddingDim) + static_cast<unsigned long "
               "long>(dimBase);\n";
-        ss << "    float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
-        ss << "    if (vectorValidLanes > 0U) v.x = thor_embedding_grad_to_float(upstreamGradient[base_v]);\n";
-        ss << "    if (vectorValidLanes > 1U) v.y = thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]);\n";
-        ss << "    if (vectorValidLanes > 2U) v.z = thor_embedding_grad_to_float(upstreamGradient[base_v + 2ULL]);\n";
-        ss << "    if (vectorValidLanes > 3U) v.w = thor_embedding_grad_to_float(upstreamGradient[base_v + 3ULL]);\n";
+        if (gradDType == DataType::FP32) {
+            ss << "    const float4 v = thor_embedding_load_float4_masked(upstreamGradient, base_v, vectorValidLanes);\n";
+        } else {
+            ss << "    float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
+            ss << "    if (vectorValidLanes > 0U) v.x = thor_embedding_grad_to_float(upstreamGradient[base_v]);\n";
+            ss << "    if (vectorValidLanes > 1U) v.y = thor_embedding_grad_to_float(upstreamGradient[base_v + 1ULL]);\n";
+            ss << "    if (vectorValidLanes > 2U) v.z = thor_embedding_grad_to_float(upstreamGradient[base_v + 2ULL]);\n";
+            ss << "    if (vectorValidLanes > 3U) v.w = thor_embedding_grad_to_float(upstreamGradient[base_v + 3ULL]);\n";
+        }
     } else if (gradDType == DataType::FP32) {
         ss << "    const float4* __restrict__ input_v = reinterpret_cast<const float4*>(upstreamGradient + token * embeddingDim);\n";
         ss << "    const float4 v = input_v[globalVectorIndex];\n";
@@ -1250,6 +1290,7 @@ std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType
     ss << "__device__ __forceinline__ float4 thor_embedding_add_float4(float4 a, float4 b) {\n";
     ss << "  return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);\n";
     ss << "}\n\n";
+    ss << emitEmbeddingSparseGradientFloat4LoadHelperSource();
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernelName
        << "(const unsigned int* numRunRows, const unsigned int* runRowIndices, const unsigned int* ultraHighRunPartialCounts, ";
@@ -1294,11 +1335,7 @@ std::string emitSparseGradientUltraHighFinalReduceKernelSource(DataType rowDType
     } else {
         ss << "    const unsigned long long base_v = (partialBegin + p) * static_cast<unsigned long long>(embeddingDim) + "
               "static_cast<unsigned long long>(dimBase);\n";
-        ss << "    float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n";
-        ss << "    if (vectorValidLanes > 0U) v.x = partialSums[base_v];\n";
-        ss << "    if (vectorValidLanes > 1U) v.y = partialSums[base_v + 1ULL];\n";
-        ss << "    if (vectorValidLanes > 2U) v.z = partialSums[base_v + 2ULL];\n";
-        ss << "    if (vectorValidLanes > 3U) v.w = partialSums[base_v + 3ULL];\n";
+        ss << "    const float4 v = thor_embedding_load_float4_masked(partialSums, base_v, vectorValidLanes);\n";
     }
     ss << "    sum = thor_embedding_add_float4(sum, v);\n";
     ss << "  }\n";
