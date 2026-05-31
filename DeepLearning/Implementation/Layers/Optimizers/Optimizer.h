@@ -53,18 +53,17 @@ class Optimizer : public Parameterizable {
     [[nodiscard]] virtual bool supportsSparseRowGradients() const { return false; }
 
     // Returns the expression equivalent of this optimizer's sparse-row update over an already-reduced
-    // SparseRowGradient. Optimizers that support sparse rows should build all sparse update math here
-    // instead of open-coding expressions inside compileSparseRows().
+    // SparseRowGradient. Production Embedding requires this fused sparse-row update surface and no longer
+    // falls back to a materialized SparseRowGradient::values optimizer update.
     //
     // The returned expression convention is:
     //   - indexed inputs/outputs are addressed by SparseRowGradient::rows[logical_row]
     //   - dense logical inputs are addressed by logical sparse row
     //   - runtime scalar inputs are supplied by updateSparseRows()
     //
-    // Keeping this optimizer math as an expression is the hook needed for future reducer/optimizer
-    // fusion: an embedding reducer can inline the same expression after computing the local reduced
-    // `gradient` value, avoiding the materialized SparseRowGradient::values round trip without
-    // inventing optimizer-specific CUDA code for every optimizer.
+    // Keeping this optimizer math as an expression lets the embedding reducer inline the same expression
+    // after computing the local reduced `gradient` value, avoiding the materialized SparseRowGradient::values
+    // round trip without inventing optimizer-specific CUDA code for every optimizer.
     [[nodiscard]] virtual SparseRowOptimizerExpression toSparseRowUpdateExpression(const Tensor &weights, SparseRowGradient &sparseRowGradient) {
         (void)weights;
         (void)sparseRowGradient;

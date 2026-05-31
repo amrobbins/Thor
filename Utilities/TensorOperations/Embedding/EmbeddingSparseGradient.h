@@ -129,12 +129,18 @@ bool preparedEmbeddingSparseGradientHasSparseRowUpdate(const PreparedEmbeddingSp
 
 bool preparedEmbeddingSparseGradientUsesTwoStageFinalize(const PreparedEmbeddingSparseGradient& prepared);
 
+// Compatibility-only one-shot graph wrappers for unit tests, microbenchmarks, and migration code.
+// Production Embedding layers must capture and instantiate their sparse-gradient graph once during
+// compileImpl(), then launch the cached CudaGraphExecutable from backward(). These helpers may
+// capture/instantiate on each call and must not be used as a production hot path.
 void launchPreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prepared,
                                            const Tensor& indices,
                                            const Tensor& upstreamGradient,
                                            SparseRowGradient& outputGradient,
                                            Stream stream);
 
+// Compatibility-only one-shot graph wrapper for tests/benchmarks. Production fused sparse-row
+// updates should patch the captured runtime-scalar write node and launch the cached graph executable.
 void launchPreparedEmbeddingSparseGradientWithSparseRowUpdate(PreparedEmbeddingSparseGradient& prepared,
                                                               const Tensor& indices,
                                                               const Tensor& upstreamGradient,
@@ -142,6 +148,8 @@ void launchPreparedEmbeddingSparseGradientWithSparseRowUpdate(PreparedEmbeddingS
                                                               const std::unordered_map<std::string, float>& runtimeScalars,
                                                               Stream stream);
 
+// Compatibility-only helper for tests/benchmarks that launch a prepared graph outside the
+// Embedding layer. Production Embedding uses updateCapturedEmbeddingSparseGradientSparseRowUpdateRuntimeScalars().
 void uploadPreparedEmbeddingSparseGradientSparseRowUpdateRuntimeScalars(
     PreparedEmbeddingSparseGradient& prepared,
     const std::unordered_map<std::string, float>& runtimeScalars,
@@ -158,6 +166,8 @@ CudaGraphExecutable endCaptureAndInstantiatePreparedEmbeddingSparseGradientGraph
     CapturedEmbeddingSparseGradient& captured,
     Stream uploadStream);
 
+// Compatibility profilers for tests and benchmark executables. They are intentionally not the
+// production Embedding execution path.
 EmbeddingSparseGradientProfileResult profilePreparedEmbeddingSparseGradient(PreparedEmbeddingSparseGradient& prepared,
                                                                            const Tensor& indices,
                                                                            const Tensor& upstreamGradient,
