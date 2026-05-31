@@ -448,8 +448,7 @@ ElementDataType *Tensor::getMemPtr() {
         else if (descriptor.getDataType() == DataType::FP64)
             THOR_THROW_IF_FALSE((is_same<BaseT, double>::value));
         else if (is_same<BaseT, char>::value)
-            THOR_THROW_IF_FALSE(descriptor.getDataType() == DataType::UINT8 ||
-                                descriptor.getDataType() == DataType::INT8);
+            THOR_THROW_IF_FALSE(descriptor.getDataType() == DataType::UINT8 || descriptor.getDataType() == DataType::INT8);
         else if (descriptor.getDataType() == DataType::INT8)
             THOR_THROW_IF_FALSE((is_same<BaseT, int8_t>::value));
         else if (descriptor.getDataType() == DataType::INT16)
@@ -479,7 +478,8 @@ ElementDataType *Tensor::getMemPtr() {
         else
             THOR_UNREACHABLE();
     }
-    return reinterpret_cast<ElementDataType *>(dataPointerWithElementOffset(getBaseMemPtr(), descriptor.getDataType(), storageElementOffset));
+    return reinterpret_cast<ElementDataType *>(
+        dataPointerWithElementOffset(getBaseMemPtr(), descriptor.getDataType(), storageElementOffset));
 }
 
 template <typename ElementDataType>
@@ -499,8 +499,7 @@ const ElementDataType *Tensor::getMemPtr() const {
         else if (descriptor.getDataType() == DataType::FP64)
             THOR_THROW_IF_FALSE((is_same<BaseT, double>::value));
         else if (is_same<BaseT, char>::value)
-            THOR_THROW_IF_FALSE(descriptor.getDataType() == DataType::UINT8 ||
-                                descriptor.getDataType() == DataType::INT8);
+            THOR_THROW_IF_FALSE(descriptor.getDataType() == DataType::UINT8 || descriptor.getDataType() == DataType::INT8);
         else if (descriptor.getDataType() == DataType::INT8)
             THOR_THROW_IF_FALSE((is_same<BaseT, int8_t>::value));
         else if (descriptor.getDataType() == DataType::INT16)
@@ -531,7 +530,8 @@ const ElementDataType *Tensor::getMemPtr() const {
             THOR_UNREACHABLE();
     }
 
-    return reinterpret_cast<const ElementDataType *>(dataPointerWithElementOffset(getBaseMemPtr(), descriptor.getDataType(), storageElementOffset));
+    return reinterpret_cast<const ElementDataType *>(
+        dataPointerWithElementOffset(getBaseMemPtr(), descriptor.getDataType(), storageElementOffset));
 }
 
 template <typename ElementDataType>
@@ -1771,43 +1771,6 @@ void Tensor::fill(double value, Stream stream) {
         }
     }
 }
-
-Tensor Tensor::transposeMatrix(Stream stream) {
-    vector<uint64_t> dimensions = getDimensions();
-    // Generally the transpose of a higher order tensor would be any permutation of the tensor's dimensions, in that case the particular
-    // permutation would also need to be specified. I'm not doing that now and unless some need arises I probably won't implement that.
-    THOR_THROW_IF_FALSE(dimensions.size() == 2);
-    vector<uint64_t> transposedDimensions;
-    transposedDimensions.push_back(dimensions[1]);
-    transposedDimensions.push_back(dimensions[0]);
-    Tensor transposedTensor = clone(transposedDimensions);
-
-    if (getDataType() == DataType::FP16) {
-        matrixTranspose((half *)transposedTensor.getMemPtr(), (half *)getMemPtr(), dimensions[0], dimensions[1], stream);
-    } else if (getDataType() == DataType::FP32) {
-        matrixTranspose((float *)transposedTensor.getMemPtr(), (float *)getMemPtr(), dimensions[0], dimensions[1], stream);
-    } else {
-        THOR_UNREACHABLE();  // TODO
-    }
-
-    return transposedTensor;
-}
-
-// void Tensor::transposeSquareMatrixInPlace(Stream stream) {
-//     vector<uint64_t> dimensions = getDimensions();
-//     // Generally the transpose of a higher order tensor would be any permutation of the tensor's dimensions, in that case the particular
-//     // permutation would also need to be specified. I'm not doing that now and unless some need arises I probably won't implement that.
-//     THOR_THROW_IF_FALSE(dimensions.size() == 2);
-//     THOR_THROW_IF_FALSE(dimensions[0] == dimensions[1]);
-//
-//     if (getDataType() == DataType::FP16) {
-//         matrixTransposeSquare((half *)getMemPtr(), (half *)getMemPtr(), dimensions[0], stream);
-//     } else if (getDataType() == DataType::FP32) {
-//         matrixTransposeSquare((float *)getMemPtr(), (float *)getMemPtr(), dimensions[0], stream);
-//     } else {
-//         THOR_UNREACHABLE();  // TODO
-//     }
-// }
 
 template void *Tensor::getMemPtr();
 template half *Tensor::getMemPtr();

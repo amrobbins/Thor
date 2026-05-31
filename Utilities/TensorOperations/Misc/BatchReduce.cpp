@@ -64,8 +64,7 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
 
     workspaceSizeInBytes = computeWorkspaceSizeInBytes(batchletSize, batchSize, classDimSize, sourceDataType, destDataType);
     if (workspaceSizeInBytes > 0)
-        workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
-                           TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
+        workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, 0), TensorDescriptor(DataType::UINT8, {workspaceSizeInBytes}));
 }
 
 bool BatchReduce::isWire() {
@@ -76,11 +75,8 @@ bool BatchReduce::isScalarDivide() {
     return (batchletSize == 1 || !reduceBatch) && (classDimSize == 1 || !reduceClass) && (batchSize != 1 && doBatchSizeDivide);
 }
 
-uint64_t BatchReduce::computeWorkspaceSizeInBytes(uint32_t batchletSize,
-                                                  uint32_t batchSize,
-                                                  uint32_t classDimSize,
-                                                  DataType sourceDataType,
-                                                  DataType destDataType) {
+uint64_t BatchReduce::computeWorkspaceSizeInBytes(
+    uint32_t batchletSize, uint32_t batchSize, uint32_t classDimSize, DataType sourceDataType, DataType destDataType) {
     if (isWire() || isScalarDivide()) {
         workspaceSizeInBytes = 0;
         return workspaceSizeInBytes;
@@ -150,6 +146,7 @@ BatchReduce::~BatchReduce() {
 
 Stream BatchReduce::getStream() { return stream; }
 
+// FIXME: Migrate to Expression
 void BatchReduce::reduce(Tensor source, Tensor dest, bool accumulate) {
     if (isWire()) {
         if (accumulate)
