@@ -907,10 +907,10 @@ TEST(FullyConnectedApi, BackwardNumericalWithSgdUpdate) {
     Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalFc->getErrorOutputs()[0].value(), stream);
     Impl::Tensor weightsAfterHost = copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
     Impl::Tensor biasesAfterHost = copyTensorToCpu(fixture.physicalFc->getParameter("biases")->getStorage().value(), gradientStream);
-    Impl::Tensor weightsGradHost =
-        copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().value(), gradientStream);
-    Impl::Tensor biasesGradHost =
-        copyTensorToCpu(fixture.physicalFc->getParameter("biases")->getOptimizer()->getWeightsGradient().value(), gradientStream);
+    EXPECT_FALSE(fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value())
+        << "Fused FullyConnected CustomLayer update should not allocate a dense weights gradient tensor.";
+    EXPECT_FALSE(fixture.physicalFc->getParameter("biases")->getOptimizer()->getWeightsGradient().has_value())
+        << "Fused FullyConnected CustomLayer update should not allocate a dense biases gradient tensor.";
 
     stream.synchronize();
     gradientStream.synchronize();
@@ -927,8 +927,6 @@ TEST(FullyConnectedApi, BackwardNumericalWithSgdUpdate) {
 
     expectAllClose(actualForward, expectedForward, 1e-5f, 1e-5f, "feature out");
     expectAllClose(readCpuTensor(errorOutputHost), expectedErrorOutput, 1e-5f, 1e-5f, "error out");
-    expectAllClose(readCpuTensor(weightsGradHost), expectedWeightsGrad, 1e-5f, 1e-5f, "weights grad");
-    expectAllClose(readCpuTensor(biasesGradHost), expectedBiasesGrad, 1e-5f, 1e-5f, "biases grad");
     expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 1e-5f, 1e-5f, "weights after");
     expectAllClose(readCpuTensor(biasesAfterHost), expectedBiasesAfter, 1e-5f, 1e-5f, "biases after");
 }
@@ -1141,7 +1139,8 @@ void runFullyConnectedAdamThreePasses(bool hasBias) {
         Stream gradientStream = fixture.physicalFc->getGradientUpdateStream().value();
 
         Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalFc->getErrorOutputs()[0].value(), stream);
-        Impl::Tensor weightsGradHost = copyTensorToCpu(physicalWeightsAdam->getWeightsGradient().value(), gradientStream);
+        EXPECT_FALSE(physicalWeightsAdam->getWeightsGradient().has_value())
+            << "Fused FullyConnected Adam weights update should not allocate a dense gradient tensor.";
         Impl::Tensor weightsAfterHost = copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
         Impl::Tensor weightsMHost = copyTensorToCpu(physicalWeightsAdam->getOptimizerParameterTensor("m"), gradientStream);
         Impl::Tensor weightsVHost = copyTensorToCpu(physicalWeightsAdam->getOptimizerParameterTensor("v"), gradientStream);
@@ -1153,7 +1152,6 @@ void runFullyConnectedAdamThreePasses(bool hasBias) {
 
         expectAllClose(actualFeatureOut, reference.featureOut, 2e-4f, 2e-4f, "feature out");
         expectAllClose(readCpuTensor(errorOutputHost), reference.errorOut, 2e-4f, 2e-4f, "error out");
-        expectAllClose(readCpuTensor(weightsGradHost), reference.weightsGrad, 2e-4f, 2e-4f, "weights grad");
         expectAllClose(readCpuTensor(weightsMHost), reference.weightsM, 2e-4f, 2e-4f, "weights m");
         expectAllClose(readCpuTensor(weightsVHost), reference.weightsV, 2e-4f, 2e-4f, "weights v");
         expectAllClose(readCpuTensor(weightsAfterHost), reference.weightsAfter, 2e-4f, 2e-4f, "weights after");
@@ -1161,7 +1159,8 @@ void runFullyConnectedAdamThreePasses(bool hasBias) {
         if (hasBias) {
             ASSERT_NE(physicalBiasesAdam, nullptr);
 
-            Impl::Tensor biasesGradHost = copyTensorToCpu(physicalBiasesAdam->getWeightsGradient().value(), gradientStream);
+            EXPECT_FALSE(physicalBiasesAdam->getWeightsGradient().has_value())
+                << "Fused FullyConnected Adam biases update should not allocate a dense gradient tensor.";
             Impl::Tensor biasesAfterHost =
                 copyTensorToCpu(fixture.physicalFc->getParameter("biases")->getStorage().value(), gradientStream);
             Impl::Tensor biasesMHost = copyTensorToCpu(physicalBiasesAdam->getOptimizerParameterTensor("m"), gradientStream);
@@ -1169,7 +1168,6 @@ void runFullyConnectedAdamThreePasses(bool hasBias) {
 
             gradientStream.synchronize();
 
-            expectAllClose(readCpuTensor(biasesGradHost), reference.biasesGrad, 2e-4f, 2e-4f, "biases grad");
             expectAllClose(readCpuTensor(biasesMHost), reference.biasesM, 2e-4f, 2e-4f, "biases m");
             expectAllClose(readCpuTensor(biasesVHost), reference.biasesV, 2e-4f, 2e-4f, "biases v");
             expectAllClose(readCpuTensor(biasesAfterHost), reference.biasesAfter, 2e-4f, 2e-4f, "biases after");

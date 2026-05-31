@@ -88,7 +88,7 @@ class PhysicalParameter {
     virtual void compileStorage(const Tensor &inputTensor);
     void compileInitializer(uint64_t fanIn, uint64_t fanOut);
     void compileInitializer();
-    virtual void compileOptimizer(const std::optional<Stream> &gradientUpdateStream, bool inferenceOnly);
+    virtual void compileOptimizer(const std::optional<Stream> &gradientUpdateStream, bool inferenceOnly, bool materializeDenseGradient = true);
 
     virtual void createStorage(const StorageContext &context);
     static Tensor allocateStorage(const TensorPlacement placement,

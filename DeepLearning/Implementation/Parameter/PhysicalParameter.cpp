@@ -23,7 +23,7 @@ void PhysicalParameter::compileStorage(const StorageContext& context) {
 
 void PhysicalParameter::compileStorage(const Tensor& inputTensor) { compileStorage(StorageContext({{"feature_input", inputTensor}})); }
 
-void PhysicalParameter::compileOptimizer(const std::optional<Stream>& gradientUpdateStream, bool inferenceOnly) {
+void PhysicalParameter::compileOptimizer(const std::optional<Stream>& gradientUpdateStream, bool inferenceOnly, bool materializeDenseGradient) {
     THOR_THROW_IF_FALSE(trainable == true);
     this->inferenceOnly = inferenceOnly;
     this->gradientUpdateStream = gradientUpdateStream;
@@ -33,7 +33,7 @@ void PhysicalParameter::compileOptimizer(const std::optional<Stream>& gradientUp
         THOR_THROW_IF_FALSE(this->gradientUpdateStream.has_value());
         THOR_THROW_IF_FALSE(storage.has_value());
         if (!optimizer->isCompiled()) {
-            optimizer->compile(storage.value(), this->gradientUpdateStream.value());
+            optimizer->compile(storage.value(), this->gradientUpdateStream.value(), materializeDenseGradient);
         }
     }
 }

@@ -442,14 +442,10 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoSgdUpdate) {
 
     ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
     ASSERT_TRUE(scale->getStorage().has_value());
-    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+    EXPECT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "Fused CustomLayer optimizer update should not allocate a dense gradient tensor.";
 
     Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
-    Tensor sentinelGrad_h(cpuPlacement, TensorDescriptor(DataType::FP32, {features}));
-    writeCpuTensor(sentinelGrad_h, {123.0f, 124.0f, 125.0f});
-    scale->getOptimizer()->getWeightsGradient().value().copyFromAsync(sentinelGrad_h, gradientUpdateStream);
-    Event sentinelReady = gradientUpdateStream.putEvent();
-    sentinelReady.synchronize();
 
     input.forward(featureIn_h, false, batchSize);
     ASSERT_EQ(sink.forwardCalls, 1);
@@ -467,13 +463,9 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoSgdUpdate) {
 
     Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
     Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
-    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
 
     expectAllClose(readCpuTensor(xGrad_h), {2.0f, 0.0f, -4.0f, 4.0f, 3.0f, 2.0f});
     expectAllClose(readCpuTensor(scaleWeights_h), {-7.0f, -2.0f, 4.0f});
-    // The fused CustomLayer optimizer path consumes the dScale expression directly for the update,
-    // but still materializes the optimizer-owned gradient buffer for public inspection/debug compatibility.
-    expectAllClose(readCpuTensor(scaleGrad_h), {9.0f, 5.0f, 0.0f});
 
     cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
 }
@@ -508,14 +500,10 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoAdamUpdateAcross
 
     ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
     ASSERT_TRUE(scale->getStorage().has_value());
-    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
+    EXPECT_FALSE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "Fused CustomLayer Adam update should not allocate a dense gradient tensor.";
 
     Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
-    Tensor sentinelGrad_h(cpuPlacement, TensorDescriptor(DataType::FP32, {features}));
-    writeCpuTensor(sentinelGrad_h, {77.0f, 78.0f, 79.0f});
-    scale->getOptimizer()->getWeightsGradient().value().copyFromAsync(sentinelGrad_h, gradientUpdateStream);
-    Event sentinelReady = gradientUpdateStream.putEvent();
-    sentinelReady.synchronize();
 
     AdamDenseReferenceState expected{initialScale, std::vector<float>(features, 0.0f), std::vector<float>(features, 0.0f), 0.0f};
 
@@ -553,7 +541,6 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoAdamUpdateAcross
     runPass({-2.0f, 1.0f, 0.5f, 3.0f, -4.0f, 2.0f}, {1.25f, -0.5f, 0.75f, -1.0f, 2.0f, -0.25f}, 2, 2);
 
     Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
-    Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
     Tensor m_h = copyTensorToCpu(adam->getOptimizerParameterTensor("m"), gradientUpdateStream);
     Tensor v_h = copyTensorToCpu(adam->getOptimizerParameterTensor("v"), gradientUpdateStream);
 
@@ -561,9 +548,6 @@ TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoAdamUpdateAcross
     expectAllClose(readCpuTensor(m_h), expected.m, 4e-5f, 4e-5f);
     expectAllClose(readCpuTensor(v_h), expected.v, 4e-5f, 4e-5f);
     EXPECT_FLOAT_EQ(adam->getT(), expected.t);
-    // The fused CustomLayer Adam path consumes dScale directly for the update, but still materializes
-    // the optimizer-owned gradient buffer for public inspection/debug compatibility.
-    expectAllClose(readCpuTensor(scaleGrad_h), {-5.5f, -8.5f, -0.125f});
 
     cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
 }
@@ -585,19 +569,23 @@ TEST(CustomLayer, MultipleApplicationsDoNotUseSingleApplicationOptimizerFusion) 
 
     NetworkInput inputA(gpuPlacement, DataType::FP32, descriptor.getDimensions());
     NetworkInput inputB(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivetA;
+    GradientRivet gradientRivetB;
     CountingPassthrough bridgeA;
     CountingPassthrough bridgeB;
     CustomLayer custom(buildSingleInputScaleExpression(gpuPlacement), {"x"}, {"out"}, gpuPlacement, {scale}, false);
     CountingPassthrough sinkA;
     CountingPassthrough sinkB;
 
-    inputA.connectToNextLayer(&bridgeA);
-    inputB.connectToNextLayer(&bridgeB);
+    inputA.connectToNextLayer(&gradientRivetA);
+    inputB.connectToNextLayer(&gradientRivetB);
+    gradientRivetA.connectToNextLayer(&bridgeA);
+    gradientRivetB.connectToNextLayer(&bridgeB);
     bridgeA.connectToNextLayer(&custom, 0, 0);
     bridgeB.connectToNextLayer(&custom, 0, 1);
     custom.connectToNextLayer(&sinkA, 0, 0);
     custom.connectToNextLayer(&sinkB, 1, 0);
-    compileAndInitialize({&inputA, &inputB, &bridgeA, &bridgeB, &custom, &sinkA, &sinkB});
+    compileAndInitialize({&inputA, &inputB, &gradientRivetA, &gradientRivetB, &bridgeA, &bridgeB, &custom, &sinkA, &sinkB});
 
     ASSERT_TRUE(custom.getGradientUpdateStream().has_value());
     ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value());
@@ -637,7 +625,7 @@ TEST(CustomLayer, MultipleApplicationsDoNotUseSingleApplicationOptimizerFusion) 
     expectAllClose(readCpuTensor(scaleGrad_h), {-0.5f, -5.0f}, 3e-5f, 3e-5f);
     expectAllClose(readCpuTensor(scaleWeights_h), {1.5f, 3.0f}, 3e-5f, 3e-5f);
 
-    cleanupLayers({&inputA, &inputB, &bridgeA, &bridgeB, &custom, &sinkA, &sinkB});
+    cleanupLayers({&inputA, &inputB, &gradientRivetA, &gradientRivetB, &bridgeA, &bridgeB, &custom, &sinkA, &sinkB});
 }
 
 TEST(CustomLayer, MultiInputMultiOutputWaitsForAllInputsAndRoutesByPortIndex) {

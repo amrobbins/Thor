@@ -620,10 +620,10 @@ TEST(Convolution3dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
         fixture.physicalConvolution->backward(errorInput, batchSize);
 
         Impl::Tensor errorOutputHost = copyTensorToCpu(fixture.physicalConvolution->getErrorOutputs()[0].value(), stream);
-        Impl::Tensor weightsGradHost = copyTensorToCpu(
-            fixture.physicalConvolution->getParameter("weights")->getOptimizer()->getWeightsGradient().value(), gradientStream);
-        Impl::Tensor biasesGradHost = copyTensorToCpu(
-            fixture.physicalConvolution->getParameter("biases")->getOptimizer()->getWeightsGradient().value(), gradientStream);
+        EXPECT_FALSE(fixture.physicalConvolution->getParameter("weights")->getOptimizer()->getWeightsGradient().has_value())
+            << "Fused Convolution3d CustomLayer update should not allocate a dense weights gradient tensor.";
+        EXPECT_FALSE(fixture.physicalConvolution->getParameter("biases")->getOptimizer()->getWeightsGradient().has_value())
+            << "Fused Convolution3d CustomLayer update should not allocate a dense biases gradient tensor.";
         Impl::Tensor weightsAfterHost =
             copyTensorToCpu(fixture.physicalConvolution->getParameter("weights")->getStorage().value(), gradientStream);
         Impl::Tensor biasesAfterHost =
@@ -640,8 +640,6 @@ TEST(Convolution3dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
         currentBiases = sgdUpdatedReference(currentBiases, expectedBiasesGrad, batchSize, learningRate);
 
         expectAllClose(readCpuTensor(errorOutputHost), expectedErrorOut, 1e-1f, 1e-1f, "pass " + to_string(pass) + " error out");
-        expectAllClose(readCpuTensor(weightsGradHost), expectedWeightsGrad, 1e-1f, 1e-1f, "pass " + to_string(pass) + " weights grad");
-        expectAllClose(readCpuTensor(biasesGradHost), expectedBiasesGrad, 1e-1f, 1e-1f, "pass " + to_string(pass) + " biases grad");
         expectAllClose(readCpuTensor(weightsAfterHost), currentWeights, 1e-1f, 1e-1f, "pass " + to_string(pass) + " weights after");
         expectAllClose(readCpuTensor(biasesAfterHost), currentBiases, 1e-1f, 1e-1f, "pass " + to_string(pass) + " biases after");
     }
