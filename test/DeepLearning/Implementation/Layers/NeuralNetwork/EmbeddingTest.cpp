@@ -293,6 +293,61 @@ void applyEmbeddingSgdReferencePass(SgdReferenceState& state,
     }
 }
 
+struct AdamReferenceState {
+    std::vector<float> weights;
+    std::vector<float> m;
+    std::vector<float> v;
+    float t = 0.0f;
+};
+
+void applyEmbeddingAdamReferencePass(AdamReferenceState& state,
+                                     const std::vector<uint64_t>& indices,
+                                     const std::vector<float>& upstreamGradient,
+                                     uint64_t vocabularySize,
+                                     uint64_t embeddingDim,
+                                     std::optional<uint64_t> paddingIndex,
+                                     uint32_t batchSize,
+                                     float alpha,
+                                     float beta1,
+                                     float beta2,
+                                     float epsilon) {
+    ASSERT_EQ(state.weights.size(), vocabularySize * embeddingDim);
+    ASSERT_EQ(state.m.size(), state.weights.size());
+    ASSERT_EQ(state.v.size(), state.weights.size());
+    ASSERT_EQ(upstreamGradient.size(), indices.size() * embeddingDim);
+
+    std::vector<float> denseGrad(vocabularySize * embeddingDim, 0.0f);
+    std::vector<bool> touched(vocabularySize, false);
+    for (uint64_t token = 0; token < indices.size(); ++token) {
+        const uint64_t row = indices[token];
+        if (row >= vocabularySize || (paddingIndex.has_value() && row == paddingIndex.value()))
+            continue;
+
+        touched[row] = true;
+        for (uint64_t d = 0; d < embeddingDim; ++d)
+            denseGrad[row * embeddingDim + d] += upstreamGradient[token * embeddingDim + d];
+    }
+
+    state.t += 1.0f;
+    const float invBatchLossScale = 1.0f / (static_cast<float>(batchSize) * Loss::getLossScalingFactor());
+    const float alphaT = static_cast<float>(static_cast<double>(alpha) * std::sqrt(1.0 - std::pow(static_cast<double>(beta2), state.t)) /
+                                            (1.0 - std::pow(static_cast<double>(beta1), state.t)));
+    for (uint64_t row = 0; row < vocabularySize; ++row) {
+        if (!touched[row])
+            continue;
+
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            const uint64_t i = row * embeddingDim + d;
+            const float g = denseGrad[i] * invBatchLossScale;
+            const float mNext = beta1 * state.m[i] + (1.0f - beta1) * g;
+            const float vNext = beta2 * state.v[i] + (1.0f - beta2) * g * g;
+            state.weights[i] -= alphaT * mNext / (std::sqrt(vNext) + epsilon);
+            state.m[i] = mNext;
+            state.v[i] = vNext;
+        }
+    }
+}
+
 std::vector<uint64_t> toUint64(const std::vector<uint32_t>& values) {
     std::vector<uint64_t> out(values.size());
     for (uint64_t i = 0; i < values.size(); ++i)
@@ -305,24 +360,61 @@ struct EmbeddingNetworkFixture {
     std::shared_ptr<Embedding> embedding;
     std::shared_ptr<EmbeddingErrorSink> sink;
     std::shared_ptr<PhysicalParameter> weightsParameter;
-    std::shared_ptr<Sgd> optimizer;
+    std::shared_ptr<Optimizer> optimizer;
 };
 
-EmbeddingNetworkFixture makeEmbeddingNetwork(uint64_t vocabularySize,
-                                             uint64_t embeddingDim,
-                                             const std::vector<uint64_t>& indexDims,
-                                             DataType indexDataType,
-                                             DataType weightsDataType,
-                                             std::optional<uint64_t> paddingIndex,
-                                             float learningRate,
-                                             float decay,
-                                             float momentum,
-                                             bool useNesterovMomentum) {
+class SparseRowGradientOnlyOptimizer final : public Optimizer {
+   public:
+    explicit SparseRowGradientOnlyOptimizer(uint64_t id) : Optimizer(id) {}
+
+    void compile(const Tensor& weights, Stream& gradientUpdateStream) override {
+        (void)weights;
+        (void)gradientUpdateStream;
+        throw std::runtime_error("SparseRowGradientOnlyOptimizer dense compile should not be used by Embedding.");
+    }
+
+    SparseRowGradient compileSparseRows(const Tensor& weights, uint64_t maxSparseRows, Stream& gradientUpdateStream) override {
+        (void)gradientUpdateStream;
+        return SparseRowGradient::allocate(weights.getPlacement(),
+                                           maxSparseRows,
+                                           weights.getDimensions()[0],
+                                           weights.getDimensions()[1],
+                                           DataType::FP32,
+                                           SparseRowGradient::chooseRowDataType(weights.getDimensions()[0]));
+    }
+
+    [[nodiscard]] bool supportsSparseRowGradients() const override { return true; }
+    [[nodiscard]] bool supportsSparseRowUpdateFusion() const override { return false; }
+
+    void updateWeights(uint32_t batchSize) override {
+        (void)batchSize;
+        throw std::runtime_error("SparseRowGradientOnlyOptimizer dense update should not be used by Embedding.");
+    }
+
+    std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) override {
+        (void)epoch;
+        (void)batch;
+        (void)batchesPerEpoch;
+        return {};
+    }
+
+    std::unordered_map<std::string, float> getAllHyperParameters() override { return {}; }
+
+    std::shared_ptr<Optimizer> clone() const override { return std::make_shared<SparseRowGradientOnlyOptimizer>(getId()); }
+};
+
+EmbeddingNetworkFixture makeEmbeddingNetworkWithOptimizer(uint64_t vocabularySize,
+                                                          uint64_t embeddingDim,
+                                                          const std::vector<uint64_t>& indexDims,
+                                                          DataType indexDataType,
+                                                          DataType weightsDataType,
+                                                          std::optional<uint64_t> paddingIndex,
+                                                          std::shared_ptr<Optimizer> optimizer) {
     EmbeddingNetworkFixture f;
     f.input = std::make_shared<NetworkInput>(gpuPlacement, indexDataType, indexDims);
     f.weightsParameter =
         std::make_shared<PhysicalParameter>("weights", true, std::vector<uint64_t>{vocabularySize, embeddingDim}, weightsDataType);
-    f.optimizer = std::make_shared<Sgd>(1001, learningRate, decay, momentum, useNesterovMomentum);
+    f.optimizer = std::move(optimizer);
     f.weightsParameter->setOptimizer(f.optimizer);
     f.embedding = std::make_shared<Embedding>(gpuPlacement,
                                               std::vector<std::shared_ptr<PhysicalParameter>>{f.weightsParameter},
@@ -345,6 +437,25 @@ EmbeddingNetworkFixture makeEmbeddingNetwork(uint64_t vocabularySize,
     f.embedding->initialize();
     f.sink->initialize();
     return f;
+}
+
+EmbeddingNetworkFixture makeEmbeddingNetwork(uint64_t vocabularySize,
+                                             uint64_t embeddingDim,
+                                             const std::vector<uint64_t>& indexDims,
+                                             DataType indexDataType,
+                                             DataType weightsDataType,
+                                             std::optional<uint64_t> paddingIndex,
+                                             float learningRate,
+                                             float decay,
+                                             float momentum,
+                                             bool useNesterovMomentum) {
+    return makeEmbeddingNetworkWithOptimizer(vocabularySize,
+                                             embeddingDim,
+                                             indexDims,
+                                             indexDataType,
+                                             weightsDataType,
+                                             paddingIndex,
+                                             std::make_shared<Sgd>(1001, learningRate, decay, momentum, useNesterovMomentum));
 }
 
 void runEmbeddingTrainingPass(EmbeddingNetworkFixture& f,
@@ -1653,6 +1764,145 @@ TEST(EmbeddingSparseBackwardTest, FusedSparseRowUpdateReducesAndAppliesAdamWitho
                    1e-5f,
                    "fused sparse Adam should not materialize gradient values");
     EXPECT_FLOAT_EQ(adam.getT(), 1.0f);
+}
+
+TEST(EmbeddingSparseBackwardTest, EmbeddingCompileRejectsSparseOptimizerWithoutFusedSparseRowUpdate) {
+    EXPECT_THROW(
+        {
+            EmbeddingNetworkFixture f = makeEmbeddingNetworkWithOptimizer(/*vocabularySize=*/4,
+                                                                          /*embeddingDim=*/8,
+                                                                          /*indexDims=*/{2, 2},
+                                                                          DataType::UINT32,
+                                                                          DataType::FP32,
+                                                                          std::nullopt,
+                                                                          std::make_shared<SparseRowGradientOnlyOptimizer>(7001));
+            (void)f;
+        },
+        std::invalid_argument);
+}
+
+TEST(EmbeddingSparseBackwardTest, EmbeddingCompileRejectsDimensionsBeyondFusedSparseRowUpdateLimit) {
+    constexpr uint64_t unsupportedEmbeddingDim = 1048577ULL;
+    ASSERT_FALSE(supportsEmbeddingSparseGradientFusedSparseRowUpdate(unsupportedEmbeddingDim));
+
+    EXPECT_THROW(
+        {
+            EmbeddingNetworkFixture f = makeEmbeddingNetwork(/*vocabularySize=*/1,
+                                                             unsupportedEmbeddingDim,
+                                                             /*indexDims=*/{1},
+                                                             DataType::UINT32,
+                                                             DataType::FP32,
+                                                             std::nullopt,
+                                                             /*learningRate=*/0.1f,
+                                                             /*decay=*/0.0f,
+                                                             /*momentum=*/0.0f,
+                                                             /*useNesterovMomentum=*/false);
+            (void)f;
+        },
+        std::invalid_argument);
+}
+
+TEST(EmbeddingSparseBackwardTest, EndToEndAdamTwoPassesPatchRuntimeScalarsAndDoNotMaterializeValues) {
+    constexpr uint64_t vocabularySize = 5;
+    constexpr uint64_t embeddingDim = 7;
+    constexpr uint32_t batchSize = 2;
+    constexpr float alpha = 0.03f;
+    constexpr float beta1 = 0.75f;
+    constexpr float beta2 = 0.85f;
+    constexpr float epsilon = 1e-4f;
+    const std::optional<uint64_t> paddingIndex = 0;
+
+    auto adam = std::make_shared<Adam>(8101, alpha, beta1, beta2, epsilon);
+    EmbeddingNetworkFixture f = makeEmbeddingNetworkWithOptimizer(vocabularySize,
+                                                                  embeddingDim,
+                                                                  /*indexDims=*/{batchSize, 3},
+                                                                  DataType::UINT32,
+                                                                  DataType::FP32,
+                                                                  paddingIndex,
+                                                                  adam);
+
+    std::vector<float> initialWeights(vocabularySize * embeddingDim);
+    for (uint64_t row = 0; row < vocabularySize; ++row) {
+        for (uint64_t d = 0; d < embeddingDim; ++d) {
+            initialWeights[row * embeddingDim + d] = static_cast<float>(0.5 + 0.2 * row + 0.01 * d);
+        }
+    }
+
+    Stream stream = f.embedding->getStreams()[0];
+    Tensor weights = f.weightsParameter->getStorage().value();
+    Tensor cpuWeights = makeCpuFloatTensor(DataType::FP32, {vocabularySize, embeddingDim}, initialWeights);
+    copyCpuToExistingGpu(weights, cpuWeights, stream);
+
+    ASSERT_TRUE(adam->getSparseRowGradient().has_value());
+    SparseRowGradient sparseGradient = adam->getSparseRowGradient().value();
+    std::vector<float> sentinelValues(sparseGradient.capacity * embeddingDim, 123.0f);
+    Tensor cpuSentinel = makeCpuFloatTensor(DataType::FP32, {sparseGradient.capacity, embeddingDim}, sentinelValues);
+    Stream gradientStream = f.embedding->getGradientUpdateStream().value();
+    copyCpuToExistingGpu(sparseGradient.values, cpuSentinel, gradientStream);
+
+    struct Pass {
+        std::vector<uint32_t> indices;
+        std::vector<float> upstream;
+    };
+    std::vector<Pass> passes;
+    for (const std::vector<uint32_t>& indices : {std::vector<uint32_t>{2, 0, 2, 4, 1, 2},
+                                                std::vector<uint32_t>{3, 1, 3, 0, 4, 1}}) {
+        Pass pass;
+        pass.indices = indices;
+        pass.upstream.resize(indices.size() * embeddingDim);
+        const uint64_t passIndex = passes.size();
+        for (uint64_t token = 0; token < indices.size(); ++token) {
+            for (uint64_t d = 0; d < embeddingDim; ++d) {
+                pass.upstream[token * embeddingDim + d] =
+                    0.02f * static_cast<float>((passIndex + 2) * (token + 1)) - 0.005f * static_cast<float>(d + 1);
+            }
+        }
+        passes.push_back(std::move(pass));
+    }
+
+    AdamReferenceState expected;
+    expected.weights = initialWeights;
+    expected.m.assign(initialWeights.size(), 0.0f);
+    expected.v.assign(initialWeights.size(), 0.0f);
+
+    for (const Pass& pass : passes) {
+        Tensor cpuIndices = makeCpuUint32Tensor({batchSize, 3}, pass.indices);
+        applyEmbeddingAdamReferencePass(expected,
+                                        toUint64(pass.indices),
+                                        pass.upstream,
+                                        vocabularySize,
+                                        embeddingDim,
+                                        paddingIndex,
+                                        batchSize,
+                                        alpha,
+                                        beta1,
+                                        beta2,
+                                        epsilon);
+        runEmbeddingTrainingPass(f, cpuIndices, pass.upstream, batchSize);
+    }
+
+    expectAllClose(copyGpuFloatTensorToValues(weights, gradientStream), expected.weights, 2e-4f, 2e-4f, "fused sparse Adam weights");
+    expectAllClose(copyGpuFloatTensorToValues(adam->getOptimizerParameterTensor("m"), gradientStream),
+                   expected.m,
+                   2e-5f,
+                   2e-4f,
+                   "fused sparse Adam m");
+    expectAllClose(copyGpuFloatTensorToValues(adam->getOptimizerParameterTensor("v"), gradientStream),
+                   expected.v,
+                   2e-5f,
+                   2e-4f,
+                   "fused sparse Adam v");
+    expectAllClose(copyGpuFloatTensorToValues(sparseGradient.values, gradientStream),
+                   sentinelValues,
+                   1e-5f,
+                   1e-5f,
+                   "end-to-end Adam must not materialize SparseRowGradient::values");
+    EXPECT_FLOAT_EQ(adam->getT(), static_cast<float>(passes.size()));
+
+    EXPECT_EQ(copyGpuRowTensorToUint64Values(sparseGradient.numRows, gradientStream)[0], 3u);
+    std::vector<uint64_t> sparseRows = copyGpuRowTensorToUint64Values(sparseGradient.rows, gradientStream);
+    sparseRows.resize(3);
+    EXPECT_EQ(sparseRows, (std::vector<uint64_t>{1, 3, 4}));
 }
 
 TEST(EmbeddingSparseBackwardTest, EndToEndPlainSgdUpdatesDuplicateRowsAndSkipsPaddingRow) {

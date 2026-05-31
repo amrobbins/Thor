@@ -141,42 +141,39 @@ void Embedding::compileImpl() {
 
                 const Tensor storage = parameter->getStorage().value();
                 const uint64_t maxSparseRows = std::min<uint64_t>(aFeatureInput.value().getTotalNumElements(), vocabularySize);
+                if (!optimizer->supportsSparseRowUpdateFusion()) {
+                    throw std::invalid_argument(
+                        "Embedding production training requires an optimizer with fused sparse-row update support. The legacy "
+                        "materialized SparseRowGradient update path has been removed from Embedding.");
+                }
+                if (!supportsEmbeddingSparseGradientFusedSparseRowUpdate(embeddingDim)) {
+                    throw std::invalid_argument(
+                        "Embedding production training requires fused sparse-row update support for embedding_dim=" +
+                        std::to_string(embeddingDim) + ". The legacy materialized SparseRowGradient update path has been removed from "
+                        "Embedding.");
+                }
+
                 weightsSparseGradient = optimizer->compileSparseRows(storage, maxSparseRows, gradientUpdateStream.value());
                 THOR_THROW_IF_FALSE(weightsSparseGradient.has_value());
-                weightsSparseGradientProducerFusesOptimizerUpdate =
-                    optimizer->supportsSparseRowUpdateFusion() && supportsEmbeddingSparseGradientFusedSparseRowUpdate(embeddingDim);
-                if (weightsSparseGradientProducerFusesOptimizerUpdate) {
-                    SparseRowOptimizerExpression updateExpression =
-                        optimizer->toSparseRowUpdateExpression(storage, weightsSparseGradient.value());
-                    weightsSparseGradientProducer = prepareEmbeddingSparseGradientWithSparseRowUpdate(aFeatureInput.value(),
-                                                                                                      aErrorInput.value(),
-                                                                                                      weightsSparseGradient.value(),
-                                                                                                      updateExpression.outputs,
-                                                                                                      updateExpression.inputs,
-                                                                                                      updateExpression.indexedOutputs,
-                                                                                                      paddingIndex);
-                } else {
-                    weightsSparseGradientProducer = prepareEmbeddingSparseGradient(
-                        aFeatureInput.value(), aErrorInput.value(), weightsSparseGradient.value(), paddingIndex);
-                }
+
+                SparseRowOptimizerExpression updateExpression =
+                    optimizer->toSparseRowUpdateExpression(storage, weightsSparseGradient.value());
+                weightsSparseGradientProducer = prepareEmbeddingSparseGradientWithSparseRowUpdate(aFeatureInput.value(),
+                                                                                                  aErrorInput.value(),
+                                                                                                  weightsSparseGradient.value(),
+                                                                                                  updateExpression.outputs,
+                                                                                                  updateExpression.inputs,
+                                                                                                  updateExpression.indexedOutputs,
+                                                                                                  paddingIndex);
 
                 weightsSparseGradientCapturedGraph.emplace(placement.getDeviceNum());
                 CudaGraphCaptureBuilder builder(gradientUpdateStream.value());
-                if (weightsSparseGradientProducerFusesOptimizerUpdate) {
-                    capturePreparedEmbeddingSparseGradientWithSparseRowUpdateRuntimeScalarStorage(builder,
-                                                                                                  *weightsSparseGradientProducer,
-                                                                                                  aFeatureInput.value(),
-                                                                                                  aErrorInput.value(),
-                                                                                                  weightsSparseGradient.value(),
-                                                                                                  weightsSparseGradientCapturedGraph.value());
-                } else {
-                    capturePreparedEmbeddingSparseGradient(builder,
-                                                           *weightsSparseGradientProducer,
-                                                           aFeatureInput.value(),
-                                                           aErrorInput.value(),
-                                                           weightsSparseGradient.value(),
-                                                           weightsSparseGradientCapturedGraph.value());
-                }
+                capturePreparedEmbeddingSparseGradientWithSparseRowUpdateRuntimeScalarStorage(builder,
+                                                                                              *weightsSparseGradientProducer,
+                                                                                              aFeatureInput.value(),
+                                                                                              aErrorInput.value(),
+                                                                                              weightsSparseGradient.value(),
+                                                                                              weightsSparseGradientCapturedGraph.value());
                 weightsSparseGradientGraphExecutable.emplace(
                     endCaptureAndInstantiatePreparedEmbeddingSparseGradientGraph(builder,
                                                                                  weightsSparseGradientCapturedGraph.value(),
@@ -247,14 +244,12 @@ void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
         THOR_THROW_IF_FALSE(weightsSparseGradient.has_value());
         THOR_THROW_IF_FALSE(weightsSparseGradientProducer != nullptr);
         THOR_THROW_IF_FALSE(weightsSparseGradientGraphExecutable.has_value());
-        if (weightsSparseGradientProducerFusesOptimizerUpdate) {
-            THOR_THROW_IF_FALSE(weightsSparseGradientCapturedGraph.has_value());
-            updateCapturedEmbeddingSparseGradientSparseRowUpdateRuntimeScalars(
-                *weightsSparseGradientProducer,
-                weightsSparseGradientCapturedGraph.value(),
-                weightsSparseGradientGraphExecutable.value(),
-                parameters[0]->getOptimizer()->sparseRowUpdateRuntimeScalars(batchSize * numBackwardConnections));
-        }
+        THOR_THROW_IF_FALSE(weightsSparseGradientCapturedGraph.has_value());
+        updateCapturedEmbeddingSparseGradientSparseRowUpdateRuntimeScalars(
+            *weightsSparseGradientProducer,
+            weightsSparseGradientCapturedGraph.value(),
+            weightsSparseGradientGraphExecutable.value(),
+            parameters[0]->getOptimizer()->sparseRowUpdateRuntimeScalars(batchSize * numBackwardConnections));
         weightsSparseGradientGraphExecutable->launch(gradientUpdateStream.value());
     }
 
@@ -269,9 +264,6 @@ void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
     if (gradientComplete) {
         weightsAreUpToDateEvent.reset();
         if (!isInferenceOnly() && gradientUpdateStream.has_value() && parameters[0]->isTrainingEnabled()) {
-            if (!weightsSparseGradientProducerFusesOptimizerUpdate) {
-                parameters[0]->getOptimizer()->updateSparseRows(batchSize * numBackwardConnections);
-            }
             weightsAreUpToDateEvent = gradientUpdateStream.value().putEvent();
         }
         isStartOfForward = true;
