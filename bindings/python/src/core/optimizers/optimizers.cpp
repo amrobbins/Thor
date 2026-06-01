@@ -5,6 +5,7 @@ namespace nb = nanobind;
 
 void bind_sgd(nb::module_ &optimizers);
 void bind_adam(nb::module_ &optimizers);
+void bind_adamw(nb::module_ &optimizers);
 
 void bind_optimizers(nb::module_ &optimizers) {
     optimizers.doc() = "Thor optimizers";
@@ -14,4 +15,5 @@ void bind_optimizers(nb::module_ &optimizers) {
 
     bind_sgd(optimizers);
     bind_adam(optimizers);
+    bind_adamw(optimizers);
 }
