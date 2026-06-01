@@ -7,6 +7,7 @@ void bind_sgd(nb::module_ &optimizers);
 void bind_adam(nb::module_ &optimizers);
 void bind_adamw(nb::module_ &optimizers);
 void bind_adamax(nb::module_ &optimizers);
+void bind_nadam(nb::module_ &optimizers);
 void bind_adagrad(nb::module_ &optimizers);
 void bind_rmsprop(nb::module_ &optimizers);
 void bind_lamb(nb::module_ &optimizers);
@@ -22,6 +23,7 @@ void bind_optimizers(nb::module_ &optimizers) {
     bind_adam(optimizers);
     bind_adamw(optimizers);
     bind_adamax(optimizers);
+    bind_nadam(optimizers);
     bind_adagrad(optimizers);
     bind_rmsprop(optimizers);
     bind_lamb(optimizers);

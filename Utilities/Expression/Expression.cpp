@@ -113,6 +113,24 @@ std::string exprOpExternalName(ExprOp op) {
             return "div";
         case ExprOp::POW:
             return "pow";
+        case ExprOp::EQUAL:
+            return "equal";
+        case ExprOp::NOT_EQUAL:
+            return "not_equal";
+        case ExprOp::LESS:
+            return "less";
+        case ExprOp::LESS_EQUAL:
+            return "less_equal";
+        case ExprOp::GREATER:
+            return "greater";
+        case ExprOp::GREATER_EQUAL:
+            return "greater_equal";
+        case ExprOp::LOGICAL_AND:
+            return "logical_and";
+        case ExprOp::LOGICAL_OR:
+            return "logical_or";
+        case ExprOp::LOGICAL_NOT:
+            return "logical_not";
         case ExprOp::NEG:
             return "neg";
         case ExprOp::ABS:
@@ -285,6 +303,28 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"mul", ExprOp::MUL},
         {"div", ExprOp::DIV},
         {"pow", ExprOp::POW},
+        {"equal", ExprOp::EQUAL},
+        {"eq", ExprOp::EQUAL},
+        {"not_equal", ExprOp::NOT_EQUAL},
+        {"ne", ExprOp::NOT_EQUAL},
+        {"less", ExprOp::LESS},
+        {"less_than", ExprOp::LESS},
+        {"lt", ExprOp::LESS},
+        {"less_equal", ExprOp::LESS_EQUAL},
+        {"less_than_or_equal", ExprOp::LESS_EQUAL},
+        {"le", ExprOp::LESS_EQUAL},
+        {"greater", ExprOp::GREATER},
+        {"greater_than", ExprOp::GREATER},
+        {"gt", ExprOp::GREATER},
+        {"greater_equal", ExprOp::GREATER_EQUAL},
+        {"greater_than_or_equal", ExprOp::GREATER_EQUAL},
+        {"ge", ExprOp::GREATER_EQUAL},
+        {"logical_and", ExprOp::LOGICAL_AND},
+        {"and", ExprOp::LOGICAL_AND},
+        {"logical_or", ExprOp::LOGICAL_OR},
+        {"or", ExprOp::LOGICAL_OR},
+        {"logical_not", ExprOp::LOGICAL_NOT},
+        {"not", ExprOp::LOGICAL_NOT},
         {"neg", ExprOp::NEG},
         {"abs", ExprOp::ABS},
         {"ceil", ExprOp::CEIL},
@@ -685,7 +725,10 @@ std::string formatFloatCanonical(double x) {
     return ss.str();
 }
 
-bool isCommutative(ExprOp op) { return op == ExprOp::ADD || op == ExprOp::MUL || op == ExprOp::MIN || op == ExprOp::MAX; }
+bool isCommutative(ExprOp op) {
+    return op == ExprOp::ADD || op == ExprOp::MUL || op == ExprOp::MIN || op == ExprOp::MAX || op == ExprOp::EQUAL ||
+           op == ExprOp::NOT_EQUAL || op == ExprOp::LOGICAL_AND || op == ExprOp::LOGICAL_OR;
+}
 
 std::string opName(ExprOp op) {
     switch (op) {
@@ -707,6 +750,24 @@ std::string opName(ExprOp op) {
             return "DIV";
         case ExprOp::POW:
             return "POW";
+        case ExprOp::EQUAL:
+            return "EQ";
+        case ExprOp::NOT_EQUAL:
+            return "NE";
+        case ExprOp::LESS:
+            return "LT";
+        case ExprOp::LESS_EQUAL:
+            return "LE";
+        case ExprOp::GREATER:
+            return "GT";
+        case ExprOp::GREATER_EQUAL:
+            return "GE";
+        case ExprOp::LOGICAL_AND:
+            return "LAND";
+        case ExprOp::LOGICAL_OR:
+            return "LOR";
+        case ExprOp::LOGICAL_NOT:
+            return "LNOT";
         case ExprOp::NEG:
             return "NEG";
         case ExprOp::ABS:
@@ -979,6 +1040,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::SQRT:
         case ExprOp::TANH:
         case ExprOp::NORMCDF:
+        case ExprOp::LOGICAL_NOT:
         case ExprOp::TRANSPOSE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ")";
             break;
@@ -1053,6 +1115,14 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::MUL:
         case ExprOp::DIV:
         case ExprOp::POW:
+        case ExprOp::EQUAL:
+        case ExprOp::NOT_EQUAL:
+        case ExprOp::LESS:
+        case ExprOp::LESS_EQUAL:
+        case ExprOp::GREATER:
+        case ExprOp::GREATER_EQUAL:
+        case ExprOp::LOGICAL_AND:
+        case ExprOp::LOGICAL_OR:
         case ExprOp::MIN:
         case ExprOp::MAX:
         case ExprOp::MIN_GRAD_LEFT:
@@ -1865,6 +1935,7 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::SQRT:
         case ExprOp::TANH:
         case ExprOp::NORMCDF:
+        case ExprOp::LOGICAL_NOT:
         case ExprOp::ROPE:
         case ExprOp::SOFTMAX:
         case ExprOp::TRANSPOSE:
@@ -1895,6 +1966,14 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::MUL:
         case ExprOp::DIV:
         case ExprOp::POW:
+        case ExprOp::EQUAL:
+        case ExprOp::NOT_EQUAL:
+        case ExprOp::LESS:
+        case ExprOp::LESS_EQUAL:
+        case ExprOp::GREATER:
+        case ExprOp::GREATER_EQUAL:
+        case ExprOp::LOGICAL_AND:
+        case ExprOp::LOGICAL_OR:
         case ExprOp::MIN:
         case ExprOp::MAX:
         case ExprOp::MIN_GRAD_LEFT:
@@ -2797,6 +2876,14 @@ static bool isTransposePushThroughBinaryOp(ExprOp op) {
         case ExprOp::MUL:
         case ExprOp::DIV:
         case ExprOp::POW:
+        case ExprOp::EQUAL:
+        case ExprOp::NOT_EQUAL:
+        case ExprOp::LESS:
+        case ExprOp::LESS_EQUAL:
+        case ExprOp::GREATER:
+        case ExprOp::GREATER_EQUAL:
+        case ExprOp::LOGICAL_AND:
+        case ExprOp::LOGICAL_OR:
         case ExprOp::MIN:
         case ExprOp::MAX:
             return true;
@@ -2931,7 +3018,32 @@ Expression Expression::operator+(const Expression& other) const { return binaryO
 Expression Expression::operator-(const Expression& other) const { return binaryOp(*this, other, ExprOp::SUB); }
 Expression Expression::operator*(const Expression& other) const { return binaryOp(*this, other, ExprOp::MUL); }
 Expression Expression::operator/(const Expression& other) const { return binaryOp(*this, other, ExprOp::DIV); }
+Expression Expression::operator==(const Expression& other) const { return equal(other); }
+Expression Expression::operator!=(const Expression& other) const { return notEqual(other); }
+Expression Expression::operator<(const Expression& other) const { return lessThan(other); }
+Expression Expression::operator<=(const Expression& other) const { return lessEqual(other); }
+Expression Expression::operator>(const Expression& other) const { return greaterThan(other); }
+Expression Expression::operator>=(const Expression& other) const { return greaterEqual(other); }
 Expression Expression::operator-() const { return unaryOp(*this, ExprOp::NEG); }
+Expression Expression::operator!() const { return logicalNot(); }
+Expression Expression::equal(const Expression& other) const { return binaryOp(*this, other, ExprOp::EQUAL); }
+Expression Expression::notEqual(const Expression& other) const { return binaryOp(*this, other, ExprOp::NOT_EQUAL); }
+Expression Expression::lessThan(const Expression& other) const { return binaryOp(*this, other, ExprOp::LESS); }
+Expression Expression::lessEqual(const Expression& other) const { return binaryOp(*this, other, ExprOp::LESS_EQUAL); }
+Expression Expression::greaterThan(const Expression& other) const { return binaryOp(*this, other, ExprOp::GREATER); }
+Expression Expression::greaterEqual(const Expression& other) const { return binaryOp(*this, other, ExprOp::GREATER_EQUAL); }
+Expression Expression::logicalAnd(const Expression& other) const { return binaryOp(*this, other, ExprOp::LOGICAL_AND); }
+Expression Expression::logicalOr(const Expression& other) const { return binaryOp(*this, other, ExprOp::LOGICAL_OR); }
+Expression Expression::logicalNot() const { return unaryOp(*this, ExprOp::LOGICAL_NOT); }
+Expression Expression::equal(const Expression& lhs, const Expression& rhs) { return lhs.equal(rhs); }
+Expression Expression::notEqual(const Expression& lhs, const Expression& rhs) { return lhs.notEqual(rhs); }
+Expression Expression::lessThan(const Expression& lhs, const Expression& rhs) { return lhs.lessThan(rhs); }
+Expression Expression::lessEqual(const Expression& lhs, const Expression& rhs) { return lhs.lessEqual(rhs); }
+Expression Expression::greaterThan(const Expression& lhs, const Expression& rhs) { return lhs.greaterThan(rhs); }
+Expression Expression::greaterEqual(const Expression& lhs, const Expression& rhs) { return lhs.greaterEqual(rhs); }
+Expression Expression::logicalAnd(const Expression& lhs, const Expression& rhs) { return lhs.logicalAnd(rhs); }
+Expression Expression::logicalOr(const Expression& lhs, const Expression& rhs) { return lhs.logicalOr(rhs); }
+Expression Expression::logicalNot(const Expression& input) { return input.logicalNot(); }
 Expression Expression::abs() const { return unaryOp(*this, ExprOp::ABS); }
 Expression Expression::ceil() const { return unaryOp(*this, ExprOp::CEIL); }
 Expression Expression::floor() const { return unaryOp(*this, ExprOp::FLOOR); }

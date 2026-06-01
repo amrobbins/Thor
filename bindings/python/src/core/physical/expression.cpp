@@ -674,12 +674,33 @@ Create a floating-point scalar constant expression.
     expr.def("__mul__", [](const Expression& a, const Expression& b) { return a * b; }, "other"_a);
     expr.def("__truediv__", [](const Expression& a, const Expression& b) { return a / b; }, "other"_a);
     expr.def("__pow__", [](const Expression& a, const Expression& b) { return a.pow(b); });
+    expr.def("__eq__", [](const Expression& a, const Expression& b) { return a.equal(b); }, "other"_a);
+    expr.def("__ne__", [](const Expression& a, const Expression& b) { return a.notEqual(b); }, "other"_a);
+    expr.def("__lt__", [](const Expression& a, const Expression& b) { return a.lessThan(b); }, "other"_a);
+    expr.def("__le__", [](const Expression& a, const Expression& b) { return a.lessEqual(b); }, "other"_a);
+    expr.def("__gt__", [](const Expression& a, const Expression& b) { return a.greaterThan(b); }, "other"_a);
+    expr.def("__ge__", [](const Expression& a, const Expression& b) { return a.greaterEqual(b); }, "other"_a);
+    expr.def("__and__", [](const Expression& a, const Expression& b) { return a.logicalAnd(b); }, "other"_a);
+    expr.def("__or__", [](const Expression& a, const Expression& b) { return a.logicalOr(b); }, "other"_a);
+    expr.def("__invert__", [](const Expression& a) { return a.logicalNot(); });
+
+    expr.def("equal", [](const Expression& a, const Expression& b) { return a.equal(b); }, "other"_a);
+    expr.def("not_equal", [](const Expression& a, const Expression& b) { return a.notEqual(b); }, "other"_a);
+    expr.def("less_than", [](const Expression& a, const Expression& b) { return a.lessThan(b); }, "other"_a);
+    expr.def("less_equal", [](const Expression& a, const Expression& b) { return a.lessEqual(b); }, "other"_a);
+    expr.def("greater_than", [](const Expression& a, const Expression& b) { return a.greaterThan(b); }, "other"_a);
+    expr.def("greater_equal", [](const Expression& a, const Expression& b) { return a.greaterEqual(b); }, "other"_a);
+    expr.def("logical_and", [](const Expression& a, const Expression& b) { return a.logicalAnd(b); }, "other"_a);
+    expr.def("logical_or", [](const Expression& a, const Expression& b) { return a.logicalOr(b); }, "other"_a);
+    expr.def("logical_not", [](const Expression& a) { return a.logicalNot(); });
 
     expr.def("__radd__", [](const Expression& a, const Expression& b) { return b + a; }, "other"_a);
     expr.def("__rsub__", [](const Expression& a, const Expression& b) { return b - a; }, "other"_a);
     expr.def("__rmul__", [](const Expression& a, const Expression& b) { return b * a; }, "other"_a);
     expr.def("__rtruediv__", [](const Expression& a, const Expression& b) { return b / a; }, "other"_a);
     expr.def("__rpow__", [](const Expression& a, const Expression& b) { return b.pow(a); }, "other"_a);
+    expr.def("__rand__", [](const Expression& a, const Expression& b) { return b.logicalAnd(a); }, "other"_a);
+    expr.def("__ror__", [](const Expression& a, const Expression& b) { return b.logicalOr(a); }, "other"_a);
     expr.def("__matmul__", [](const Expression& a, const Expression& b) { return Expression::matmul(a, b); }, "other"_a);
     expr.def("__rmatmul__", [](const Expression& a, const Expression& b) { return Expression::matmul(b, a); }, "other"_a);
     expr.def("__imatmul__", [](const Expression& a, const Expression& b) { return Expression::matmul(a, b); }, "other"_a);

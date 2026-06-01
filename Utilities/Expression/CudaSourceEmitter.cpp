@@ -291,6 +291,16 @@ static std::string scalarStorageType(DataType dtype) {
             return "long long";
         case DataType::UINT64:
             return "unsigned long long";
+        case DataType::BOOLEAN:
+            return "unsigned char";
+        case DataType::UINT8:
+            return "unsigned char";
+        case DataType::INT8:
+            return "signed char";
+        case DataType::UINT16:
+            return "unsigned short";
+        case DataType::INT16:
+            return "short";
         default:
             throw runtime_error("Unsupported scalar storage dtype in fused stage emitter: " + TensorDescriptor::getElementTypeName(dtype));
     }
@@ -311,6 +321,13 @@ static uint32_t scalarStorageTypeSizeBytes(DataType dtype) {
         case DataType::INT64:
         case DataType::UINT64:
             return 8;
+        case DataType::BOOLEAN:
+        case DataType::UINT8:
+        case DataType::INT8:
+            return 1;
+        case DataType::UINT16:
+        case DataType::INT16:
+            return 2;
         default:
             throw runtime_error("Unsupported scalar storage dtype size in transpose emitter: " +
                                 TensorDescriptor::getElementTypeName(dtype));
@@ -1046,6 +1063,13 @@ static uint32_t dataTypeStorageBytes(DataType dtype) {
         case DataType::INT64:
         case DataType::UINT64:
             return 8;
+        case DataType::BOOLEAN:
+        case DataType::UINT8:
+        case DataType::INT8:
+            return 1;
+        case DataType::UINT16:
+        case DataType::INT16:
+            return 2;
         default:
             throw runtime_error("Unsupported dtype in dataTypeStorageBytes: " + TensorDescriptor::getElementTypeName(dtype));
     }
@@ -1138,6 +1162,17 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
                 case DataType::FP8_E4M3:
                 case DataType::FP8_E5M2:
                     return "float(half(" + expr + "))";
+                case DataType::BOOLEAN:
+                    return "(" + expr + " ? 1.0f : 0.0f)";
+                case DataType::UINT8:
+                case DataType::INT8:
+                case DataType::UINT16:
+                case DataType::INT16:
+                case DataType::UINT32:
+                case DataType::INT32:
+                case DataType::UINT64:
+                case DataType::INT64:
+                    return "float(" + expr + ")";
                 default:
                     break;
             }
@@ -1145,6 +1180,8 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
 
         case DataType::FP16:
             switch (src_dtype) {
+                case DataType::BOOLEAN:
+                    return "half((" + expr + ") ? 1.0f : 0.0f)";
                 case DataType::FP32:
                     return "half(" + expr + ")";
                 case DataType::FP16:
@@ -1161,6 +1198,8 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
 
         case DataType::BF16:
             switch (src_dtype) {
+                case DataType::BOOLEAN:
+                    return "__nv_bfloat16((" + expr + ") ? 1.0f : 0.0f)";
                 case DataType::FP32:
                     return "__nv_bfloat16(" + expr + ")";
                 case DataType::FP16:
@@ -1204,6 +1243,29 @@ static std::string castScalarExpr(const std::string& expr, DataType src_dtype, D
                     return "__nv_fp8_e5m2(half(" + expr + "))";
                 case DataType::FP8_E5M2:
                     return expr;
+                default:
+                    break;
+            }
+            break;
+
+        case DataType::BOOLEAN:
+            switch (src_dtype) {
+                case DataType::BOOLEAN:
+                    return expr;
+                case DataType::FP32:
+                case DataType::FP16:
+                case DataType::BF16:
+                case DataType::FP8_E4M3:
+                case DataType::FP8_E5M2:
+                case DataType::UINT8:
+                case DataType::INT8:
+                case DataType::UINT16:
+                case DataType::INT16:
+                case DataType::UINT32:
+                case DataType::INT32:
+                case DataType::UINT64:
+                case DataType::INT64:
+                    return "((" + castScalarExpr(expr, src_dtype, DataType::FP32) + ") != 0.0f)";
                 default:
                     break;
             }
@@ -1320,6 +1382,12 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
             const std::string x_h = castScalarExpr(x, compute_dtype, DataType::FP16);
             return castScalarExpr("half(normcdff(float(" + x_h + ")))", DataType::FP16, compute_dtype);
         }
+        case ExprOp::LOGICAL_NOT:
+            if (compute_dtype == DataType::BOOLEAN) {
+                return "(!" + x + ")";
+            }
+            return "!(" + x_f + " != 0.0f)";
+
         case ExprOp::RESHAPE:
         case ExprOp::STRIDED_VIEW:
         case ExprOp::UNSQUEEZE:
@@ -1368,6 +1436,29 @@ static std::string emitBinaryComputeExpr(ExprOp op, const std::string& a, const 
 
         case ExprOp::MAX:
             return castScalarExpr("fmaxf(" + a_f + ", " + b_f + ")", DataType::FP32, compute_dtype);
+
+        case ExprOp::EQUAL:
+            return "(" + a_f + " == " + b_f + ")";
+        case ExprOp::NOT_EQUAL:
+            return "(" + a_f + " != " + b_f + ")";
+        case ExprOp::LESS:
+            return "(" + a_f + " < " + b_f + ")";
+        case ExprOp::LESS_EQUAL:
+            return "(" + a_f + " <= " + b_f + ")";
+        case ExprOp::GREATER:
+            return "(" + a_f + " > " + b_f + ")";
+        case ExprOp::GREATER_EQUAL:
+            return "(" + a_f + " >= " + b_f + ")";
+        case ExprOp::LOGICAL_AND:
+            if (compute_dtype == DataType::BOOLEAN) {
+                return "(" + a + " && " + b + ")";
+            }
+            return "((" + a_f + " != 0.0f) && (" + b_f + " != 0.0f))";
+        case ExprOp::LOGICAL_OR:
+            if (compute_dtype == DataType::BOOLEAN) {
+                return "(" + a + " || " + b + ")";
+            }
+            return "((" + a_f + " != 0.0f) || (" + b_f + " != 0.0f))";
 
         case ExprOp::MIN_GRAD_LEFT:
             return castScalarExpr(

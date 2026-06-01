@@ -62,9 +62,15 @@ static size_t dataTypeSizeBytes(DataType dtype) {
             return 1;
         case DataType::FP8_E5M2:
             return 1;
+        case DataType::BOOLEAN:
+            return 1;
         case DataType::UINT8:
             return 1;
+        case DataType::INT8:
+            return 1;
         case DataType::UINT16:
+            return 2;
+        case DataType::INT16:
             return 2;
         case DataType::UINT32:
             return 4;
@@ -1017,6 +1023,14 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::MUL:
             case ExprOp::DIV:
             case ExprOp::POW:
+            case ExprOp::EQUAL:
+            case ExprOp::NOT_EQUAL:
+            case ExprOp::LESS:
+            case ExprOp::LESS_EQUAL:
+            case ExprOp::GREATER:
+            case ExprOp::GREATER_EQUAL:
+            case ExprOp::LOGICAL_AND:
+            case ExprOp::LOGICAL_OR:
             case ExprOp::MIN:
             case ExprOp::MAX:
             case ExprOp::MIN_GRAD_LEFT:
@@ -1350,6 +1364,14 @@ static bool sameSubexpressionForMatmulEpilogue(const PhysicalExpression& expr,
         case ExprOp::SUB:
         case ExprOp::MUL:
         case ExprOp::DIV:
+        case ExprOp::EQUAL:
+        case ExprOp::NOT_EQUAL:
+        case ExprOp::LESS:
+        case ExprOp::LESS_EQUAL:
+        case ExprOp::GREATER:
+        case ExprOp::GREATER_EQUAL:
+        case ExprOp::LOGICAL_AND:
+        case ExprOp::LOGICAL_OR:
         case ExprOp::MIN:
         case ExprOp::MAX:
             return sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
@@ -2804,6 +2826,14 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::MUL:
             case ExprOp::DIV:
             case ExprOp::POW:
+            case ExprOp::EQUAL:
+            case ExprOp::NOT_EQUAL:
+            case ExprOp::LESS:
+            case ExprOp::LESS_EQUAL:
+            case ExprOp::GREATER:
+            case ExprOp::GREATER_EQUAL:
+            case ExprOp::LOGICAL_AND:
+            case ExprOp::LOGICAL_OR:
             case ExprOp::MIN:
             case ExprOp::MAX:
             case ExprOp::MIN_GRAD_LEFT:
@@ -3075,6 +3105,15 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::MIN_GRAD_RIGHT:
         case ExprOp::MAX_GRAD_LEFT:
         case ExprOp::MAX_GRAD_RIGHT:
+        case ExprOp::EQUAL:
+        case ExprOp::NOT_EQUAL:
+        case ExprOp::LESS:
+        case ExprOp::LESS_EQUAL:
+        case ExprOp::GREATER:
+        case ExprOp::GREATER_EQUAL:
+        case ExprOp::LOGICAL_AND:
+        case ExprOp::LOGICAL_OR:
+        case ExprOp::LOGICAL_NOT:
             return 1;
 
         case ExprOp::POW:
@@ -3160,6 +3199,14 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::MUL:
             case ExprOp::DIV:
             case ExprOp::POW:
+            case ExprOp::EQUAL:
+            case ExprOp::NOT_EQUAL:
+            case ExprOp::LESS:
+            case ExprOp::LESS_EQUAL:
+            case ExprOp::GREATER:
+            case ExprOp::GREATER_EQUAL:
+            case ExprOp::LOGICAL_AND:
+            case ExprOp::LOGICAL_OR:
             case ExprOp::MIN:
             case ExprOp::MAX:
             case ExprOp::MIN_GRAD_LEFT:
@@ -3364,6 +3411,14 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::MUL:
             case ExprOp::DIV:
             case ExprOp::POW:
+            case ExprOp::EQUAL:
+            case ExprOp::NOT_EQUAL:
+            case ExprOp::LESS:
+            case ExprOp::LESS_EQUAL:
+            case ExprOp::GREATER:
+            case ExprOp::GREATER_EQUAL:
+            case ExprOp::LOGICAL_AND:
+            case ExprOp::LOGICAL_OR:
             case ExprOp::NEG:
             case ExprOp::ABS:
             case ExprOp::CEIL:
@@ -3400,6 +3455,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::LOGICAL_NOT:
             case ExprOp::ROPE:
             case ExprOp::MIN:
             case ExprOp::MAX:
@@ -4127,6 +4183,7 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::TANH:
         case ExprOp::NORMCDF:
         case ExprOp::ROPE:
+        case ExprOp::LOGICAL_NOT:
         case ExprOp::REDUCE_SUM:
         case ExprOp::REDUCE_PROD:
         case ExprOp::REDUCE_MIN:
@@ -4147,7 +4204,15 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::MIN_GRAD_LEFT:
         case ExprOp::MIN_GRAD_RIGHT:
         case ExprOp::MAX_GRAD_LEFT:
-        case ExprOp::MAX_GRAD_RIGHT: {
+        case ExprOp::MAX_GRAD_RIGHT:
+        case ExprOp::EQUAL:
+        case ExprOp::NOT_EQUAL:
+        case ExprOp::LESS:
+        case ExprOp::LESS_EQUAL:
+        case ExprOp::GREATER:
+        case ExprOp::GREATER_EQUAL:
+        case ExprOp::LOGICAL_AND:
+        case ExprOp::LOGICAL_OR: {
             auto lhs_map = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
             auto rhs_map = collectEffectiveInputDimsForNode(expr, node_dims, node.rhs);
             mergeEffectiveInputDimsMaps(lhs_map, rhs_map);
