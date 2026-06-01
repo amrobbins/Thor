@@ -134,6 +134,6 @@ With Nesterov momentum and decay::
 See Also
 --------
 Adam : Adaptive Moment Estimation optimizer.
-RmsProp : RMSProp optimizer.
+RMSprop : RMSprop optimizer.
 )doc";
 }

@@ -16,9 +16,9 @@ void Parameterizable::addParameter(const shared_ptr<PhysicalParameter> &paramete
     parameters.push_back(parameter);
 }
 
-bool Parameterizable::hasParameter(const std::string &name) { return parameterIndexByName.contains(name); }
+bool Parameterizable::hasParameter(const std::string &name) const { return parameterIndexByName.contains(name); }
 
-shared_ptr<PhysicalParameter> Parameterizable::getParameter(const string &name) {
+shared_ptr<PhysicalParameter> Parameterizable::getParameter(const string &name) const {
     auto it = parameterIndexByName.find(name);
     if (it == parameterIndexByName.end())
         throw runtime_error("Parameter " + name + " is not a parameter of the parameterizable layer.");
@@ -43,21 +43,21 @@ void Parameterizable::dropParameter(const std::string &name) {
     parameterIndexByName.erase(name);
 }
 
-Tensor Parameterizable::getParameterStorage(const string &name) {
+Tensor Parameterizable::getParameterStorage(const string &name) const {
     auto it = parameterIndexByName.find(name);
     if (it == parameterIndexByName.end())
         throw runtime_error("Parameter " + name + " is not a parameter of the parameterizable layer.");
     return parameters[it->second]->getStorage().value();
 }
 
-unordered_map<string, shared_ptr<PhysicalParameter>> Parameterizable::getParameters() {
+unordered_map<string, shared_ptr<PhysicalParameter>> Parameterizable::getParameters() const {
     std::unordered_map<std::string, std::shared_ptr<PhysicalParameter>> allParams;
     for (const auto &parameter : parameters)
         allParams[parameter->getName()] = parameter;
     return allParams;
 }
 
-vector<string> Parameterizable::listParameters() {
+vector<string> Parameterizable::listParameters() const {
     vector<string> names;
     for (const auto &param : parameters) {
         names.push_back(param->getName());

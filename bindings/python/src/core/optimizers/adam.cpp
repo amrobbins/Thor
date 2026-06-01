@@ -71,7 +71,7 @@ void bind_adam(nb::module_ &optimizers) {
 ADAM optimizer (Adaptive Moment Estimation).
 
 Adam is an adaptive learning-rate optimizer that combines ideas from momentum and
-RMSProp by maintaining exponentially decayed moving averages of the gradient
+RMSprop by maintaining exponentially decayed moving averages of the gradient
 (first moment) and of the squared gradient (second moment). These moment estimates
 are bias-corrected and used to scale the parameter update for each parameter individually.
 
@@ -129,6 +129,6 @@ Custom hyperparameters::
 See Also
 --------
 Sgd : Stochastic Gradient Descent optimizer (optionally with momentum / Nesterov).
-RmsProp : RMSProp optimizer.
+RMSprop : RMSprop optimizer.
 )doc";
 }
