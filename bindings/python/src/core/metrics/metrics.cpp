@@ -6,6 +6,7 @@ namespace nb = nanobind;
 
 void bind_binary_accuracy(nb::module_ &metrics);
 void bind_categorical_accuracy(nb::module_ &metrics);
+void bind_custom_metric(nb::module_ &metrics);
 
 void bind_metrics(nb::module_ &metrics) {
     metrics.doc() = "Thor metrics";
@@ -15,4 +16,5 @@ void bind_metrics(nb::module_ &metrics) {
 
     bind_binary_accuracy(metrics);
     bind_categorical_accuracy(metrics);
+    bind_custom_metric(metrics);
 }
