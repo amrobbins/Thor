@@ -102,22 +102,22 @@ class Adam::Builder {
         this->_network = &_network;
         return *this;
     }
-    virtual Adam::Builder alpha(float _alpha) {
+    virtual Adam::Builder &alpha(float _alpha) {
         THOR_THROW_IF_FALSE(!this->_alpha.has_value());
         this->_alpha = _alpha;
         return *this;
     }
-    virtual Adam::Builder beta1(float _beta1) {
+    virtual Adam::Builder &beta1(float _beta1) {
         THOR_THROW_IF_FALSE(!this->_beta1.has_value());
         this->_beta1 = _beta1;
         return *this;
     }
-    virtual Adam::Builder beta2(float _beta2) {
+    virtual Adam::Builder &beta2(float _beta2) {
         THOR_THROW_IF_FALSE(!this->_beta2.has_value());
         this->_beta2 = _beta2;
         return *this;
     }
-    virtual Adam::Builder epsilon(float _epsilon) {
+    virtual Adam::Builder &epsilon(float _epsilon) {
         THOR_THROW_IF_FALSE(!this->_epsilon.has_value());
         this->_epsilon = _epsilon;
         return *this;

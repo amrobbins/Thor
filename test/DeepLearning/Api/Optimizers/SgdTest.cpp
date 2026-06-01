@@ -162,10 +162,10 @@ void runSgdStep(Impl::Sgd& sgd, const std::vector<float>& rawGradient, uint32_t 
     stream.synchronize();
 }
 
-Impl::Tensor getMomentumStorage(Impl::Sgd& sgd) {
-    EXPECT_TRUE(sgd.hasParameter("momentum"));
+Impl::Tensor getVelocityStorage(Impl::Sgd& sgd) {
+    EXPECT_TRUE(sgd.hasParameter("velocity"));
 
-    std::optional<Impl::Tensor> storage = sgd.getParameter("momentum")->getStorage();
+    std::optional<Impl::Tensor> storage = sgd.getParameter("velocity")->getStorage();
     EXPECT_TRUE(storage.has_value());
 
     return storage.value();
@@ -238,7 +238,7 @@ TEST(SgdApi, BuilderCustomValuesStampAndCompilePhysicalSgdWithoutMomentum) {
     EXPECT_FLOAT_EQ(physicalSgd->getDecay(), decay);
     EXPECT_FLOAT_EQ(physicalSgd->getMomentum(), momentum);
     EXPECT_EQ(physicalSgd->getUseNesterovMomentum(), useNesterovMomentum);
-    EXPECT_FALSE(physicalSgd->hasParameter("momentum"));
+    EXPECT_FALSE(physicalSgd->hasParameter("velocity"));
 
     std::optional<Impl::Tensor> gradient = physicalSgd->getWeightsGradient();
     ASSERT_TRUE(gradient.has_value());
@@ -254,12 +254,13 @@ TEST(SgdApi, BuilderCustomValuesStampAndCompilePhysicalSgdWithoutMomentum) {
     EXPECT_EQ(names, (std::set<std::string>{"weights"}));
 
     std::unordered_map<std::string, float> params = physicalSgd->getAllHyperParameters();
-    ASSERT_EQ(params.size(), 5u);
+    ASSERT_EQ(params.size(), 6u);
     expectHyperParameter(params, "currentLearningRate", initialLearningRate);
     expectHyperParameter(params, "initialLearningRate", initialLearningRate);
     expectHyperParameter(params, "decay", decay);
     expectHyperParameter(params, "momentum", momentum);
     expectHyperParameter(params, "useNesterovMomentum", 0.0f);
+    expectHyperParameter(params, "epoch", 0.0f);
 }
 
 TEST(SgdApi, BuilderCustomValuesStampAndCompilePhysicalSgdWithMomentum) {
@@ -290,10 +291,10 @@ TEST(SgdApi, BuilderCustomValuesStampAndCompilePhysicalSgdWithMomentum) {
     EXPECT_FLOAT_EQ(physicalSgd->getDecay(), decay);
     EXPECT_FLOAT_EQ(physicalSgd->getMomentum(), momentum);
     EXPECT_EQ(physicalSgd->getUseNesterovMomentum(), useNesterovMomentum);
-    EXPECT_TRUE(physicalSgd->hasParameter("momentum"));
+    EXPECT_TRUE(physicalSgd->hasParameter("velocity"));
 
     Impl::Tensor velocity = physicalSgd->getOptimizerParameterTensor("velocity");
-    Impl::Tensor momentumStorage = getMomentumStorage(*physicalSgd);
+    Impl::Tensor momentumStorage = getVelocityStorage(*physicalSgd);
     EXPECT_EQ(velocity, momentumStorage);
     EXPECT_EQ(momentumStorage.getPlacement(), gpuPlacement);
     EXPECT_EQ(momentumStorage.getDataType(), DataType::FP32);
@@ -305,12 +306,13 @@ TEST(SgdApi, BuilderCustomValuesStampAndCompilePhysicalSgdWithMomentum) {
     EXPECT_EQ(names, (std::set<std::string>{"weights", "velocity"}));
 
     std::unordered_map<std::string, float> params = physicalSgd->getAllHyperParameters();
-    ASSERT_EQ(params.size(), 5u);
+    ASSERT_EQ(params.size(), 6u);
     expectHyperParameter(params, "currentLearningRate", initialLearningRate);
     expectHyperParameter(params, "initialLearningRate", initialLearningRate);
     expectHyperParameter(params, "decay", decay);
     expectHyperParameter(params, "momentum", momentum);
     expectHyperParameter(params, "useNesterovMomentum", 1.0f);
+    expectHyperParameter(params, "epoch", 0.0f);
 }
 
 TEST(SgdApi, StampedPhysicalPlainSgdStepMatchesCpuReference) {

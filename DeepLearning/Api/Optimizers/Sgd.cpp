@@ -1,7 +1,9 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+
 #include <optional>
+#include <stdexcept>
 
 using namespace std;
 using json = nlohmann::json;
@@ -15,6 +17,7 @@ Sgd::Sgd(uint64_t originalId) : Optimizer(originalId) {}
 // Sgd::~Sgd() {}
 
 shared_ptr<ThorImplementation::Optimizer> Sgd::stamp(shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) {
+    (void)trainableLayer;
     return make_shared<ThorImplementation::Sgd>(getId(), initialLearningRate, decay, momentum, useNesterovMomentum, startResumeEpoch);
 }
 
@@ -29,7 +32,8 @@ shared_ptr<Optimizer> Sgd::clone() const { return make_shared<Sgd>(*this); }
  * decay will still apply from epoch 0.
  */
 void Sgd::setDecay(float newDecay, PlacedNetwork *placedNetwork) {
-    THOR_THROW_IF_FALSE(decay < 1.0);
+    THOR_THROW_IF_FALSE(newDecay <= 1.0f);
+    THOR_THROW_IF_FALSE(newDecay >= 0.0f);
 
     decay = newDecay;
     if (placedNetwork != nullptr)
@@ -48,7 +52,7 @@ void Sgd::setInitialLearningRate(float newInitialLearningRate, PlacedNetwork *pl
 }
 
 void Sgd::setMomentum(float newMomentum, PlacedNetwork *placedNetwork) {
-    THOR_THROW_IF_FALSE(momentum >= 0.0f);
+    THOR_THROW_IF_FALSE(newMomentum >= 0.0f);
 
     momentum = newMomentum;
     if (placedNetwork != nullptr)
@@ -62,26 +66,8 @@ void Sgd::setUseNesterovMomentum(bool newUseNesterovMomentum, PlacedNetwork *pla
 }
 
 void Sgd::updateParameters(PlacedNetwork *placedNetwork) {
-    // FIXME: re-implement
-    // THOR_THROW_IF_FALSE(placedNetwork != nullptr);
-    // uint32_t numStamps = placedNetwork->getNumStamps();
-    // for (uint32_t i = 0; i < numStamps; ++i) {
-    //     ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
-    //     uint32_t numTrainableLayers = stampedNetwork.getNumTrainableLayers();
-    //     for (uint32_t j = 0; j < numTrainableLayers; ++j) {
-    //         shared_ptr<ThorImplementation::TrainableLayer> &trainableLayer = stampedNetwork.getTrainableLayer(j);
-    //         std::optional<shared_ptr<ThorImplementation::Optimizer>> maybePhysicalOptimizer = trainableLayer->getOptimizer();
-    //         THOR_THROW_IF_FALSE(maybePhysicalOptimizer.has_value());
-    //         shared_ptr<ThorImplementation::Optimizer> optimizer = maybePhysicalOptimizer.value();
-    //         shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
-    //         if (physicalSgd == nullptr || physicalSgd->getId() != getId())
-    //             continue;
-    //         physicalSgd->setInitialLearningRate(initialLearningRate);
-    //         physicalSgd->setDecay(decay);
-    //         physicalSgd->setMomentum(momentum);
-    //         physicalSgd->setUseNesterovMomentum(useNesterovMomentum);
-    //     }
-    // }
+    // FIXME: re-implement after the current per-parameter optimizer pattern is centralized.
+    (void)placedNetwork;
 }
 
 float Sgd::getInitialLearningRate() { return initialLearningRate; }
@@ -107,7 +93,7 @@ json Sgd::architectureJson() const {
     j["decay"] = decay;
     j["momentum"] = momentum;
     j["use_nesterov"] = useNesterovMomentum;
-    j["epoch"] = 0;
+    j["epoch"] = startResumeEpoch;
 
     return j;
 }
@@ -117,6 +103,10 @@ json Sgd::serialize(thor_file::TarWriter &archiveWriter,
                     shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
                     std::string filenamePrefix,
                     bool saveOptimizerState) const {
+    (void)archiveWriter;
+    (void)stream;
+    (void)filenamePrefix;
+
     json j = architectureJson();
     if (saveOptimizerState) {
         THOR_THROW_IF_FALSE(physicalOptimizer != nullptr);
@@ -128,6 +118,8 @@ json Sgd::serialize(thor_file::TarWriter &archiveWriter,
 }
 
 shared_ptr<Optimizer> Sgd::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
+    (void)archiveReader;
+    (void)network;
     if (j.at("optimizer_type").get<string>() != "sgd")
         throw runtime_error("Layer type mismatch in Sgd::deserialize: " + j.at("type").get<string>());
     if (j.at("version").get<string>() != "1.0.0")
@@ -138,8 +130,8 @@ shared_ptr<Optimizer> Sgd::deserialize(shared_ptr<thor_file::TarReader> &archive
     float initialLearningRate = j.at("initial_learning_rate").get<float>();
     float decay = j.at("decay").get<float>();
     float momentum = j.at("momentum").get<float>();
-    float useNesterov = j.at("use_nesterov").get<float>();
-    float epoch = j.at("epoch").get<float>();
+    bool useNesterov = j.at("use_nesterov").get<bool>();
+    uint64_t epoch = j.at("epoch").get<uint64_t>();
 
     Sgd sgd(originalId);
     sgd.originalId = originalId;

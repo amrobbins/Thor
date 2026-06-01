@@ -2,6 +2,7 @@
 #include "Utilities/Expression/AutoDiff.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/NewtonSchulzOrthogonalization.h"
 
 #include "cuda_runtime.h"
 
@@ -9,10 +10,12 @@
 
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -1572,4 +1575,190 @@ TEST(ExpressionGammaFunctionOps, DigammaProducesNanAtNonpositiveIntegerPoles) {
     for (float value : values) {
         EXPECT_TRUE(std::isnan(value));
     }
+}
+
+namespace {
+
+std::vector<double> matmulCpu(const std::vector<double>& a,
+                              uint64_t a_rows,
+                              uint64_t a_cols,
+                              const std::vector<double>& b,
+                              uint64_t b_rows,
+                              uint64_t b_cols) {
+    if (a_cols != b_rows) {
+        throw std::runtime_error("matmulCpu dimension mismatch.");
+    }
+    std::vector<double> out(a_rows * b_cols, 0.0);
+    for (uint64_t i = 0; i < a_rows; ++i) {
+        for (uint64_t k = 0; k < a_cols; ++k) {
+            const double av = a[i * a_cols + k];
+            for (uint64_t j = 0; j < b_cols; ++j) {
+                out[i * b_cols + j] += av * b[k * b_cols + j];
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<double> transposeCpu(const std::vector<double>& x, uint64_t rows, uint64_t cols) {
+    std::vector<double> out(rows * cols);
+    for (uint64_t i = 0; i < rows; ++i) {
+        for (uint64_t j = 0; j < cols; ++j) {
+            out[j * rows + i] = x[i * cols + j];
+        }
+    }
+    return out;
+}
+
+std::vector<double> newtonSchulzCpu(const std::vector<float>& input,
+                                    uint64_t numRows,
+                                    uint64_t numCols,
+                                    NewtonSchulzOrthogonalizationOptions options) {
+    std::vector<double> x(input.begin(), input.end());
+    if (options.transposeTallMatrices && numRows > numCols) {
+        x = transposeCpu(x, numRows, numCols);
+        std::swap(numRows, numCols);
+    }
+
+    double sumSquares = 0.0;
+    for (double v : x) {
+        sumSquares += v * v;
+    }
+    const double invNorm = 1.0 / (std::sqrt(sumSquares) + options.epsilon);
+    for (double& v : x) {
+        v *= invNorm;
+    }
+
+    for (uint32_t step = 0; step < options.numIterations; ++step) {
+        if (numRows <= numCols) {
+            const auto xT = transposeCpu(x, numRows, numCols);
+            const auto gram = matmulCpu(x, numRows, numCols, xT, numCols, numRows);
+            const auto gram2 = matmulCpu(gram, numRows, numRows, gram, numRows, numRows);
+            std::vector<double> polynomial(numRows * numRows);
+            for (size_t i = 0; i < polynomial.size(); ++i) {
+                polynomial[i] = options.coefficientB * gram[i] + options.coefficientC * gram2[i];
+            }
+            const auto polynomialX = matmulCpu(polynomial, numRows, numRows, x, numRows, numCols);
+            for (size_t i = 0; i < x.size(); ++i) {
+                x[i] = options.coefficientA * x[i] + polynomialX[i];
+            }
+        } else {
+            const auto xT = transposeCpu(x, numRows, numCols);
+            const auto gram = matmulCpu(xT, numCols, numRows, x, numRows, numCols);
+            const auto gram2 = matmulCpu(gram, numCols, numCols, gram, numCols, numCols);
+            std::vector<double> polynomial(numCols * numCols);
+            for (size_t i = 0; i < polynomial.size(); ++i) {
+                polynomial[i] = options.coefficientB * gram[i] + options.coefficientC * gram2[i];
+            }
+            const auto xPolynomial = matmulCpu(x, numRows, numCols, polynomial, numCols, numCols);
+            for (size_t i = 0; i < x.size(); ++i) {
+                x[i] = options.coefficientA * x[i] + xPolynomial[i];
+            }
+        }
+    }
+
+    return x;
+}
+
+std::vector<double> newtonSchulzCpuOriginalShape(const std::vector<float>& input,
+                                                 uint64_t numRows,
+                                                 uint64_t numCols,
+                                                 NewtonSchulzOrthogonalizationOptions options) {
+    const bool transposed = options.transposeTallMatrices && numRows > numCols;
+    auto out = newtonSchulzCpu(input, numRows, numCols, options);
+    if (transposed) {
+        out = transposeCpu(out, numCols, numRows);
+    }
+    return out;
+}
+
+std::vector<float> toFloatValues(const std::vector<double>& values) {
+    std::vector<float> out;
+    out.reserve(values.size());
+    for (double value : values) {
+        out.push_back(static_cast<float>(value));
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST(NewtonSchulzOrthogonalization, RejectsInvalidOptions) {
+    auto x = Expression::input("x");
+    EXPECT_THROW((void)newtonSchulzOrthogonalize(x, 0, 4), std::logic_error);
+    EXPECT_THROW((void)newtonSchulzOrthogonalize(x, 4, 0), std::logic_error);
+
+    NewtonSchulzOrthogonalizationOptions options;
+    options.epsilon = 0.0;
+    EXPECT_THROW((void)newtonSchulzOrthogonalize(x, 4, 4, options), std::logic_error);
+
+    options.epsilon = 1.0e-8;
+    options.coefficientA = std::numeric_limits<double>::infinity();
+    EXPECT_THROW((void)newtonSchulzOrthogonalize(x, 4, 4, options), std::logic_error);
+}
+
+TEST(NewtonSchulzOrthogonalization, WideMatrixMatchesCpuReference) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    constexpr uint64_t rows = 2;
+    constexpr uint64_t cols = 4;
+    const std::vector<float> inputValues = {
+        0.8f, -0.4f, 1.2f, 0.5f,
+        -1.1f, 0.3f, 0.7f, -0.9f,
+    };
+    Tensor x = makeGpuTensor({rows, cols}, inputValues, stream);
+
+    NewtonSchulzOrthogonalizationOptions options;
+    options.numIterations = 3;
+    auto expressionOutputs = Expression::outputs({{"y", newtonSchulzOrthogonalize(Expression::input("x"), rows, cols, options)}});
+    Tensor y = runExpressionOutput(expressionOutputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{rows, cols}));
+    expectNear(copyToCpuValues(y, stream), toFloatValues(newtonSchulzCpuOriginalShape(inputValues, rows, cols, options)), 2.0e-4f);
+}
+
+TEST(NewtonSchulzOrthogonalization, TallMatrixTransposePathMatchesCpuReference) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    constexpr uint64_t rows = 4;
+    constexpr uint64_t cols = 2;
+    const std::vector<float> inputValues = {
+        0.8f, -0.4f,
+        1.2f, 0.5f,
+        -1.1f, 0.3f,
+        0.7f, -0.9f,
+    };
+    Tensor x = makeGpuTensor({rows, cols}, inputValues, stream);
+
+    NewtonSchulzOrthogonalizationOptions options;
+    options.numIterations = 3;
+    options.transposeTallMatrices = true;
+    auto expressionOutputs = Expression::outputs({{"y", newtonSchulzOrthogonalize(Expression::input("x"), rows, cols, options)}});
+    Tensor y = runExpressionOutput(expressionOutputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{rows, cols}));
+    expectNear(copyToCpuValues(y, stream), toFloatValues(newtonSchulzCpuOriginalShape(inputValues, rows, cols, options)), 2.0e-4f);
+}
+
+TEST(NewtonSchulzOrthogonalization, TallMatrixRightPolynomialPathMatchesCpuReference) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    constexpr uint64_t rows = 4;
+    constexpr uint64_t cols = 2;
+    const std::vector<float> inputValues = {
+        0.8f, -0.4f,
+        1.2f, 0.5f,
+        -1.1f, 0.3f,
+        0.7f, -0.9f,
+    };
+    Tensor x = makeGpuTensor({rows, cols}, inputValues, stream);
+
+    NewtonSchulzOrthogonalizationOptions options;
+    options.numIterations = 3;
+    options.transposeTallMatrices = false;
+    auto expressionOutputs = Expression::outputs({{"y", newtonSchulzOrthogonalize(Expression::input("x"), rows, cols, options)}});
+    Tensor y = runExpressionOutput(expressionOutputs, {{"x", x}}, "y", stream);
+
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{rows, cols}));
+    expectNear(copyToCpuValues(y, stream), toFloatValues(newtonSchulzCpuOriginalShape(inputValues, rows, cols, options)), 2.0e-4f);
 }

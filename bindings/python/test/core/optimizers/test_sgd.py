@@ -36,7 +36,9 @@ def test_sgd_constructs_custom_params():
 def test_sgd_allows_decay_endpoints():
     n = _net()
     assert isinstance(thor.optimizers.Sgd(decay=0.0), thor.optimizers.Sgd)
-    assert isinstance(thor.optimizers.Sgd(network=n, decay=1.0), thor.optimizers.Sgd)
+    assert isinstance(thor.optimizers.Sgd(network=n, decay=0.95), thor.optimizers.Sgd)
+    with pytest.raises(ValueError, match=r"0 <= decay < 1"):
+        thor.optimizers.Sgd(network=n, decay=1.0)
 
 
 def test_sgd_rejects_non_positive_initial_learning_rate():
@@ -50,10 +52,10 @@ def test_sgd_rejects_non_positive_initial_learning_rate():
 
 def test_sgd_rejects_decay_out_of_range():
     n = _net()
-    with pytest.raises(ValueError, match=r"0 <= decay <= 1"):
+    with pytest.raises(ValueError, match=r"0 <= decay < 1"):
         thor.optimizers.Sgd(network=n, decay=-0.01)
 
-    with pytest.raises(ValueError, match=r"0 <= decay <= 1"):
+    with pytest.raises(ValueError, match=r"0 <= decay < 1"):
         thor.optimizers.Sgd(network=n, decay=1.01)
 
 

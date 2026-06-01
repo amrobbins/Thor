@@ -62,17 +62,25 @@ std::vector<uint64_t> stateShapeForWeights(const CustomOptimizerStateSpec& spec,
     return spec.shape.value_or(weights.getDimensions());
 }
 
+DataType stateDTypeForWeights(const CustomOptimizerStateSpec& spec, const Tensor& weights) {
+    return spec.useWeightsDType ? weights.getDescriptor().getDataType() : spec.dtype;
+}
+
 }  // namespace
 
 CustomOptimizer::CustomOptimizer(uint64_t id,
                                  std::vector<CustomOptimizerStateSpec> stateSpecs,
                                  UpdateExpressionBuilder updateExpressionBuilder,
                                  RuntimeScalarBuilder runtimeScalarBuilder,
-                                 bool supportsSparseRowGradients)
+                                 bool supportsSparseRowGradients,
+                                 HyperParameterUpdateBuilder hyperParameterUpdateBuilder,
+                                 HyperParameterSnapshotBuilder hyperParameterSnapshotBuilder)
     : Optimizer(id),
       stateSpecs_(std::move(stateSpecs)),
       updateExpressionBuilder_(std::move(updateExpressionBuilder)),
       runtimeScalarBuilder_(std::move(runtimeScalarBuilder)),
+      hyperParameterUpdateBuilder_(std::move(hyperParameterUpdateBuilder)),
+      hyperParameterSnapshotBuilder_(std::move(hyperParameterSnapshotBuilder)),
       supportsSparseRowGradients_(supportsSparseRowGradients) {
     if (!updateExpressionBuilder_) {
         throw std::invalid_argument("CustomOptimizer requires an update expression builder.");
@@ -110,8 +118,9 @@ void CustomOptimizer::ensureStateParameters(const Tensor& weights) {
 
     for (const CustomOptimizerStateSpec& spec : stateSpecs_) {
         const std::vector<uint64_t> stateShape = stateShapeForWeights(spec, weights);
+        const DataType stateDType = stateDTypeForWeights(spec, weights);
         if (!hasParameter(spec.name)) {
-            auto parameter = std::make_shared<PhysicalParameter>(spec.name, false, stateShape, spec.dtype);
+            auto parameter = std::make_shared<PhysicalParameter>(spec.name, false, stateShape, stateDType);
             auto initializer = std::make_shared<ZerosInitializer>();
             parameter->setInitializer(initializer->clone());
             addParameter(parameter);
@@ -134,7 +143,7 @@ void CustomOptimizer::ensureStateParameters(const Tensor& weights) {
         if (storage.getDimensions() != stateShape) {
             throw std::runtime_error("CustomOptimizer state '" + spec.name + "' storage shape does not match the requested shape.");
         }
-        if (storage.getDataType() != spec.dtype) {
+        if (storage.getDataType() != stateDType) {
             throw std::runtime_error("CustomOptimizer state '" + spec.name + "' storage dtype does not match the requested dtype.");
         }
     }
@@ -388,12 +397,17 @@ void CustomOptimizer::updateSparseRows(uint32_t batchSize) {
 std::unordered_map<std::string, float> CustomOptimizer::updateHyperParameters(uint64_t epoch,
                                                                               uint64_t batch,
                                                                               uint64_t batchesPerEpoch) {
-    (void)epoch;
-    (void)batch;
-    (void)batchesPerEpoch;
-    return {};
+    if (!hyperParameterUpdateBuilder_) {
+        return {};
+    }
+    return hyperParameterUpdateBuilder_(epoch, batch, batchesPerEpoch);
 }
 
-std::unordered_map<std::string, float> CustomOptimizer::getAllHyperParameters() { return {}; }
+std::unordered_map<std::string, float> CustomOptimizer::getAllHyperParameters() {
+    if (!hyperParameterSnapshotBuilder_) {
+        return {};
+    }
+    return hyperParameterSnapshotBuilder_();
+}
 
 }  // namespace ThorImplementation
