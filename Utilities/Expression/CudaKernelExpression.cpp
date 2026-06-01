@@ -494,9 +494,7 @@ CudaKernelExpression::Builder& CudaKernelExpression::Builder::hostRuntimeScalarI
     return *this;
 }
 
-CudaKernelExpression::Builder& CudaKernelExpression::Builder::output(std::string name,
-                                                                     DataType dtype,
-                                                                     std::vector<DimExpr> shape) {
+CudaKernelExpression::Builder& CudaKernelExpression::Builder::output(std::string name, DataType dtype, std::vector<DimExpr> shape) {
     validateName(name, "output");
     if (shape.empty()) {
         throw std::invalid_argument("CudaKernelExpression output '" + name +
@@ -506,9 +504,7 @@ CudaKernelExpression::Builder& CudaKernelExpression::Builder::output(std::string
     return *this;
 }
 
-CudaKernelExpression::Builder& CudaKernelExpression::Builder::outputLike(std::string name,
-                                                                         DataType dtype,
-                                                                         const std::string& input_name) {
+CudaKernelExpression::Builder& CudaKernelExpression::Builder::outputLike(std::string name, DataType dtype, const std::string& input_name) {
     validateName(name, "output");
     validateName(input_name, "input");
     outputs_.push_back(OutputParamSpec{std::move(name), dtype, {}, input_name});
@@ -643,7 +639,9 @@ std::string CudaKernelExpression::cacheSignature() const {
     return oss.str();
 }
 
-std::string cudaKernelExpressionCompiledSourceForInspection(const std::string& user_source) { return customKernelCompiledSource(user_source); }
+std::string cudaKernelExpressionCompiledSourceForInspection(const std::string& user_source) {
+    return customKernelCompiledSource(user_source);
+}
 
 std::string CudaKernelExpression::compiledSource() const { return customKernelCompiledSource(source_); }
 
@@ -843,10 +841,10 @@ std::shared_ptr<CompiledCudaKernel> CudaKernelExpression::compile(int device_num
         throw std::runtime_error(
             "Refusing to compile CudaKernelExpression '" + name_ +
             "' because its CUDA source was loaded from a serialized model. Custom CUDA source in loaded models is unsafe code execution. "
-            "If you will be running it, you should inspect the serialized CUDA source/compiled source, then load it with "
-            "allow_unsafe_loaded_cuda_source=true, the trusted Ed25519 public key, and when applicable the AES-256-GCM source decryption "
-            "key that were printed when the model was saved. Signature verification provides evidence of the identity of the signed CUDA "
-            "manifest; source decryption only restores the inspected code.");
+            "If you will be running it, you should then load it with "
+            "allow_unsafe_loaded_cuda_source=true, the trusted Ed25519 public key, and the AES-256-GCM source decryption "
+            "key that were provided when the model was saved. Signature verification provides evidence of the identity of the signed CUDA "
+            "manifest. You should inspect the resultant CUDA source.");
     }
 
     EquationSignature sig =

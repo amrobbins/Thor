@@ -126,6 +126,19 @@ allows the decrypted source to compile/run after signature verification.
     network.def("cuda_kernel_source_info", [](const Network& self) { return cudaKernelSourceInspectionListToPython(self.cudaKernelSourceInfo()); });
     network.def("cuda_kernel_sources", &Network::cudaKernelSources);
     network.def("cuda_kernel_source_info_json", &Network::cudaKernelSourceInfoJsonString);
+    network.def("has_cuda_kernel_expressions", &Network::hasCudaKernelExpressions);
+    network.def("capture_cuda_kernel_save_keys_to_file",
+                &Network::captureCudaKernelSaveKeysToFile,
+                "path"_a,
+                "overwrite"_a = false,
+                R"nbdoc(
+Configure a required out-of-band key capture file for models containing
+CudaKernelExpression CUDA source. Training placement refuses to proceed for
+such networks until this is configured. The file is created immediately with a
+pending marker and overwritten with the final save-time keys when save() runs.
+)nbdoc");
+    network.def("clear_cuda_kernel_save_key_capture", &Network::clearCudaKernelSaveKeyCapture);
+    network.def("cuda_kernel_save_key_capture_configured", &Network::cudaKernelSaveKeyCaptureConfigured);
     network.def("cuda_kernel_signing_public_keys", &Network::cudaKernelSigningPublicKeys);
     network.def("cuda_kernel_out_of_band_keys", [](const Network& self) { return cudaKernelOutOfBandKeysToPython(self.cudaKernelOutOfBandKeys()); });
 

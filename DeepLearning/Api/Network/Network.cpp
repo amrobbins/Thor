@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include <fstream>
 #include <iostream>
 
 using namespace std;
@@ -12,6 +13,42 @@ using json = nlohmann::json;
 using ThorImplementation::TensorPlacement;
 
 namespace {
+
+json cudaKernelOutOfBandKeysFileJson(const std::string& networkName,
+                                      const std::vector<ThorImplementation::CudaKernelOutOfBandKeys>& cudaKernelKeys,
+                                      const std::string& status) {
+    json j;
+    j["type"] = "thor.cuda_kernel_expression_out_of_band_keys";
+    j["schema_version"] = 1;
+    j["network_name"] = networkName;
+    j["status"] = status;
+    j["warning"] =
+        "Keep this file outside the saved model archive. A Thor model containing CudaKernelExpression CUDA source cannot be loaded "
+        "or compiled from the saved artifact unless the Ed25519 public key and AES-256-GCM source decryption key are preserved out of band.";
+    j["loaded_model_safety_disclaimer"] = ThorImplementation::cudaKernelLoadedModelSafetyDisclaimer();
+    j["keys"] = json::array();
+    for (const ThorImplementation::CudaKernelOutOfBandKeys& keys : cudaKernelKeys) {
+        j["keys"].push_back(json{{"signing_public_key", keys.signing_public_key},
+                                  {"source_decryption_key", keys.source_decryption_key}});
+    }
+    return j;
+}
+
+void writeJsonFile(const std::filesystem::path& path, const json& j) {
+    const std::filesystem::path parent = path.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent);
+    }
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("Unable to open CudaKernelExpression save-key capture file for writing: " + path.string());
+    }
+    out << j.dump(4) << "\n";
+    if (!out) {
+        throw std::runtime_error("Failed while writing CudaKernelExpression save-key capture file: " + path.string());
+    }
+}
 
 void printCudaKernelOutOfBandKeys(const std::vector<ThorImplementation::CudaKernelOutOfBandKeys>& cudaKernelKeys) {
     if (cudaKernelKeys.empty()) {
@@ -50,6 +87,70 @@ string Network::statusCodeToString(StatusCode statusCode) {
     else if (statusCode == StatusCode::DEADLOCK_CYCLE)
         return "DEADLOCK CYCLE";
     THOR_UNREACHABLE();
+}
+
+bool Network::hasCudaKernelExpressions() const {
+    return !ThorImplementation::collectCudaKernelSourceInfo(architectureJson()).empty();
+}
+
+void Network::captureCudaKernelSaveKeysToFile(const std::string& path, bool overwrite) {
+    if (path.empty()) {
+        throw std::invalid_argument("CudaKernelExpression save-key capture file path cannot be empty.");
+    }
+
+    const std::filesystem::path capturePath = std::filesystem::absolute(std::filesystem::path(path));
+    if (std::filesystem::exists(capturePath) && !overwrite) {
+        throw std::runtime_error("CudaKernelExpression save-key capture file already exists: " + capturePath.string() +
+                                 ". Pass overwrite=true or choose a different file before training.");
+    }
+
+    cudaKernelSaveKeyCaptureFile_ = capturePath.string();
+    writeJsonFile(capturePath, cudaKernelOutOfBandKeysFileJson(networkName, {}, "pending"));
+}
+
+void Network::clearCudaKernelSaveKeyCapture() {
+    cudaKernelSaveKeyCaptureFile_.reset();
+}
+
+void Network::enforceCudaKernelSaveKeyCaptureForTraining() const {
+    if (!hasCudaKernelExpressions()) {
+        return;
+    }
+    if (cudaKernelSaveKeyCaptureFile_.has_value()) {
+        return;
+    }
+
+    throw std::runtime_error(
+        "Refusing to place a training network that contains CudaKernelExpression CUDA source without configured save-key capture. "
+        "CudaKernelExpression source is encrypted and signed when the model is saved; the saved model stores only key fingerprints. "
+        "Configure captureCudaKernelSaveKeysToFile(...) before training so the out-of-band Ed25519 public key and AES-256-GCM "
+        "source decryption key produced by save() are persisted. Otherwise a long training run could produce a model that cannot "
+        "be loaded or compiled.");
+}
+
+void Network::requireCudaKernelSaveKeyCaptureForKeys(
+    const std::vector<ThorImplementation::CudaKernelOutOfBandKeys>& cudaKernelKeys) const {
+    if (cudaKernelKeys.empty()) {
+        return;
+    }
+    if (cudaKernelSaveKeyCaptureFile_.has_value()) {
+        return;
+    }
+
+    throw std::runtime_error(
+        "Refusing to save a model containing CudaKernelExpression CUDA source without configured save-key capture. The saved model "
+        "would contain encrypted CUDA source and key fingerprints but not the out-of-band keys needed to load it. Configure "
+        "captureCudaKernelSaveKeysToFile(...) before training or before save(), then save again.");
+}
+
+void Network::writeCudaKernelSaveKeysToCaptureFile(
+    const std::vector<ThorImplementation::CudaKernelOutOfBandKeys>& cudaKernelKeys) const {
+    if (cudaKernelKeys.empty()) {
+        return;
+    }
+    requireCudaKernelSaveKeyCaptureForKeys(cudaKernelKeys);
+    writeJsonFile(std::filesystem::path(cudaKernelSaveKeyCaptureFile_.value()),
+                  cudaKernelOutOfBandKeysFileJson(networkName, cudaKernelKeys, "complete"));
 }
 
 // Records the layers in sorted DAG order.
@@ -205,6 +306,10 @@ Network::StatusCode Network::connect(bool inferenceOnly) {
 
 shared_ptr<PlacedNetwork> Network::place(
     uint32_t batchSize, vector<Event> &initDoneEvents, bool inferenceOnly, vector<int32_t> forcedDevices, uint32_t forcedNumStampsPerGpu) {
+    if (!inferenceOnly) {
+        enforceCudaKernelSaveKeyCaptureForTraining();
+    }
+
     if (!frozen) {
         StatusCode dagStatus = connect(inferenceOnly);
         if (dagStatus != StatusCode::SUCCESS)
@@ -263,6 +368,8 @@ void Network::save(const string &directory, const bool overwrite) {
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
     const std::vector<ThorImplementation::CudaKernelOutOfBandKeys> cudaKernelKeys =
         ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
+    requireCudaKernelSaveKeyCaptureForKeys(cudaKernelKeys);
+    writeCudaKernelSaveKeysToCaptureFile(cudaKernelKeys);
     printCudaKernelOutOfBandKeys(cudaKernelKeys);
     string modelJsonDump = modelJson.dump(4);
 
@@ -302,6 +409,8 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
     string qualifiedModelName = networkName + ".thor.json";
     const std::vector<ThorImplementation::CudaKernelOutOfBandKeys> cudaKernelKeys =
         ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
+    requireCudaKernelSaveKeyCaptureForKeys(cudaKernelKeys);
+    writeCudaKernelSaveKeysToCaptureFile(cudaKernelKeys);
     printCudaKernelOutOfBandKeys(cudaKernelKeys);
 
     string jsonDump = modelJson.dump(4);
