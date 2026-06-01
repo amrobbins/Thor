@@ -547,6 +547,35 @@ void py_wrong_key_source_kernel(const float* x, float* y, int64_t n) {
     np.testing.assert_allclose(y_np, x_np * 3.0, rtol=1e-6, atol=1e-6)
 
 
+
+def _build_serializable_cuda_kernel_custom_layer_network(name: str) -> thor.Network:
+    network = thor.Network(name)
+    x = thor.layers.NetworkInput(network, "x", [4], thor.DataType.fp32).get_feature_output()
+
+    kernel = (
+        CudaKernelExpression.builder(f"{name}_scale")
+        .source(
+            r"""
+extern "C" __global__
+void cuda_kernel_save_key_capture_scale_kernel(const float* feature_input, float* feature_output, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    feature_output[i] = 2.0f * feature_input[i];
+}
+"""
+        )
+        .entry("cuda_kernel_save_key_capture_scale_kernel")
+        .input("feature_input", thor.DataType.fp32)
+        .output_like("feature_output", thor.DataType.fp32, "feature_input")
+        .scalar("n", thor.DataType.int64, CudaKernelExpression.numel("feature_output"))
+        .launch_grid_1d(CudaKernelExpression.numel("feature_output"), block_size=128)
+        .build()
+    )
+
+    layer = thor.layers.CustomLayer(network=network, inputs=x, build=kernel.as_dynamic_expression())
+    thor.layers.NetworkOutput(network, "out", layer["feature_output"], thor.DataType.fp32)
+    return network
+
 def test_python_defined_cuda_kernel_expression_serializes_through_custom_layer():
     network = thor.Network("py_cuda_kernel_custom_layer_serializable")
     x = thor.layers.NetworkInput(network, "x", [4], thor.DataType.fp32).get_feature_output()
@@ -612,6 +641,39 @@ void py_custom_layer_serializable_scale_kernel(const float* feature_input, float
         trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
     )
     assert definition.has_cuda_kernel_expressions is True
+
+
+def test_network_cuda_kernel_save_key_capture_is_required_for_training_and_save(tmp_path):
+    network = _build_serializable_cuda_kernel_custom_layer_network("py_cuda_kernel_save_key_capture_required")
+    assert network.has_cuda_kernel_expressions() is True
+    assert network.cuda_kernel_save_key_capture_configured() is False
+
+    with pytest.raises(RuntimeError, match="Refusing to place a training network.*save-key capture"):
+        network.place(batch_size=1, inference_only=False)
+
+    with pytest.raises(RuntimeError, match="Refusing to save.*save-key capture"):
+        network.save(str(tmp_path / "model_without_key_capture"), overwrite=True)
+
+    key_path = tmp_path / "cuda_kernel_keys.json"
+    network.capture_cuda_kernel_save_keys_to_file(str(key_path))
+    assert network.cuda_kernel_save_key_capture_configured() is True
+
+    pending = json.loads(key_path.read_text())
+    assert pending["type"] == "thor.cuda_kernel_expression_out_of_band_keys"
+    assert pending["status"] == "pending"
+    assert pending["keys"] == []
+
+    network.save(str(tmp_path / "model_with_key_capture"), overwrite=True)
+
+    captured = json.loads(key_path.read_text())
+    assert captured["status"] == "complete"
+    assert len(captured["keys"]) == 1
+    assert captured["keys"][0]["signing_public_key"]
+    assert captured["keys"][0]["source_decryption_key"]
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        network.capture_cuda_kernel_save_keys_to_file(str(key_path))
+
 
 def test_cuda_kernel_expression_nonserializable_launch_callback_is_rejected_when_serializing_from_python():
     kernel = (

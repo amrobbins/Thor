@@ -105,6 +105,11 @@ class Network {
     std::vector<ThorImplementation::CudaKernelSourceInspection> cudaKernelSourceInfo() const;
     std::vector<std::string> cudaKernelSources() const;
     std::string cudaKernelSourceInfoJsonString() const;
+    [[nodiscard]] bool hasCudaKernelExpressions() const;
+    void captureCudaKernelSaveKeysToFile(const std::string &path, bool overwrite = false);
+    void clearCudaKernelSaveKeyCapture();
+    [[nodiscard]] bool cudaKernelSaveKeyCaptureConfigured() const { return cudaKernelSaveKeyCaptureFile_.has_value(); }
+    [[nodiscard]] std::optional<std::string> cudaKernelSaveKeyCaptureFile() const { return cudaKernelSaveKeyCaptureFile_; }
     virtual nlohmann::json architectureJson() const;
     virtual std::string architectureJsonString() const;
 
@@ -202,6 +207,11 @@ class Network {
     bool allowUnsafeLoadedCudaKernelSourceCompilation_ = false;
     std::string trustedLoadedCudaKernelPublicKey_;
     std::string trustedLoadedCudaKernelSourceDecryptionKey_;
+
+    std::optional<std::string> cudaKernelSaveKeyCaptureFile_;
+    void enforceCudaKernelSaveKeyCaptureForTraining() const;
+    void requireCudaKernelSaveKeyCaptureForKeys(const std::vector<ThorImplementation::CudaKernelOutOfBandKeys> &cudaKernelKeys) const;
+    void writeCudaKernelSaveKeysToCaptureFile(const std::vector<ThorImplementation::CudaKernelOutOfBandKeys> &cudaKernelKeys) const;
 
     std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
 
