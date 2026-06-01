@@ -45,6 +45,7 @@ enum class ExprOp : uint16_t {
     LOGICAL_AND,
     LOGICAL_OR,
     LOGICAL_NOT,
+    WHERE,
     NEG,
     ABS,
     CEIL,
@@ -492,6 +493,7 @@ class Expression {
     [[nodiscard]] Expression logicalAnd(const Expression& other) const;
     [[nodiscard]] Expression logicalOr(const Expression& other) const;
     [[nodiscard]] Expression logicalNot() const;
+    [[nodiscard]] Expression select(const Expression& true_value, const Expression& false_value) const;
 
     [[nodiscard]] static Expression equal(const Expression& lhs, const Expression& rhs);
     [[nodiscard]] static Expression notEqual(const Expression& lhs, const Expression& rhs);
@@ -502,6 +504,8 @@ class Expression {
     [[nodiscard]] static Expression logicalAnd(const Expression& lhs, const Expression& rhs);
     [[nodiscard]] static Expression logicalOr(const Expression& lhs, const Expression& rhs);
     [[nodiscard]] static Expression logicalNot(const Expression& input);
+    [[nodiscard]] static Expression where(const Expression& condition, const Expression& true_value, const Expression& false_value);
+    [[nodiscard]] static Expression select(const Expression& condition, const Expression& true_value, const Expression& false_value);
 
     [[nodiscard]] Expression abs() const;
     [[nodiscard]] Expression ceil() const;

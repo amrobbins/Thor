@@ -693,6 +693,28 @@ Create a floating-point scalar constant expression.
     expr.def("logical_and", [](const Expression& a, const Expression& b) { return a.logicalAnd(b); }, "other"_a);
     expr.def("logical_or", [](const Expression& a, const Expression& b) { return a.logicalOr(b); }, "other"_a);
     expr.def("logical_not", [](const Expression& a) { return a.logicalNot(); });
+    expr.def("select", [](const Expression& condition, const Expression& true_value, const Expression& false_value) { return condition.select(true_value, false_value); }, "true_value"_a, "false_value"_a);
+    expr.def_static(
+        "where",
+        [](const Expression& condition, const Expression& true_value, const Expression& false_value) {
+            return Expression::where(condition, true_value, false_value);
+        },
+        "condition"_a,
+        "true_value"_a,
+        "false_value"_a,
+        R"nbdoc(
+Elementwise conditional selection.
+
+Returns true_value where condition is true, otherwise false_value. The
+condition must be boolean and all three operands use normal Thor broadcast
+semantics.
+)nbdoc");
+    // Do not also expose Expression.select(...) as a static method: nanobind
+    // rejects overload sets that mix instance and static methods under one
+    // Python name. Python callers should use Expression.where(cond, a, b) for
+    // the static form and cond.select(a, b) for the instance form. The C++
+    // Expression::select(condition, true_value, false_value) API remains
+    // available.
 
     expr.def("__radd__", [](const Expression& a, const Expression& b) { return b + a; }, "other"_a);
     expr.def("__rsub__", [](const Expression& a, const Expression& b) { return b - a; }, "other"_a);

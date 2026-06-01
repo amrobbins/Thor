@@ -1055,6 +1055,28 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 }
                 break;
             }
+            case ExprOp::WHERE: {
+                std::vector<std::vector<uint64_t>> non_scalar_inputs;
+                if (!node_dims[node.lhs].empty()) {
+                    non_scalar_inputs.push_back(node_dims[node.lhs]);
+                }
+                if (!node_dims[node.rhs].empty()) {
+                    non_scalar_inputs.push_back(node_dims[node.rhs]);
+                }
+                if (!node_dims[node.aux].empty()) {
+                    non_scalar_inputs.push_back(node_dims[node.aux]);
+                }
+                if (non_scalar_inputs.empty()) {
+                    node_dims[i] = {};
+                } else if (non_scalar_inputs.size() == 1) {
+                    node_dims[i] = non_scalar_inputs[0];
+                } else {
+                    std::vector<uint64_t> out_dims;
+                    resolveLayoutFromDims(non_scalar_inputs, out_dims);
+                    node_dims[i] = std::move(out_dims);
+                }
+                break;
+            }
             case ExprOp::NEG:
             case ExprOp::ABS:
             case ExprOp::CEIL:
@@ -1376,6 +1398,10 @@ static bool sameSubexpressionForMatmulEpilogue(const PhysicalExpression& expr,
         case ExprOp::MAX:
             return sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
                    sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1);
+        case ExprOp::WHERE:
+            return sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
+                   sameSubexpressionForMatmulEpilogue(expr, a.rhs, b.rhs, depth + 1) &&
+                   sameSubexpressionForMatmulEpilogue(expr, a.aux, b.aux, depth + 1);
         default:
             return false;
     }
@@ -2650,8 +2676,11 @@ static void collectReferencedLocalInputSlots(const PhysicalExpression& expr, uin
 
     collectReferencedLocalInputSlots(expr, node.lhs, slots);
 
-    if (Expression::isBinaryOp(node.op)) {
+    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         collectReferencedLocalInputSlots(expr, node.rhs, slots);
+    }
+    if (Expression::isTernaryOp(node.op)) {
+        collectReferencedLocalInputSlots(expr, node.aux, slots);
     }
 }
 
@@ -2671,8 +2700,11 @@ static void collectReachableLocalNodes(const PhysicalExpression& expr, uint32_t 
 
     collectReachableLocalNodes(expr, node.lhs, nodes);
 
-    if (Expression::isBinaryOp(node.op)) {
+    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         collectReachableLocalNodes(expr, node.rhs, nodes);
+    }
+    if (Expression::isTernaryOp(node.op)) {
+        collectReachableLocalNodes(expr, node.aux, nodes);
     }
 }
 
@@ -2845,6 +2877,25 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
                     non_scalar_inputs.push_back(node_dims[node.lhs]);
                 if (!node_dims[node.rhs].empty())
                     non_scalar_inputs.push_back(node_dims[node.rhs]);
+                if (non_scalar_inputs.empty()) {
+                    node_dims[i] = {};
+                } else if (non_scalar_inputs.size() == 1) {
+                    node_dims[i] = non_scalar_inputs[0];
+                } else {
+                    std::vector<uint64_t> out_dims;
+                    resolveLayoutFromDims(non_scalar_inputs, out_dims);
+                    node_dims[i] = std::move(out_dims);
+                }
+                break;
+            }
+            case ExprOp::WHERE: {
+                std::vector<std::vector<uint64_t>> non_scalar_inputs;
+                if (!node_dims[node.lhs].empty())
+                    non_scalar_inputs.push_back(node_dims[node.lhs]);
+                if (!node_dims[node.rhs].empty())
+                    non_scalar_inputs.push_back(node_dims[node.rhs]);
+                if (!node_dims[node.aux].empty())
+                    non_scalar_inputs.push_back(node_dims[node.aux]);
                 if (non_scalar_inputs.empty()) {
                     node_dims[i] = {};
                 } else if (non_scalar_inputs.size() == 1) {
@@ -3114,6 +3165,7 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::LOGICAL_AND:
         case ExprOp::LOGICAL_OR:
         case ExprOp::LOGICAL_NOT:
+        case ExprOp::WHERE:
             return 1;
 
         case ExprOp::POW:
@@ -3232,6 +3284,37 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
                         oss << "inferFusedStageNodeDimsForReachable binary-op broadcast failure"
                             << " local_node=" << i << " op=" << static_cast<int>(node.op) << " lhs=" << node.lhs << " rhs=" << node.rhs
                             << " lhs_dims=" << dimsToString(node_dims[node.lhs]) << " rhs_dims=" << dimsToString(node_dims[node.rhs])
+                            << " reachable=" << (reachable_nodes.contains(static_cast<uint32_t>(i)) ? "true" : "false")
+                            << " error=" << e.what();
+                        throw std::runtime_error(oss.str());
+                    }
+                    node_dims[i] = std::move(out_dims);
+                }
+                break;
+            }
+            case ExprOp::WHERE: {
+                std::vector<std::vector<uint64_t>> non_scalar_inputs;
+                if (!node_dims[node.lhs].empty())
+                    non_scalar_inputs.push_back(node_dims[node.lhs]);
+                if (!node_dims[node.rhs].empty())
+                    non_scalar_inputs.push_back(node_dims[node.rhs]);
+                if (!node_dims[node.aux].empty())
+                    non_scalar_inputs.push_back(node_dims[node.aux]);
+
+                if (non_scalar_inputs.empty()) {
+                    node_dims[i] = {};
+                } else if (non_scalar_inputs.size() == 1) {
+                    node_dims[i] = non_scalar_inputs[0];
+                } else {
+                    std::vector<uint64_t> out_dims;
+                    try {
+                        resolveLayoutFromDims(non_scalar_inputs, out_dims);
+                    } catch (const std::exception& e) {
+                        std::ostringstream oss;
+                        oss << "inferFusedStageNodeDimsForReachable where broadcast failure"
+                            << " local_node=" << i << " cond=" << node.lhs << " true=" << node.rhs << " false=" << node.aux
+                            << " cond_dims=" << dimsToString(node_dims[node.lhs]) << " true_dims=" << dimsToString(node_dims[node.rhs])
+                            << " false_dims=" << dimsToString(node_dims[node.aux])
                             << " reachable=" << (reachable_nodes.contains(static_cast<uint32_t>(i)) ? "true" : "false")
                             << " error=" << e.what();
                         throw std::runtime_error(oss.str());
@@ -3419,6 +3502,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::GREATER_EQUAL:
             case ExprOp::LOGICAL_AND:
             case ExprOp::LOGICAL_OR:
+            case ExprOp::WHERE:
             case ExprOp::NEG:
             case ExprOp::ABS:
             case ExprOp::CEIL:
@@ -4217,6 +4301,14 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
             auto rhs_map = collectEffectiveInputDimsForNode(expr, node_dims, node.rhs);
             mergeEffectiveInputDimsMaps(lhs_map, rhs_map);
             return lhs_map;
+        }
+        case ExprOp::WHERE: {
+            auto cond_map = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
+            auto true_map = collectEffectiveInputDimsForNode(expr, node_dims, node.rhs);
+            auto false_map = collectEffectiveInputDimsForNode(expr, node_dims, node.aux);
+            mergeEffectiveInputDimsMaps(cond_map, true_map);
+            mergeEffectiveInputDimsMaps(cond_map, false_map);
+            return cond_map;
         }
         default:
             throw std::runtime_error("collectEffectiveInputDimsForNode encountered unknown ExprOp.");

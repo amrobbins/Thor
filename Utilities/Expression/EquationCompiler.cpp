@@ -792,6 +792,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "LOR";
         case ExprOp::LOGICAL_NOT:
             return "LNOT";
+        case ExprOp::WHERE:
+            return "WHERE";
         case ExprOp::NEG:
             return "NEG";
         case ExprOp::ABS:
@@ -1204,7 +1206,7 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
         return s;
     }
 
-    if (!Expression::isBinaryOp(node.op)) {
+    if (!Expression::isBinaryOp(node.op) && !Expression::isTernaryOp(node.op)) {
         std::string s;
         if (node.op == ExprOp::RESHAPE) {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",dims=" + uintVecSignature(node.reshape_dims) + ")";
@@ -1231,6 +1233,14 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
         } else {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
         }
+        appendNodeDTypeSignature(s, node);
+        return s;
+    }
+
+    if (node.op == ExprOp::WHERE) {
+        const std::string true_value = fusedRegionSignatureRec(expr, node.rhs);
+        const std::string false_value = fusedRegionSignatureRec(expr, node.aux);
+        std::string s = std::string(fusedOpTag(node.op)) + "(" + lhs + "," + true_value + "," + false_value + ")";
         appendNodeDTypeSignature(s, node);
         return s;
     }
@@ -2617,7 +2627,7 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
             stack.push_back(lhs_idx);
         }
 
-        if (Expression::isBinaryOp(node.op)) {
+        if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
             uint32_t rhs_idx = node.rhs;
             if (rhs_idx >= expr.nodes.size()) {
                 throw std::runtime_error("Invalid rhs node index in expression.");
@@ -2626,6 +2636,18 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
             const ExprNode& rhs = expr.nodes[rhs_idx];
             if (!isStageBoundaryOp(rhs.op) && !forced_boundary_nodes.count(rhs_idx)) {
                 stack.push_back(rhs_idx);
+            }
+        }
+
+        if (Expression::isTernaryOp(node.op)) {
+            uint32_t aux_idx = node.aux;
+            if (aux_idx >= expr.nodes.size()) {
+                throw std::runtime_error("Invalid aux node index in expression.");
+            }
+
+            const ExprNode& aux = expr.nodes[aux_idx];
+            if (!isStageBoundaryOp(aux.op) && !forced_boundary_nodes.count(aux_idx)) {
+                stack.push_back(aux_idx);
             }
         }
     }
@@ -2661,11 +2683,17 @@ static bool subgraphContainsLogicalTranspose(const PhysicalExpression& expr, uin
             throw std::runtime_error("Malformed expression while searching for logical transpose.");
         }
         stack.push_back(node.lhs);
-        if (Expression::isBinaryOp(node.op)) {
+        if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
             if (node.rhs == UINT32_MAX || node.rhs >= expr.nodes.size()) {
-                throw std::runtime_error("Malformed binary expression while searching for logical transpose.");
+                throw std::runtime_error("Malformed rhs expression while searching for logical transpose.");
             }
             stack.push_back(node.rhs);
+        }
+        if (Expression::isTernaryOp(node.op)) {
+            if (node.aux == UINT32_MAX || node.aux >= expr.nodes.size()) {
+                throw std::runtime_error("Malformed aux expression while searching for logical transpose.");
+            }
+            stack.push_back(node.aux);
         }
     }
     return false;
@@ -2693,11 +2721,17 @@ static void collectReachableLogicalTransposeNodes(const PhysicalExpression& expr
         throw std::runtime_error("Malformed expression while collecting logical transposes.");
     }
     collectReachableLogicalTransposeNodes(expr, node.lhs, visited, transpose_nodes);
-    if (Expression::isBinaryOp(node.op)) {
+    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         if (node.rhs == UINT32_MAX || node.rhs >= expr.nodes.size()) {
-            throw std::runtime_error("Malformed binary expression while collecting logical transposes.");
+            throw std::runtime_error("Malformed rhs expression while collecting logical transposes.");
         }
         collectReachableLogicalTransposeNodes(expr, node.rhs, visited, transpose_nodes);
+    }
+    if (Expression::isTernaryOp(node.op)) {
+        if (node.aux == UINT32_MAX || node.aux >= expr.nodes.size()) {
+            throw std::runtime_error("Malformed aux expression while collecting logical transposes.");
+        }
+        collectReachableLogicalTransposeNodes(expr, node.aux, visited, transpose_nodes);
     }
 }
 
@@ -2737,11 +2771,17 @@ static void collectUnsupportedLogicalTransposeBoundariesImpl(const PhysicalExpre
         throw std::runtime_error("Malformed expression while collecting unsupported logical transpose boundaries.");
     }
     collectUnsupportedLogicalTransposeBoundariesImpl(expr, node.lhs, visited, forced_boundaries);
-    if (Expression::isBinaryOp(node.op)) {
+    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         if (node.rhs == UINT32_MAX || node.rhs >= expr.nodes.size()) {
-            throw std::runtime_error("Malformed binary expression while collecting unsupported logical transpose boundaries.");
+            throw std::runtime_error("Malformed rhs expression while collecting unsupported logical transpose boundaries.");
         }
         collectUnsupportedLogicalTransposeBoundariesImpl(expr, node.rhs, visited, forced_boundaries);
+    }
+    if (Expression::isTernaryOp(node.op)) {
+        if (node.aux == UINT32_MAX || node.aux >= expr.nodes.size()) {
+            throw std::runtime_error("Malformed aux expression while collecting unsupported logical transpose boundaries.");
+        }
+        collectUnsupportedLogicalTransposeBoundariesImpl(expr, node.aux, visited, forced_boundaries);
     }
 }
 
@@ -2770,13 +2810,23 @@ static void collectBoundaryDependencies(const PhysicalExpression& expr,
             boundary_nodes.insert(lhs_idx);
         }
 
-        if (Expression::isBinaryOp(node.op)) {
+        if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
             uint32_t rhs_idx = node.rhs;
             if (rhs_idx >= expr.nodes.size()) {
                 throw std::runtime_error("Invalid rhs node index in expression.");
             }
             if (!region_nodes.count(rhs_idx) && isStageBoundaryOp(expr.nodes[rhs_idx].op)) {
                 boundary_nodes.insert(rhs_idx);
+            }
+        }
+
+        if (Expression::isTernaryOp(node.op)) {
+            uint32_t aux_idx = node.aux;
+            if (aux_idx >= expr.nodes.size()) {
+                throw std::runtime_error("Invalid aux node index in expression.");
+            }
+            if (!region_nodes.count(aux_idx) && isStageBoundaryOp(expr.nodes[aux_idx].op)) {
+                boundary_nodes.insert(aux_idx);
             }
         }
     }
@@ -2836,64 +2886,45 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
             const NamedInput& root_input = expr.inputs.at(value_id);
             new_node.input_slot = getOrCreateLocalInputSlot(value_id, root_input.kind, root_input.name);
         } else {
-            if (!Expression::isLeafOp(new_node.op)) {
-                uint32_t old_parent = new_node.lhs;
+            auto remapParent = [&](uint32_t old_parent, const char* field_name) -> uint32_t {
                 auto it = old_to_new_node_idx.find(old_parent);
                 if (it != old_to_new_node_idx.end()) {
-                    new_node.lhs = it->second;
-                } else {
-                    auto out_it = node_output_value_id.find(old_parent);
-                    if (out_it == node_output_value_id.end()) {
-                        throw std::runtime_error("Missing value id for fused stage lhs boundary input.");
-                    }
-
-                    ExprNode input_node;
-                    input_node.op = ExprOp::INPUT;
-                    input_node.input_slot = getOrCreateLocalInputSlot(out_it->second, NamedInput::Kind::Tensor);
-
-                    // This local INPUT stands in for the already-materialized parent value
-                    // crossing a stage boundary, so it should inherit that value's dtype semantics.
-                    input_node.input_tensor_dtype = expr.nodes[old_parent].output_dtype;
-                    input_node.output_dtype = expr.nodes[old_parent].output_dtype;
-                    input_node.compute_dtype = expr.nodes[old_parent].compute_dtype;
-                    input_node.backward_output_dtype = expr.nodes[old_parent].backward_output_dtype;
-                    input_node.backward_compute_dtype = expr.nodes[old_parent].backward_compute_dtype;
-
-                    uint32_t new_input_idx = static_cast<uint32_t>(stage_expr.nodes.size());
-                    stage_expr.nodes.push_back(std::move(input_node));
-                    old_to_new_node_idx[old_parent] = new_input_idx;
-                    new_node.lhs = new_input_idx;
+                    return it->second;
                 }
+
+                auto out_it = node_output_value_id.find(old_parent);
+                if (out_it == node_output_value_id.end()) {
+                    throw std::runtime_error(std::string("Missing value id for fused stage ") + field_name + " boundary input.");
+                }
+
+                ExprNode input_node;
+                input_node.op = ExprOp::INPUT;
+                input_node.input_slot = getOrCreateLocalInputSlot(out_it->second, NamedInput::Kind::Tensor);
+
+                // This local INPUT stands in for the already-materialized parent value
+                // crossing a stage boundary, so it should inherit that value's dtype semantics.
+                input_node.input_tensor_dtype = expr.nodes[old_parent].output_dtype;
+                input_node.output_dtype = expr.nodes[old_parent].output_dtype;
+                input_node.compute_dtype = expr.nodes[old_parent].compute_dtype;
+                input_node.backward_output_dtype = expr.nodes[old_parent].backward_output_dtype;
+                input_node.backward_compute_dtype = expr.nodes[old_parent].backward_compute_dtype;
+
+                uint32_t new_input_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+                stage_expr.nodes.push_back(std::move(input_node));
+                old_to_new_node_idx[old_parent] = new_input_idx;
+                return new_input_idx;
+            };
+
+            if (!Expression::isLeafOp(new_node.op)) {
+                new_node.lhs = remapParent(new_node.lhs, "lhs");
             }
 
-            if (Expression::isBinaryOp(new_node.op)) {
-                uint32_t old_parent = new_node.rhs;
-                auto it = old_to_new_node_idx.find(old_parent);
-                if (it != old_to_new_node_idx.end()) {
-                    new_node.rhs = it->second;
-                } else {
-                    auto out_it = node_output_value_id.find(old_parent);
-                    if (out_it == node_output_value_id.end()) {
-                        throw std::runtime_error("Missing value id for fused stage rhs boundary input.");
-                    }
+            if (Expression::isBinaryOp(new_node.op) || Expression::isTernaryOp(new_node.op)) {
+                new_node.rhs = remapParent(new_node.rhs, "rhs");
+            }
 
-                    ExprNode input_node;
-                    input_node.op = ExprOp::INPUT;
-                    input_node.input_slot = getOrCreateLocalInputSlot(out_it->second, NamedInput::Kind::Tensor);
-
-                    // This local INPUT stands in for the already-materialized parent value
-                    // crossing a stage boundary, so it should inherit that value's dtype semantics.
-                    input_node.input_tensor_dtype = expr.nodes[old_parent].output_dtype;
-                    input_node.output_dtype = expr.nodes[old_parent].output_dtype;
-                    input_node.compute_dtype = expr.nodes[old_parent].compute_dtype;
-                    input_node.backward_output_dtype = expr.nodes[old_parent].backward_output_dtype;
-                    input_node.backward_compute_dtype = expr.nodes[old_parent].backward_compute_dtype;
-
-                    uint32_t new_input_idx = static_cast<uint32_t>(stage_expr.nodes.size());
-                    stage_expr.nodes.push_back(std::move(input_node));
-                    old_to_new_node_idx[old_parent] = new_input_idx;
-                    new_node.rhs = new_input_idx;
-                }
+            if (Expression::isTernaryOp(new_node.op)) {
+                new_node.aux = remapParent(new_node.aux, "aux");
             }
         }
 
@@ -4720,6 +4751,10 @@ static std::vector<uint32_t> computeNodeUseCounts(const PhysicalExpression& expr
         }
         if (Expression::isBinaryOp(node.op)) {
             bump(node.rhs);
+        }
+        if (node.op == ExprOp::WHERE) {
+            bump(node.rhs);
+            bump(node.aux);
         }
         if (node.op == ExprOp::GEMM || node.op == ExprOp::ATTENTION_BACKWARD_Q || node.op == ExprOp::ATTENTION_BACKWARD_K ||
             node.op == ExprOp::ATTENTION_BACKWARD_V || node.op == ExprOp::ATTENTION_BACKWARD_BIAS) {
