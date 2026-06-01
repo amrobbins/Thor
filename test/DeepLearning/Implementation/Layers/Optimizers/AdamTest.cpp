@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -76,6 +77,45 @@ std::vector<float> readCpuFp32Tensor(const Tensor& tensor) {
         values[i] = ptr[i];
 
     return values;
+}
+
+
+void enqueueValuesToGpuFp32Tensor(Tensor& gpuTensor,
+                                  const std::vector<float>& values,
+                                  Stream& stream,
+                                  std::deque<Tensor>& hostKeepAlive) {
+    ASSERT_EQ(gpuTensor.getPlacement(), gpuPlacement);
+    ASSERT_EQ(gpuTensor.getDataType(), DataType::FP32);
+    ASSERT_EQ(gpuTensor.getTotalNumElements(), values.size());
+
+    hostKeepAlive.emplace_back(cpuPlacement, gpuTensor.getDescriptor());
+    writeCpuFp32Tensor(hostKeepAlive.back(), values);
+    gpuTensor.copyFromAsync(hostKeepAlive.back(), stream);
+}
+
+void enqueueRowValuesToGpuTensor(Tensor& gpuTensor,
+                                 const std::vector<uint64_t>& values,
+                                 Stream& stream,
+                                 std::deque<Tensor>& hostKeepAlive) {
+    ASSERT_EQ(gpuTensor.getPlacement(), gpuPlacement);
+    ASSERT_EQ(gpuTensor.getTotalNumElements(), values.size());
+
+    hostKeepAlive.emplace_back(cpuPlacement, gpuTensor.getDescriptor());
+    switch (gpuTensor.getDataType()) {
+        case DataType::UINT16:
+            writeCpuUint16Tensor(hostKeepAlive.back(), values);
+            break;
+        case DataType::UINT32:
+            writeCpuUint32Tensor(hostKeepAlive.back(), values);
+            break;
+        case DataType::UINT64:
+            writeCpuUint64Tensor(hostKeepAlive.back(), values);
+            break;
+        default:
+            FAIL() << "Unsupported sparse row dtype in enqueueRowValuesToGpuTensor.";
+    }
+
+    gpuTensor.copyFromAsync(hostKeepAlive.back(), stream);
 }
 
 void copyValuesToGpuFp32Tensor(Tensor& gpuTensor, const std::vector<float>& values, Stream& stream) {
@@ -222,6 +262,24 @@ void writeSparseGradient(SparseRowGradient& gradient,
     copyRowValuesToGpuTensor(gradient.rows, rowStorage, stream);
     copyValuesToGpuFp32Tensor(gradient.values, values, stream);
     copyRowValuesToGpuTensor(gradient.numRows, {numRows}, stream);
+}
+
+
+void enqueueSparseGradient(SparseRowGradient& gradient,
+                           const std::vector<uint64_t>& rows,
+                           const std::vector<float>& values,
+                           uint64_t numRows,
+                           Stream& stream,
+                           std::deque<Tensor>& hostKeepAlive) {
+    ASSERT_LE(numRows, gradient.capacity);
+    ASSERT_LE(rows.size(), gradient.rows.getTotalNumElements());
+    ASSERT_EQ(values.size(), gradient.capacity * gradient.embeddingDim);
+
+    std::vector<uint64_t> rowStorage(gradient.rows.getTotalNumElements(), 0);
+    std::copy(rows.begin(), rows.end(), rowStorage.begin());
+    enqueueRowValuesToGpuTensor(gradient.rows, rowStorage, stream, hostKeepAlive);
+    enqueueValuesToGpuFp32Tensor(gradient.values, values, stream, hostKeepAlive);
+    enqueueRowValuesToGpuTensor(gradient.numRows, {numRows}, stream, hostKeepAlive);
 }
 
 void runSparseAdamStep(Adam& adam,
@@ -528,6 +586,65 @@ TEST(AdamTest, TwoStepsCarryMomentsAndUseBiasCorrection) {
     expectMapHasValue(all, "t", 2.0f);
 }
 
+
+TEST(AdamTest, QueuedDenseUpdatesCaptureRuntimeScalarsBeforeRuntimeStateMutation) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t numQueuedSteps = 12;
+    constexpr float beta1 = 0.65f;
+    constexpr float beta2 = 0.82f;
+    constexpr float epsilon = 1e-4f;
+
+    const std::vector<float> initialWeights{1.0f, -2.0f, 3.0f, -4.0f, 5.0f, -6.0f};
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {2, 3}));
+    copyValuesToGpuFp32Tensor(weights, initialWeights, stream);
+
+    Adam adam(71, /*alpha=*/0.01f, beta1, beta2, epsilon);
+    adam.compile(weights, stream);
+    stream.synchronize();
+
+    std::optional<Tensor> gradientOpt = adam.getWeightsGradient();
+    ASSERT_TRUE(gradientOpt.has_value());
+    Tensor gradient = gradientOpt.value();
+
+    AdamReferenceState expected;
+    expected.weights = initialWeights;
+    expected.m.assign(initialWeights.size(), 0.0f);
+    expected.v.assign(initialWeights.size(), 0.0f);
+
+    std::deque<Tensor> queuedHostCopies;
+    for (uint64_t stepIdx = 0; stepIdx < numQueuedSteps; ++stepIdx) {
+        std::vector<float> rawGradient(initialWeights.size());
+        for (uint64_t i = 0; i < rawGradient.size(); ++i) {
+            const float sign = ((stepIdx + i) % 2 == 0) ? 1.0f : -1.0f;
+            rawGradient[i] = sign * 0.25f * static_cast<float>((stepIdx + 1) * (i + 2));
+        }
+
+        const uint32_t batchSize = static_cast<uint32_t>((stepIdx % 4) + 1);
+        const float alpha = 0.008f + 0.0015f * static_cast<float>(stepIdx);
+
+        adam.setT(expected.t);
+        adam.setAlpha(alpha);
+        enqueueValuesToGpuFp32Tensor(gradient, rawGradient, stream, queuedHostCopies);
+        applyAdamReferenceStep(expected, rawGradient, batchSize, alpha, beta1, beta2, epsilon);
+        adam.updateWeights(batchSize);
+
+        // Poison the mutable CPU-side RuntimeState after the launch has been queued.
+        // Correct execution depends only on the scalar values captured for that launch,
+        // not on whatever RuntimeState contains by the time the GPU reaches the queued work.
+        adam.setAlpha(100.0f + static_cast<float>(stepIdx));
+        adam.setT(1000.0f + static_cast<float>(stepIdx));
+    }
+
+    stream.synchronize();
+    adam.setT(expected.t);
+
+    EXPECT_FLOAT_EQ(adam.getT(), static_cast<float>(numQueuedSteps));
+    expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 1e-4f, 1e-4f);
+    expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("m"), stream), expected.m, 1e-4f, 1e-4f);
+    expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("v"), stream), expected.v, 1e-4f, 1e-4f);
+}
+
 TEST(AdamTest, CompileSparseRowsCreatesSparseGradientMomentsAndNoDenseGradient) {
     Stream stream(gpuPlacement);
 
@@ -640,6 +757,73 @@ TEST(AdamTest, SparseRowUpdateTwoStepsCarryMomentsOnlyForTouchedRows) {
     expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 3e-5f, 3e-5f);
     expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("m"), stream), expected.m, 3e-5f, 3e-5f);
     expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("v"), stream), expected.v, 3e-5f, 3e-5f);
+}
+
+
+TEST(AdamTest, QueuedSparseRowUpdatesCaptureRuntimeScalarsBeforeRuntimeStateMutation) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t numQueuedSteps = 12;
+    constexpr uint64_t vocabularySize = 8;
+    constexpr uint64_t embeddingDim = 4;
+    constexpr uint64_t capacity = 4;
+    constexpr uint64_t activeRows = 3;
+    constexpr float beta1 = 0.6f;
+    constexpr float beta2 = 0.85f;
+    constexpr float epsilon = 1e-4f;
+
+    std::vector<float> initialWeights(vocabularySize * embeddingDim);
+    for (uint64_t i = 0; i < initialWeights.size(); ++i) {
+        initialWeights[i] = -2.0f + 0.125f * static_cast<float>(i);
+    }
+
+    Tensor weights(gpuPlacement, TensorDescriptor(DataType::FP32, {vocabularySize, embeddingDim}));
+    copyValuesToGpuFp32Tensor(weights, initialWeights, stream);
+
+    Adam adam(72, /*alpha=*/0.01f, beta1, beta2, epsilon);
+    SparseRowGradient gradient = adam.compileSparseRows(weights, capacity, stream);
+    stream.synchronize();
+
+    AdamReferenceState expected;
+    expected.weights = initialWeights;
+    expected.m.assign(initialWeights.size(), 0.0f);
+    expected.v.assign(initialWeights.size(), 0.0f);
+
+    std::deque<Tensor> queuedHostCopies;
+    for (uint64_t stepIdx = 0; stepIdx < numQueuedSteps; ++stepIdx) {
+        const uint64_t row0 = stepIdx % vocabularySize;
+        const std::vector<uint64_t> rows{row0, (row0 + 3) % vocabularySize, (row0 + 5) % vocabularySize};
+
+        std::vector<float> values(capacity * embeddingDim, 12345.0f);
+        for (uint64_t r = 0; r < activeRows; ++r) {
+            for (uint64_t d = 0; d < embeddingDim; ++d) {
+                const float sign = ((stepIdx + r + d) % 2 == 0) ? 1.0f : -1.0f;
+                values[r * embeddingDim + d] = sign * 0.125f * static_cast<float>((stepIdx + 1) * (r + 1) * (d + 1));
+            }
+        }
+
+        const uint32_t batchSize = static_cast<uint32_t>((stepIdx % 5) + 1);
+        const float alpha = 0.006f + 0.00125f * static_cast<float>(stepIdx);
+
+        adam.setT(expected.t);
+        adam.setAlpha(alpha);
+        enqueueSparseGradient(gradient, rows, values, activeRows, stream, queuedHostCopies);
+        applySparseAdamReferenceStep(expected, rows, values, activeRows, embeddingDim, batchSize, alpha, beta1, beta2, epsilon);
+        adam.updateSparseRows(batchSize);
+
+        // Mutate the CPU RuntimeState immediately after enqueue. The sparse update
+        // must have copied alphaT/invBatchLossScale into this launch's parameters.
+        adam.setAlpha(200.0f + static_cast<float>(stepIdx));
+        adam.setT(2000.0f + static_cast<float>(stepIdx));
+    }
+
+    stream.synchronize();
+    adam.setT(expected.t);
+
+    EXPECT_FLOAT_EQ(adam.getT(), static_cast<float>(numQueuedSteps));
+    expectAllClose(copyGpuFp32TensorToValues(weights, stream), expected.weights, 1e-4f, 1e-4f);
+    expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("m"), stream), expected.m, 1e-4f, 1e-4f);
+    expectAllClose(copyGpuFp32TensorToValues(adam.getOptimizerParameterTensor("v"), stream), expected.v, 1e-4f, 1e-4f);
 }
 
 TEST(AdamTest, ThreeStepsWithFp8E5M2WeightsCarryMomentsAndQuantizeWeights) {

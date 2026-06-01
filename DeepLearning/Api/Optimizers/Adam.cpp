@@ -13,7 +13,9 @@ Adam::Adam() : Optimizer() {}
 Adam::Adam(uint64_t originalId) : Optimizer(originalId) {}
 
 shared_ptr<ThorImplementation::Optimizer> Adam::stamp(shared_ptr<ThorImplementation::TrainableLayer> trainableLayer) {
-    return make_shared<ThorImplementation::Adam>(getId(), alpha, beta1, beta2, epsilon);
+    auto physicalAdam = make_shared<ThorImplementation::Adam>(getId(), alpha, beta1, beta2, epsilon);
+    physicalAdam->setT(t);
+    return physicalAdam;
 }
 
 void Adam::setAlpha(float newAlpha, PlacedNetwork *placedNetwork) {

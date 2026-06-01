@@ -1,36 +1,16 @@
 #pragma once
 
-#include "DeepLearning/Implementation/Layers/Layer.h"
-#include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
-#include "DeepLearning/Implementation/Tensor/Tensor.h"
-#include "Utilities/Common/Stream.h"
-#include "Utilities/TensorOperations/DeepLearning/Add1dBias.h"
+#include "DeepLearning/Implementation/Layers/Optimizers/CustomOptimizer.h"
+
+#include <memory>
 
 namespace ThorImplementation {
 
-class Sgd final : public Optimizer {
+class Sgd final : public CustomOptimizer {
    public:
     Sgd(uint64_t id, float initialLearningRate, float decay, float momentum, bool useNesterovMomentum, uint64_t startResumeEpoch = 0);
 
-    void compile(const Tensor &weights, Stream &gradientUpdateStream, bool materializeDenseGradient = true) override;
-    SparseRowGradient compileSparseRows(const Tensor &weights, uint64_t maxSparseRows, Stream &gradientUpdateStream) override;
-    [[nodiscard]] SparseRowOptimizerExpression toSparseRowUpdateExpression(const Tensor &weights, SparseRowGradient &sparseRowGradient) override;
-    [[nodiscard]] bool supportsSparseRowGradients() const override { return true; }
-    [[nodiscard]] bool supportsSparseRowUpdateFusion() const override { return true; }
-    [[nodiscard]] bool supportsDenseUpdateFusion() const override { return true; }
-    [[nodiscard]] DenseOptimizerExpression toDenseUpdateExpression(const Tensor &weights,
-                                                                   const Expression &gradient,
-                                                                   const std::string &namePrefix) override;
-    [[nodiscard]] std::unordered_map<std::string, float> denseUpdateRuntimeScalars(uint32_t batchSize,
-                                                                                   const std::string &namePrefix) override;
-    [[nodiscard]] std::unordered_map<std::string, float> sparseRowUpdateRuntimeScalars(uint32_t batchSize) override;
-
-    void updateWeights(uint32_t batchSize) override;
-    void updateSparseRows(uint32_t batchSize) override;
-
-    std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) override;
-    std::unordered_map<std::string, float> getAllHyperParameters() override;
-    void setInitialLearningRate(float initaialLearningRate);
+    void setInitialLearningRate(float initialLearningRate);
     void setDecay(float decay);
     void setMomentum(float momentum);
     void setUseNesterovMomentum(bool useNesterovMomentum);
@@ -42,19 +22,14 @@ class Sgd final : public Optimizer {
     uint64_t getEpoch() const;
     float getCurrentLearningRate() const;
 
-    std::shared_ptr<Optimizer> clone() const override {
-        return std::make_shared<Sgd>(getId(), initialLearningRate, decay, momentum, useNesterovMomentum, 0);
-    }
+    std::shared_ptr<Optimizer> clone() const override;
 
-   protected:
-    float initialLearningRate;
-    float decay;
-    float momentum;
-    bool useNesterovMomentum;
+    struct RuntimeState;
 
-    uint64_t currentEpoch = UINT64_MAX;
-    uint64_t currentBatch;
-    float currentLearningRate;
+   private:
+    Sgd(uint64_t id, std::shared_ptr<RuntimeState> runtimeState);
+
+    std::shared_ptr<RuntimeState> runtimeState;
 };
 
 }  // namespace ThorImplementation

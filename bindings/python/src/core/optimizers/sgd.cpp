@@ -22,8 +22,8 @@ void bind_sgd(nb::module_ &optimizers) {
                     "Sgd builder: initial_learning_rate must be > 0. initial_learning_rate: " + to_string(initial_learning_rate);
                 throw nb::value_error(error_message.c_str());
             }
-            if (decay < 0.0f || decay > 1.0f) {
-                string error_message = "Sgd builder: assertion 0 <= decay <= 1 failed. decay: " + to_string(decay);
+            if (decay < 0.0f || decay >= 1.0f) {
+                string error_message = "Sgd builder: assertion 0 <= decay < 1 failed. decay: " + to_string(decay);
                 throw nb::value_error(error_message.c_str());
             }
             if (momentum < 0.0f) {

@@ -364,8 +364,6 @@ void Network::save(const string &directory, const bool overwrite) {
 
     // string modelJsonDump = architectureJsonString();
     json modelJson = architectureJson();
-    if (defaultOptimizer != nullptr)
-        modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
     const std::vector<ThorImplementation::CudaKernelOutOfBandKeys> cudaKernelKeys =
         ThorImplementation::cudaKernelGenerateAndAttachManifestSignatures(modelJson);
     requireCudaKernelSaveKeyCaptureForKeys(cudaKernelKeys);
@@ -434,6 +432,8 @@ json Network::architectureJson() const {
     for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
         modelJson["layers"].push_back(layer->architectureJson());
     }
+    if (defaultOptimizer != nullptr)
+        modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
     return modelJson;
 }
 

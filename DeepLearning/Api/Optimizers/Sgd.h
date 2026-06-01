@@ -7,9 +7,9 @@
 
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
-#include <optional>
 
 namespace Thor {
 
@@ -36,10 +36,10 @@ class Sgd : public Optimizer {
     virtual uint64_t getEpoch();
 
     nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
-                                     Stream stream,
-                                     std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
-                                     std::string filenamePrefix,
-                                     bool saveOptimizerState) const override;
+                             Stream stream,
+                             std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
+                             std::string filenamePrefix,
+                             bool saveOptimizerState) const override;
     static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader,
                                                   const nlohmann::json &j,
                                                   Network *network);
@@ -100,25 +100,25 @@ class Sgd::Builder {
         return *this;
     }
 
-    virtual Sgd::Builder initialLearningRate(float _initialLearningRate) {
+    virtual Sgd::Builder &initialLearningRate(float _initialLearningRate) {
         THOR_THROW_IF_FALSE(!this->_initialLearningRate.has_value());
         this->_initialLearningRate = _initialLearningRate;
         return *this;
     }
 
-    virtual Sgd::Builder decay(float _decay) {
+    virtual Sgd::Builder &decay(float _decay) {
         THOR_THROW_IF_FALSE(!this->_decay.has_value());
         this->_decay = _decay;
         return *this;
     }
 
-    virtual Sgd::Builder momentum(float _momentum) {
+    virtual Sgd::Builder &momentum(float _momentum) {
         THOR_THROW_IF_FALSE(!this->_momentum.has_value());
         this->_momentum = _momentum;
         return *this;
     }
 
-    virtual Sgd::Builder useNesterovMomentum(bool _useNesterovMomentum) {
+    virtual Sgd::Builder &useNesterovMomentum(bool _useNesterovMomentum) {
         THOR_THROW_IF_FALSE(!this->_useNesterovMomentum.has_value());
         this->_useNesterovMomentum = _useNesterovMomentum;
         return *this;

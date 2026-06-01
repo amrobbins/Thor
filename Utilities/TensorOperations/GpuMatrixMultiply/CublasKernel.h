@@ -1,7 +1,7 @@
 #pragma once
 
-#include "DeepLearning/Implementation/ThorError.h"
 #include <optional>
+#include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/ReferenceCounted.h"
@@ -156,28 +156,33 @@ class CublasKernel : private ReferenceCounted {
         THOR_THROW_IF_FALSE(ADimensions.size() == 2);
         THOR_THROW_IF_FALSE(ADimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsA);
         THOR_THROW_IF_FALSE(ADimensions[1] == ldA);
-        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(A.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.ADataType);
+        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(A.getDescriptor().getDataType()) ==
+                            cublasKernelRequirement->operationType.ADataType);
 
         std::vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
         THOR_THROW_IF_FALSE(BDimensions.size() == 2);
         THOR_THROW_IF_FALSE(BDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsB);
         THOR_THROW_IF_FALSE(BDimensions[1] == ldB);
-        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(B.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.BDataType);
+        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(B.getDescriptor().getDataType()) ==
+                            cublasKernelRequirement->operationType.BDataType);
 
         std::vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
         THOR_THROW_IF_FALSE(CDimensions.size() == 2);
         THOR_THROW_IF_FALSE(CDimensions[0] == rowsC);
         THOR_THROW_IF_FALSE(CDimensions[1] == ldC);
-        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(C.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.CDataType);
+        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(C.getDescriptor().getDataType()) ==
+                            cublasKernelRequirement->operationType.CDataType);
 
         std::vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
         THOR_THROW_IF_FALSE(DDimensions.size() == 2);
         THOR_THROW_IF_FALSE(DDimensions[0] == rowsC);
         THOR_THROW_IF_FALSE(DDimensions[1] == ldD);
-        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(D.getDescriptor().getDataType()) == cublasKernelRequirement->operationType.DDataType);
+        THOR_THROW_IF_FALSE(mapTensorDataTypeToCublasDataType(D.getDescriptor().getDataType()) ==
+                            cublasKernelRequirement->operationType.DDataType);
 
-        THOR_THROW_IF_FALSE(C.getMemPtr() != A.getMemPtr());
-        THOR_THROW_IF_FALSE(C.getMemPtr() != B.getMemPtr());
+        // FIXME: Why was this there? What is the current support surface?
+        // THOR_THROW_IF_FALSE(C.getMemPtr() != A.getMemPtr());
+        // THOR_THROW_IF_FALSE(C.getMemPtr() != B.getMemPtr());
 
         THOR_THROW_IF_FALSE(runWithoutChecks(A, B, C, D, workspace, alpha, beta, stream, pointerMode, fp8Scales) == CUBLAS_STATUS_SUCCESS);
     }

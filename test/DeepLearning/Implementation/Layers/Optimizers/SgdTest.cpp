@@ -278,10 +278,10 @@ void runSparseSgdStep(Sgd& sgd,
     stream.synchronize();
 }
 
-Tensor getMomentumStorage(Sgd& sgd) {
-    EXPECT_TRUE(sgd.hasParameter("momentum"));
+Tensor getVelocityStorage(Sgd& sgd) {
+    EXPECT_TRUE(sgd.hasParameter("velocity"));
 
-    std::optional<Tensor> storage = sgd.getParameter("momentum")->getStorage();
+    std::optional<Tensor> storage = sgd.getParameter("velocity")->getStorage();
     EXPECT_TRUE(storage.has_value());
 
     return storage.value();
@@ -325,12 +325,13 @@ TEST(SgdTest, ConstructorGettersSettersAndHyperParameters) {
     EXPECT_EQ(sgd.getEpoch(), epoch);
 
     std::unordered_map<std::string, float> all = sgd.getAllHyperParameters();
-    ASSERT_EQ(all.size(), 5u);
+    ASSERT_EQ(all.size(), 6u);
     expectMapHasValue(all, "currentLearningRate", expectedLearningRate);
     expectMapHasValue(all, "initialLearningRate", 0.25f);
     expectMapHasValue(all, "decay", 0.1f);
     expectMapHasValue(all, "momentum", 0.7f);
     expectMapHasValue(all, "useNesterovMomentum", 0.0f);
+    expectMapHasValue(all, "epoch", static_cast<float>(epoch));
 }
 
 TEST(SgdTest, CompileWithoutMomentumCreatesGradientAndWeightsOutputOnly) {
@@ -350,7 +351,7 @@ TEST(SgdTest, CompileWithoutMomentumCreatesGradientAndWeightsOutputOnly) {
     stream.synchronize();
 
     EXPECT_TRUE(sgd.isCompiled());
-    EXPECT_FALSE(sgd.hasParameter("momentum"));
+    EXPECT_FALSE(sgd.hasParameter("velocity"));
 
     std::optional<Tensor> gradientOpt = sgd.getWeightsGradient();
     ASSERT_TRUE(gradientOpt.has_value());
@@ -387,11 +388,11 @@ TEST(SgdTest, CompileWithMomentumCreatesVelocityParameterAndNamedOutputs) {
     stream.synchronize();
 
     EXPECT_TRUE(sgd.isCompiled());
-    EXPECT_TRUE(sgd.hasParameter("momentum"));
+    EXPECT_TRUE(sgd.hasParameter("velocity"));
 
     Tensor weightsOut = sgd.getOptimizerParameterTensor("weights");
     Tensor velocityOut = sgd.getOptimizerParameterTensor("velocity");
-    Tensor momentumStorage = getMomentumStorage(sgd);
+    Tensor momentumStorage = getVelocityStorage(sgd);
 
     EXPECT_EQ(weightsOut, weights);
     EXPECT_EQ(velocityOut, momentumStorage);
@@ -632,7 +633,7 @@ TEST(SgdTest, CompileSparseRowsWithoutMomentumCreatesSparseGradientAndWeightsOut
     EXPECT_TRUE(sgd.isCompiled());
     EXPECT_FALSE(sgd.getWeightsGradient().has_value());
     EXPECT_TRUE(sgd.getSparseRowGradient().has_value());
-    EXPECT_FALSE(sgd.hasParameter("momentum"));
+    EXPECT_FALSE(sgd.hasParameter("velocity"));
 
     gradient.validate();
     EXPECT_EQ(gradient.capacity, 3u);

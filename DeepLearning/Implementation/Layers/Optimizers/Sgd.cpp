@@ -1,395 +1,179 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
-#include <optional>
 
-#include "DeepLearning/Implementation/Initializers/ZerosInitializer.h"
-#include "Utilities/Expression/Expression.h"
-#include "Utilities/Expression/FusedEquation.h"
-
-#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
-
+#include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/ThorError.h"
-using namespace ThorImplementation;
+#include "Utilities/Expression/Expression.h"
+
+#include <cmath>
+#include <memory>
+#include <utility>
+#include <vector>
+
 using namespace std;
 
-Sgd::Sgd(uint64_t id, float initialLearningRate, float decay, float momentum, bool useNesterovMomentum, uint64_t startResumeEpoch)
-    : Optimizer(id),
-      initialLearningRate(initialLearningRate),
-      decay(decay),
-      momentum(momentum),
-      useNesterovMomentum(useNesterovMomentum),
-      currentEpoch(startResumeEpoch),
-      currentBatch(0),
-      currentLearningRate(initialLearningRate) {}
+namespace ThorImplementation {
 
-void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream, bool materializeDenseGradient) {
-    THOR_THROW_IF_FALSE(!compiled);
-    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
-    THOR_THROW_IF_FALSE(weights.isInitialized());
-    THOR_THROW_IF_FALSE(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+struct Sgd::RuntimeState {
+    float initialLearningRate;
+    float decay;
+    float momentum;
+    bool useNesterovMomentum;
+    uint64_t currentEpoch;
+    uint64_t currentBatch = 0;
+    float currentLearningRate;
+};
 
-    this->gradientUpdateStream = gradientUpdateStream;
-    this->weights = weights;
+namespace {
 
-    const DataType weightsDType = weights.getDescriptor().getDataType();
-    const int32_t gpuNum = weights.getPlacement().getDeviceNum();
+shared_ptr<Sgd::RuntimeState> makeRuntimeState(float initialLearningRate,
+                                               float decay,
+                                               float momentum,
+                                               bool useNesterovMomentum,
+                                               uint64_t startResumeEpoch) {
+    return make_shared<Sgd::RuntimeState>(Sgd::RuntimeState{initialLearningRate,
+                                                            decay,
+                                                            momentum,
+                                                            useNesterovMomentum,
+                                                            startResumeEpoch,
+                                                            0,
+                                                            initialLearningRate});
+}
 
-    if (momentum > 0.0f && !hasParameter("momentum")) {
-        shared_ptr<PhysicalParameter> momentumParameter =
-            make_shared<PhysicalParameter>("momentum", false, weights.getDimensions(), weightsDType);
-        shared_ptr<Initializer> paramInitializer = make_shared<ZerosInitializer>();
-        momentumParameter->setInitializer(paramInitializer->clone());
-        addParameter(momentumParameter);
-        momentumParameter->compileStorage(weights);
-        momentumParameter->compileInitializer();
-        momentumParameter->initialize(gradientUpdateStream);
-        THOR_THROW_IF_FALSE(momentumParameter->getStorage().has_value());
-    } else if (momentum <= 0.0f && hasParameter("momentum")) {
-        dropParameter("momentum");
+vector<CustomOptimizerStateSpec> stateSpecsFor(const Sgd::RuntimeState& state) {
+    vector<CustomOptimizerStateSpec> stateSpecs;
+    if (state.momentum > 0.0f) {
+        stateSpecs.push_back(CustomOptimizerStateSpec::sameShapeAndDTypeAsWeights("velocity"));
     }
+    return stateSpecs;
+}
 
-    if (!materializeDenseGradient) {
-        // CustomLayer dense optimizer fusion provides the gradient as an expression and updates the
-        // parameter/state tensors directly.  In that production path the dense gradient tensor and
-        // standalone optimizer update stamp are intentionally not allocated.
-        compiled = true;
-        return;
-    }
+CustomOptimizer::UpdateExpressionBuilder makeUpdateExpressionBuilder(shared_ptr<Sgd::RuntimeState> state) {
+    return [state](const CustomOptimizerUpdateContext& context) {
+        const DataType weightsDType = context.weightsTensor().getDescriptor().getDataType();
 
-    this->weightsGradient = weights.clone();
+        auto w = context.weights(DataType::FP32, DataType::FP32);
+        auto g = context.gradient();
+        auto step = context.runtimeScalar("step", DataType::FP32, DataType::FP32);
 
-    auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
-    auto g = Expression::input("gradient", DataType::FP32, DataType::FP32);
-    auto step = Expression::runtimeScalar("step", DataType::FP32, DataType::FP32);
+        if (state->momentum > 0.0f) {
+            auto v = context.state("velocity", DataType::FP32, DataType::FP32);
+            auto mu = Expression::constantScalar(state->momentum);
+            auto vNext = (mu * v - step * g).withOutputDType(weightsDType);
 
-    unordered_map<string, Tensor> stampInputs;
-    unordered_map<string, TensorScalarBinding> tensorScalarInputs;
-    unordered_map<string, Tensor> preallocatedOutputs;
+            if (state->useNesterovMomentum) {
+                // v_{t+1} = mu * v_t - step * g
+                // w_{t+1} = w_t + mu * v_{t+1} - step * g
+                auto wNext = (w + mu * vNext - step * g).withOutputDType(weightsDType);
+                return CustomOptimizerUpdateExpression{{
+                    {"weights", wNext},
+                    {"velocity", vNext},
+                }};
+            }
 
-    stampInputs["weights_in"] = weights;
-    THOR_THROW_IF_FALSE(weightsGradient.has_value());
-    stampInputs["gradient"] = weightsGradient.value();
-    preallocatedOutputs["weights"] = weights;
-
-    std::optional<Outputs> expressionOutputs;
-    if (momentum > 0.0f) {
-        shared_ptr<PhysicalParameter> momentumParameter = getParameter("momentum");
-        Tensor momentumTensor = momentumParameter->getStorage().value();
-
-        std::optional<Expression> vNext;
-        std::optional<Expression> wNext;
-        if (useNesterovMomentum) {
-            // Nesterov:
-            // v_{t+1} = mu * v_t - step * g
-            // w_{t+1} = w_t + mu * v_{t+1} - step * g
-            Expression v = Expression::input("velocity_in", DataType::FP32, DataType::FP32);
-            vNext.emplace(Expression::constantScalar(momentum) * v - step * g);
-            wNext.emplace(w + Expression::constantScalar(momentum) * (*vNext) - step * g);
-        } else {
             // Classical momentum:
             // v_{t+1} = mu * v_t - step * g
             // w_{t+1} = w_t + v_{t+1}
-            Expression v = Expression::input("velocity_in", DataType::FP32, DataType::FP32);
-            vNext.emplace(Expression::constantScalar(momentum) * v - step * g);
-            wNext.emplace(w + (*vNext));
+            auto wNext = (w + vNext).withOutputDType(weightsDType);
+            return CustomOptimizerUpdateExpression{{
+                {"weights", wNext},
+                {"velocity", vNext},
+            }};
         }
 
-        expressionOutputs.emplace(Expression::outputs({
-            {"weights", *wNext},
-            {"velocity", *vNext},
-        }));
-
-        stampInputs["velocity_in"] = momentumTensor;
-        preallocatedOutputs["velocity"] = momentumTensor;
-    } else {
-        // Plain SGD:
-        // w_{t+1} = w_t - step * g
-        auto wNext = (w - step * g).withOutputDType(weightsDType);
-        expressionOutputs.emplace(Expression::outputs({
-            {"weights", wNext},
-        }));
-    }
-
-    FusedEquation sgdUpdateEquation = FusedEquation::compile(expressionOutputs->physicalOutputs(), gpuNum);
-    updateEquationStamped = make_unique<StampedExecutionPlan>(
-        sgdUpdateEquation.stamp(stampInputs, gradientUpdateStream, tensorScalarInputs, preallocatedOutputs));
-
-    compiled = true;
+        return CustomOptimizerUpdateExpression{{
+            {"weights", (w - step * g).withOutputDType(weightsDType)},
+        }};
+    };
 }
 
+CustomOptimizer::RuntimeScalarBuilder makeRuntimeScalarBuilder(shared_ptr<Sgd::RuntimeState> state) {
+    return [state](uint32_t batchSize, const string& namePrefix) {
+        THOR_THROW_IF_FALSE(batchSize > 0);
+        const float lossScalingFactor = Loss::getLossScalingFactor();
+        THOR_THROW_IF_FALSE(lossScalingFactor > 0.0f);
 
-DenseOptimizerExpression Sgd::toDenseUpdateExpression(const Tensor& weights,
-                                                      const Expression& gradient,
-                                                      const std::string& namePrefix) {
-    THOR_THROW_IF_FALSE(weights.isInitialized());
-    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
+        const float step = state->currentLearningRate / (static_cast<float>(batchSize) * lossScalingFactor);
+        return unordered_map<string, float>{{namePrefix + "step", step}};
+    };
+}
 
-    const DataType weightsDType = weights.getDescriptor().getDataType();
-
-    auto w = Expression::input(namePrefix + "weights_in", DataType::FP32, DataType::FP32);
-    auto step = Expression::runtimeScalar(namePrefix + "step", DataType::FP32, DataType::FP32);
-
-    DenseOptimizerExpression result;
-    result.inputs[namePrefix + "weights_in"] = weights;
-    result.preallocatedOutputs["weights"] = weights;
-
-    std::optional<Outputs> expressionOutputs;
-    if (momentum > 0.0f) {
-        if (!hasParameter("momentum")) {
-            shared_ptr<PhysicalParameter> momentumParameter =
-                make_shared<PhysicalParameter>("momentum", false, weights.getDimensions(), weightsDType);
-            shared_ptr<Initializer> paramInitializer = make_shared<ZerosInitializer>();
-            momentumParameter->setInitializer(paramInitializer->clone());
-            addParameter(momentumParameter);
-            momentumParameter->compileStorage(weights);
-            momentumParameter->compileInitializer();
-            momentumParameter->initialize(gradientUpdateStream);
-            THOR_THROW_IF_FALSE(momentumParameter->getStorage().has_value());
+CustomOptimizer::HyperParameterUpdateBuilder makeHyperParameterUpdateBuilder(shared_ptr<Sgd::RuntimeState> state) {
+    return [state](uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
+        (void)batchesPerEpoch;
+        if (state->currentEpoch != epoch) {
+            state->currentLearningRate = static_cast<float>(
+                static_cast<double>(state->initialLearningRate) *
+                std::pow(1.0 - static_cast<double>(state->decay), static_cast<double>(epoch)));
         }
-        shared_ptr<PhysicalParameter> momentumParameter = getParameter("momentum");
-        Tensor momentumTensor = momentumParameter->getStorage().value();
-
-        Expression v = Expression::input(namePrefix + "velocity_in", DataType::FP32, DataType::FP32);
-        std::optional<Expression> vNext;
-        std::optional<Expression> wNext;
-        if (useNesterovMomentum) {
-            vNext.emplace((Expression::constantScalar(momentum) * v - step * gradient).withOutputDType(weightsDType));
-            wNext.emplace((w + Expression::constantScalar(momentum) * (*vNext) - step * gradient).withOutputDType(weightsDType));
-        } else {
-            vNext.emplace((Expression::constantScalar(momentum) * v - step * gradient).withOutputDType(weightsDType));
-            wNext.emplace((w + (*vNext)).withOutputDType(weightsDType));
-        }
-
-        expressionOutputs.emplace(Expression::outputs({
-            {"weights", *wNext},
-            {"velocity", *vNext},
-        }));
-
-        result.inputs[namePrefix + "velocity_in"] = momentumTensor;
-        result.preallocatedOutputs["velocity"] = momentumTensor;
-    } else {
-        auto wNext = (w - step * gradient).withOutputDType(weightsDType);
-        expressionOutputs.emplace(Expression::outputs({
-            {"weights", wNext},
-        }));
-    }
-
-    result.outputs = expressionOutputs->physicalOutputs();
-    return result;
+        state->currentEpoch = epoch;
+        state->currentBatch = batch;
+        return unordered_map<string, float>{{"currentLearningRate", state->currentLearningRate}};
+    };
 }
 
-std::unordered_map<std::string, float> Sgd::denseUpdateRuntimeScalars(uint32_t batchSize, const std::string& namePrefix) {
-    std::unordered_map<std::string, float> scalars = sparseRowUpdateRuntimeScalars(batchSize);
-    std::unordered_map<std::string, float> prefixed;
-    prefixed.reserve(scalars.size());
-    for (const auto& [name, value] : scalars) {
-        prefixed[namePrefix + name] = value;
-    }
-    return prefixed;
+CustomOptimizer::HyperParameterSnapshotBuilder makeHyperParameterSnapshotBuilder(shared_ptr<Sgd::RuntimeState> state) {
+    return [state]() {
+        return unordered_map<string, float>{{"currentLearningRate", state->currentLearningRate},
+                                            {"initialLearningRate", state->initialLearningRate},
+                                            {"decay", state->decay},
+                                            {"momentum", state->momentum},
+                                            {"useNesterovMomentum", state->useNesterovMomentum ? 1.0f : 0.0f},
+                                            {"epoch", static_cast<float>(state->currentEpoch)}};
+    };
 }
 
-SparseRowOptimizerExpression Sgd::toSparseRowUpdateExpression(const Tensor& weights, SparseRowGradient& sparseRowGradient) {
-    THOR_THROW_IF_FALSE(weights.isInitialized());
-    sparseRowGradient.validate();
-    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
+}  // namespace
 
-    const std::vector<uint64_t> weightDims = weights.getDimensions();
-    if (weightDims.size() != 2 || weightDims[0] == 0 || weightDims[1] == 0) {
-        throw std::invalid_argument("Sparse SGD weights tensor must have shape [vocabulary_size, embedding_dim].");
-    }
-    if (sparseRowGradient.embeddingDim != weightDims[1]) {
-        throw std::invalid_argument("Sparse SGD sparse-gradient embedding dimension does not match weights.");
-    }
-    if (sparseRowGradient.vocabularySize != weightDims[0]) {
-        throw std::invalid_argument("Sparse SGD sparse-gradient vocabulary size does not match weights.");
-    }
+Sgd::Sgd(uint64_t id, float initialLearningRate, float decay, float momentum, bool useNesterovMomentum, uint64_t startResumeEpoch)
+    : Sgd(id, makeRuntimeState(initialLearningRate, decay, momentum, useNesterovMomentum, startResumeEpoch)) {}
 
-    const DataType weightsDType = weights.getDescriptor().getDataType();
+Sgd::Sgd(uint64_t id, shared_ptr<RuntimeState> runtimeState)
+    : CustomOptimizer(id,
+                      stateSpecsFor(*runtimeState),
+                      makeUpdateExpressionBuilder(runtimeState),
+                      makeRuntimeScalarBuilder(runtimeState),
+                      /*supportsSparseRowGradients=*/true,
+                      makeHyperParameterUpdateBuilder(runtimeState),
+                      makeHyperParameterSnapshotBuilder(runtimeState)),
+      runtimeState(std::move(runtimeState)) {}
 
-    auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
-    auto g = Expression::input("gradient", DataType::FP32, DataType::FP32);
-    auto step = Expression::runtimeScalar("step", DataType::FP32, DataType::FP32);
-
-    SparseRowOptimizerExpression result;
-    result.inputs["weights_in"] = SparseRowUpdateTensorBinding{weights, SparseRowUpdateTensorKind::IndexedRows};
-    result.inputs["gradient"] = SparseRowUpdateTensorBinding{sparseRowGradient.values, SparseRowUpdateTensorKind::DenseLogicalRows};
-    result.indexedOutputs["weights"] = weights;
-
-    std::optional<Outputs> expressionOutputs;
-    if (momentum > 0.0f) {
-        if (!hasParameter("momentum")) {
-            shared_ptr<PhysicalParameter> momentumParameter =
-                make_shared<PhysicalParameter>("momentum", false, weights.getDimensions(), weightsDType);
-            shared_ptr<Initializer> paramInitializer = make_shared<ZerosInitializer>();
-            momentumParameter->setInitializer(paramInitializer->clone());
-            addParameter(momentumParameter);
-            momentumParameter->compileStorage(weights);
-            momentumParameter->compileInitializer();
-            momentumParameter->initialize(gradientUpdateStream);
-            THOR_THROW_IF_FALSE(momentumParameter->getStorage().has_value());
-        }
-        shared_ptr<PhysicalParameter> momentumParameter = getParameter("momentum");
-        Tensor momentumTensor = momentumParameter->getStorage().value();
-
-        Expression v = Expression::input("velocity_in", DataType::FP32, DataType::FP32);
-        std::optional<Expression> vNext;
-        std::optional<Expression> wNext;
-        if (useNesterovMomentum) {
-            // Nesterov:
-            // v_{t+1}[row, d] = mu * v_t[row, d] - step * g[row, d]
-            // w_{t+1}[row, d] = w_t[row, d] + mu * v_{t+1}[row, d] - step * g[row, d]
-            vNext.emplace((Expression::constantScalar(momentum) * v - step * g).withOutputDType(weightsDType));
-            wNext.emplace((w + Expression::constantScalar(momentum) * (*vNext) - step * g).withOutputDType(weightsDType));
-        } else {
-            // Classical momentum:
-            // v_{t+1}[row, d] = mu * v_t[row, d] - step * g[row, d]
-            // w_{t+1}[row, d] = w_t[row, d] + v_{t+1}[row, d]
-            vNext.emplace((Expression::constantScalar(momentum) * v - step * g).withOutputDType(weightsDType));
-            wNext.emplace((w + (*vNext)).withOutputDType(weightsDType));
-        }
-
-        expressionOutputs.emplace(Expression::outputs({
-            {"weights", *wNext},
-            {"velocity", *vNext},
-        }));
-        result.inputs["velocity_in"] = SparseRowUpdateTensorBinding{momentumTensor, SparseRowUpdateTensorKind::IndexedRows};
-        result.indexedOutputs["velocity"] = momentumTensor;
-    } else {
-        if (hasParameter("momentum"))
-            dropParameter("momentum");
-
-        // Plain sparse SGD over the optimizer-owned reduced sparse-gradient rows:
-        // w_{t+1}[row, d] = w_t[row, d] - step * g[row, d]
-        auto wNext = (w - step * g).withOutputDType(weightsDType);
-        expressionOutputs.emplace(Expression::outputs({
-            {"weights", wNext},
-        }));
-    }
-
-    result.outputs = expressionOutputs->physicalOutputs();
-    return result;
+void Sgd::setInitialLearningRate(float initialLearningRate) {
+    THOR_THROW_IF_FALSE(initialLearningRate >= 0.0f);
+    runtimeState->initialLearningRate = initialLearningRate;
 }
 
-SparseRowGradient Sgd::compileSparseRows(const Tensor& weights, uint64_t maxSparseRows, Stream& gradientUpdateStream) {
-    THOR_THROW_IF_FALSE(!compiled);
-    THOR_THROW_IF_FALSE(gradientUpdateStream.isInitialized());
-    THOR_THROW_IF_FALSE(weights.isInitialized());
-    THOR_THROW_IF_FALSE(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-
-    const std::vector<uint64_t> weightDims = weights.getDimensions();
-    if (weightDims.size() != 2 || weightDims[0] == 0 || weightDims[1] == 0) {
-        throw std::invalid_argument("Sparse SGD weights tensor must have shape [vocabulary_size, embedding_dim].");
-    }
-    if (maxSparseRows == 0) {
-        throw std::invalid_argument("Sparse SGD maxSparseRows must be non-zero.");
-    }
-    if (maxSparseRows > weightDims[0]) {
-        throw std::invalid_argument("Sparse SGD maxSparseRows cannot exceed the embedding vocabulary size.");
-    }
-
-    this->gradientUpdateStream = gradientUpdateStream;
-    this->weights = weights;
-    this->sparseRowGradient =
-        SparseRowGradient::allocate(weights.getPlacement(),
-                                    maxSparseRows,
-                                    weightDims[0],
-                                    weightDims[1],
-                                    DataType::FP32,
-                                    SparseRowGradient::chooseRowDataType(weightDims[0]));
-    THOR_THROW_IF_FALSE(sparseRowGradient.has_value());
-
-    const int32_t gpuNum = weights.getPlacement().getDeviceNum();
-    SparseRowOptimizerExpression updateExpression = toSparseRowUpdateExpression(weights, sparseRowGradient.value());
-
-    sparseUpdatePlan = SparseRowUpdatePlan::compile(updateExpression.outputs,
-                                                   sparseRowGradient->rows,
-                                                   sparseRowGradient->numRows,
-                                                   updateExpression.inputs,
-                                                   updateExpression.indexedOutputs,
-                                                   gpuNum);
-
-    compiled = true;
-    return sparseRowGradient.value();
+void Sgd::setDecay(float decay) {
+    THOR_THROW_IF_FALSE(decay >= 0.0f);
+    THOR_THROW_IF_FALSE(decay <= 1.0f);
+    runtimeState->decay = decay;
 }
-
-std::unordered_map<std::string, float> Sgd::sparseRowUpdateRuntimeScalars(uint32_t batchSize) {
-    THOR_THROW_IF_FALSE(batchSize > 0);
-    const float lossScalingFactor = Loss::getLossScalingFactor();
-    THOR_THROW_IF_FALSE(lossScalingFactor > 0);
-
-    const float step = currentLearningRate / (static_cast<float>(batchSize) * lossScalingFactor);
-    return {{"step", step}};
-}
-
-void Sgd::updateWeights(uint32_t batchSize) {
-    THOR_THROW_IF_FALSE(compiled);
-    THOR_THROW_IF_FALSE(weightsGradient.has_value());
-    THOR_THROW_IF_FALSE(weightsGradient.value().isInitialized());
-    THOR_THROW_IF_FALSE(weightsGradient.value().getPlacement() == weights.getPlacement());
-    THOR_THROW_IF_FALSE(updateEquationStamped != nullptr);
-
-    THOR_THROW_IF_FALSE(batchSize > 0);
-    const float lossScalingFactor = Loss::getLossScalingFactor();
-    THOR_THROW_IF_FALSE(lossScalingFactor > 0);
-
-    const float step = currentLearningRate / (static_cast<float>(batchSize) * lossScalingFactor);
-    updateEquationStamped->run({
-        {"step", step},
-    });
-}
-
-void Sgd::updateSparseRows(uint32_t batchSize) {
-    THOR_THROW_IF_FALSE(compiled);
-    THOR_THROW_IF_FALSE(sparseRowGradient.has_value());
-    THOR_THROW_IF_FALSE(sparseUpdatePlan != nullptr);
-
-    sparseRowGradient->validate();
-
-    sparseUpdatePlan->run(sparseRowUpdateRuntimeScalars(batchSize), gradientUpdateStream);
-}
-
-unordered_map<string, float> Sgd::updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
-    unordered_map<string, float> updatedParameters;
-
-    if (currentEpoch != epoch)
-        currentLearningRate = static_cast<float>(initialLearningRate * pow(1.0 - static_cast<double>(decay), static_cast<double>(epoch)));
-
-    currentEpoch = epoch;
-
-    updatedParameters["currentLearningRate"] = currentLearningRate;
-
-    return updatedParameters;
-}
-
-unordered_map<string, float> Sgd::getAllHyperParameters() {
-    unordered_map<string, float> parameters;
-    parameters["currentLearningRate"] = currentLearningRate;
-    parameters["initialLearningRate"] = initialLearningRate;
-    parameters["decay"] = decay;
-    parameters["momentum"] = momentum;
-    parameters["useNesterovMomentum"] = useNesterovMomentum ? 1.0f : 0.0f;
-
-    return parameters;
-}
-
-void Sgd::setInitialLearningRate(float initialLearningRate) { this->initialLearningRate = initialLearningRate; }
-
-void Sgd::setDecay(float decay) { this->decay = decay; }
 
 void Sgd::setMomentum(float momentum) {
     THOR_THROW_IF_FALSE(momentum >= 0.0f);
-    this->momentum = momentum;
+    runtimeState->momentum = momentum;
 }
 
-void Sgd::setUseNesterovMomentum(bool useNesterovMomentum) { this->useNesterovMomentum = useNesterovMomentum; }
+void Sgd::setUseNesterovMomentum(bool useNesterovMomentum) { runtimeState->useNesterovMomentum = useNesterovMomentum; }
 
-float Sgd::getInitialLearningRate() const { return initialLearningRate; }
+float Sgd::getInitialLearningRate() const { return runtimeState->initialLearningRate; }
 
-float Sgd::getDecay() const { return decay; }
+float Sgd::getDecay() const { return runtimeState->decay; }
 
-float Sgd::getMomentum() const { return momentum; }
+float Sgd::getMomentum() const { return runtimeState->momentum; }
 
-bool Sgd::getUseNesterovMomentum() const { return useNesterovMomentum; }
+bool Sgd::getUseNesterovMomentum() const { return runtimeState->useNesterovMomentum; }
 
-uint64_t Sgd::getEpoch() const { return currentEpoch; }
+uint64_t Sgd::getEpoch() const { return runtimeState->currentEpoch; }
 
-float Sgd::getCurrentLearningRate() const { return currentLearningRate; }
+float Sgd::getCurrentLearningRate() const { return runtimeState->currentLearningRate; }
+
+shared_ptr<Optimizer> Sgd::clone() const {
+    return make_shared<Sgd>(getId(),
+                            runtimeState->initialLearningRate,
+                            runtimeState->decay,
+                            runtimeState->momentum,
+                            runtimeState->useNesterovMomentum,
+                            runtimeState->currentEpoch);
+}
+
+}  // namespace ThorImplementation

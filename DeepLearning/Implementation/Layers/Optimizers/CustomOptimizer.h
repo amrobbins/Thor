@@ -16,9 +16,14 @@ struct CustomOptimizerStateSpec {
     std::string name;
     DataType dtype = DataType::FP32;
     std::optional<std::vector<uint64_t>> shape = std::nullopt;
+    bool useWeightsDType = false;
 
     static CustomOptimizerStateSpec sameShapeAsWeights(std::string name, DataType dtype = DataType::FP32) {
-        return CustomOptimizerStateSpec{std::move(name), dtype, std::nullopt};
+        return CustomOptimizerStateSpec{std::move(name), dtype, std::nullopt, false};
+    }
+
+    static CustomOptimizerStateSpec sameShapeAndDTypeAsWeights(std::string name) {
+        return CustomOptimizerStateSpec{std::move(name), DataType::FP32, std::nullopt, true};
     }
 };
 
@@ -63,12 +68,18 @@ class CustomOptimizer : public Optimizer {
     using UpdateExpressionBuilder = std::function<CustomOptimizerUpdateExpression(const CustomOptimizerUpdateContext&)>;
     using RuntimeScalarBuilder = std::function<std::unordered_map<std::string, float>(uint32_t batchSize,
                                                                                       const std::string& namePrefix)>;
+    using HyperParameterUpdateBuilder = std::function<std::unordered_map<std::string, float>(uint64_t epoch,
+                                                                                             uint64_t batch,
+                                                                                             uint64_t batchesPerEpoch)>;
+    using HyperParameterSnapshotBuilder = std::function<std::unordered_map<std::string, float>()>;
 
     CustomOptimizer(uint64_t id,
                     std::vector<CustomOptimizerStateSpec> stateSpecs,
                     UpdateExpressionBuilder updateExpressionBuilder,
                     RuntimeScalarBuilder runtimeScalarBuilder = {},
-                    bool supportsSparseRowGradients = false);
+                    bool supportsSparseRowGradients = false,
+                    HyperParameterUpdateBuilder hyperParameterUpdateBuilder = {},
+                    HyperParameterSnapshotBuilder hyperParameterSnapshotBuilder = {});
 
     void compile(const Tensor& weights, Stream& gradientUpdateStream, bool materializeDenseGradient = true) override;
     SparseRowGradient compileSparseRows(const Tensor& weights, uint64_t maxSparseRows, Stream& gradientUpdateStream) override;
@@ -96,7 +107,13 @@ class CustomOptimizer : public Optimizer {
     const std::vector<CustomOptimizerStateSpec>& getStateSpecs() const { return stateSpecs_; }
 
     std::shared_ptr<Optimizer> clone() const override {
-        return std::make_shared<CustomOptimizer>(getId(), stateSpecs_, updateExpressionBuilder_, runtimeScalarBuilder_, supportsSparseRowGradients_);
+        return std::make_shared<CustomOptimizer>(getId(),
+                                                 stateSpecs_,
+                                                 updateExpressionBuilder_,
+                                                 runtimeScalarBuilder_,
+                                                 supportsSparseRowGradients_,
+                                                 hyperParameterUpdateBuilder_,
+                                                 hyperParameterSnapshotBuilder_);
     }
 
    private:
@@ -110,6 +127,8 @@ class CustomOptimizer : public Optimizer {
     std::vector<CustomOptimizerStateSpec> stateSpecs_;
     UpdateExpressionBuilder updateExpressionBuilder_;
     RuntimeScalarBuilder runtimeScalarBuilder_;
+    HyperParameterUpdateBuilder hyperParameterUpdateBuilder_;
+    HyperParameterSnapshotBuilder hyperParameterSnapshotBuilder_;
     bool supportsSparseRowGradients_ = false;
 };
 
