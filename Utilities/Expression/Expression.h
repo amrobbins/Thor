@@ -36,6 +36,15 @@ enum class ExprOp : uint16_t {
     MUL,
     DIV,
     POW,
+    EQUAL,
+    NOT_EQUAL,
+    LESS,
+    LESS_EQUAL,
+    GREATER,
+    GREATER_EQUAL,
+    LOGICAL_AND,
+    LOGICAL_OR,
+    LOGICAL_NOT,
     NEG,
     ABS,
     CEIL,
@@ -464,7 +473,35 @@ class Expression {
     [[nodiscard]] Expression operator*(const Expression& other) const;
     [[nodiscard]] Expression operator/(const Expression& other) const;
 
+    [[nodiscard]] Expression operator==(const Expression& other) const;
+    [[nodiscard]] Expression operator!=(const Expression& other) const;
+    [[nodiscard]] Expression operator<(const Expression& other) const;
+    [[nodiscard]] Expression operator<=(const Expression& other) const;
+    [[nodiscard]] Expression operator>(const Expression& other) const;
+    [[nodiscard]] Expression operator>=(const Expression& other) const;
+
     [[nodiscard]] Expression operator-() const;
+    [[nodiscard]] Expression operator!() const;
+
+    [[nodiscard]] Expression equal(const Expression& other) const;
+    [[nodiscard]] Expression notEqual(const Expression& other) const;
+    [[nodiscard]] Expression lessThan(const Expression& other) const;
+    [[nodiscard]] Expression lessEqual(const Expression& other) const;
+    [[nodiscard]] Expression greaterThan(const Expression& other) const;
+    [[nodiscard]] Expression greaterEqual(const Expression& other) const;
+    [[nodiscard]] Expression logicalAnd(const Expression& other) const;
+    [[nodiscard]] Expression logicalOr(const Expression& other) const;
+    [[nodiscard]] Expression logicalNot() const;
+
+    [[nodiscard]] static Expression equal(const Expression& lhs, const Expression& rhs);
+    [[nodiscard]] static Expression notEqual(const Expression& lhs, const Expression& rhs);
+    [[nodiscard]] static Expression lessThan(const Expression& lhs, const Expression& rhs);
+    [[nodiscard]] static Expression lessEqual(const Expression& lhs, const Expression& rhs);
+    [[nodiscard]] static Expression greaterThan(const Expression& lhs, const Expression& rhs);
+    [[nodiscard]] static Expression greaterEqual(const Expression& lhs, const Expression& rhs);
+    [[nodiscard]] static Expression logicalAnd(const Expression& lhs, const Expression& rhs);
+    [[nodiscard]] static Expression logicalOr(const Expression& lhs, const Expression& rhs);
+    [[nodiscard]] static Expression logicalNot(const Expression& input);
 
     [[nodiscard]] Expression abs() const;
     [[nodiscard]] Expression ceil() const;

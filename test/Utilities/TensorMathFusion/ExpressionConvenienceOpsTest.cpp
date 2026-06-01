@@ -372,6 +372,136 @@ TEST(ExpressionConvenienceOps, OuterProductBackwardProducesExpectedGradients) {
     expectNear(gradients.at("b_grad"), {12.5f, -13.0f});
 }
 
+TEST(ExpressionBooleanComparisonOps, ComparisonsLowerToBinaryExpressionNodes) {
+    auto x = Expression::input("x");
+    auto y = Expression::input("y");
+
+    const std::vector<std::pair<ExprOp, Expression>> cases = {
+        {ExprOp::EQUAL, x.equal(y)},
+        {ExprOp::NOT_EQUAL, x.notEqual(y)},
+        {ExprOp::LESS, x.lessThan(y)},
+        {ExprOp::LESS_EQUAL, x.lessEqual(y)},
+        {ExprOp::GREATER, x.greaterThan(y)},
+        {ExprOp::GREATER_EQUAL, x.greaterEqual(y)},
+        {ExprOp::EQUAL, x == y},
+        {ExprOp::NOT_EQUAL, x != y},
+        {ExprOp::LESS, x < y},
+        {ExprOp::LESS_EQUAL, x <= y},
+        {ExprOp::GREATER, x > y},
+        {ExprOp::GREATER_EQUAL, x >= y},
+    };
+
+    for (const auto& [expectedOp, expr] : cases) {
+        auto outputs = Expression::outputs({{"y", expr}}).physicalOutputs();
+        const ExprNode& node = outputNode(outputs);
+        EXPECT_EQ(node.op, expectedOp);
+        ASSERT_NE(node.lhs, UINT32_MAX);
+        ASSERT_NE(node.rhs, UINT32_MAX);
+        EXPECT_EQ(outputs.expr->nodes.at(node.lhs).op, ExprOp::INPUT);
+        EXPECT_EQ(outputs.expr->nodes.at(node.rhs).op, ExprOp::INPUT);
+    }
+}
+
+TEST(ExpressionBooleanComparisonOps, BooleanOutputsDefaultToBooleanAndCanBeOverridden) {
+    auto x = Expression::input("x");
+    auto y = Expression::input("y");
+
+    auto bool_outputs = Expression::outputs({{"mask", x.greaterEqual(y)}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(bool_outputs, {DataType::FP32, DataType::FP32});
+    const ExprNode& bool_node = outputNode(bool_outputs);
+    ASSERT_TRUE(bool_node.output_dtype.has_value());
+    EXPECT_EQ(bool_node.output_dtype.value(), DataType::BOOLEAN);
+    ASSERT_TRUE(bool_node.compute_dtype.has_value());
+    EXPECT_EQ(bool_node.compute_dtype.value(), DataType::FP32);
+
+    auto fp32_outputs = Expression::outputs({{"mask", x.greaterEqual(y).withOutputDType(DataType::FP32)}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(fp32_outputs, {DataType::FP32, DataType::FP32});
+    const ExprNode& fp32_node = outputNode(fp32_outputs);
+    ASSERT_TRUE(fp32_node.output_dtype.has_value());
+    EXPECT_EQ(fp32_node.output_dtype.value(), DataType::FP32);
+    ASSERT_TRUE(fp32_node.compute_dtype.has_value());
+    EXPECT_EQ(fp32_node.compute_dtype.value(), DataType::FP32);
+
+    auto integer_outputs = Expression::outputs({{"mask", x.equal(y)}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(integer_outputs, {DataType::UINT32, DataType::UINT32});
+    const ExprNode& integer_node = outputNode(integer_outputs);
+    ASSERT_TRUE(integer_node.output_dtype.has_value());
+    EXPECT_EQ(integer_node.output_dtype.value(), DataType::BOOLEAN);
+    ASSERT_TRUE(integer_node.compute_dtype.has_value());
+    EXPECT_EQ(integer_node.compute_dtype.value(), DataType::FP32);
+}
+
+TEST(ExpressionBooleanComparisonOps, LogicalOpsComposeBooleanMasksInSingleFusedStage) {
+    auto x = Expression::input("x");
+    auto y = Expression::input("y");
+    auto mask = x.greaterEqual(y).logicalAnd(x.notEqual(y)).logicalOr(!x.lessThan(y));
+
+    auto outputs = Expression::outputs({{"mask", mask}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::FP32, DataType::FP32});
+
+    const ExprNode& root = outputNode(outputs);
+    ASSERT_EQ(root.op, ExprOp::LOGICAL_OR);
+    ASSERT_TRUE(root.output_dtype.has_value());
+    EXPECT_EQ(root.output_dtype.value(), DataType::BOOLEAN);
+    ASSERT_TRUE(root.compute_dtype.has_value());
+    EXPECT_EQ(root.compute_dtype.value(), DataType::BOOLEAN);
+
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(outputs);
+    ASSERT_EQ(stages.size(), 1);
+    EXPECT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+}
+
+TEST(ExpressionBooleanComparisonOps, AutodiffRejectsNondifferentiableBooleanOps) {
+    auto x = Expression::input("x");
+    auto y = Expression::input("y");
+
+    const std::vector<Expression> cases = {
+        x.equal(y).withOutputDType(DataType::FP32),
+        x.notEqual(y).withOutputDType(DataType::FP32),
+        x.lessThan(y).withOutputDType(DataType::FP32),
+        x.lessEqual(y).withOutputDType(DataType::FP32),
+        x.greaterThan(y).withOutputDType(DataType::FP32),
+        x.greaterEqual(y).withOutputDType(DataType::FP32),
+        x.greaterEqual(y).logicalAnd(x.notEqual(y)).withOutputDType(DataType::FP32),
+        x.greaterEqual(y).logicalOr(x.notEqual(y)).withOutputDType(DataType::FP32),
+        x.greaterEqual(y).logicalNot().withOutputDType(DataType::FP32),
+    };
+
+    for (const auto& expr : cases) {
+        auto outputs = Expression::outputs({{"y", expr}}).physicalOutputs();
+        EXPECT_THROW((void)buildBackwardOutputs(outputs, {"x"}), std::runtime_error);
+    }
+}
+
+TEST(ExpressionBooleanComparisonOps, ComparisonProducesExpectedValuesWhenCastedToFp32) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor x = makeGpuTensor({2, 4}, {-2.0f, -1.0f, 0.0f, 0.5f, 1.0f, 2.0f, 3.0f, 4.0f}, stream);
+    Tensor y = makeGpuTensor({2, 4}, {-2.0f, 0.0f, 0.0f, 1.0f, 0.5f, 2.0f, 4.0f, 3.0f}, stream);
+
+    auto expression_outputs = Expression::outputs({{"mask", Expression::input("x").greaterEqual(Expression::input("y")).withOutputDType(DataType::FP32)}});
+    Tensor mask = runExpressionOutput(expression_outputs, {{"x", x}, {"y", y}}, "mask", stream);
+
+    EXPECT_EQ(mask.getDimensions(), (std::vector<uint64_t>{2, 4}));
+    expectNear(copyToCpuValues(mask, stream), {1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f});
+}
+
+TEST(ExpressionBooleanComparisonOps, LogicalCompositionProducesExpectedValuesWhenCastedToFp32) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor x = makeGpuTensor({6}, {-1.0f, 0.0f, 0.25f, 0.5f, 0.75f, 1.0f}, stream);
+    Tensor label = makeGpuTensor({6}, {0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f}, stream);
+
+    auto prediction = Expression::input("x").greaterEqual(Expression::constantScalar(0.5));
+    auto truth = Expression::input("label").notEqual(Expression::constantScalar(0.0));
+    auto correct = prediction.equal(truth).withOutputDType(DataType::FP32);
+    auto expression_outputs = Expression::outputs({{"correct", correct}});
+    Tensor out = runExpressionOutput(expression_outputs, {{"x", x}, {"label", label}}, "correct", stream);
+
+    EXPECT_EQ(out.getDimensions(), (std::vector<uint64_t>{6}));
+    expectNear(copyToCpuValues(out, stream), {1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f});
+}
+
 TEST(ExpressionRoundingOps, LowerToUnaryExpressionNodes) {
     auto x = Expression::input("x");
 

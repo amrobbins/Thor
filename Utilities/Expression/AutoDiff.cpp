@@ -2735,6 +2735,15 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             case ExprOp::FLOOR:
             case ExprOp::ROUND:
             case ExprOp::TRUNC:
+            case ExprOp::EQUAL:
+            case ExprOp::NOT_EQUAL:
+            case ExprOp::LESS:
+            case ExprOp::LESS_EQUAL:
+            case ExprOp::GREATER:
+            case ExprOp::GREATER_EQUAL:
+            case ExprOp::LOGICAL_AND:
+            case ExprOp::LOGICAL_OR:
+            case ExprOp::LOGICAL_NOT:
                 throw std::runtime_error("Thor expressions autodiff does not support backward for op " + opName(node.op) + ".");
 
             case ExprOp::SIN: {

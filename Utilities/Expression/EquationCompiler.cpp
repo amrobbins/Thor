@@ -340,7 +340,10 @@ struct StageNodeKeyHash {
     }
 };
 
-static bool isCommutativeStageOp(ExprOp op) { return op == ExprOp::ADD || op == ExprOp::MUL || op == ExprOp::MIN || op == ExprOp::MAX; }
+static bool isCommutativeStageOp(ExprOp op) {
+    return op == ExprOp::ADD || op == ExprOp::MUL || op == ExprOp::MIN || op == ExprOp::MAX || op == ExprOp::EQUAL ||
+           op == ExprOp::NOT_EQUAL || op == ExprOp::LOGICAL_AND || op == ExprOp::LOGICAL_OR;
+}
 
 static uint64_t scalarBits(double x) {
     uint64_t bits = 0;
@@ -771,6 +774,24 @@ static const char* fusedOpTag(ExprOp op) {
             return "MUL";
         case ExprOp::DIV:
             return "DIV";
+        case ExprOp::EQUAL:
+            return "EQ";
+        case ExprOp::NOT_EQUAL:
+            return "NE";
+        case ExprOp::LESS:
+            return "LT";
+        case ExprOp::LESS_EQUAL:
+            return "LE";
+        case ExprOp::GREATER:
+            return "GT";
+        case ExprOp::GREATER_EQUAL:
+            return "GE";
+        case ExprOp::LOGICAL_AND:
+            return "LAND";
+        case ExprOp::LOGICAL_OR:
+            return "LOR";
+        case ExprOp::LOGICAL_NOT:
+            return "LNOT";
         case ExprOp::NEG:
             return "NEG";
         case ExprOp::ABS:
