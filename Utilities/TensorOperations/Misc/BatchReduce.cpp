@@ -1,7 +1,52 @@
 #include "BatchReduce.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Expression/FusedEquation.h"
+
+#include <string>
+#include <unordered_map>
 
 using namespace ThorImplementation;
+
+namespace {
+
+FusedEquation makePointwiseBatchReduceEquation(DataType destDataType,
+                                               uint32_t batchSize,
+                                               bool accumulate,
+                                               bool divide,
+                                               int gpuNum) {
+    Expression source = Expression::input("source", destDataType, destDataType);
+    Expression result = source;
+
+    if (accumulate) {
+        Expression destIn = Expression::input("dest_in", destDataType, destDataType);
+        result = destIn + source;
+    }
+
+    if (divide) {
+        result = result / Expression::constantScalar(static_cast<double>(batchSize));
+    }
+
+    result = result.withOutputDType(destDataType);
+
+    auto outputs = Expression::outputs({{"dest", result}});
+    return FusedEquation::compile(outputs.physicalOutputs(), gpuNum);
+}
+
+void runPointwiseBatchReduceEquation(FusedEquation &equation, Tensor source, Tensor dest, Stream stream, bool accumulate) {
+    std::unordered_map<std::string, Tensor> inputs;
+    inputs.emplace("source", source);
+    if (accumulate) {
+        inputs.emplace("dest_in", dest);
+    }
+
+    std::unordered_map<std::string, Tensor> outputs;
+    outputs.emplace("dest", dest);
+
+    StampedExecutionPlan plan = equation.stamp(inputs, stream, {}, outputs);
+    plan.run();
+}
+
+}  // namespace
 
 /**
  * Cudnn will reduce any dimension of the output tensor that is not equal to the input dimension and is equal to 1.
@@ -38,6 +83,7 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
     this->reduceBatch = reduceBatch;
     this->reduceClass = reduceClass;
     this->doBatchSizeDivide = doBatchSizeDivide;
+    this->destDataType = destDataType;
 
     THOR_THROW_IF_FALSE(batchSize > 0);
     THOR_THROW_IF_FALSE(classDimSize > 0);
@@ -146,21 +192,32 @@ BatchReduce::~BatchReduce() {
 
 Stream BatchReduce::getStream() { return stream; }
 
-// FIXME: Migrate to Expression
+FusedEquation &BatchReduce::getWireAccumulateEquation() {
+    if (!wireAccumulateEquation) {
+        wireAccumulateEquation = std::make_unique<FusedEquation>(
+            makePointwiseBatchReduceEquation(destDataType, batchSize, true, false, stream.getGpuNum()));
+    }
+    return *wireAccumulateEquation;
+}
+
+FusedEquation &BatchReduce::getScalarDivideEquation(bool accumulate) {
+    std::unique_ptr<FusedEquation> &equation = accumulate ? scalarDivideAccumulateEquation : scalarDivideEquation;
+    if (!equation) {
+        equation = std::make_unique<FusedEquation>(
+            makePointwiseBatchReduceEquation(destDataType, batchSize, accumulate, true, stream.getGpuNum()));
+    }
+    return *equation;
+}
+
 void BatchReduce::reduce(Tensor source, Tensor dest, bool accumulate) {
     if (isWire()) {
         if (accumulate)
-            dest.add(dest, source, stream);
+            runPointwiseBatchReduceEquation(getWireAccumulateEquation(), source, dest, stream, true);
         else if (source != dest)
             dest.copyFromAsync(source, stream);
         return;
     } else if (isScalarDivide()) {
-        if (accumulate) {
-            dest.add(dest, source, stream);
-            dest.divide(dest, batchSize, stream);
-        } else {
-            dest.divide(source, batchSize, stream);
-        }
+        runPointwiseBatchReduceEquation(getScalarDivideEquation(accumulate), source, dest, stream, accumulate);
         return;
     }
 

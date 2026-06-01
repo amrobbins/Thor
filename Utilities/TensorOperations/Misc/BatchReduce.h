@@ -10,7 +10,11 @@
 #include <cuda_fp16.h>
 #include <cudnn.h>
 
+#include <memory>
+
 namespace ThorImplementation {
+
+class FusedEquation;
 
 class BatchReduce {
    public:
@@ -37,6 +41,9 @@ class BatchReduce {
     bool isScalarDivide();
 
    protected:
+    FusedEquation &getWireAccumulateEquation();
+    FusedEquation &getScalarDivideEquation(bool accumulate);
+
     uint64_t computeWorkspaceSizeInBytes(uint32_t batchletSize,
                                          uint32_t batchSize,
                                          uint32_t classDimSize,
@@ -56,6 +63,10 @@ class BatchReduce {
     bool reduceBatch;
     bool reduceClass;
     bool doBatchSizeDivide;
+    DataType destDataType;
+    std::unique_ptr<FusedEquation> wireAccumulateEquation;
+    std::unique_ptr<FusedEquation> scalarDivideEquation;
+    std::unique_ptr<FusedEquation> scalarDivideAccumulateEquation;
     void *batchScale = nullptr;
     void *zero = nullptr;
     void *one = nullptr;
