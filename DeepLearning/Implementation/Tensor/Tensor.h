@@ -167,22 +167,6 @@ class Tensor : private ReferenceCounted {
     // These functions perform the operation on the source tensor and write into this tensor
     // Both tensors must be on the same device.
 
-    /**
-     * [thisTensor] = [augend] + [addend], elementwise
-     * <div/>
-     * augend and addend need to be of the same data type.
-     * FIXME: Remove. Used by BatchReduce.cpp
-     */
-    void add(Tensor augend, Tensor addend, Stream stream);
-
-    /**
-     * [thisTensor] = [numerator] / denominator, elementwise
-     *
-     * denominator is first cast to the data type of numerator.
-     * FIXME: Remove. Used by BatchReduce.cpp
-     */
-    void divide(Tensor numerator, double denominator, Stream stream);
-
     bool operator==(const Tensor &other) const;
     bool operator!=(const Tensor &other) const;
     bool operator<(const Tensor &other) const;
