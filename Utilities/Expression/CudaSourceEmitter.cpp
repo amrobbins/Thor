@@ -225,8 +225,11 @@ static void collectRequiredNodes(const PhysicalExpression& expr, uint32_t node_i
     }
 
     collectRequiredNodes(expr, node.lhs, required);
-    if (Expression::isBinaryOp(node.op)) {
+    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         collectRequiredNodes(expr, node.rhs, required);
+    }
+    if (Expression::isTernaryOp(node.op)) {
+        collectRequiredNodes(expr, node.aux, required);
     }
 }
 
@@ -1481,6 +1484,10 @@ static std::string emitBinaryComputeExpr(ExprOp op, const std::string& a, const 
     }
 }
 
+static std::string emitWhereComputeExpr(const std::string& cond, const std::string& true_value, const std::string& false_value) {
+    return "(" + cond + " ? " + true_value + " : " + false_value + ")";
+}
+
 static bool tryGetEmitterConstantValue(const PhysicalExpression& expr, uint32_t node_idx, double& value) {
     if (node_idx >= expr.nodes.size()) {
         throw runtime_error("Node index out of range in constant emitter query.");
@@ -1722,8 +1729,11 @@ static std::unordered_set<uint32_t> collectIndexAwareInputNodesToSkipForFlatOutp
         // source-gradient input index from the output coordinate, rather than
         // using the fused output's flat idx directly.
         note_child_input_use(node_idx, node.lhs, node.op == ExprOp::STRIDED_VIEW_BACKWARD);
-        if (Expression::isBinaryOp(node.op)) {
+        if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
             note_child_input_use(node_idx, node.rhs, false);
+        }
+        if (Expression::isTernaryOp(node.op)) {
+            note_child_input_use(node_idx, node.aux, false);
         }
     }
 
@@ -1956,7 +1966,16 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
     };
 
     std::string compute_expr;
-    if (Expression::isBinaryOp(n.op)) {
+    if (n.op == ExprOp::WHERE) {
+        auto emit_child_as = [&](uint32_t child_idx, const std::vector<uint64_t>& child_domain_dims, DataType target_dtype) -> std::string {
+            const std::string value =
+                emitIndexMappedScalarValue(ss, expr, group, child_idx, idx_expr, child_domain_dims, indent, use_uint32_index_math, counter);
+            return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[child_idx]), target_dtype);
+        };
+        compute_expr = emitWhereComputeExpr(emit_child_as(n.lhs, domain_dims, DataType::BOOLEAN),
+                                            emit_child_as(n.rhs, domain_dims, compute_dtype),
+                                            emit_child_as(n.aux, domain_dims, compute_dtype));
+    } else if (Expression::isBinaryOp(n.op)) {
         compute_expr = emitBinaryComputeExpr(n.op, emit_child(n.lhs, domain_dims), emit_child(n.rhs, domain_dims), compute_dtype);
     } else if (Expression::isUnaryOp(n.op)) {
         compute_expr = emitUnaryComputeExpr(n.op, emit_child(n.lhs, domain_dims), compute_dtype);
@@ -1988,8 +2007,11 @@ static void collectReachableLogicalTransposeNodes(const PhysicalExpression& expr
     }
 
     collectReachableLogicalTransposeNodes(expr, node.lhs, visited, transpose_nodes);
-    if (Expression::isBinaryOp(node.op)) {
+    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         collectReachableLogicalTransposeNodes(expr, node.rhs, visited, transpose_nodes);
+    }
+    if (Expression::isTernaryOp(node.op)) {
+        collectReachableLogicalTransposeNodes(expr, node.aux, visited, transpose_nodes);
     }
 }
 
@@ -2398,7 +2420,24 @@ static std::string emitTiledLogicalTransposeConsumerScalarValue(std::ostringstre
     };
 
     std::string compute_expr;
-    if (Expression::isBinaryOp(n.op)) {
+    if (n.op == ExprOp::WHERE) {
+        auto emit_child_as = [&](uint32_t child_idx, const std::vector<uint64_t>& child_domain_dims, DataType target_dtype) -> std::string {
+            const std::string value = emitTiledLogicalTransposeConsumerScalarValue(ss,
+                                                                                   expr,
+                                                                                   group,
+                                                                                   child_idx,
+                                                                                   idx_expr,
+                                                                                   child_domain_dims,
+                                                                                   frontier_values,
+                                                                                   indent,
+                                                                                   use_uint32_index_math,
+                                                                                   counter);
+            return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[child_idx]), target_dtype);
+        };
+        compute_expr = emitWhereComputeExpr(emit_child_as(n.lhs, domain_dims, DataType::BOOLEAN),
+                                            emit_child_as(n.rhs, domain_dims, compute_dtype),
+                                            emit_child_as(n.aux, domain_dims, compute_dtype));
+    } else if (Expression::isBinaryOp(n.op)) {
         compute_expr = emitBinaryComputeExpr(n.op, emit_child(n.lhs, domain_dims), emit_child(n.rhs, domain_dims), compute_dtype);
     } else if (Expression::isUnaryOp(n.op)) {
         compute_expr = emitUnaryComputeExpr(n.op, emit_child(n.lhs, domain_dims), compute_dtype);
@@ -2672,6 +2711,21 @@ static void emitScalarNode(
         return;
     }
 
+    if (n.op == ExprOp::WHERE) {
+        auto child_value_as = [&](uint32_t child_idx, DataType target_dtype) -> std::string {
+            if (child_idx >= expr.nodes.size()) {
+                throw runtime_error("Child node index out of range in where fused stage emitter.");
+            }
+            return emitResolvedScalarValueExpr(expr, child_idx, target_dtype);
+        };
+        const std::string compute_expr = emitWhereComputeExpr(child_value_as(n.lhs, DataType::BOOLEAN),
+                                                              child_value_as(n.rhs, compute_dtype),
+                                                              child_value_as(n.aux, compute_dtype));
+        ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(compute_expr, compute_dtype, emitted_dtype)
+           << ";\n";
+        return;
+    }
+
     if (Expression::isBinaryOp(n.op)) {
         switch (n.op) {
             case ExprOp::ADD:
@@ -2855,6 +2909,21 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
 
     if (n.op == ExprOp::RESHAPE || n.op == ExprOp::STRIDED_VIEW || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
         emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.lhs, suffix, indent);
+        return;
+    }
+
+    if (n.op == ExprOp::WHERE) {
+        auto child_value_as = [&](uint32_t child_idx, DataType target_dtype) -> std::string {
+            if (child_idx >= expr.nodes.size()) {
+                throw runtime_error("Child node index out of range in suffixed where fused stage emitter.");
+            }
+            return emitResolvedScalarValueExprSuffixed(expr, child_idx, target_dtype, suffix);
+        };
+        const std::string compute_expr = emitWhereComputeExpr(child_value_as(n.lhs, DataType::BOOLEAN),
+                                                              child_value_as(n.rhs, compute_dtype),
+                                                              child_value_as(n.aux, compute_dtype));
+        ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
+           << castScalarExpr(compute_expr, compute_dtype, emitted_dtype) << ";\n";
         return;
     }
 

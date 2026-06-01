@@ -131,6 +131,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "logical_or";
         case ExprOp::LOGICAL_NOT:
             return "logical_not";
+        case ExprOp::WHERE:
+            return "where";
         case ExprOp::NEG:
             return "neg";
         case ExprOp::ABS:
@@ -325,6 +327,8 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"or", ExprOp::LOGICAL_OR},
         {"logical_not", ExprOp::LOGICAL_NOT},
         {"not", ExprOp::LOGICAL_NOT},
+        {"where", ExprOp::WHERE},
+        {"select", ExprOp::WHERE},
         {"neg", ExprOp::NEG},
         {"abs", ExprOp::ABS},
         {"ceil", ExprOp::CEIL},
@@ -768,6 +772,8 @@ std::string opName(ExprOp op) {
             return "LOR";
         case ExprOp::LOGICAL_NOT:
             return "LNOT";
+        case ExprOp::WHERE:
+            return "WHERE";
         case ExprOp::NEG:
             return "NEG";
         case ExprOp::ABS:
@@ -1180,6 +1186,14 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 }
             }
             out += ")";
+            break;
+        }
+
+        case ExprOp::WHERE: {
+            std::string cond = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string true_value = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            std::string false_value = canonicalizeNode(expr, n.aux, memo, memoReady);
+            out = opName(n.op) + "(" + cond + "," + true_value + "," + false_value + ")";
             break;
         }
 
@@ -2005,6 +2019,7 @@ bool Expression::isTernaryOp(const ExprOp op) {
         case ExprOp::ATTENTION_BACKWARD_K:
         case ExprOp::ATTENTION_BACKWARD_V:
         case ExprOp::ATTENTION_BACKWARD_BIAS:
+        case ExprOp::WHERE:
             return true;
         default:
             return false;
@@ -3044,6 +3059,13 @@ Expression Expression::greaterEqual(const Expression& lhs, const Expression& rhs
 Expression Expression::logicalAnd(const Expression& lhs, const Expression& rhs) { return lhs.logicalAnd(rhs); }
 Expression Expression::logicalOr(const Expression& lhs, const Expression& rhs) { return lhs.logicalOr(rhs); }
 Expression Expression::logicalNot(const Expression& input) { return input.logicalNot(); }
+Expression Expression::select(const Expression& true_value, const Expression& false_value) const { return where(*this, true_value, false_value); }
+Expression Expression::where(const Expression& condition, const Expression& true_value, const Expression& false_value) {
+    return ternaryOp(condition, true_value, false_value, ExprOp::WHERE);
+}
+Expression Expression::select(const Expression& condition, const Expression& true_value, const Expression& false_value) {
+    return where(condition, true_value, false_value);
+}
 Expression Expression::abs() const { return unaryOp(*this, ExprOp::ABS); }
 Expression Expression::ceil() const { return unaryOp(*this, ExprOp::CEIL); }
 Expression Expression::floor() const { return unaryOp(*this, ExprOp::FLOOR); }

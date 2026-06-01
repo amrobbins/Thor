@@ -502,6 +502,107 @@ TEST(ExpressionBooleanComparisonOps, LogicalCompositionProducesExpectedValuesWhe
     expectNear(copyToCpuValues(out, stream), {1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f});
 }
 
+
+TEST(ExpressionWhereSelectOps, WhereAndSelectLowerToTernaryExpressionNodes) {
+    auto x = Expression::input("x");
+    auto y = Expression::input("y");
+    auto condition = x.greaterThan(Expression::constantScalar(0.0));
+
+    auto where_outputs = Expression::outputs({{"z", Expression::where(condition, x, y)}}).physicalOutputs();
+    const ExprNode& where_node = outputNode(where_outputs);
+    EXPECT_EQ(where_node.op, ExprOp::WHERE);
+    ASSERT_NE(where_node.lhs, UINT32_MAX);
+    ASSERT_NE(where_node.rhs, UINT32_MAX);
+    ASSERT_NE(where_node.aux, UINT32_MAX);
+    EXPECT_EQ(where_outputs.expr->nodes.at(where_node.lhs).op, ExprOp::GREATER);
+    EXPECT_EQ(where_outputs.expr->nodes.at(where_node.rhs).op, ExprOp::INPUT);
+    EXPECT_EQ(where_outputs.expr->nodes.at(where_node.aux).op, ExprOp::INPUT);
+
+    auto select_outputs = Expression::outputs({{"z", condition.select(x, y)}}).physicalOutputs();
+    const ExprNode& select_node = outputNode(select_outputs);
+    EXPECT_EQ(select_node.op, ExprOp::WHERE);
+    ASSERT_NE(select_node.lhs, UINT32_MAX);
+    ASSERT_NE(select_node.rhs, UINT32_MAX);
+    ASSERT_NE(select_node.aux, UINT32_MAX);
+}
+
+TEST(ExpressionWhereSelectOps, DefaultsToBranchDTypeAndRequiresBooleanCondition) {
+    auto x = Expression::input("x");
+    auto y = Expression::input("y");
+    auto condition = x.greaterEqual(y);
+
+    auto outputs = Expression::outputs({{"z", Expression::where(condition, x, y)}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::FP32, DataType::FP32});
+    const ExprNode& node = outputNode(outputs);
+    ASSERT_TRUE(node.output_dtype.has_value());
+    EXPECT_EQ(node.output_dtype.value(), DataType::FP32);
+    ASSERT_TRUE(node.compute_dtype.has_value());
+    EXPECT_EQ(node.compute_dtype.value(), DataType::FP32);
+
+    auto bool_outputs = Expression::outputs({{"z", Expression::where(condition, condition, condition.logicalNot())}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(bool_outputs, {DataType::FP32, DataType::FP32});
+    const ExprNode& bool_node = outputNode(bool_outputs);
+    ASSERT_TRUE(bool_node.output_dtype.has_value());
+    EXPECT_EQ(bool_node.output_dtype.value(), DataType::BOOLEAN);
+    ASSERT_TRUE(bool_node.compute_dtype.has_value());
+    EXPECT_EQ(bool_node.compute_dtype.value(), DataType::BOOLEAN);
+
+    auto invalid_outputs = Expression::outputs({{"z", Expression::where(x, x, y)}}).physicalOutputs();
+    EXPECT_THROW(resolveOutputsDTypesInPlace(invalid_outputs, {DataType::FP32, DataType::FP32}), std::runtime_error);
+}
+
+TEST(ExpressionWhereSelectOps, ComposesWithBooleanMasksInSingleFusedStage) {
+    auto x = Expression::input("x");
+    auto y = Expression::input("y");
+    auto condition = x.greaterThan(Expression::constantScalar(0.0)).logicalAnd(y.lessThan(Expression::constantScalar(10.0)));
+    auto z = Expression::where(condition, x * y, x - y);
+
+    auto outputs = Expression::outputs({{"z", z}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::FP32, DataType::FP32});
+
+    const ExprNode& root = outputNode(outputs);
+    ASSERT_EQ(root.op, ExprOp::WHERE);
+    ASSERT_TRUE(root.output_dtype.has_value());
+    EXPECT_EQ(root.output_dtype.value(), DataType::FP32);
+    ASSERT_TRUE(root.compute_dtype.has_value());
+    EXPECT_EQ(root.compute_dtype.value(), DataType::FP32);
+
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(outputs);
+    ASSERT_EQ(stages.size(), 1);
+    EXPECT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+}
+
+TEST(ExpressionWhereSelectOps, WhereProducesExpectedBroadcastedValues) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor x = makeGpuTensor({2, 3}, {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f, 3.0f}, stream);
+    Tensor fallback = makeGpuTensor({1, 3}, {10.0f, 20.0f, 30.0f}, stream);
+
+    auto expression_outputs = Expression::outputs(
+        {{"z", Expression::where(Expression::input("x").greaterThan(Expression::constantScalar(0.0)),
+                                  Expression::input("x"),
+                                  Expression::input("fallback"))}});
+    Tensor out = runExpressionOutput(expression_outputs, {{"x", x}, {"fallback", fallback}}, "z", stream);
+
+    EXPECT_EQ(out.getDimensions(), (std::vector<uint64_t>{2, 3}));
+    expectNear(copyToCpuValues(out, stream), {10.0f, 20.0f, 30.0f, 1.0f, 2.0f, 3.0f});
+}
+
+TEST(ExpressionWhereSelectOps, WhereBackwardMasksBranchGradientsAndIgnoresConditionGradient) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor x = makeGpuTensor({6}, {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f, 3.0f}, stream);
+    Tensor dy = makeGpuTensor({6}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, stream);
+
+    auto x_expr = Expression::input("x");
+    auto forward_outputs = Expression::outputs({{"z", Expression::where(x_expr.greaterThan(Expression::constantScalar(0.0)),
+                                                                          x_expr * x_expr,
+                                                                          x_expr * Expression::constantScalar(3.0))}});
+    auto gradients = runBackwardValues(forward_outputs, {{"x", x}, {"dy", dy}}, {"x"}, "dy", stream);
+
+    expectNear(gradients.at("x_grad"), {3.0f, 6.0f, 9.0f, 8.0f, 20.0f, 36.0f});
+}
+
 TEST(ExpressionRoundingOps, LowerToUnaryExpressionNodes) {
     auto x = Expression::input("x");
 

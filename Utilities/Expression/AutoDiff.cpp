@@ -315,6 +315,14 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::MUL:
             case ExprOp::DIV:
             case ExprOp::POW:
+            case ExprOp::EQUAL:
+            case ExprOp::NOT_EQUAL:
+            case ExprOp::LESS:
+            case ExprOp::LESS_EQUAL:
+            case ExprOp::GREATER:
+            case ExprOp::GREATER_EQUAL:
+            case ExprOp::LOGICAL_AND:
+            case ExprOp::LOGICAL_OR:
             case ExprOp::MIN:
             case ExprOp::MAX:
             case ExprOp::MIN_GRAD_LEFT:
@@ -359,6 +367,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::LOGICAL_NOT:
             case ExprOp::ROPE:
             case ExprOp::SOFTMAX:
             case ExprOp::TRANSPOSE:
@@ -390,6 +399,11 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                 break;
             case ExprOp::GEMM:
                 reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs) || reaches.at(node.aux);
+                break;
+            case ExprOp::WHERE:
+                // The condition is nondifferentiable control data. Only the selected value branches
+                // contribute differentiable reachability.
+                reaches[i] = reaches.at(node.rhs) || reaches.at(node.aux);
                 break;
             case ExprOp::ATTENTION:
                 reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs) || reaches.at(node.aux) ||
@@ -1379,6 +1393,15 @@ class BackwardGraphBuilder {
         return push(std::move(node));
     }
 
+    uint32_t where(uint32_t condition, uint32_t true_value, uint32_t false_value) {
+        ExprNode node{};
+        node.op = ExprOp::WHERE;
+        node.lhs = condition;
+        node.rhs = true_value;
+        node.aux = false_value;
+        return push(std::move(node));
+    }
+
     uint32_t neg(uint32_t value) { return unary(ExprOp::NEG, value); }
     uint32_t sin(uint32_t value) { return unary(ExprOp::SIN, value); }
     uint32_t cos(uint32_t value) { return unary(ExprOp::COS, value); }
@@ -2100,6 +2123,14 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::MUL:
             case ExprOp::DIV:
             case ExprOp::POW:
+            case ExprOp::EQUAL:
+            case ExprOp::NOT_EQUAL:
+            case ExprOp::LESS:
+            case ExprOp::LESS_EQUAL:
+            case ExprOp::GREATER:
+            case ExprOp::GREATER_EQUAL:
+            case ExprOp::LOGICAL_AND:
+            case ExprOp::LOGICAL_OR:
             case ExprOp::MIN:
             case ExprOp::MAX:
             case ExprOp::MIN_GRAD_LEFT:
@@ -2112,6 +2143,28 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 }
                 if (!node_dims[node.rhs].empty()) {
                     non_scalar_inputs.push_back(node_dims[node.rhs]);
+                }
+                if (non_scalar_inputs.empty()) {
+                    node_dims[i] = {};
+                } else if (non_scalar_inputs.size() == 1) {
+                    node_dims[i] = non_scalar_inputs[0];
+                } else {
+                    std::vector<uint64_t> out_dims;
+                    resolveLayoutFromDims(non_scalar_inputs, out_dims);
+                    node_dims[i] = std::move(out_dims);
+                }
+                break;
+            }
+            case ExprOp::WHERE: {
+                std::vector<std::vector<uint64_t>> non_scalar_inputs;
+                if (!node_dims[node.lhs].empty()) {
+                    non_scalar_inputs.push_back(node_dims[node.lhs]);
+                }
+                if (!node_dims[node.rhs].empty()) {
+                    non_scalar_inputs.push_back(node_dims[node.rhs]);
+                }
+                if (!node_dims[node.aux].empty()) {
+                    non_scalar_inputs.push_back(node_dims[node.aux]);
                 }
                 if (non_scalar_inputs.empty()) {
                     node_dims[i] = {};
@@ -2160,6 +2213,7 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::LOGICAL_NOT:
             case ExprOp::ROPE:
             case ExprOp::SOFTMAX:
                 node_dims[i] = node_dims[node.lhs];
@@ -2727,6 +2781,20 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
                     const uint32_t scaled = builder.mul(grad, sign_lhs);
                     addContributionToChild(node.lhs, scaled, node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::WHERE: {
+                const uint32_t cond = builder.cloneForward(node.lhs);
+                const uint32_t zero = builder.scalar(0.0);
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    const uint32_t true_contrib = builder.where(cond, grad, zero);
+                    addContributionToChild(node.rhs, true_contrib, node_dims);
+                }
+                if (node_reaches_requested_inputs.at(node.aux)) {
+                    const uint32_t false_contrib = builder.where(cond, zero, grad);
+                    addContributionToChild(node.aux, false_contrib, node_dims);
                 }
                 break;
             }

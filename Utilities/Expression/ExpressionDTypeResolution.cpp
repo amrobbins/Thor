@@ -58,6 +58,8 @@ static bool isComparisonOp(ExprOp op) {
 
 static bool isLogicalOp(ExprOp op) { return op == ExprOp::LOGICAL_AND || op == ExprOp::LOGICAL_OR || op == ExprOp::LOGICAL_NOT; }
 
+static bool isWhereOp(ExprOp op) { return op == ExprOp::WHERE; }
+
 static bool isBooleanOutputOp(ExprOp op) { return isComparisonOp(op) || isLogicalOp(op); }
 
 static bool isCudnnSingleInputStageOp(ExprOp op) { return isCudnnReduceOp(op) || isCudnnSoftmaxOp(op); }
@@ -73,14 +75,14 @@ static bool isSupportedCudnnReductionOutputDType(DataType dtype) {
 }
 
 DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
-    if (isComparisonOp(op) || isLogicalOp(op)) {
+    if (isComparisonOp(op) || isLogicalOp(op) || isWhereOp(op)) {
         if (requested_compute_dtype == DataType::BOOLEAN || requested_compute_dtype == DataType::UINT8) {
             return DataType::BOOLEAN;
         }
         if (isSupportedFusionFloatingType(requested_compute_dtype)) {
             return toSupportedComputeDType(ExprOp::ADD, requested_compute_dtype);
         }
-        throw std::runtime_error("Unsupported boolean/comparison dtype in toSupportedComputeDType.");
+        throw std::runtime_error("Unsupported boolean/comparison/where dtype in toSupportedComputeDType.");
     }
 
     if (!isSupportedFusionFloatingType(requested_compute_dtype)) {
@@ -217,6 +219,50 @@ DataType promoteTensorValueDTypes(const std::vector<DataType>& dtypes) {
     return out;
 }
 
+static DataType promoteWhereBranchDTypes(const std::vector<DataType>& dtypes) {
+    if (dtypes.empty()) {
+        return DataType::FP32;
+    }
+
+    bool all_same = true;
+    for (DataType dtype : dtypes) {
+        if (dtype != dtypes.front()) {
+            all_same = false;
+            break;
+        }
+    }
+    if (all_same) {
+        return dtypes.front();
+    }
+
+    bool all_floating = true;
+    for (DataType dtype : dtypes) {
+        if (!isSupportedFusionFloatingType(dtype)) {
+            all_floating = false;
+            break;
+        }
+    }
+    if (all_floating) {
+        return promoteTensorValueDTypes(dtypes);
+    }
+
+    throw std::runtime_error("Where branch dtypes must either match exactly or be supported floating dtypes.");
+}
+
+static DataType promoteRequiredComputeDType(ExprOp op, DataType current_compute_dtype, DataType propagated_dtype) {
+    if (isComparisonOp(op) || isLogicalOp(op) || isWhereOp(op)) {
+        if (isSupportedFusionFloatingType(current_compute_dtype) && isSupportedFusionFloatingType(propagated_dtype)) {
+            return toSupportedComputeDType(op, promoteTensorValueDTypes(current_compute_dtype, propagated_dtype));
+        }
+        if (isSupportedFusionFloatingType(propagated_dtype)) {
+            return toSupportedComputeDType(op, propagated_dtype);
+        }
+        return toSupportedComputeDType(op, current_compute_dtype);
+    }
+
+    return toSupportedComputeDType(op, promoteTensorValueDTypes(current_compute_dtype, propagated_dtype));
+}
+
 static DataType resolveNodeLogicalInputDType(const ExprNode& node,
                                              const std::vector<ExprNode>& nodes,
                                              const std::vector<DataType>& resolved_output_dtypes,
@@ -277,6 +323,31 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         if (node.attention_use_bias) {
             add_tensor_parent(node.beta_node);
         }
+    }
+
+    if (isWhereOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size() || node.aux >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("Where node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        const DataType condition_dtype = resolved_output_dtypes[node.lhs];
+        if (condition_dtype != DataType::BOOLEAN) {
+            throw std::runtime_error("Where condition must have BOOLEAN dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(condition_dtype));
+        }
+
+        std::vector<DataType> branch_dtypes;
+        branch_dtypes.reserve(2);
+        const ExprNode& true_parent = nodes[node.rhs];
+        const ExprNode& false_parent = nodes[node.aux];
+        if (true_parent.op != ExprOp::SCALAR_FP && true_parent.op != ExprOp::RUNTIME_SCALAR &&
+            true_parent.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+            branch_dtypes.push_back(resolved_output_dtypes[node.rhs]);
+        }
+        if (false_parent.op != ExprOp::SCALAR_FP && false_parent.op != ExprOp::RUNTIME_SCALAR &&
+            false_parent.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+            branch_dtypes.push_back(resolved_output_dtypes[node.aux]);
+        }
+        return promoteWhereBranchDTypes(branch_dtypes);
     }
 
     if (tensor_parent_dtypes.empty()) {
@@ -417,6 +488,32 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return node.output_dtype.has_value() ? node.output_dtype.value() : DataType::BOOLEAN;
     }
 
+    if (isWhereOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size() || node.aux >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("Where node has parent index out of range in resolveNodeOutputDType.");
+        }
+        const DataType condition_dtype = resolved_output_dtypes[node.lhs];
+        if (condition_dtype != DataType::BOOLEAN) {
+            throw std::runtime_error("Where condition must have BOOLEAN dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(condition_dtype));
+        }
+
+        std::vector<DataType> branch_dtypes;
+        branch_dtypes.reserve(2);
+        const ExprNode& true_parent = nodes[node.rhs];
+        const ExprNode& false_parent = nodes[node.aux];
+        if (true_parent.op != ExprOp::SCALAR_FP && true_parent.op != ExprOp::RUNTIME_SCALAR &&
+            true_parent.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+            branch_dtypes.push_back(resolved_output_dtypes[node.rhs]);
+        }
+        if (false_parent.op != ExprOp::SCALAR_FP && false_parent.op != ExprOp::RUNTIME_SCALAR &&
+            false_parent.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+            branch_dtypes.push_back(resolved_output_dtypes[node.aux]);
+        }
+        const DataType default_output = promoteWhereBranchDTypes(branch_dtypes);
+        return node.output_dtype.has_value() ? node.output_dtype.value() : default_output;
+    }
+
     const DataType default_output = tensor_parent_dtypes.empty() ? DataType::FP32 : promoteTensorValueDTypes(tensor_parent_dtypes);
 
     return node.output_dtype.has_value() ? node.output_dtype.value() : default_output;
@@ -463,8 +560,7 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
 
         if (!Expression::isLeafOp(node.op) && node.compute_dtype.has_value()) {
             if (!explicit_compute_dtype[node_idx]) {
-                const DataType promoted_requested_dtype = promoteTensorValueDTypes(node.compute_dtype.value(), propagated_dtype);
-                node.compute_dtype = toSupportedComputeDType(node.op, promoted_requested_dtype);
+                node.compute_dtype = promoteRequiredComputeDType(node.op, node.compute_dtype.value(), propagated_dtype);
             }
             propagated_dtype = node.compute_dtype.value();
         }
@@ -476,26 +572,42 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
             seedRequiredComputeDType(required_compute_dtype[parent_idx], propagated_dtype);
         };
 
+        auto propagate_to_floating_parent = [&](uint32_t parent_idx) {
+            if (parent_idx >= expr.nodes.size()) {
+                throw std::runtime_error("Parent node index out of range in propagateMaterializedOutputComputeDTypes.");
+            }
+            if (expr.nodes[parent_idx].output_dtype.has_value() && isSupportedFusionFloatingType(expr.nodes[parent_idx].output_dtype.value())) {
+                seedRequiredComputeDType(required_compute_dtype[parent_idx], propagated_dtype);
+            }
+        };
+
         if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
             for (uint32_t input_node : node.cuda_kernel_input_nodes) {
                 propagate_to_parent(input_node);
             }
-        } else if (!Expression::isLeafOp(node.op)) {
-            propagate_to_parent(node.lhs);
-        }
-        if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
-            propagate_to_parent(node.rhs);
-        }
-        if (Expression::isTernaryOp(node.op)) {
-            propagate_to_parent(node.aux);
-        }
-        if (node.op == ExprOp::ATTENTION && node.attention_use_bias) {
-            propagate_to_parent(node.alpha_node);
-        }
-        if (isAttentionBackwardOp(node.op)) {
-            propagate_to_parent(node.alpha_node);
-            if (node.attention_use_bias) {
-                propagate_to_parent(node.beta_node);
+        } else if (node.op == ExprOp::WHERE) {
+            // Do not propagate the selected value compute dtype into the boolean condition.
+            // Only floating-value branches should be widened by a materialized where output.
+            propagate_to_floating_parent(node.rhs);
+            propagate_to_floating_parent(node.aux);
+        } else {
+            if (!Expression::isLeafOp(node.op)) {
+                propagate_to_parent(node.lhs);
+            }
+            if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
+                propagate_to_parent(node.rhs);
+            }
+            if (Expression::isTernaryOp(node.op)) {
+                propagate_to_parent(node.aux);
+            }
+            if (node.op == ExprOp::ATTENTION && node.attention_use_bias) {
+                propagate_to_parent(node.alpha_node);
+            }
+            if (isAttentionBackwardOp(node.op)) {
+                propagate_to_parent(node.alpha_node);
+                if (node.attention_use_bias) {
+                    propagate_to_parent(node.beta_node);
+                }
             }
         }
     }
@@ -583,6 +695,8 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
                 requested_compute_dtype = DataType::FP32;
             }
         } else if (isLogicalOp(node.op)) {
+            requested_compute_dtype = node.compute_dtype.has_value() ? node.compute_dtype.value() : logical_input_dtype;
+        } else if (isWhereOp(node.op)) {
             requested_compute_dtype = node.compute_dtype.has_value() ? node.compute_dtype.value() : logical_input_dtype;
         } else {
             requested_compute_dtype =
