@@ -603,6 +603,126 @@ TEST(ExpressionWhereSelectOps, WhereBackwardMasksBranchGradientsAndIgnoresCondit
     expectNear(gradients.at("x_grad"), {3.0f, 6.0f, 9.0f, 8.0f, 20.0f, 36.0f});
 }
 
+
+TEST(ExpressionGraphConditionalOps, ConditionalOutputsExposeContractAndRejectMismatchedBranchNames) {
+    auto x = Expression::input("x");
+    auto predicate = Expression::input("predicate_value").greaterThan(Expression::constantScalar(0.0));
+
+    Outputs then_outputs = Expression::outputs({{"y", x + Expression::constantScalar(1.0)}});
+    Outputs else_outputs = Expression::outputs({{"y", x - Expression::constantScalar(1.0)}});
+    Outputs conditional = Outputs::conditional(predicate, then_outputs, else_outputs);
+
+    EXPECT_TRUE(conditional.isConditional());
+    PhysicalOutputs physical = conditional.physicalOutputs();
+    ASSERT_TRUE(physical.isConditional());
+    ASSERT_NE(physical.conditional, nullptr);
+    ASSERT_EQ(physical.outputs.size(), 1);
+    EXPECT_EQ(physical.outputs[0].name, "y");
+
+    Outputs mismatched_else = Expression::outputs({{"z", x - Expression::constantScalar(1.0)}});
+    EXPECT_THROW((void)Outputs::conditional(predicate, then_outputs, mismatched_else), std::runtime_error);
+}
+
+TEST(ExpressionGraphConditionalOps, CompileBackwardAndExpressionDefinitionRejectConditionalOutputs) {
+    auto x = Expression::input("x");
+    auto predicate = Expression::input("predicate_value").greaterThan(Expression::constantScalar(0.0));
+    Outputs conditional = Outputs::conditional(predicate,
+                                               Expression::outputs({{"y", x + Expression::constantScalar(1.0)}}),
+                                               Expression::outputs({{"y", x - Expression::constantScalar(1.0)}}));
+
+    EXPECT_THROW((void)ExpressionDefinition::fromOutputs(conditional), std::runtime_error);
+
+    FusedEquation equation = FusedEquation::compile(conditional.physicalOutputs(), 0);
+    EXPECT_THROW((void)equation.compileBackward({"x"}, "dy"), std::runtime_error);
+}
+
+TEST(ExpressionGraphConditionalOps, RunsThenAndElseBranchesWithDeviceScalarPredicate) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x_expr = Expression::input("x");
+    auto predicate = Expression::input("predicate_value").greaterThan(Expression::constantScalar(0.0));
+    Outputs conditional = Outputs::conditional(predicate,
+                                               Expression::outputs({{"y", x_expr + Expression::constantScalar(10.0)}}),
+                                               Expression::outputs({{"y", x_expr - Expression::constantScalar(10.0)}}));
+    FusedEquation equation = FusedEquation::compile(conditional.physicalOutputs(), 0);
+
+    Tensor x = makeGpuTensor({4}, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+
+    Tensor true_predicate = makeGpuTensor({1}, {1.0f}, stream);
+    StampedExecutionPlan true_plan = equation.stamp({{"x", x}, {"predicate_value", true_predicate}}, stream);
+    EXPECT_EQ(true_plan.stageKindNames(), (std::vector<std::string>{"Conditional"}));
+    true_plan.run();
+    expectNear(copyToCpuValues(true_plan.output("y"), stream), {11.0f, 12.0f, 13.0f, 14.0f});
+
+    Tensor false_predicate = makeGpuTensor({1}, {-1.0f}, stream);
+    StampedExecutionPlan false_plan = equation.stamp({{"x", x}, {"predicate_value", false_predicate}}, stream);
+    EXPECT_EQ(false_plan.stageKindNames(), (std::vector<std::string>{"Conditional"}));
+    false_plan.run();
+    expectNear(copyToCpuValues(false_plan.output("y"), stream), {-9.0f, -8.0f, -7.0f, -6.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, MultiOutputBranchesShareFinalOutputTensorsAndSelectCorrectBranch) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x_expr = Expression::input("x");
+    auto predicate = Expression::input("predicate_value").greaterThan(Expression::constantScalar(0.0));
+    Outputs then_outputs = Expression::outputs({
+        {"sum", x_expr + Expression::constantScalar(5.0)},
+        {"scaled", x_expr * Expression::constantScalar(2.0)},
+    });
+    Outputs else_outputs = Expression::outputs({
+        {"sum", x_expr - Expression::constantScalar(5.0)},
+        {"scaled", x_expr * Expression::constantScalar(3.0)},
+    });
+    FusedEquation equation = FusedEquation::compile(Outputs::conditional(predicate, then_outputs, else_outputs).physicalOutputs(), 0);
+
+    Tensor x = makeGpuTensor({3}, {1.0f, 2.0f, 3.0f}, stream);
+    Tensor true_predicate = makeGpuTensor({1}, {1.0f}, stream);
+    StampedExecutionPlan true_plan = equation.stamp({{"x", x}, {"predicate_value", true_predicate}}, stream);
+    true_plan.run();
+    expectNear(copyToCpuValues(true_plan.output("sum"), stream), {6.0f, 7.0f, 8.0f});
+    expectNear(copyToCpuValues(true_plan.output("scaled"), stream), {2.0f, 4.0f, 6.0f});
+
+    Tensor false_predicate = makeGpuTensor({1}, {-1.0f}, stream);
+    StampedExecutionPlan false_plan = equation.stamp({{"x", x}, {"predicate_value", false_predicate}}, stream);
+    false_plan.run();
+    expectNear(copyToCpuValues(false_plan.output("sum"), stream), {-4.0f, -3.0f, -2.0f});
+    expectNear(copyToCpuValues(false_plan.output("scaled"), stream), {3.0f, 6.0f, 9.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, StampRejectsNonBooleanPredicateOutput) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x_expr = Expression::input("x");
+    Outputs conditional = Outputs::conditional(Expression::input("predicate_value"),
+                                               Expression::outputs({{"y", x_expr + Expression::constantScalar(1.0)}}),
+                                               Expression::outputs({{"y", x_expr - Expression::constantScalar(1.0)}}));
+    FusedEquation equation = FusedEquation::compile(conditional.physicalOutputs(), 0);
+
+    Tensor x = makeGpuTensor({2}, {1.0f, 2.0f}, stream);
+    Tensor predicate = makeGpuTensor({1}, {1.0f}, stream);
+    EXPECT_THROW((void)equation.stamp({{"x", x}, {"predicate_value", predicate}}, stream), std::runtime_error);
+}
+
+TEST(ExpressionGraphConditionalOps, StampRejectsNonScalarPredicateOutput) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x_expr = Expression::input("x");
+    auto predicate = Expression::input("predicate_value").greaterThan(Expression::constantScalar(0.0));
+    Outputs conditional = Outputs::conditional(predicate,
+                                               Expression::outputs({{"y", x_expr + Expression::constantScalar(1.0)}}),
+                                               Expression::outputs({{"y", x_expr - Expression::constantScalar(1.0)}}));
+    FusedEquation equation = FusedEquation::compile(conditional.physicalOutputs(), 0);
+
+    Tensor x = makeGpuTensor({2}, {1.0f, 2.0f}, stream);
+    Tensor predicate_values = makeGpuTensor({2}, {1.0f, -1.0f}, stream);
+    EXPECT_THROW((void)equation.stamp({{"x", x}, {"predicate_value", predicate_values}}, stream), std::runtime_error);
+}
+
 TEST(ExpressionRoundingOps, LowerToUnaryExpressionNodes) {
     auto x = Expression::input("x");
 
