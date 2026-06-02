@@ -38,12 +38,6 @@ class CategoricalAccuracy : public Metric {
         return categoricalAccuracy;
     }
 
-    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        uint64_t workspaceSize = 4 * batchSize;
-        uint64_t metricOutputSize = 4;
-
-        return workspaceSize + metricOutputSize;
-    }
 
     LabelType labelType;
     uint32_t numClasses;

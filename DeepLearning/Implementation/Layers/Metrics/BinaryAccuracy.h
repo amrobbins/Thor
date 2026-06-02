@@ -1,209 +1,81 @@
 #pragma once
 
-#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Layers/Metrics/CustomMetric.h"
+#include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/Expression/Expression.h"
 
-#include "DeepLearning/Implementation/Layers/Metric.h"
-#include "Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.h"
-
-#include <chrono>
-#include <thread>
+#include <optional>
+#include <vector>
 
 namespace ThorImplementation {
+namespace BinaryAccuracyDetail {
+
+inline DynamicExpression makeExpression() {
+    Expression predictions = Expression::input("predictions", DataType::FP32, DataType::FP32);
+    Expression labels = Expression::input("labels", DataType::FP32, DataType::FP32);
+
+    Expression predictedLabel = Expression::where(predictions >= Expression(0.5), Expression(1.0), Expression(0.0));
+    Expression correct = Expression::where(predictedLabel == labels, Expression(1.0), Expression(0.0));
+    Expression metric = correct.reduce_mean({0, 1}, {0}, DataType::FP32);
+
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Expression::outputs({{"metric", metric}}));
+    return DynamicExpression::fromExpressionDefinition(definition);
+}
+
+}  // namespace BinaryAccuracyDetail
 
 /**
- * Returns the proportion of the predictions where the class with the highest prediction probability is the true class.
+ * Returns the proportion of binary predictions that match the binary labels.
+ *
+ * The public BinaryAccuracy metric is kept as its own layer type for API and
+ * serialization stability, but its implementation is now the expression-backed
+ * CustomMetric path rather than a hand-written metric kernel.
  */
-
-class BinaryAccuracy : public Metric {
+class BinaryAccuracy : public CustomMetric {
    public:
-    ~BinaryAccuracy() override {}
-    BinaryAccuracy() {}
+    BinaryAccuracy() : CustomMetric(BinaryAccuracyDetail::makeExpression(), "predictions", "labels", "metric", "Accuracy") {}
+
+    ~BinaryAccuracy() override = default;
 
     std::optional<Tensor> createFeatureOutputTensor() override {
-        TensorPlacement placement = featureInput.value().getPlacement();
-        return Tensor(placement, TensorDescriptor(DataType::FP32, {1U}));
+        if (isInferenceOnly())
+            return std::nullopt;
+        validateBinaryAccuracyInputs();
+        return CustomMetric::createFeatureOutputTensor();
     }
 
     void compileImpl() override {
-        Layer::compileImpl();
+        if (!isInferenceOnly())
+            validateBinaryAccuracyInputs();
+        CustomMetric::compileImpl();
+    }
+
+    std::string getType() override { return "BinaryAccuracy"; }
+
+   private:
+    void validateBinaryAccuracyInputs() const {
+        THOR_THROW_IF_FALSE(featureInput.has_value());
         THOR_THROW_IF_FALSE(labelsInput.has_value());
         THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
         THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
-        THOR_THROW_IF_FALSE(featureInput.has_value());
         THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
 
-        std::vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
-        std::vector<uint64_t> labelDimensions = labelsInput.value().getDescriptor().getDimensions();
-        DataType labelsDataType = labelsInput.value().getDescriptor().getDataType();
+        const std::vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
+        const std::vector<uint64_t> labelDimensions = labelsInput.value().getDescriptor().getDimensions();
+        const DataType labelsDataType = labelsInput.value().getDescriptor().getDataType();
+        const DataType predictionsDataType = featureInput.value().getDescriptor().getDataType();
+
         THOR_THROW_IF_FALSE(labelDimensions.size() == 2);
         THOR_THROW_IF_FALSE(labelDimensions[1] == 1);
         THOR_THROW_IF_FALSE(featureInputDimensions == labelDimensions);
+        THOR_THROW_IF_FALSE(predictionsDataType == DataType::FP16 || predictionsDataType == DataType::FP32);
         THOR_THROW_IF_FALSE(labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
-               labelsDataType == DataType::UINT32 || labelsDataType == DataType::INT8 ||
-               labelsDataType == DataType::INT16 || labelsDataType == DataType::INT32 ||
-               labelsDataType == DataType::FP16 || labelsDataType == DataType::FP32);
-
-        batchSize = featureInput.value().getDescriptor().getDimensions()[0];
-
-        workspace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::FP16, {batchSize}));
-
-        batchReduce = createBinaryAccuracyBatchReduce(batchSize, stream);
+                            labelsDataType == DataType::UINT32 || labelsDataType == DataType::INT8 ||
+                            labelsDataType == DataType::INT16 || labelsDataType == DataType::INT32 ||
+                            labelsDataType == DataType::FP16 || labelsDataType == DataType::FP32);
     }
-
-    void computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) override {
-        if (predictions.getDescriptor().getDataType() == DataType::FP16) {
-            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
-                launchComputeBinaryAccuracy(metric,
-                                            (half *)predictions.getMemPtr(),
-                                            (uint8_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
-                launchComputeBinaryAccuracy(metric,
-                                            (half *)predictions.getMemPtr(),
-                                            (uint16_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
-                launchComputeBinaryAccuracy(metric,
-                                            (half *)predictions.getMemPtr(),
-                                            (uint32_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
-                launchComputeBinaryAccuracy(metric,
-                                            (half *)predictions.getMemPtr(),
-                                            (int8_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
-                launchComputeBinaryAccuracy(metric,
-                                            (half *)predictions.getMemPtr(),
-                                            (int16_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
-                launchComputeBinaryAccuracy(metric,
-                                            (half *)predictions.getMemPtr(),
-                                            (int32_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::FP16) {
-                launchComputeBinaryAccuracy(
-                    metric, (half *)predictions.getMemPtr(), (half *)labels.getMemPtr(), workspace, batchSize, batchReduce, stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::FP32) {
-                launchComputeBinaryAccuracy(
-                    metric, (half *)predictions.getMemPtr(), (float *)labels.getMemPtr(), workspace, batchSize, batchReduce, stream);
-            } else {
-                THOR_UNREACHABLE();
-            }
-
-        } else if (predictions.getDescriptor().getDataType() == DataType::FP32) {
-            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
-                launchComputeBinaryAccuracy(metric,
-                                            (float *)predictions.getMemPtr(),
-                                            (uint8_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
-                launchComputeBinaryAccuracy(metric,
-                                            (float *)predictions.getMemPtr(),
-                                            (uint16_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
-                launchComputeBinaryAccuracy(metric,
-                                            (float *)predictions.getMemPtr(),
-                                            (uint32_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
-                launchComputeBinaryAccuracy(metric,
-                                            (float *)predictions.getMemPtr(),
-                                            (int8_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
-                launchComputeBinaryAccuracy(metric,
-                                            (float *)predictions.getMemPtr(),
-                                            (int16_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
-                launchComputeBinaryAccuracy(metric,
-                                            (float *)predictions.getMemPtr(),
-                                            (int32_t *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::FP16) {
-                launchComputeBinaryAccuracy(
-                    metric, (float *)predictions.getMemPtr(), (half *)labels.getMemPtr(), workspace, batchSize, batchReduce, stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::FP32) {
-                launchComputeBinaryAccuracy(metric,
-                                            (float *)predictions.getMemPtr(),
-                                            (float *)labels.getMemPtr(),
-                                            workspace,
-                                            batchSize,
-                                            batchReduce,
-                                            stream);
-            } else {
-                THOR_UNREACHABLE();
-            }
-        } else {
-            THOR_UNREACHABLE();
-        }
-    }
-
-    std::string toDisplayString(Tensor metric_h) override {
-        THOR_THROW_IF_FALSE(metric_h.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
-        float accuracy = *((float *)metric_h.getMemPtr());
-        return "Accuracy: " + std::to_string(accuracy);
-    }
-
-   private:
-    unsigned int batchSize;
-    Tensor workspace;
-    std::shared_ptr<BatchReduce> batchReduce;
 };
 
 }  // namespace ThorImplementation

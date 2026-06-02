@@ -34,13 +34,6 @@ class BinaryAccuracy : public Metric {
         return BinaryAccuracy;
     }
 
-    uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        uint64_t workspaceSize = 2 * batchSize;
-        uint64_t metricOutputSize = 4;
-
-        return workspaceSize + metricOutputSize;
-    }
-
     uint32_t numClasses;
 };
 

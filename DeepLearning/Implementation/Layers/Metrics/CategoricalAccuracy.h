@@ -1,375 +1,149 @@
 #pragma once
 
-#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Layers/Metrics/CustomMetric.h"
+#include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/FusedEquation.h"
 
-#include "DeepLearning/Implementation/Layers/Metric.h"
-#include "Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.h"
-
-#include <chrono>
-#include <thread>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace ThorImplementation {
+namespace CategoricalAccuracyDetail {
+
+inline bool isPerClassLabelDType(DataType dtype) {
+    return dtype == DataType::UINT8 || dtype == DataType::UINT16 || dtype == DataType::UINT32 || dtype == DataType::INT8 ||
+           dtype == DataType::INT16 || dtype == DataType::INT32 || dtype == DataType::FP16 || dtype == DataType::FP32;
+}
+
+inline bool isClassIndexLabelDType(DataType dtype) {
+    return dtype == DataType::UINT8 || dtype == DataType::UINT16 || dtype == DataType::UINT32 || dtype == DataType::INT8 ||
+           dtype == DataType::INT16 || dtype == DataType::INT32;
+}
+
+inline DynamicExpression makeExpression() {
+    return DynamicExpression({"predictions", "labels"},
+                             {"metric"},
+                             [](const DynamicExpression::TensorMap& inputs,
+                                const DynamicExpression::TensorMap& outputs,
+                                Stream& stream) -> DynamicExpressionBuild {
+                                 auto predictionsIt = inputs.find("predictions");
+                                 auto labelsIt = inputs.find("labels");
+                                 if (predictionsIt == inputs.end() || labelsIt == inputs.end())
+                                     throw std::invalid_argument("CategoricalAccuracy expression requires predictions and labels inputs.");
+
+                                 const Tensor& predictionsTensor = predictionsIt->second;
+                                 const Tensor& labelsTensor = labelsIt->second;
+                                 const std::vector<uint64_t> predictionDims = predictionsTensor.getDescriptor().getDimensions();
+                                 const std::vector<uint64_t> labelDims = labelsTensor.getDescriptor().getDimensions();
+                                 const DataType predictionDType = predictionsTensor.getDescriptor().getDataType();
+                                 const DataType labelDType = labelsTensor.getDescriptor().getDataType();
+
+                                 THOR_THROW_IF_FALSE(predictionDims.size() == 2);
+                                 THOR_THROW_IF_FALSE(predictionDims[0] > 0);
+                                 THOR_THROW_IF_FALSE(predictionDims[1] >= 2);
+                                 THOR_THROW_IF_FALSE(predictionDType == DataType::FP16 || predictionDType == DataType::FP32);
+
+                                 const bool perClassLabels = predictionDims == labelDims && isPerClassLabelDType(labelDType);
+                                 const bool classIndexLabels = labelDims.size() == 2 && labelDims[0] == predictionDims[0] &&
+                                                               labelDims[1] == 1 && isClassIndexLabelDType(labelDType);
+                                 THOR_THROW_IF_FALSE(perClassLabels ^ classIndexLabels);
+
+                                 Expression predictions = Expression::input("predictions", DataType::FP32, DataType::FP32);
+                                 // Keep the class dimension as size 1 so class-index labels can be compared directly
+                                 // without running integer labels through a shape-only squeeze node. The current
+                                 // expression dtype resolver supports integer inputs for comparisons, but generic
+                                 // shape-only pointwise nodes still assume floating compute dtypes.
+                                 Expression predictedClass = predictions.argmax({1}, {}, DataType::FP32);
+
+                                 Expression trueClass = perClassLabels
+                                                            ? Expression::input("labels", DataType::FP32, DataType::FP32)
+                                                                  .argmax({1}, {}, DataType::FP32)
+                                                            : Expression::input("labels");
+                                 Expression correct = Expression::where(predictedClass == trueClass, Expression(1.0), Expression(0.0));
+                                 Expression metric = correct.reduce_mean({0, 1}, {0}, DataType::FP32);
+
+                                 ExpressionDefinition definition =
+                                     ExpressionDefinition::fromOutputs(Expression::outputs({{"metric", metric}}));
+                                 return DynamicExpressionBuild{
+                                     std::make_shared<FusedEquation>(FusedEquation::compile(definition.outputs, stream.getGpuNum())),
+                                     inputs,
+                                     {},
+                                     outputs,
+                                     {},
+                                 };
+                             });
+}
+
+}  // namespace CategoricalAccuracyDetail
 
 /**
- * Returns the proportion of the predictions where the class with the highest prediction probability is the true class.
+ * Returns the proportion of predictions where the class with the highest prediction score is the true class.
+ *
+ * The public CategoricalAccuracy metric is kept as its own layer type for API and serialization stability,
+ * but its implementation is now the expression-backed CustomMetric path rather than a hand-written metric kernel.
  */
-
-class CategoricalAccuracy : public Metric {
+class CategoricalAccuracy : public CustomMetric {
    public:
-    ~CategoricalAccuracy() override {}
-    CategoricalAccuracy() {}
+    CategoricalAccuracy() : CustomMetric(CategoricalAccuracyDetail::makeExpression(), "predictions", "labels", "metric", "Accuracy") {}
+
+    ~CategoricalAccuracy() override = default;
 
     std::optional<Tensor> createFeatureOutputTensor() override {
-        TensorPlacement placement = featureInput.value().getPlacement();
-        return Tensor(placement, TensorDescriptor(DataType::FP32, {1U}));
+        if (isInferenceOnly())
+            return std::nullopt;
+        validateCategoricalAccuracyInputs();
+        return CustomMetric::createFeatureOutputTensor();
     }
 
     void compileImpl() override {
-        Layer::compileImpl();
-        THOR_THROW_IF_FALSE(labelsInput.has_value());
-        THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
-        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
-
-        std::vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
-        std::vector<uint64_t> labelDimensions = labelsInput.value().getDescriptor().getDimensions();
-        DataType labelsDataType = labelsInput.value().getDescriptor().getDataType();
-        bool perClassLabels =
-            featureInputDimensions == labelDimensions &&
-            (labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
-             labelsDataType == DataType::UINT32 || labelsDataType == DataType::INT8 ||
-             labelsDataType == DataType::INT16 || labelsDataType == DataType::INT32 ||
-             labelsDataType == DataType::FP16 || labelsDataType == DataType::FP32);
-        bool classIndexLabels =
-            labelDimensions.size() == 2 && featureInputDimensions[0] == labelDimensions[0] && labelDimensions[1] == 1 &&
-            (labelsDataType == DataType::UINT8 || labelsDataType == DataType::UINT16 ||
-             labelsDataType == DataType::UINT32 || labelsDataType == DataType::INT8 ||
-             labelsDataType == DataType::INT16 || labelsDataType == DataType::INT32);
-        THOR_THROW_IF_FALSE(perClassLabels ^ classIndexLabels);
-        if (perClassLabels)
-            labelFormat = LABEL_FORMAT::INDICATOR_PER_CLASS_TYPE;
-        else
-            labelFormat = LABEL_FORMAT::INDEX_OF_CLASS_TYPE;
-
-        THOR_THROW_IF_FALSE(featureInput.has_value());
-        THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() == 2);
-
-        THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() >= 2);
-        batchSize = featureInput.value().getDescriptor().getDimensions()[0];
-        numClasses = featureInput.value().getDescriptor().getDimensions()[1];
-
-        // When there are two classes and the label is a single 1 or 0, binary accuracy can be used, instead of categorical accuracy.
-        THOR_THROW_IF_FALSE(numClasses >= 2);
-
-        workspace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::FP32, {batchSize}));
-    }
-
-    void computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) override {
-        if (labelFormat == LABEL_FORMAT::INDICATOR_PER_CLASS_TYPE) {
-            computeMetricIndicatorPerClass(labels, predictions, metric, stream);
-        } else if (labelFormat == LABEL_FORMAT::INDEX_OF_CLASS_TYPE) {
-            computeMetricClassIndex(labels, predictions, metric, stream);
-        } else {
-            THOR_UNREACHABLE();
-        }
-    }
-
-    std::string toDisplayString(Tensor metric_h) override {
-        THOR_THROW_IF_FALSE(metric_h.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
-        float accuracy = *((float *)metric_h.getMemPtr());
-        return "Accuracy: " + std::to_string(accuracy);
+        if (!isInferenceOnly())
+            validateCategoricalAccuracyInputs();
+        CustomMetric::compileImpl();
     }
 
     enum class LABEL_FORMAT { INDICATOR_PER_CLASS_TYPE = 7, INDEX_OF_CLASS_TYPE };
 
     LABEL_FORMAT confirmLabelFormat() { return labelFormat; }
 
-   protected:
-    LABEL_FORMAT labelFormat;
+    std::string getType() override { return "CategoricalAccuracy"; }
 
    private:
-    void computeMetricIndicatorPerClass(Tensor labels, Tensor predictions, Tensor metric, Stream stream) {
-        if (predictions.getDescriptor().getDataType() == DataType::FP16) {
-            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (half *)predictions.getMemPtr(),
-                                                                (uint8_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
+    void validateCategoricalAccuracyInputs() {
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(labelsInput.has_value());
+        THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
+        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
 
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (half *)predictions.getMemPtr(),
-                                                                (uint16_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
+        const std::vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
+        const std::vector<uint64_t> labelDimensions = labelsInput.value().getDescriptor().getDimensions();
+        const DataType labelsDataType = labelsInput.value().getDescriptor().getDataType();
+        const DataType predictionsDataType = featureInput.value().getDescriptor().getDataType();
 
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (half *)predictions.getMemPtr(),
-                                                                (uint32_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
+        THOR_THROW_IF_FALSE(featureInputDimensions.size() == 2);
+        THOR_THROW_IF_FALSE(featureInputDimensions[0] > 0);
+        THOR_THROW_IF_FALSE(featureInputDimensions[1] >= 2);
+        THOR_THROW_IF_FALSE(predictionsDataType == DataType::FP16 || predictionsDataType == DataType::FP32);
 
-            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (half *)predictions.getMemPtr(),
-                                                                (int8_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
+        const bool perClassLabels = featureInputDimensions == labelDimensions &&
+                                    CategoricalAccuracyDetail::isPerClassLabelDType(labelsDataType);
+        const bool classIndexLabels = labelDimensions.size() == 2 && featureInputDimensions[0] == labelDimensions[0] &&
+                                      labelDimensions[1] == 1 &&
+                                      CategoricalAccuracyDetail::isClassIndexLabelDType(labelsDataType);
+        THOR_THROW_IF_FALSE(perClassLabels ^ classIndexLabels);
 
-            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (half *)predictions.getMemPtr(),
-                                                                (int16_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (half *)predictions.getMemPtr(),
-                                                                (int32_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::FP16) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (half *)predictions.getMemPtr(),
-                                                                (half *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::FP32) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (half *)predictions.getMemPtr(),
-                                                                (float *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-            } else {
-                THOR_UNREACHABLE();
-            }
-
-        } else if (predictions.getDescriptor().getDataType() == DataType::FP32) {
-            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (float *)predictions.getMemPtr(),
-                                                                (uint8_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (float *)predictions.getMemPtr(),
-                                                                (uint16_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (float *)predictions.getMemPtr(),
-                                                                (uint32_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (float *)predictions.getMemPtr(),
-                                                                (int8_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (float *)predictions.getMemPtr(),
-                                                                (int16_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (float *)predictions.getMemPtr(),
-                                                                (int32_t *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::FP16) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (float *)predictions.getMemPtr(),
-                                                                (half *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::FP32) {
-                launchComputeCategoricalAccuracy_perClassLabels((float *)metric.getMemPtr(),
-                                                                (float *)predictions.getMemPtr(),
-                                                                (float *)labels.getMemPtr(),
-                                                                (uint8_t *)workspace.getMemPtr(),
-                                                                numClasses,
-                                                                batchSize,
-                                                                stream);
-            } else {
-                THOR_UNREACHABLE();
-            }
-        } else {
-            THOR_UNREACHABLE();
-        }
+        labelFormat = perClassLabels ? LABEL_FORMAT::INDICATOR_PER_CLASS_TYPE : LABEL_FORMAT::INDEX_OF_CLASS_TYPE;
     }
 
-    void computeMetricClassIndex(Tensor labels, Tensor predictions, Tensor metric, Stream stream) {
-        if (predictions.getDescriptor().getDataType() == DataType::FP16) {
-            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (half *)predictions.getMemPtr(),
-                                                                  (uint8_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (half *)predictions.getMemPtr(),
-                                                                  (uint16_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (half *)predictions.getMemPtr(),
-                                                                  (uint32_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (half *)predictions.getMemPtr(),
-                                                                  (int8_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (half *)predictions.getMemPtr(),
-                                                                  (int16_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (half *)predictions.getMemPtr(),
-                                                                  (int32_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-
-            } else {
-                THOR_UNREACHABLE();
-            }
-
-        } else if (predictions.getDescriptor().getDataType() == DataType::FP32) {
-            if (labels.getDescriptor().getDataType() == DataType::UINT8) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (float *)predictions.getMemPtr(),
-                                                                  (uint8_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT16) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (float *)predictions.getMemPtr(),
-                                                                  (uint16_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::UINT32) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (float *)predictions.getMemPtr(),
-                                                                  (uint32_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-
-            } else if (labels.getDescriptor().getDataType() == DataType::INT8) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (float *)predictions.getMemPtr(),
-                                                                  (int8_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-            } else if (labels.getDescriptor().getDataType() == DataType::INT16) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (float *)predictions.getMemPtr(),
-                                                                  (int16_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-            } else if (labels.getDescriptor().getDataType() == DataType::INT32) {
-                launchComputeCategoricalAccuracy_classIndexLabels((float *)metric.getMemPtr(),
-                                                                  (float *)predictions.getMemPtr(),
-                                                                  (int32_t *)labels.getMemPtr(),
-                                                                  (uint8_t *)workspace.getMemPtr(),
-                                                                  numClasses,
-                                                                  batchSize,
-                                                                  stream);
-
-            } else {
-                THOR_UNREACHABLE();
-            }
-        } else {
-            THOR_UNREACHABLE();
-        }
-    }
-
-    unsigned int batchSize;
-    unsigned int numClasses;
-
-    Tensor workspace;
+    LABEL_FORMAT labelFormat = LABEL_FORMAT::INDICATOR_PER_CLASS_TYPE;
 };
 
 }  // namespace ThorImplementation
