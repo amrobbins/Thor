@@ -157,7 +157,7 @@ CustomOptimizer::UpdateExpressionBuilder makeFactoredUpdateExpressionBuilder(sha
         Expression columnSecondMomentNext =
             beta2 * columnSecondMoment + oneMinusBeta2 * gradientSquared.reduce_mean({rowAxis}, {}, DataType::FP32);
         Expression rowMean = beta2 * rowSecondMoment.reduce_mean({rowAxis}, {}, DataType::FP32) +
-oneMinusBeta2 * gradientSquared.reduce_mean({rowAxis, columnAxis}, {}, DataType::FP32);
+                             oneMinusBeta2 * gradientSquared.reduce_mean({rowAxis, columnAxis}, {}, DataType::FP32);
         Expression secondMomentEstimate = (rowSecondMomentNext / (rowMean + epsilon)) * columnSecondMomentNext;
         Expression update = g / Expression::sqrt(secondMomentEstimate + epsilon);
         Expression wNext = (w - alphaWeightDecay * w - alpha * update).withOutputDType(weightsDType);
@@ -190,7 +190,7 @@ shared_ptr<Optimizer> Adafactor::makeFactoredOptimizer(const vector<uint64_t>& w
                                         makeFactoredUpdateExpressionBuilder(runtimeState_, weightDims),
                                         makeRuntimeScalarBuilder(runtimeState_),
                                         /*supportsSparseRowGradients=*/false,
-                                        CustomOptimizer::HyperParameterUpdateBuilder{},
+                                        /*hyperParameterUpdateBuilder=*/CustomOptimizer::HyperParameterUpdateBuilder{},
                                         makeHyperParameterSnapshotBuilder(runtimeState_));
 }
 
@@ -200,7 +200,7 @@ shared_ptr<Optimizer> Adafactor::makeUnfactoredOptimizer() const {
                                         makeUnfactoredUpdateExpressionBuilder(runtimeState_),
                                         makeRuntimeScalarBuilder(runtimeState_),
                                         /*supportsSparseRowGradients=*/true,
-                                        CustomOptimizer::HyperParameterUpdateBuilder{},
+                                        /*hyperParameterUpdateBuilder=*/CustomOptimizer::HyperParameterUpdateBuilder{},
                                         makeHyperParameterSnapshotBuilder(runtimeState_));
 }
 
