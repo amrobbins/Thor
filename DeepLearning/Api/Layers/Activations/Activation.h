@@ -40,6 +40,11 @@ class Activation : public Layer {
     static std::unordered_map<std::string, Deserializer>& get_registry();
     static void register_layer(std::string name, Deserializer fn);
 
+   protected:
+    std::shared_ptr<ThorImplementation::Layer> stampExpressionBackedActivation(ThorImplementation::TensorPlacement placement,
+                                                                                Thor::Tensor connectingApiTensor,
+                                                                                bool inferenceOnly) const;
+
    private:
     using Layer::serialize;
 };

@@ -2,7 +2,6 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
-#include "DeepLearning/Implementation/Layers/Activation/Exponential.h"
 
 namespace Thor {
 
@@ -50,12 +49,9 @@ class Exponential : public Activation {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        (void)inferenceOnly;
-        THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
-
-        std::shared_ptr<ThorImplementation::Exponential> exponential = std::make_shared<ThorImplementation::Exponential>();
-        return exponential;
+        (void)drivingLayer;
+        (void)drivingApiLayer;
+        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {

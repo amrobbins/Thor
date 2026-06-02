@@ -1,11 +1,22 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
+#include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "Utilities/Expression/DynamicExpression.h"
 
+#include "DeepLearning/Api/Layers/Activations/BilinearGlu.h"
+#include "DeepLearning/Api/Layers/Activations/Geglu.h"
+#include "DeepLearning/Api/Layers/Activations/Glu.h"
+#include "DeepLearning/Api/Layers/Activations/Reglu.h"
+#include "DeepLearning/Api/Layers/Activations/Swiglu.h"
 #include "DeepLearning/Api/Layers/Activations/Elu.h"
 #include "DeepLearning/Api/Layers/Activations/Exponential.h"
 #include "DeepLearning/Api/Layers/Activations/Gelu.h"
 #include "DeepLearning/Api/Layers/Activations/HardSigmoid.h"
+#include "DeepLearning/Api/Layers/Activations/HardSwish.h"
+#include "DeepLearning/Api/Layers/Activations/HardTanh.h"
+#include "DeepLearning/Api/Layers/Activations/Mish.h"
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
+#include "DeepLearning/Api/Layers/Activations/Relu6.h"
 #include "DeepLearning/Api/Layers/Activations/Selu.h"
 #include "DeepLearning/Api/Layers/Activations/Sigmoid.h"
 #include "DeepLearning/Api/Layers/Activations/SoftPlus.h"
@@ -13,6 +24,7 @@
 #include "DeepLearning/Api/Layers/Activations/Softmax.h"
 #include "DeepLearning/Api/Layers/Activations/Swish.h"
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
+#include "DeepLearning/Api/Layers/Activations/Threshold.h"
 
 #include <stdexcept>
 #include <optional>
@@ -28,6 +40,32 @@ unordered_map<string, Activation::Deserializer>& Activation::get_registry() {
 }
 
 void Activation::register_layer(string name, Deserializer fn) { get_registry().emplace(std::move(name), std::move(fn)); }
+
+
+std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActivation(ThorImplementation::TensorPlacement placement,
+                                                                                        Thor::Tensor connectingApiTensor,
+                                                                                        bool inferenceOnly) const {
+    THOR_THROW_IF_FALSE(initialized);
+    THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
+
+    using ThorImplementation::DynamicExpression;
+    using ThorImplementation::Expression;
+    using ThorImplementation::ExpressionDefinition;
+
+    Expression featureInputExpr = Expression::input("feature_input");
+    Expression featureOutputExpr = toExpression(featureInputExpr);
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Expression::outputs({{"feature_output", featureOutputExpr}}));
+
+    std::shared_ptr<ThorImplementation::CustomLayer> physicalActivation = std::make_shared<ThorImplementation::CustomLayer>(
+        DynamicExpression::fromExpressionDefinition(definition),
+        std::vector<std::string>{"feature_input"},
+        std::vector<std::string>{"feature_output"},
+        placement,
+        std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>{},
+        inferenceOnly);
+    physicalActivation->setLayerName(getLayerType());
+    return physicalActivation;
+}
 
 json Activation::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
@@ -76,7 +114,13 @@ std::shared_ptr<Activation> Activation::deserializeTemplate(const json& j) {
     const std::string type = j.at("layer_type").get<std::string>();
     std::shared_ptr<Activation> activation;
 
-    if (type == "elu") {
+    if (type == "bilinear_glu") {
+        activation = std::make_shared<BilinearGlu>();
+    } else if (type == "geglu") {
+        activation = std::make_shared<Geglu>();
+    } else if (type == "glu") {
+        activation = std::make_shared<Glu>();
+    } else if (type == "elu") {
         activation = std::make_shared<Elu>(j.value("alpha", 1.0f));
     } else if (type == "exponential") {
         activation = std::make_shared<Exponential>();
@@ -84,8 +128,18 @@ std::shared_ptr<Activation> Activation::deserializeTemplate(const json& j) {
         activation = std::make_shared<Gelu>();
     } else if (type == "hard_sigmoid") {
         activation = std::make_shared<HardSigmoid>();
+    } else if (type == "hard_swish") {
+        activation = std::make_shared<HardSwish>();
+    } else if (type == "hard_tanh") {
+        activation = std::make_shared<HardTanh>(j.value("min_value", -1.0), j.value("max_value", 1.0));
+    } else if (type == "mish") {
+        activation = std::make_shared<Mish>();
+    } else if (type == "reglu") {
+        activation = std::make_shared<Reglu>();
     } else if (type == "relu") {
         activation = std::make_shared<Relu>();
+    } else if (type == "relu6") {
+        activation = std::make_shared<Relu6>();
     } else if (type == "selu") {
         activation = std::make_shared<Selu>();
     } else if (type == "sigmoid") {
@@ -96,10 +150,14 @@ std::shared_ptr<Activation> Activation::deserializeTemplate(const json& j) {
         activation = std::make_shared<SoftSign>();
     } else if (type == "softmax") {
         activation = Softmax::Builder().build();
+    } else if (type == "swiglu") {
+        activation = std::make_shared<Swiglu>();
     } else if (type == "swish") {
         activation = std::make_shared<Swish>();
     } else if (type == "tanh") {
         activation = std::make_shared<Tanh>();
+    } else if (type == "threshold") {
+        activation = std::make_shared<Threshold>(j.value("threshold", 0.0), j.value("value", 0.0));
     } else {
         throw std::runtime_error("Unknown activation template type: " + type);
     }

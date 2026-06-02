@@ -12,7 +12,7 @@ class CategoricalCrossEntropy;
 class Softmax : public Activation {
    public:
     class Builder;
-    Softmax() {}
+    Softmax() : backwardComputedExternally(false) {}
 
     ~Softmax() override {}
 
@@ -53,12 +53,17 @@ class Softmax : public Activation {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        (void)inferenceOnly;
+        (void)drivingLayer;
+        (void)drivingApiLayer;
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
-        std::shared_ptr<ThorImplementation::Softmax> softmax = std::make_shared<ThorImplementation::Softmax>(backwardComputedExternally);
-        return softmax;
+        if (backwardComputedExternally) {
+            // Loss-owned softmax keeps the external-backward physical-layer contract.
+            return std::make_shared<ThorImplementation::Softmax>(true);
+        }
+
+        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
@@ -79,10 +84,12 @@ class Softmax::Builder : public Activation::Builder {
             softmax->featureInput = _featureInput;
             softmax->featureOutput = _featureInput.value().clone();
             softmax->initialized = true;
+            softmax->backwardComputedExternally = _backwardComputedExternally.value_or(false);
             softmax->addToNetwork(_network.value());
         } else {
             // Template activation support
             softmax->initialized = true;
+            softmax->backwardComputedExternally = _backwardComputedExternally.value_or(false);
         }
 
         return softmax;

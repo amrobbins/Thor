@@ -1,5 +1,6 @@
 #include <optional>
 #include "DeepLearning/Api/Layers/Activations/Gelu.h"
+#include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
@@ -180,10 +181,10 @@ TEST(Activations, GeluSerializeDeserialize) {
     ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
     stampedNetwork = newPlacedNetwork->getStampedNetwork(0);
 
-    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
-    ASSERT_EQ(otherLayers.size(), 1U);
-    shared_ptr<ThorImplementation::Gelu> stampedGelu = dynamic_pointer_cast<ThorImplementation::Gelu>(otherLayers[0]);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
+    shared_ptr<ThorImplementation::CustomLayer> stampedGelu = dynamic_pointer_cast<ThorImplementation::CustomLayer>(stampedNetwork.getTrainableLayer(0));
     ASSERT_NE(stampedGelu, nullptr);
+    ASSERT_EQ(stampedGelu->getLayerType(), "CustomLayer<Gelu>");
 
     vector<shared_ptr<ThorImplementation::NetworkInput>> inputLayers = stampedNetwork.getInputs();
     ASSERT_EQ(inputLayers.size(), 1U);
@@ -253,10 +254,10 @@ TEST(Activations, GeluRegistered) {
     ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = newPlacedNetwork->getStampedNetwork(0);
 
-    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
-    ASSERT_EQ(otherLayers.size(), 1U);
-    shared_ptr<ThorImplementation::Gelu> stampedGelu = dynamic_pointer_cast<ThorImplementation::Gelu>(otherLayers[0]);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
+    shared_ptr<ThorImplementation::CustomLayer> stampedGelu = dynamic_pointer_cast<ThorImplementation::CustomLayer>(stampedNetwork.getTrainableLayer(0));
     ASSERT_NE(stampedGelu, nullptr);
+    ASSERT_EQ(stampedGelu->getLayerType(), "CustomLayer<Gelu>");
 
     filesystem::remove("/tmp/testModel.thor.tar");
 }

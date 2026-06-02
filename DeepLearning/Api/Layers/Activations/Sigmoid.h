@@ -12,7 +12,7 @@ class BinaryCrossEntropy;
 class Sigmoid : public Activation {
    public:
     class Builder;
-    Sigmoid() {}
+    Sigmoid() : backwardComputedExternally(false) {}
 
     ~Sigmoid() override {}
 
@@ -53,12 +53,17 @@ class Sigmoid : public Activation {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        (void)inferenceOnly;
+        (void)drivingLayer;
+        (void)drivingApiLayer;
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
-        std::shared_ptr<ThorImplementation::Sigmoid> sigmoid = std::make_shared<ThorImplementation::Sigmoid>(backwardComputedExternally);
-        return sigmoid;
+        if (backwardComputedExternally) {
+            // Loss-owned sigmoid keeps the external-backward physical-layer contract.
+            return std::make_shared<ThorImplementation::Sigmoid>(true);
+        }
+
+        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
@@ -79,14 +84,12 @@ class Sigmoid::Builder : public Activation::Builder {
             sigmoid->featureInput = _featureInput;
             sigmoid->featureOutput = _featureInput.value().clone();
             sigmoid->initialized = true;
-            if (_backwardComputedExternally.has_value() && _backwardComputedExternally.value() == true)
-                sigmoid->backwardComputedExternally = true;
-            else
-                sigmoid->backwardComputedExternally = false;
+            sigmoid->backwardComputedExternally = _backwardComputedExternally.value_or(false);
             sigmoid->addToNetwork(_network.value());
         } else {
             // Template activation support
             sigmoid->initialized = true;
+            sigmoid->backwardComputedExternally = _backwardComputedExternally.value_or(false);
         }
         return sigmoid;
     }

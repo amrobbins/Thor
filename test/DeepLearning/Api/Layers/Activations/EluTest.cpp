@@ -1,5 +1,6 @@
 #include <optional>
 #include "DeepLearning/Api/Layers/Activations/Elu.h"
+#include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
@@ -193,10 +194,10 @@ TEST(Activations, EluSerializeDeserialize) {
     ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &newStamp = newPlacedNetwork->getStampedNetwork(0);
 
-    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = newStamp.getOtherLayers();
-    ASSERT_EQ(otherLayers.size(), 1U);
-    shared_ptr<ThorImplementation::Elu> stampedElu = dynamic_pointer_cast<ThorImplementation::Elu>(otherLayers[0]);
+    ASSERT_EQ(newStamp.getNumTrainableLayers(), 1UL);
+    shared_ptr<ThorImplementation::CustomLayer> stampedElu = dynamic_pointer_cast<ThorImplementation::CustomLayer>(newStamp.getTrainableLayer(0));
     ASSERT_NE(stampedElu, nullptr);
+    ASSERT_EQ(stampedElu->getLayerType(), "CustomLayer<Elu>");
 
     vector<shared_ptr<ThorImplementation::NetworkInput>> inputLayers = newStamp.getInputs();
     ASSERT_EQ(inputLayers.size(), 1U);
@@ -269,11 +270,10 @@ TEST(Activations, EluRegistered) {
     ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = newPlacedNetwork->getStampedNetwork(0);
 
-    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
-    ASSERT_EQ(otherLayers.size(), 1U);
-    shared_ptr<ThorImplementation::Elu> stampedElu = dynamic_pointer_cast<ThorImplementation::Elu>(otherLayers[0]);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
+    shared_ptr<ThorImplementation::CustomLayer> stampedElu = dynamic_pointer_cast<ThorImplementation::CustomLayer>(stampedNetwork.getTrainableLayer(0));
     ASSERT_NE(stampedElu, nullptr);
-    ASSERT_EQ(stampedElu->getAlpha(), alpha);
+    ASSERT_EQ(stampedElu->getLayerType(), "CustomLayer<Elu>");
 
     filesystem::remove("/tmp/testModel.thor.tar");
 }
