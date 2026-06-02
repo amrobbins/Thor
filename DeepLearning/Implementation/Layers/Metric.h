@@ -33,11 +33,14 @@ class Metric : public Layer {
         if (connectionType == (int)ConnectionType::FORWARD) {
             return connectToFeatureInputLayer(previousLayer, featureInput, stream, backPropagateError);
         } else if (connectionType == (int)ConnectionType::LABELS) {
+            THOR_THROW_IF_FALSE(requiresLabelsInput());
             return connectToLabelsInputLayer(previousLayer, featureInput, stream);
         } else {
             THOR_UNREACHABLE();
         }
     }
+
+    virtual bool requiresLabelsInput() const { return true; }
 
     virtual std::optional<Tensor> connectToFeatureInputLayer(Layer *featureInputLayer,
                                                         std::optional<Tensor> featureInput,
@@ -93,7 +96,7 @@ class Metric : public Layer {
     void initialize() override {
         Layer::initialize();
         featureInputReceived = false;
-        labelsReceived = false;
+        labelsReceived = !requiresLabelsInput();
     }
 
     void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t batchSize = 0) override {
@@ -101,17 +104,19 @@ class Metric : public Layer {
         if (isInferenceOnly())
             return;
 
-        THOR_THROW_IF_FALSE(labelsStream.isInitialized());
-        THOR_THROW_IF_FALSE(labelsInput.has_value());
-        THOR_THROW_IF_FALSE(labelsStream.isInitialized());
-        THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
+        if (requiresLabelsInput()) {
+            THOR_THROW_IF_FALSE(labelsStream.isInitialized());
+            THOR_THROW_IF_FALSE(labelsInput.has_value());
+            THOR_THROW_IF_FALSE(labelsStream.isInitialized());
+            THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
+        }
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         THOR_THROW_IF_FALSE(featureInput.has_value());
         THOR_THROW_IF_FALSE(inputTensor.has_value());
 
         if (inputTensor.value() == featureInput.value())
             forwardFeatures(inputTensor.value(), validationPass);
-        else if (inputTensor.value() == labelsInput.value())
+        else if (requiresLabelsInput() && labelsInput.has_value() && inputTensor.value() == labelsInput.value())
             forwardLabels(inputTensor.value(), validationPass);
         else
             THOR_UNREACHABLE();
@@ -164,17 +169,21 @@ class Metric : public Layer {
     }
 
     virtual void advanceDataIfReady(bool validationPass) {
-        if (featureInputReceived && labelsReceived) {
+        const bool ready = featureInputReceived && (!requiresLabelsInput() || labelsReceived);
+        if (!ready)
+            return;
+
+        if (requiresLabelsInput()) {
             // DataStream waits for labels to arrive,
             stream.waitEvent(labelsStream.putEvent());
-
             computeMetric(labelsInput.value(), featureInput.value(), featureOutput.value(), stream);
-
-            featureInputReceived = false;
             labelsReceived = false;
         } else {
-            return;
+            computeMetric(featureInput.value(), featureInput.value(), featureOutput.value(), stream);
+            labelsReceived = true;
         }
+
+        featureInputReceived = false;
 
         if (nextLayer.has_value())
             nextLayer.value()->forward(featureOutput, validationPass);

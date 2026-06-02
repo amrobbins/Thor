@@ -29,12 +29,17 @@ class Metric : public Layer {
     bool mustConnectAllInputsToDriveOutput() override { return true; }
 
     void informThatInputConnectionMade(Tensor inputTensor) override {
+        (void)inputTensor;
         numInputConnectionsMade += 1;
-        THOR_THROW_IF_FALSE(numInputConnectionsMade < 3);
+        THOR_THROW_IF_FALSE(numInputConnectionsMade <= requiredInputConnectionCount());
     }
 
+    virtual bool requiresLabels() const { return true; }
     virtual Tensor getPredictions() const { return getFeatureInput().value(); }
-    virtual Tensor getLabels() const { return labelsTensor; }
+    virtual Tensor getLabels() const {
+        THOR_THROW_IF_FALSE(requiresLabels());
+        return labelsTensor;
+    }
     virtual Tensor getMetric() const { return metricTensor; }
     std::optional<Tensor> getFeatureOutput() const override { return getMetric(); }
     std::vector<Tensor> getAllOutputTensors() const override { return {getFeatureOutput().value()}; }
@@ -42,7 +47,7 @@ class Metric : public Layer {
     int getConnectionType(Tensor connectingTensor) const override {
         if (connectingTensor == getFeatureInput().value())
             return (int)ThorImplementation::Metric::ConnectionType::FORWARD;
-        else if (connectingTensor == getLabels())
+        else if (requiresLabels() && connectingTensor == labelsTensor)
             return (int)ThorImplementation::Metric::ConnectionType::LABELS;
         else if (connectingTensor == getMetric())
             return (int)ThorImplementation::Metric::ConnectionType::METRIC;
@@ -50,8 +55,8 @@ class Metric : public Layer {
     }
 
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override {
-        THOR_THROW_IF_FALSE(inputTensor == getFeatureInput().value() || inputTensor == getLabels());
-        if (numInputConnectionsMade == 2)
+        THOR_THROW_IF_FALSE(inputTensor == getFeatureInput().value() || (requiresLabels() && inputTensor == labelsTensor));
+        if (numInputConnectionsMade == requiredInputConnectionCount())
             return {metricTensor};
         else
             return std::vector<Tensor>();
@@ -68,6 +73,8 @@ class Metric : public Layer {
     }
 
    private:
+    uint32_t requiredInputConnectionCount() const { return requiresLabels() ? 2 : 1; }
+
     uint32_t numInputConnectionsMade = 0;
 };
 

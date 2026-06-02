@@ -34,7 +34,8 @@ json Metric::architectureJson() const {
 
     // Input connections
     j["predictions"] = getPredictions().architectureJson();
-    j["labels"] = labelsTensor.architectureJson();
+    if (requiresLabels())
+        j["labels"] = labelsTensor.architectureJson();
 
     // Output connections
     j["metric"] = metricTensor.architectureJson();
