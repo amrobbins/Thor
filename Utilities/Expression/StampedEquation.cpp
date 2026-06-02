@@ -924,6 +924,12 @@ StampedReduction::StampedReduction(
 void StampedReduction::run() { runOn(stream); }
 
 void StampedReduction::runOn(Stream& run_stream) const {
+    if (built_reduction->identity_reduction) {
+        Tensor output_view = output;
+        output_view.copyFromAsync(input, run_stream);
+        return;
+    }
+
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
         THOR_THROW_IF_FALSE(workspace.has_value());
@@ -2286,6 +2292,39 @@ static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<uint64_t>
     return desc;
 }
 
+static std::vector<uint64_t> paddedCudnnReductionDims(std::vector<uint64_t> dims) {
+    while (dims.size() < 4)
+        dims.push_back(1);
+    if (dims.size() > 8)
+        throw std::runtime_error("cuDNN reduction only supports rank <= 8.");
+    return dims;
+}
+
+static bool hasCudnnReductionDimension(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& output_dims) {
+    const std::vector<uint64_t> padded_input = paddedCudnnReductionDims(input_dims);
+    const std::vector<uint64_t> padded_output = paddedCudnnReductionDims(output_dims);
+    if (padded_input.size() != padded_output.size())
+        return true;
+    for (size_t i = 0; i < padded_input.size(); ++i) {
+        if (padded_input[i] != padded_output[i])
+            return true;
+    }
+    return false;
+}
+
+static bool singletonReductionCanReuseInputValue(ExprOp op) {
+    switch (op) {
+        case ExprOp::REDUCE_SUM:
+        case ExprOp::REDUCE_PROD:
+        case ExprOp::REDUCE_MIN:
+        case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_AVG:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static fe::DataType_t toFrontendDataType(DataType dtype) {
     switch (dtype) {
         case DataType::FP32:
@@ -2872,6 +2911,20 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
     const std::vector<uint64_t> output_dims = computeReductionOutputDims(input_dims,
                                                                          built->key.reduction_axes,
                                                                          /*squeeze_axes=*/{});
+
+    // cuDNN rejects reductions where every reduced dimension already has extent 1
+    // because the padded source and destination descriptors are identical. For
+    // singleton sum/prod/min/max/avg value reductions, the result is just the input
+    // value, with only dtype conversion and optional squeeze/reshape at the Tensor
+    // view level. Norm reductions are intentionally excluded because norm1/norm2
+    // over a singleton is abs(x), not x.
+    built->identity_reduction = !built->key.output_indices && singletonReductionCanReuseInputValue(built->key.op) &&
+                                !hasCudnnReductionDimension(input_dims, output_dims);
+    if (built->identity_reduction) {
+        builtReductionCache.put(key, built);
+        return built;
+    }
+
     built->a_desc = createCudnnTensorDescriptor(input_dims, built->key.input_dtype);
     built->reduce_desc = createCudnnReduceDescriptor(built->key.op, built->key.compute_dtype, built->key.output_indices);
     built->c_desc = createCudnnTensorDescriptor(output_dims, built->key.output_dtype);

@@ -351,33 +351,137 @@ static uint32_t transposePackScalars(DataType dtype) {
 }
 
 static void emitSharedTransposeWordHelpers(std::ostringstream& ss) {
-    ss << R"(template <typename T>
+    ss << R"(#include <vector_types.h>
+
+template <unsigned int Bytes>
+struct thor_transpose_storage_for_bytes;
+
+template <>
+struct thor_transpose_storage_for_bytes<1U> {
+    using type = unsigned char;
+};
+
+template <>
+struct thor_transpose_storage_for_bytes<2U> {
+    using type = unsigned short;
+};
+
+template <>
+struct thor_transpose_storage_for_bytes<4U> {
+    using type = unsigned int;
+};
+
+template <unsigned int SlotBytes>
+struct thor_transpose_word_vector_for_slot_bytes;
+
+template <>
+struct thor_transpose_word_vector_for_slot_bytes<1U> {
+    using type = uchar4;
+};
+
+template <>
+struct thor_transpose_word_vector_for_slot_bytes<2U> {
+    using type = ushort2;
+};
+
+template <>
+struct thor_transpose_word_vector_for_slot_bytes<4U> {
+    using type = unsigned int;
+};
+
+template <typename T>
+__device__ __forceinline__ typename thor_transpose_storage_for_bytes<sizeof(T)>::type thor_transpose_scalar_bits(T value) {
+    static_assert(sizeof(T) == 1U || sizeof(T) == 2U || sizeof(T) == 4U,
+                  "transpose shared-memory swizzle supports scalar storage types of 1, 2, or 4 bytes");
+    union ScalarCaster {
+        T value;
+        typename thor_transpose_storage_for_bytes<sizeof(T)>::type bits;
+    };
+    ScalarCaster caster;
+    caster.bits = 0;
+    caster.value = value;
+    return caster.bits;
+}
+
+template <typename T>
+__device__ __forceinline__ T thor_transpose_scalar_from_bits(typename thor_transpose_storage_for_bytes<sizeof(T)>::type bits) {
+    static_assert(sizeof(T) == 1U || sizeof(T) == 2U || sizeof(T) == 4U,
+                  "transpose shared-memory swizzle supports scalar storage types of 1, 2, or 4 bytes");
+    union ScalarCaster {
+        typename thor_transpose_storage_for_bytes<sizeof(T)>::type bits;
+        T value;
+    };
+    ScalarCaster caster;
+    caster.bits = bits;
+    return caster.value;
+}
+
+template <typename T>
 __device__ __forceinline__ unsigned int thor_pack_transpose_word(T value) {
     static_assert(sizeof(T) <= sizeof(unsigned int), "transpose shared-memory swizzle supports scalar storage types up to 32 bits");
-    union WordCaster { unsigned int word; T value; };
-    WordCaster caster;
-    caster.word = 0u;
-    caster.value = value;
-    return caster.word;
+    return static_cast<unsigned int>(thor_transpose_scalar_bits(value));
 }
 
 template <typename T>
 __device__ __forceinline__ T thor_unpack_transpose_word(unsigned int word) {
     static_assert(sizeof(T) <= sizeof(unsigned int), "transpose shared-memory swizzle supports scalar storage types up to 32 bits");
-    union WordCaster { unsigned int word; T value; };
-    WordCaster caster;
-    caster.word = word;
-    return caster.value;
+    return thor_transpose_scalar_from_bits<T>(static_cast<typename thor_transpose_storage_for_bytes<sizeof(T)>::type>(word));
 }
 
-template <unsigned int Bytes>
-__device__ __forceinline__ unsigned int thor_transpose_mask_for_bytes() {
-    static_assert(Bytes >= 1U && Bytes <= sizeof(unsigned int), "transpose packed lane masks support 1..4 byte fields");
-    if constexpr (Bytes == sizeof(unsigned int)) {
-        return 0xffffffffu;
+template <unsigned int SlotBytes>
+__device__ __forceinline__ typename thor_transpose_storage_for_bytes<SlotBytes>::type thor_get_transpose_pack_lane_bits(unsigned int word,
+                                                                                                                       unsigned int lane) {
+    static_assert(SlotBytes == 1U || SlotBytes == 2U || SlotBytes == 4U,
+                  "transpose logical swizzle slots must be 1, 2, or 4 bytes");
+    union WordCaster {
+        unsigned int raw;
+        typename thor_transpose_word_vector_for_slot_bytes<SlotBytes>::type lanes;
+    };
+    WordCaster caster;
+    caster.raw = word;
+    if constexpr (SlotBytes == 1U) {
+        if (lane == 0U) return caster.lanes.x;
+        if (lane == 1U) return caster.lanes.y;
+        if (lane == 2U) return caster.lanes.z;
+        return caster.lanes.w;
+    } else if constexpr (SlotBytes == 2U) {
+        return lane == 0U ? caster.lanes.x : caster.lanes.y;
     } else {
-        return (1u << (Bytes * 8U)) - 1u;
+        return caster.raw;
     }
+}
+
+template <unsigned int SlotBytes>
+__device__ __forceinline__ unsigned int thor_set_transpose_pack_lane_bits(
+    unsigned int word, unsigned int lane, typename thor_transpose_storage_for_bytes<SlotBytes>::type value) {
+    static_assert(SlotBytes == 1U || SlotBytes == 2U || SlotBytes == 4U,
+                  "transpose logical swizzle slots must be 1, 2, or 4 bytes");
+    union WordCaster {
+        unsigned int raw;
+        typename thor_transpose_word_vector_for_slot_bytes<SlotBytes>::type lanes;
+    };
+    WordCaster caster;
+    caster.raw = word;
+    if constexpr (SlotBytes == 1U) {
+        if (lane == 0U) {
+            caster.lanes.x = value;
+        } else if (lane == 1U) {
+            caster.lanes.y = value;
+        } else if (lane == 2U) {
+            caster.lanes.z = value;
+        } else {
+            caster.lanes.w = value;
+        }
+    } else if constexpr (SlotBytes == 2U) {
+        if (lane == 0U) {
+            caster.lanes.x = value;
+        } else {
+            caster.lanes.y = value;
+        }
+    } else {
+        caster.raw = value;
+    }
+    return caster.raw;
 }
 
 template <unsigned int SlotBytes, typename T>
@@ -385,14 +489,8 @@ __device__ __forceinline__ unsigned int thor_set_transpose_pack_lane(unsigned in
     static_assert(SlotBytes == 1U || SlotBytes == 2U || SlotBytes == 4U,
                   "transpose logical swizzle slots must be 1, 2, or 4 bytes");
     static_assert(sizeof(T) <= SlotBytes, "transpose logical swizzle lane value must fit in its selected bank slot");
-    union WordCaster { unsigned int word; T value; };
-    WordCaster caster;
-    caster.word = 0u;
-    caster.value = value;
-    const unsigned int shift = lane * SlotBytes * 8U;
-    const unsigned int slot_mask = thor_transpose_mask_for_bytes<SlotBytes>();
-    const unsigned int value_mask = thor_transpose_mask_for_bytes<sizeof(T)>();
-    return (word & ~(slot_mask << shift)) | ((caster.word & value_mask) << shift);
+    using SlotStorage = typename thor_transpose_storage_for_bytes<SlotBytes>::type;
+    return thor_set_transpose_pack_lane_bits<SlotBytes>(word, lane, static_cast<SlotStorage>(thor_transpose_scalar_bits(value)));
 }
 
 template <unsigned int SlotBytes, typename T>
@@ -400,12 +498,9 @@ __device__ __forceinline__ T thor_unpack_transpose_pack_lane(unsigned int word, 
     static_assert(SlotBytes == 1U || SlotBytes == 2U || SlotBytes == 4U,
                   "transpose logical swizzle slots must be 1, 2, or 4 bytes");
     static_assert(sizeof(T) <= SlotBytes, "transpose logical swizzle lane value must fit in its selected bank slot");
-    union WordCaster { unsigned int word; T value; };
-    WordCaster caster;
-    const unsigned int shift = lane * SlotBytes * 8U;
-    const unsigned int value_mask = thor_transpose_mask_for_bytes<sizeof(T)>();
-    caster.word = (word >> shift) & value_mask;
-    return caster.value;
+    using ValueStorage = typename thor_transpose_storage_for_bytes<sizeof(T)>::type;
+    const auto lane_bits = thor_get_transpose_pack_lane_bits<SlotBytes>(word, lane);
+    return thor_transpose_scalar_from_bits<T>(static_cast<ValueStorage>(lane_bits));
 }
 
 template <unsigned int InputBytes, unsigned int SlotBytes>
@@ -415,16 +510,41 @@ __device__ __forceinline__ unsigned int thor_expand_transpose_dense_input_word(u
     static_assert(SlotBytes == 1U || SlotBytes == 2U || SlotBytes == 4U,
                   "transpose packed dense-input slots must be 1, 2, or 4 bytes");
     static_assert(InputBytes <= SlotBytes, "dense-input packed word cannot narrow values while staging the transpose tile");
-    constexpr unsigned int pack_scalars = sizeof(unsigned int) / SlotBytes;
-    const unsigned int input_mask = thor_transpose_mask_for_bytes<InputBytes>();
-    unsigned int word = 0u;
-#pragma unroll
-    for (unsigned int lane = 0; lane < pack_scalars; ++lane) {
-        const unsigned int input_shift = lane * InputBytes * 8U;
-        const unsigned int output_shift = lane * SlotBytes * 8U;
-        word |= ((raw >> input_shift) & input_mask) << output_shift;
+
+    if constexpr (InputBytes == SlotBytes) {
+        return raw;
+    } else if constexpr (InputBytes == 1U && SlotBytes == 2U) {
+        union InputCaster {
+            unsigned int raw;
+            uchar4 lanes;
+        } input;
+        union OutputCaster {
+            unsigned int raw;
+            ushort2 lanes;
+        } output;
+        input.raw = raw;
+        output.raw = 0u;
+        output.lanes.x = static_cast<unsigned short>(input.lanes.x);
+        output.lanes.y = static_cast<unsigned short>(input.lanes.y);
+        return output.raw;
+    } else if constexpr (InputBytes == 1U && SlotBytes == 4U) {
+        union InputCaster {
+            unsigned int raw;
+            uchar4 lanes;
+        } input;
+        input.raw = raw;
+        return static_cast<unsigned int>(input.lanes.x);
+    } else if constexpr (InputBytes == 2U && SlotBytes == 4U) {
+        union InputCaster {
+            unsigned int raw;
+            ushort2 lanes;
+        } input;
+        input.raw = raw;
+        return static_cast<unsigned int>(input.lanes.x);
+    } else {
+        static_assert(InputBytes == SlotBytes, "Unhandled dense-input packed transpose expansion case");
+        return raw;
     }
-    return word;
 }
 
 )";
@@ -5337,7 +5457,6 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
             }
 
             const std::string suffix = use_loaded_chunks ? "_dl" : "_dls";
-            ss << base_indent << "#pragma unroll\n";
             ss << base_indent << "for (unsigned int laneIter = 0; laneIter < READ_PACK_SCALARS; ++laneIter) {\n";
             ss << base_indent << "  const unsigned int LANE = ((localReadPackCol + laneIter) & (READ_PACK_SCALARS - 1U));\n";
             ss << base_indent << "  const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
@@ -5922,7 +6041,6 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
                     ss << "      }\n";
                 }
             } else {
-                ss << "      #pragma unroll\n";
                 ss << "      for (unsigned int laneIter = 0; laneIter < READ_PACK_SCALARS; ++laneIter) {\n";
                 ss << "        const unsigned int LANE = ((localReadPackCol + laneIter) & (READ_PACK_SCALARS - 1U));\n";
                 ss << "        const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
@@ -5953,7 +6071,6 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
             ss << "    if (logicalRow < numRows) {\n";
         }
 
-        ss << "      #pragma unroll\n";
         ss << "      for (unsigned int laneIter = 0; laneIter < READ_PACK_SCALARS; ++laneIter) {\n";
         ss << "        const unsigned int LANE = ((localReadPackCol + laneIter) & (READ_PACK_SCALARS - 1U));\n";
         ss << "        const unsigned int LOCAL_COL = localReadPackCol * READ_PACK_SCALARS + LANE;\n";
@@ -6352,7 +6469,6 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             scalarStorageTypeSizeBytes(dense_input_load->input_dtype) <= logical_transpose_slot_bytes;
 
         auto emit_scalar_lane_loads = [&](const std::string& indent) {
-            ss << indent << "#pragma unroll\n";
             ss << indent << "for (unsigned int lane = 0; lane < LOGICAL_TRANSPOSE_PACK_SCALARS; ++lane) {\n";
             ss << indent << "  const " << index_type << " logical_col = logical_col_base + static_cast<" << index_type
                << ">(lane);\n";
@@ -6424,7 +6540,6 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
            << ">(localPackedOutputRow * LOGICAL_TRANSPOSE_PACK_SCALARS);\n";
         ss << "      if (tx < numRows) {\n";
         ss << "        const unsigned int packed_word = tile[threadIdx.x][localPackedOutputRow];\n";
-        ss << "        #pragma unroll\n";
         ss << "        for (unsigned int lane = 0; lane < LOGICAL_TRANSPOSE_PACK_SCALARS; ++lane) {\n";
         ss << "          const " << index_type << " output_row = output_row_base + static_cast<" << index_type << ">(lane);\n";
         ss << "          if (output_row < numCols) {\n";
@@ -6468,8 +6583,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             const DataType vector_compute_dtype = logical_transpose_vector_compute_dtype.value();
             ss << "        // Vectorized downstream lane math: each owner thread evaluates two logical lanes\n";
             ss << "        // with half2/bfloat162 once the packed transpose frontier has been unloaded.\n";
-            ss << "        #pragma unroll\n";
-            ss << "        for (unsigned int lane_pair = 0; lane_pair < LOGICAL_TRANSPOSE_PACK_SCALARS; lane_pair += 2U) {\n";
+                ss << "        for (unsigned int lane_pair = 0; lane_pair < LOGICAL_TRANSPOSE_PACK_SCALARS; lane_pair += 2U) {\n";
             ss << "          const " << index_type << " output_row0 = output_row_base + static_cast<" << index_type << ">(lane_pair);\n";
             ss << "          if (output_row0 + static_cast<" << index_type << ">(1) < numCols) {\n";
             ss << "            const " << index_type << " out_idx0 = matrixOffset + output_row0 * numRows + tx;\n";
@@ -6532,8 +6646,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             ss << "          }\n";
             ss << "        }\n";
         } else {
-            ss << "        #pragma unroll\n";
-            ss << "        for (unsigned int lane = 0; lane < LOGICAL_TRANSPOSE_PACK_SCALARS; ++lane) {\n";
+                ss << "        for (unsigned int lane = 0; lane < LOGICAL_TRANSPOSE_PACK_SCALARS; ++lane) {\n";
             ss << "          const " << index_type << " output_row = output_row_base + static_cast<" << index_type << ">(lane);\n";
             ss << "          if (output_row < numCols) {\n";
             ss << "            const " << index_type << " out_idx = matrixOffset + output_row * numRows + tx;\n";
