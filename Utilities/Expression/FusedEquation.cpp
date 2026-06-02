@@ -5187,6 +5187,9 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
 
 std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
     const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const {
+    if (outputs_template.isConditional()) {
+        throw std::runtime_error("Graph-level conditional Outputs are stamped through their branch plans and do not expose a flat CompiledOutputs plan.");
+    }
     if (root_values.empty()) {
         throw std::runtime_error("FusedEquation::compileForRootValues requires at least one bound root input.");
     }
@@ -5236,6 +5239,9 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
 
 std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRunPlan(
     const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const {
+    if (outputs_template.isConditional()) {
+        throw std::runtime_error("FusedEquation::run convenience path does not support graph-level conditional Outputs; use stamp(...).run().");
+    }
     if (root_values.empty()) {
         throw std::runtime_error("FusedEquation::prepareConvenienceRunPlan requires at least one bound root input.");
     }
@@ -6910,6 +6916,81 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                           const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
                                           const std::unordered_map<std::string, Tensor>& preallocated_outputs,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
+    if (outputs_template.isConditional()) {
+        if (backward_config.has_value()) {
+            throw std::runtime_error("Graph-level conditional Outputs do not currently support compileBackward().");
+        }
+        const PhysicalConditionalOutputs& conditional = *outputs_template.conditional;
+
+        FusedEquation predicate_equation = FusedEquation::compile(conditional.predicate, device_num, use_fast_math);
+        FusedEquation then_equation = FusedEquation::compile(conditional.then_branch, device_num, use_fast_math);
+        FusedEquation else_equation = FusedEquation::compile(conditional.else_branch, device_num, use_fast_math);
+
+        auto filter_tensor_inputs = [&](const FusedEquation& equation) {
+            std::unordered_map<std::string, Tensor> filtered;
+            for (const NamedInput& input : equation.root_inputs) {
+                if (input.kind != NamedInput::Kind::Tensor) {
+                    continue;
+                }
+                auto it = inputs.find(input.name);
+                if (it != inputs.end()) {
+                    filtered.emplace(input.name, it->second);
+                }
+            }
+            return filtered;
+        };
+        auto filter_tensor_scalar_inputs = [&](const FusedEquation& equation) {
+            std::unordered_map<std::string, TensorScalarBinding> filtered;
+            for (const NamedInput& input : equation.root_inputs) {
+                if (input.kind != NamedInput::Kind::TensorRuntimeScalar) {
+                    continue;
+                }
+                auto it = tensor_scalar_inputs.find(input.name);
+                if (it != tensor_scalar_inputs.end()) {
+                    filtered.emplace(input.name, it->second);
+                }
+            }
+            return filtered;
+        };
+
+        const auto predicate_inputs = filter_tensor_inputs(predicate_equation);
+        const auto predicate_tensor_scalars = filter_tensor_scalar_inputs(predicate_equation);
+        const auto then_inputs = filter_tensor_inputs(then_equation);
+        const auto then_tensor_scalars = filter_tensor_scalar_inputs(then_equation);
+        const auto else_inputs = filter_tensor_inputs(else_equation);
+        const auto else_tensor_scalars = filter_tensor_scalar_inputs(else_equation);
+
+        auto predicate_plan = std::make_shared<StampedExecutionPlan>(
+            predicate_equation.stamp(predicate_inputs, stream, predicate_tensor_scalars, {}, {}));
+
+        auto then_plan = std::make_shared<StampedExecutionPlan>(
+            then_equation.stamp(then_inputs, stream, then_tensor_scalars, preallocated_outputs, requestedOutputShapes));
+
+        std::unordered_map<std::string, Tensor> shared_outputs = then_plan->getFinalOutputs();
+        for (const auto& [name, tensor] : preallocated_outputs) {
+            (void)tensor;
+            if (shared_outputs.find(name) == shared_outputs.end()) {
+                throw std::runtime_error("Preallocated conditional output tensor was not consumed by the then branch: " + name);
+            }
+        }
+
+        auto else_plan = std::make_shared<StampedExecutionPlan>(
+            else_equation.stamp(else_inputs, stream, else_tensor_scalars, shared_outputs, requestedOutputShapes));
+
+        std::vector<std::string> output_names;
+        output_names.reserve(outputs_template.outputs.size());
+        for (const NamedOutput& output : outputs_template.outputs) {
+            output_names.push_back(output.name);
+        }
+
+        auto stamped_conditional = std::make_shared<StampedConditional>(
+            std::move(predicate_plan), std::move(then_plan), std::move(else_plan), std::move(output_names), stream);
+
+        std::vector<StampedExecutionStage> stages;
+        stages.emplace_back(stamped_conditional);
+        return StampedExecutionPlan(std::move(stages), std::move(shared_outputs), stream);
+    }
+
     if (accumulatesIntoGradOutputs(backward_config) && preallocated_outputs.empty()) {
         throw std::runtime_error(
             "Backward equations compiled with accumulate_grad_outputs=true require caller-provided gradient output tensors when stamping.");

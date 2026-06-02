@@ -16,6 +16,7 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/CudaDriver/CudaGraph.h"
 
 #include "Utilities/Cache/LruCache.h"
 #include "Utilities/Expression/CompiledEquation.h"
@@ -31,6 +32,8 @@ class Graph;
 }
 
 namespace ThorImplementation {
+
+class StampedExecutionPlan;
 
 struct ReductionCacheKey {
     const ExprOp op;
@@ -348,6 +351,9 @@ class StampedEquation {
 
     void run();
     void run(const std::unordered_map<std::string, float>& runtime_scalars);
+
+    [[nodiscard]] bool requiresRuntimeScalars() const;
+    [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
     void runOn(Stream& run_stream) const;
     void runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const;
 
@@ -417,9 +423,6 @@ class StampedEquation {
         const Tensor& output,
         const Stream& stream,
         int device_num);
-
-    [[nodiscard]] bool requiresRuntimeScalars() const;
-    [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
 
    private:
     std::shared_ptr<CompiledEquation> compiledEquation;
@@ -910,8 +913,33 @@ class StampedInPlaceRope {
     Stream stream;
 };
 
+class StampedConditional {
+   public:
+    StampedConditional(std::shared_ptr<StampedExecutionPlan> predicate_plan,
+                       std::shared_ptr<StampedExecutionPlan> then_plan,
+                       std::shared_ptr<StampedExecutionPlan> else_plan,
+                       std::vector<std::string> output_names,
+                       const Stream& stream);
+
+    void run();
+    void run(const std::unordered_map<std::string, float>& runtime_scalars);
+    void runOn(Stream& run_stream) const;
+    void runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const;
+    [[nodiscard]] bool requiresRuntimeScalars() const;
+    [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
+    uint32_t gpuNum() const;
+
+   private:
+    std::shared_ptr<StampedExecutionPlan> predicate_plan;
+    std::shared_ptr<StampedExecutionPlan> then_plan;
+    std::shared_ptr<StampedExecutionPlan> else_plan;
+    std::vector<std::string> output_names;
+    Stream stream;
+    CudaGraphExecutable conditional_graph;
+};
+
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward, Conditional };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -942,6 +970,8 @@ struct StampedExecutionStage {
                 return "ConvolutionBackward";
             case Kind::ReduceMinMaxBackward:
                 return "ReduceMinMaxBackward";
+            case Kind::Conditional:
+                return "Conditional";
         }
         return "<unknown>";
     }
@@ -966,6 +996,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedConvolution> convolution = nullptr;
     const std::shared_ptr<StampedConvolutionBackward> convolution_backward = nullptr;
     const std::shared_ptr<StampedReduceMinMaxBackward> reduce_minmax_backward = nullptr;
+    const std::shared_ptr<StampedConditional> conditional = nullptr;
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused,
                                    std::vector<uint32_t> dependency_stage_indices = {},
@@ -1094,6 +1125,15 @@ struct StampedExecutionStage {
           flop_count(flop_count),
           reduce_minmax_backward(reduce_minmax_backward) {}
 
+    explicit StampedExecutionStage(const std::shared_ptr<StampedConditional>& conditional,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::Conditional),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(conditional->gpuNum()),
+          flop_count(flop_count),
+          conditional(conditional) {}
+
     [[nodiscard]] uint64_t flopCount() const { return flop_count; }
 
     void runOn(Stream& run_stream) const { runOn(run_stream, {}); }
@@ -1150,6 +1190,12 @@ struct StampedExecutionStage {
         } else if (kind == Kind::ReduceMinMaxBackward) {
             THOR_THROW_IF_FALSE(reduce_minmax_backward != nullptr);
             reduce_minmax_backward->runOn(run_stream);
+        } else if (kind == Kind::Conditional) {
+            THOR_THROW_IF_FALSE(conditional != nullptr);
+            if (runtime_scalars.empty())
+                conditional->runOn(run_stream);
+            else
+                conditional->runOn(run_stream, runtime_scalars);
         } else {
             throw std::runtime_error("Unknown StampedExecutionStage kind: " + std::to_string((int)kind));
         }
@@ -1165,6 +1211,11 @@ class StampedExecutionPlan {
 
     void run();
     void run(const std::unordered_map<std::string, float>& runtime_scalars);
+    void runSequentialOn(Stream& run_stream) const;
+    void runSequentialOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const;
+
+    [[nodiscard]] bool requiresRuntimeScalars() const;
+    [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
 
     [[nodiscard]] uint64_t flopCount() const {
         uint64_t total = 0;

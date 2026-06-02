@@ -1957,7 +1957,23 @@ Args:
                 names.push_back(output.name);
             }
             return names;
-        });
+        })
+        .def_static(
+            "conditional",
+            &Outputs::conditional,
+            "predicate"_a,
+            "then_outputs"_a,
+            "else_outputs"_a,
+            R"nbdoc(
+Create graph-level conditional outputs. The predicate must evaluate to a single BOOLEAN element.
+Only the selected branch is executed at runtime; both branches must expose identical output names.
+)nbdoc")
+        .def_static(
+            "if_else",
+            &Outputs::ifElse,
+            "predicate"_a,
+            "then_outputs"_a,
+            "else_outputs"_a);
 
     auto expression_definition_type = nb::class_<ExpressionDefinition>(physical, "ExpressionDefinition");
     expression_definition_type.attr("__module__") = "thor.physical";
@@ -2032,6 +2048,16 @@ Args:
 Returns:
     Outputs
         A terminal multi-output graph object that can be compiled together.
+ )nbdoc");
+
+    expr.def_static(
+        "if_else",
+        &Outputs::ifElse,
+        "predicate"_a,
+        "then_outputs"_a,
+        "else_outputs"_a,
+        R"nbdoc(
+Create graph-level conditional outputs from a scalar BOOLEAN predicate and two branch Outputs objects.
 )nbdoc");
 
     expr.def_static(
