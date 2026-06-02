@@ -4,6 +4,7 @@
 namespace nb = nanobind;
 
 void bind_sgd(nb::module_ &optimizers);
+void bind_asgd(nb::module_ &optimizers);
 void bind_adam(nb::module_ &optimizers);
 void bind_adamw(nb::module_ &optimizers);
 void bind_adamax(nb::module_ &optimizers);
@@ -24,6 +25,7 @@ void bind_optimizers(nb::module_ &optimizers) {
     optimizer.attr("__module__") = "thor.optimizers";
 
     bind_sgd(optimizers);
+    bind_asgd(optimizers);
     bind_adam(optimizers);
     bind_adamw(optimizers);
     bind_adamax(optimizers);
