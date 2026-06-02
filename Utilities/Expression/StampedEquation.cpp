@@ -4,6 +4,7 @@
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/MatmulScalarKernel.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
+#include "Utilities/CudaDriver/CudaGraphConditional.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include <cudnn_frontend.h>
@@ -1707,6 +1708,317 @@ void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
                                       run_stream);
 }
 
+
+static uint64_t conditionalPredicateNumel(const Tensor& predicate) {
+    uint64_t numel = 1;
+    for (uint64_t d : predicate.getDimensions()) {
+        numel *= d;
+    }
+    return numel;
+}
+
+static void validateConditionalPredicateTensor(const Tensor& predicate) {
+    if (!predicate.isInitialized()) {
+        throw std::runtime_error("Graph-level conditional predicate output tensor is not initialized.");
+    }
+    if (predicate.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
+        throw std::runtime_error("Graph-level conditional predicate output must live on GPU.");
+    }
+    if (predicate.getDataType() != DataType::BOOLEAN) {
+        throw std::runtime_error("Graph-level conditional predicate output must have BOOLEAN dtype.");
+    }
+    if (conditionalPredicateNumel(predicate) != 1) {
+        throw std::runtime_error("Graph-level conditional predicate output must contain exactly one element.");
+    }
+}
+
+static std::vector<cudaGraphNode_t> graphLeafNodes(cudaGraph_t graph) {
+    size_t node_count = 0;
+    CUDA_CHECK(cudaGraphGetNodes(graph, nullptr, &node_count));
+
+    std::vector<cudaGraphNode_t> nodes(node_count);
+    if (node_count != 0) {
+        CUDA_CHECK(cudaGraphGetNodes(graph, nodes.data(), &node_count));
+        nodes.resize(node_count);
+    }
+
+    std::vector<cudaGraphNode_t> leaves;
+    leaves.reserve(nodes.size());
+    for (cudaGraphNode_t node : nodes) {
+        size_t dependent_count = 0;
+        CUDA_CHECK(cudaGraphNodeGetDependentNodes(node, nullptr, nullptr, &dependent_count));
+        if (dependent_count == 0) {
+            leaves.push_back(node);
+        }
+    }
+    return leaves;
+}
+
+static void capturePlanSequentiallyIntoGraph(const StampedExecutionPlan& plan,
+                                             cudaGraph_t graph,
+                                             Stream& capture_stream,
+                                             const std::vector<cudaGraphNode_t>& dependencies = {}) {
+    cudaGraph_t captured_graph = nullptr;
+    const cudaGraphNode_t* deps = dependencies.empty() ? nullptr : dependencies.data();
+    CUDA_CHECK(cudaStreamBeginCaptureToGraph(capture_stream.getStream(),
+                                             graph,
+                                             deps,
+                                             nullptr,
+                                             dependencies.size(),
+                                             cudaStreamCaptureModeGlobal));
+
+    try {
+        plan.runSequentialOn(capture_stream);
+        CUDA_CHECK(cudaStreamEndCapture(capture_stream.getStream(), &captured_graph));
+    } catch (...) {
+        cudaGraph_t aborted_graph = nullptr;
+        cudaError_t end_status = cudaStreamEndCapture(capture_stream.getStream(), &aborted_graph);
+        if (end_status == cudaSuccess && aborted_graph != nullptr && aborted_graph != graph) {
+            (void)cudaGraphDestroy(aborted_graph);
+        } else if (end_status != cudaSuccess) {
+            (void)cudaGetLastError();
+        }
+        throw;
+    }
+
+    if (captured_graph != graph) {
+        throw std::runtime_error("CUDA graph capture for conditional subplan did not return the target graph.");
+    }
+}
+
+static void captureConditionalSetterIntoGraph(cudaGraphConditionalHandle conditional_handle,
+                                                const Tensor& predicate,
+                                                cudaGraph_t graph,
+                                                Stream& capture_stream,
+                                                const std::vector<cudaGraphNode_t>& dependencies) {
+    cudaGraph_t captured_graph = nullptr;
+    const cudaGraphNode_t* deps = dependencies.empty() ? nullptr : dependencies.data();
+    CUDA_CHECK(cudaStreamBeginCaptureToGraph(capture_stream.getStream(),
+                                             graph,
+                                             deps,
+                                             nullptr,
+                                             dependencies.size(),
+                                             cudaStreamCaptureModeGlobal));
+
+    try {
+        launchSetCudaGraphConditionalFromBool(conditional_handle, predicate, capture_stream);
+        CUDA_CHECK(cudaStreamEndCapture(capture_stream.getStream(), &captured_graph));
+    } catch (...) {
+        cudaGraph_t aborted_graph = nullptr;
+        cudaError_t end_status = cudaStreamEndCapture(capture_stream.getStream(), &aborted_graph);
+        if (end_status == cudaSuccess && aborted_graph != nullptr && aborted_graph != graph) {
+            (void)cudaGraphDestroy(aborted_graph);
+        } else if (end_status != cudaSuccess) {
+            (void)cudaGetLastError();
+        }
+        throw;
+    }
+
+    if (captured_graph != graph) {
+        throw std::runtime_error("CUDA graph capture for conditional setter did not return the target graph.");
+    }
+}
+
+static CudaGraphExecutable buildConditionalCudaGraph(const StampedExecutionPlan& predicate_plan,
+                                                     const StampedExecutionPlan& then_plan,
+                                                     const StampedExecutionPlan& else_plan,
+                                                     const Stream& stream) {
+    Stream capture_stream(stream.getGpuNum());
+
+    // Pre-create common library handles outside capture. Some stage types lazily create
+    // cuDNN/cuBLAS handles from the stream; doing that while capture is active would make
+    // the conditional graph path fragile.
+    (void)capture_stream.getCudnnHandle();
+    (void)capture_stream.getCublasHandle();
+
+    Tensor predicate = predicate_plan.output();
+    validateConditionalPredicateTensor(predicate);
+
+    cudaGraph_t root_graph = nullptr;
+    CUDA_CHECK(cudaGraphCreate(&root_graph, 0));
+
+    try {
+        cudaGraphConditionalHandle conditional_handle{};
+        CUDA_CHECK(cudaGraphConditionalHandleCreate(&conditional_handle, root_graph, 0, 0));
+
+        capturePlanSequentiallyIntoGraph(predicate_plan, root_graph, capture_stream);
+
+        std::vector<cudaGraphNode_t> predicate_leaves = graphLeafNodes(root_graph);
+        if (predicate_leaves.empty()) {
+            throw std::runtime_error("Graph-level conditional predicate graph produced no CUDA graph nodes.");
+        }
+        captureConditionalSetterIntoGraph(conditional_handle, predicate, root_graph, capture_stream, predicate_leaves);
+
+        std::vector<cudaGraphNode_t> conditional_dependencies = graphLeafNodes(root_graph);
+        if (conditional_dependencies.empty()) {
+            throw std::runtime_error("Graph-level conditional setter graph produced no CUDA graph leaf nodes.");
+        }
+
+        cudaGraphNodeParams conditional_params{};
+        conditional_params.type = cudaGraphNodeTypeConditional;
+        conditional_params.conditional.handle = conditional_handle;
+        conditional_params.conditional.type = cudaGraphCondTypeIf;
+        conditional_params.conditional.size = 2;
+
+        cudaGraphNode_t conditional_node = nullptr;
+        CUDA_CHECK(cudaGraphAddNode(&conditional_node,
+                                    root_graph,
+                                    conditional_dependencies.data(),
+                                    nullptr,
+                                    conditional_dependencies.size(),
+                                    &conditional_params));
+
+        if (conditional_params.conditional.phGraph_out == nullptr) {
+            throw std::runtime_error("CUDA did not return body graphs for graph-level conditional node.");
+        }
+
+        capturePlanSequentiallyIntoGraph(then_plan, conditional_params.conditional.phGraph_out[0], capture_stream);
+        capturePlanSequentiallyIntoGraph(else_plan, conditional_params.conditional.phGraph_out[1], capture_stream);
+
+        CudaGraph graph(root_graph, stream.getGpuNum(), false);
+        root_graph = nullptr;
+        CudaGraphExecutable executable = graph.instantiate();
+        executable.upload(capture_stream);
+        return executable;
+    } catch (...) {
+        if (root_graph != nullptr) {
+            (void)cudaGraphDestroy(root_graph);
+        }
+        throw;
+    }
+}
+
+StampedConditional::StampedConditional(std::shared_ptr<StampedExecutionPlan> predicate_plan,
+                                       std::shared_ptr<StampedExecutionPlan> then_plan,
+                                       std::shared_ptr<StampedExecutionPlan> else_plan,
+                                       std::vector<std::string> output_names,
+                                       const Stream& stream)
+    : predicate_plan(std::move(predicate_plan)),
+      then_plan(std::move(then_plan)),
+      else_plan(std::move(else_plan)),
+      output_names(std::move(output_names)),
+      stream(stream) {
+    if (!this->predicate_plan || !this->then_plan || !this->else_plan) {
+        throw std::runtime_error("StampedConditional requires predicate, then, and else plans.");
+    }
+    if (this->output_names.empty()) {
+        throw std::runtime_error("StampedConditional requires at least one output name.");
+    }
+    if (requiresRuntimeScalars()) {
+        throw std::runtime_error(
+            "Graph-level conditional Outputs cannot currently use host runtime scalar overrides because the conditional is "
+            "captured as a CUDA graph. Use tensor runtime scalars or constant scalars instead.");
+    }
+
+    conditional_graph = buildConditionalCudaGraph(*this->predicate_plan, *this->then_plan, *this->else_plan, this->stream);
+}
+
+uint32_t StampedConditional::gpuNum() const {
+    Tensor predicate = predicate_plan->output();
+    if (predicate.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+        return static_cast<uint32_t>(predicate.getPlacement().getDeviceNum());
+    }
+    for (const std::string& name : output_names) {
+        Tensor out = then_plan->output(name);
+        if (out.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+            return static_cast<uint32_t>(out.getPlacement().getDeviceNum());
+        }
+    }
+    return 0;
+}
+
+bool StampedConditional::requiresRuntimeScalars() const { return !runtimeScalarNames().empty(); }
+
+std::unordered_set<std::string> StampedConditional::runtimeScalarNames() const {
+    std::unordered_set<std::string> names = predicate_plan->runtimeScalarNames();
+    std::unordered_set<std::string> then_names = then_plan->runtimeScalarNames();
+    std::unordered_set<std::string> else_names = else_plan->runtimeScalarNames();
+    names.insert(then_names.begin(), then_names.end());
+    names.insert(else_names.begin(), else_names.end());
+    return names;
+}
+
+void StampedConditional::run() { run({}); }
+
+void StampedConditional::run(const std::unordered_map<std::string, float>& runtime_scalars) { runOn(stream, runtime_scalars); }
+
+void StampedConditional::runOn(Stream& run_stream) const { runOn(run_stream, {}); }
+
+void StampedConditional::runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
+    if (!runtime_scalars.empty()) {
+        throw std::runtime_error("Graph-level conditional Outputs do not support host runtime scalar overrides.");
+    }
+    conditional_graph.launch(run_stream);
+}
+
+static std::unordered_set<std::string> runtimeScalarNamesForStage(const StampedExecutionStage& stage) {
+    std::unordered_set<std::string> stage_names;
+    if (stage.kind == StampedExecutionStage::Kind::FusedKernel && stage.kernel != nullptr && stage.kernel->requiresRuntimeScalars()) {
+        stage_names = stage.kernel->runtimeScalarNames();
+    } else if (stage.kind == StampedExecutionStage::Kind::CudaKernel && stage.cuda_kernel != nullptr &&
+               stage.cuda_kernel->requiresRuntimeScalars()) {
+        stage_names = stage.cuda_kernel->runtimeScalarNames();
+    } else if (stage.kind == StampedExecutionStage::Kind::Matmul && stage.matmul != nullptr) {
+        if (stage.matmul->alphaRuntimeName().has_value()) {
+            stage_names.insert(*stage.matmul->alphaRuntimeName());
+        }
+        if (stage.matmul->betaRuntimeName().has_value()) {
+            stage_names.insert(*stage.matmul->betaRuntimeName());
+        }
+    } else if (stage.kind == StampedExecutionStage::Kind::Conditional && stage.conditional != nullptr &&
+               stage.conditional->requiresRuntimeScalars()) {
+        stage_names = stage.conditional->runtimeScalarNames();
+    }
+    return stage_names;
+}
+
+bool StampedExecutionPlan::requiresRuntimeScalars() const { return !runtimeScalarNames().empty(); }
+
+std::unordered_set<std::string> StampedExecutionPlan::runtimeScalarNames() const {
+    std::unordered_set<std::string> names;
+    for (const StampedExecutionStage& stage : steps) {
+        std::unordered_set<std::string> stage_names = runtimeScalarNamesForStage(stage);
+        names.insert(stage_names.begin(), stage_names.end());
+    }
+    return names;
+}
+
+void StampedExecutionPlan::runSequentialOn(Stream& run_stream) const { runSequentialOn(run_stream, {}); }
+
+void StampedExecutionPlan::runSequentialOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
+    std::unordered_set<std::string> consumed_runtime_scalar_names;
+
+    for (const StampedExecutionStage& stage : steps) {
+        std::unordered_map<std::string, float> stage_runtime_scalars;
+        std::unordered_set<std::string> needed_names = runtimeScalarNamesForStage(stage);
+
+        if (!needed_names.empty()) {
+            stage_runtime_scalars.reserve(needed_names.size());
+            for (const std::string& name : needed_names) {
+                auto it = runtime_scalars.find(name);
+                if (it == runtime_scalars.end()) {
+                    throw std::runtime_error("Missing value for runtime scalar: " + name +
+                                             "  - if it was meant to be constant, use a constant scalar instead.");
+                }
+                stage_runtime_scalars.emplace(name, it->second);
+                consumed_runtime_scalar_names.insert(name);
+            }
+        }
+
+        if (stage_runtime_scalars.empty()) {
+            stage.runOn(run_stream);
+        } else {
+            stage.runOn(run_stream, stage_runtime_scalars);
+        }
+    }
+
+    for (const auto& [name, _] : runtime_scalars) {
+        if (!consumed_runtime_scalar_names.contains(name)) {
+            throw std::runtime_error("Unexpected runtime scalar override for stamped execution plan: " + name);
+        }
+    }
+}
+
 void StampedExecutionPlan::run() { run({}); }
 
 void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& runtime_scalars) {
@@ -1779,6 +2091,9 @@ void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& run
                 if (stage.matmul->betaRuntimeName().has_value()) {
                     needed_names.insert(*stage.matmul->betaRuntimeName());
                 }
+            } else if (stage.kind == StampedExecutionStage::Kind::Conditional && stage.conditional != nullptr &&
+                       stage.conditional->requiresRuntimeScalars()) {
+                needed_names = stage.conditional->runtimeScalarNames();
             }
 
             if (!needed_names.empty()) {

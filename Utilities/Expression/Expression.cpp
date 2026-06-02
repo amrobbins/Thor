@@ -1440,6 +1440,9 @@ std::string canonicalize(const PhysicalOutputs& outputs) {
 std::string expressionHash(const PhysicalOutputs& outputs) { return "fnv1a64:" + hex64(fnv1a64(canonicalize(outputs))); }
 
 void ExpressionDefinition::validate() const {
+    if (outputs.isConditional()) {
+        throw std::runtime_error("ExpressionDefinition validation for graph-level conditional Outputs is not implemented yet.");
+    }
     if (!outputs.expr) {
         throw std::runtime_error("ExpressionDefinition requires a non-null PhysicalExpression.");
     }
@@ -1801,6 +1804,9 @@ void ExpressionDefinition::allowUnsafeLoadedCudaKernelSourceCompilation(const st
 ExpressionDefinition ExpressionDefinition::fromOutputs(const Outputs& outputs) {
     ExpressionDefinition definition;
     definition.outputs = outputs.physicalOutputs();
+    if (definition.outputs.isConditional()) {
+        throw std::runtime_error("ExpressionDefinition serialization for graph-level conditional Outputs is not implemented yet.");
+    }
 
     for (const NamedInput& input : definition.outputs.expr->inputs) {
         definition.expected_input_names.push_back(input.name);
@@ -4290,6 +4296,75 @@ Outputs Expression::outputs(const std::vector<std::pair<std::string, Expression>
 
 Outputs Expression::outputs(std::initializer_list<std::pair<std::string, Expression>> named_exprs) {
     return outputs(std::vector<std::pair<std::string, Expression>>(named_exprs));
+}
+
+namespace {
+
+static void mergePhysicalOutputInputsInto(PhysicalExpression& dst, const PhysicalOutputs& src, std::unordered_map<std::string, uint32_t>& slots_by_name) {
+    if (!src.expr) {
+        return;
+    }
+    for (const NamedInput& input : src.expr->inputs) {
+        auto it = slots_by_name.find(input.name);
+        if (it != slots_by_name.end()) {
+            if (it->second >= dst.inputs.size()) {
+                throw std::runtime_error("Conditional output input slot map is invalid.");
+            }
+            if (dst.inputs[it->second].kind != input.kind) {
+                throw std::runtime_error("Conditional branch input kind mismatch for input: " + input.name);
+            }
+            continue;
+        }
+        const uint32_t slot = static_cast<uint32_t>(dst.inputs.size());
+        dst.inputs.push_back(NamedInput{input.name, slot, input.kind});
+        slots_by_name.emplace(input.name, slot);
+    }
+}
+
+static std::vector<std::string> physicalOutputNames(const PhysicalOutputs& outputs) {
+    std::vector<std::string> names;
+    names.reserve(outputs.outputs.size());
+    for (const NamedOutput& output : outputs.outputs) {
+        names.push_back(output.name);
+    }
+    return names;
+}
+
+}  // namespace
+
+Outputs Outputs::conditional(const Expression& predicate, const Outputs& then_outputs, const Outputs& else_outputs) {
+    PhysicalOutputs predicate_outputs = Expression::outputs({{"predicate", predicate}}).physicalOutputs();
+    PhysicalOutputs then_physical = then_outputs.physicalOutputs();
+    PhysicalOutputs else_physical = else_outputs.physicalOutputs();
+
+    if (predicate_outputs.outputs.size() != 1) {
+        throw std::runtime_error("Outputs::conditional requires a single predicate output.");
+    }
+    if (then_physical.outputs.empty() || else_physical.outputs.empty()) {
+        throw std::runtime_error("Outputs::conditional requires non-empty then and else branches.");
+    }
+    if (physicalOutputNames(then_physical) != physicalOutputNames(else_physical)) {
+        throw std::runtime_error("Outputs::conditional requires then/else branches to expose the same output names in the same order.");
+    }
+
+    auto conditional = std::make_shared<PhysicalConditionalOutputs>();
+    conditional->predicate = std::move(predicate_outputs);
+    conditional->then_branch = std::move(then_physical);
+    conditional->else_branch = std::move(else_physical);
+
+    auto root_expr = std::make_shared<PhysicalExpression>();
+    std::unordered_map<std::string, uint32_t> slots_by_name;
+    mergePhysicalOutputInputsInto(*root_expr, conditional->predicate, slots_by_name);
+    mergePhysicalOutputInputsInto(*root_expr, conditional->then_branch, slots_by_name);
+    mergePhysicalOutputInputsInto(*root_expr, conditional->else_branch, slots_by_name);
+
+    std::vector<NamedOutput> outputs;
+    outputs.reserve(conditional->then_branch.outputs.size());
+    for (size_t i = 0; i < conditional->then_branch.outputs.size(); ++i) {
+        outputs.push_back(NamedOutput{conditional->then_branch.outputs[i].name, static_cast<uint32_t>(i)});
+    }
+
+    return Outputs(std::move(root_expr), std::move(outputs), std::move(conditional));
 }
 
 }  // namespace ThorImplementation

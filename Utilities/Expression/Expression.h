@@ -24,6 +24,7 @@
 namespace ThorImplementation {
 struct PhysicalExecutionStage;
 class CudaKernelExpression;
+class Expression;
 class Outputs;
 
 enum class ExprOp : uint16_t {
@@ -353,9 +354,20 @@ struct PhysicalExpression {
     }
 };
 
+struct PhysicalConditionalOutputs;
+
 struct PhysicalOutputs {
     std::shared_ptr<PhysicalExpression> expr;
     std::vector<NamedOutput> outputs;
+    std::shared_ptr<PhysicalConditionalOutputs> conditional;
+
+    [[nodiscard]] bool isConditional() const { return static_cast<bool>(conditional); }
+};
+
+struct PhysicalConditionalOutputs {
+    PhysicalOutputs predicate;
+    PhysicalOutputs then_branch;
+    PhysicalOutputs else_branch;
 };
 
 struct ExpressionDefinition {
@@ -387,31 +399,41 @@ class Outputs {
    public:
     [[nodiscard]] const std::shared_ptr<PhysicalExpression>& expression() const { return expr; }
     [[nodiscard]] const std::vector<NamedOutput>& namedOutputs() const { return outputs; }
+    [[nodiscard]] bool isConditional() const { return static_cast<bool>(conditional_outputs); }
 
     [[nodiscard]] PhysicalOutputs physicalOutputs() const {
-        if (!expr) {
-            throw std::runtime_error("Outputs has no backing expression graph.");
+        if (!expr && !conditional_outputs) {
+            throw std::runtime_error("Outputs has no backing expression graph or conditional outputs.");
         }
         return PhysicalOutputs{
             .expr = expr,
             .outputs = outputs,
+            .conditional = conditional_outputs,
         };
     }
 
     [[nodiscard]] static Outputs fromPhysicalOutputs(PhysicalOutputs physicalOutputs) {
-        if (!physicalOutputs.expr) {
-            throw std::runtime_error("Outputs::fromPhysicalOutputs requires a non-null PhysicalExpression.");
+        if (!physicalOutputs.expr && !physicalOutputs.conditional) {
+            throw std::runtime_error("Outputs::fromPhysicalOutputs requires a non-null PhysicalExpression or conditional outputs.");
         }
 
-        return Outputs(std::move(physicalOutputs.expr), std::move(physicalOutputs.outputs));
+        return Outputs(std::move(physicalOutputs.expr), std::move(physicalOutputs.outputs), std::move(physicalOutputs.conditional));
+    }
+
+    [[nodiscard]] static Outputs conditional(const Expression& predicate, const Outputs& then_outputs, const Outputs& else_outputs);
+    [[nodiscard]] static Outputs ifElse(const Expression& predicate, const Outputs& then_outputs, const Outputs& else_outputs) {
+        return conditional(predicate, then_outputs, else_outputs);
     }
 
    private:
     std::shared_ptr<PhysicalExpression> expr;
     std::vector<NamedOutput> outputs;
+    std::shared_ptr<PhysicalConditionalOutputs> conditional_outputs;
 
-    Outputs(std::shared_ptr<PhysicalExpression> expr, std::vector<NamedOutput> outputs)
-        : expr(std::move(expr)), outputs(std::move(outputs)) {}
+    Outputs(std::shared_ptr<PhysicalExpression> expr,
+            std::vector<NamedOutput> outputs,
+            std::shared_ptr<PhysicalConditionalOutputs> conditional_outputs = nullptr)
+        : expr(std::move(expr)), outputs(std::move(outputs)), conditional_outputs(std::move(conditional_outputs)) {}
 
     friend class Expression;
 };
