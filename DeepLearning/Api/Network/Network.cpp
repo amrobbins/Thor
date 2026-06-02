@@ -576,15 +576,19 @@ Network::StatusCode Network::evaluateGraph() {
         shared_ptr<Metric> metric = dynamic_pointer_cast<Metric>(layer);
         if (metric) {
             Tensor inputTensor = metric->getFeatureInput().value();
-            Tensor labelsTensor = metric->getLabels();
             Tensor outputTensor = metric->getFeatureOutput().value();
             allTensors.insert(inputTensor);
-            allTensors.insert(labelsTensor);
             allTensors.insert(outputTensor);
             apiTensorToApiLoadingLayers[inputTensor].push_back(metric);
-            apiTensorToApiLoadingLayers[labelsTensor].push_back(metric);
             apiLayerToApiInputTensors[metric].push_back(inputTensor);
-            apiLayerToApiInputTensors[metric].push_back(labelsTensor);
+
+            if (metric->requiresLabels()) {
+                Tensor labelsTensor = metric->getLabels();
+                allTensors.insert(labelsTensor);
+                apiTensorToApiLoadingLayers[labelsTensor].push_back(metric);
+                apiLayerToApiInputTensors[metric].push_back(labelsTensor);
+            }
+
             THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
             apiTensorToApiDrivingLayer[outputTensor] = metric;
             apiLayerToApiOutputTensors[metric].push_back(outputTensor);
@@ -920,10 +924,12 @@ void Network::addLayerToNetwork(const Layer *layer) {
         apiTensorByOriginalId[lossTensor.getOriginalId()] = lossTensor;
     } else if (metric) {
         Tensor inputTensor = metric->getFeatureInput().value();
-        Tensor labelsTensor = metric->getLabels();
         Tensor outputTensor = metric->getFeatureOutput().value();
         apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
-        apiTensorByOriginalId[labelsTensor.getOriginalId()] = labelsTensor;
+        if (metric->requiresLabels()) {
+            Tensor labelsTensor = metric->getLabels();
+            apiTensorByOriginalId[labelsTensor.getOriginalId()] = labelsTensor;
+        }
         apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
     } else if (customLayer) {
         vector<Tensor> inputTensors = customLayer->getFeatureInputs();

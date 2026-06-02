@@ -61,6 +61,8 @@ void bind_tensor(nb::module_ &thor) {
             Data type of all elements in the tensor.
         )nbdoc")
         .def("get_id", &Tensor::getId)
+        .def("__eq__", [](const Tensor &a, const Tensor &b) { return a == b; }, "other"_a)
+        .def("__ne__", [](const Tensor &a, const Tensor &b) { return a != b; }, "other"_a)
         .def("get_dimensions", &Tensor::getDimensions)
         .def("get_data_type", &Tensor::getDataType)
         .def("get_total_num_elements", &Tensor::getTotalNumElements)

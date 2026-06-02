@@ -22,6 +22,7 @@ class CustomMetric : public Metric {
 
     ~CustomMetric() override = default;
 
+    bool requiresLabelsInput() const override { return !labelsName.empty(); }
     std::optional<Tensor> createFeatureOutputTensor() override;
     void compileImpl() override;
     void computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) override;

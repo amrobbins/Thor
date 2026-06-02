@@ -45,11 +45,9 @@ CustomMetric::CustomMetric(DynamicExpression expr,
       displayName(std::move(displayName)) {
     if (this->predictionsName.empty())
         throw std::invalid_argument("CustomMetric predictions input name cannot be empty.");
-    if (this->labelsName.empty())
-        throw std::invalid_argument("CustomMetric labels input name cannot be empty.");
     if (this->metricName.empty())
         throw std::invalid_argument("CustomMetric metric output name cannot be empty.");
-    if (this->predictionsName == this->labelsName)
+    if (!this->labelsName.empty() && this->predictionsName == this->labelsName)
         throw std::invalid_argument("CustomMetric predictions and labels input names must be distinct.");
     if (this->displayName.empty())
         this->displayName = "Metric";
@@ -57,11 +55,12 @@ CustomMetric::CustomMetric(DynamicExpression expr,
 
 CustomMetric::TensorMap CustomMetric::buildMetricInputs() const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
-    THOR_THROW_IF_FALSE(labelsInput.has_value());
+    THOR_THROW_IF_FALSE(!requiresLabelsInput() || labelsInput.has_value());
 
     TensorMap inputs;
     inputs.emplace(predictionsName, featureInput.value());
-    inputs.emplace(labelsName, labelsInput.value());
+    if (requiresLabelsInput())
+        inputs.emplace(labelsName, labelsInput.value());
     return inputs;
 }
 
@@ -84,7 +83,7 @@ void CustomMetric::validateMetricOutputNames(const std::vector<std::string>& out
 
 std::pair<std::vector<uint64_t>, DataType> CustomMetric::inferMetricOutputDescriptor() const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
-    THOR_THROW_IF_FALSE(labelsInput.has_value());
+    THOR_THROW_IF_FALSE(!requiresLabelsInput() || labelsInput.has_value());
     THOR_THROW_IF_FALSE(stream.isInitialized());
 
     DynamicExpressionBuild build = metricExpression.build(buildMetricInputs(), {}, const_cast<Stream&>(stream));
@@ -152,14 +151,16 @@ void CustomMetric::compileImpl() {
         return;
 
     THOR_THROW_IF_FALSE(featureInput.has_value());
-    THOR_THROW_IF_FALSE(labelsInput.has_value());
+    THOR_THROW_IF_FALSE(!requiresLabelsInput() || labelsInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
     THOR_THROW_IF_FALSE(stream.isInitialized());
-    THOR_THROW_IF_FALSE(labelsStream.isInitialized());
+    THOR_THROW_IF_FALSE(!requiresLabelsInput() || labelsStream.isInitialized());
     THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    if (requiresLabelsInput()) {
+        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == labelsInput.value().getPlacement());
+    }
     THOR_THROW_IF_FALSE(featureOutput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == labelsInput.value().getPlacement());
     THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == featureOutput.value().getPlacement());
 
     TensorMap inputs = buildMetricInputs();
@@ -173,10 +174,11 @@ void CustomMetric::compileImpl() {
 void CustomMetric::computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) {
     THOR_THROW_IF_FALSE(stream == this->stream);
     THOR_THROW_IF_FALSE(metricStamped != nullptr);
-    THOR_THROW_IF_FALSE(labelsInput.has_value());
+    THOR_THROW_IF_FALSE(!requiresLabelsInput() || labelsInput.has_value());
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
-    THOR_THROW_IF_FALSE(labels == labelsInput.value());
+    if (requiresLabelsInput())
+        THOR_THROW_IF_FALSE(labels == labelsInput.value());
     THOR_THROW_IF_FALSE(predictions == featureInput.value());
     THOR_THROW_IF_FALSE(metric == featureOutput.value());
 
