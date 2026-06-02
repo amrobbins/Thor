@@ -87,6 +87,7 @@ struct BuiltReduction {
 
     size_t workspace_bytes = 0;
     size_t indices_bytes = 0;
+    bool identity_reduction = false;
 
     explicit BuiltReduction(ReductionCacheKey key) : key(std::move(key)) {}
 
