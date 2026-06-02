@@ -575,3 +575,61 @@ def test_outputs_reduction_squeeze_true_numerical(dtype: thor.DataType):
 
     _assert_close(sum_all_cpu.numpy(), expected_sum_all, dtype)
     _assert_close(max_all_cpu.numpy(), expected_max_all, dtype)
+
+
+def test_graph_conditional_output_contract_and_branch_name_validation():
+    x = ex.input("x")
+    predicate = ex.input("predicate_value") > ex.constant_scalar(0.0)
+
+    then_outputs = ex.outputs({"y": x + ex.constant_scalar(1.0)})
+    else_outputs = ex.outputs({"y": x - ex.constant_scalar(1.0)})
+    conditional = thor.physical.Outputs.conditional(predicate, then_outputs, else_outputs)
+    assert conditional.output_names() == ["y"]
+
+    mismatched_else = ex.outputs({"z": x - ex.constant_scalar(1.0)})
+    with pytest.raises(RuntimeError):
+        thor.physical.Outputs.conditional(predicate, then_outputs, mismatched_else)
+
+    with pytest.raises(RuntimeError):
+        conditional.to_json()
+
+
+@pytest.mark.cuda
+def test_graph_conditional_runs_then_and_else_with_device_scalar_predicate():
+    dtype = thor.DataType.fp32
+    stream = Stream(gpu_num=0)
+
+    x = ex.input("x")
+    predicate = ex.input("predicate_value") > ex.constant_scalar(0.0)
+    conditional = ex.if_else(
+        predicate,
+        ex.outputs({"y": x + ex.constant_scalar(10.0)}),
+        ex.outputs({"y": x - ex.constant_scalar(10.0)}),
+    )
+    eq = conditional.compile(device_num=0, use_fast_math=False)
+
+    x_cpu = _cpu_tensor([4], dtype)
+    _fill_cpu_tensor(x_cpu, [1.0, 2.0, 3.0, 4.0], dtype)
+    x_gpu = _clone_to_gpu(x_cpu, stream)
+
+    true_cpu = _cpu_tensor([1], dtype)
+    _fill_cpu_tensor(true_cpu, [1.0], dtype)
+    true_gpu = _clone_to_gpu(true_cpu, stream)
+    stream.synchronize()
+    true_plan = eq.stamp({"x": x_gpu, "predicate_value": true_gpu}, stream)
+    assert true_plan._debug_stage_kinds() == ["Conditional"]
+    true_plan.run()
+    true_out = _clone_to_cpu(true_plan.output("y"), stream)
+    stream.synchronize()
+    np.testing.assert_allclose(true_out.numpy(), np.array([11.0, 12.0, 13.0, 14.0], dtype=np.float32))
+
+    false_cpu = _cpu_tensor([1], dtype)
+    _fill_cpu_tensor(false_cpu, [-1.0], dtype)
+    false_gpu = _clone_to_gpu(false_cpu, stream)
+    stream.synchronize()
+    false_plan = eq.stamp({"x": x_gpu, "predicate_value": false_gpu}, stream)
+    assert false_plan._debug_stage_kinds() == ["Conditional"]
+    false_plan.run()
+    false_out = _clone_to_cpu(false_plan.output("y"), stream)
+    stream.synchronize()
+    np.testing.assert_allclose(false_out.numpy(), np.array([-9.0, -8.0, -7.0, -6.0], dtype=np.float32))

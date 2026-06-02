@@ -11,6 +11,7 @@ void bind_nadam(nb::module_ &optimizers);
 void bind_radam(nb::module_ &optimizers);
 void bind_adagrad(nb::module_ &optimizers);
 void bind_adadelta(nb::module_ &optimizers);
+void bind_adafactor(nb::module_ &optimizers);
 void bind_rmsprop(nb::module_ &optimizers);
 void bind_lamb(nb::module_ &optimizers);
 void bind_muon(nb::module_ &optimizers);
@@ -29,6 +30,7 @@ void bind_optimizers(nb::module_ &optimizers) {
     bind_radam(optimizers);
     bind_adagrad(optimizers);
     bind_adadelta(optimizers);
+    bind_adafactor(optimizers);
     bind_rmsprop(optimizers);
     bind_lamb(optimizers);
     bind_muon(optimizers);
