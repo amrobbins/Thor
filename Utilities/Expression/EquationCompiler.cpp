@@ -750,12 +750,6 @@ static bool setsOverlap(const std::unordered_set<uint32_t>& a, const std::unorde
     return false;
 }
 
-static std::vector<uint32_t> makeRegionKey(const std::unordered_set<uint32_t>& region) {
-    std::vector<uint32_t> region_key(region.begin(), region.end());
-    std::sort(region_key.begin(), region_key.end());
-    return region_key;
-}
-
 static const char* fusedOpTag(ExprOp op) {
     switch (op) {
         case ExprOp::INPUT:
@@ -1290,41 +1284,6 @@ shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey&
     return out;
 }
 
-static std::vector<NamedInput::Kind> collectCompiledInputKinds(const PhysicalExpression& expr) {
-    std::vector<NamedInput::Kind> input_kinds(expr.numInputs(), NamedInput::Kind::Tensor);
-    std::vector<uint8_t> seen(expr.numInputs(), 0);
-
-    for (const ExprNode& node : expr.nodes) {
-        if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR && node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
-            continue;
-        }
-        if (node.input_slot >= input_kinds.size()) {
-            throw runtime_error("Input slot out of range while collecting compiled input kinds.");
-        }
-
-        const NamedInput::Kind kind =
-            node.op == ExprOp::INPUT
-                ? NamedInput::Kind::Tensor
-                : (node.op == ExprOp::RUNTIME_SCALAR ? NamedInput::Kind::RuntimeScalarFp32 : NamedInput::Kind::TensorRuntimeScalar);
-        if (seen[node.input_slot]) {
-            if (input_kinds[node.input_slot] != kind) {
-                throw runtime_error("Inconsistent fused stage input kind for local input slot.");
-            }
-        } else {
-            input_kinds[node.input_slot] = kind;
-            seen[node.input_slot] = 1;
-        }
-    }
-
-    for (uint32_t slot = 0; slot < input_kinds.size(); ++slot) {
-        if (!seen[slot]) {
-            throw runtime_error("Unused or unresolved fused stage input slot.");
-        }
-    }
-
-    return input_kinds;
-}
-
 static std::vector<DataType> collectCompiledInputDTypes(const PhysicalExpression& expr) {
     std::vector<DataType> input_dtypes(expr.numInputs(), DataType::FP32);
     std::vector<uint8_t> seen(expr.numInputs(), 0);
@@ -1382,43 +1341,6 @@ static bool stageHasTransposedMaterializedOutput(const std::vector<CompiledStage
     return std::any_of(outputs.begin(), outputs.end(), [](const CompiledStageOutput& output) {
         return output.materialized_layout == MaterializedTensorLayout::Transposed;
     });
-}
-
-static DataType resolveHomogeneousFusedStageDType(const PhysicalExpression& expr) {
-    std::optional<DataType> stage_output_dtype = std::nullopt;
-
-    for (const ExprNode& node : expr.nodes) {
-        if (node.op == ExprOp::SCALAR_FP) {
-            continue;
-        }
-
-        if (!node.output_dtype.has_value()) {
-            throw runtime_error("Fused stage node is missing resolved output_dtype.");
-        }
-        if (!node.compute_dtype.has_value()) {
-            throw runtime_error("Fused stage node is missing resolved compute_dtype.");
-        }
-
-        const DataType node_output_dtype = node.output_dtype.value();
-        const DataType expected_compute_dtype = defaultComputeDType(node_output_dtype);
-
-        if (!stage_output_dtype.has_value()) {
-            stage_output_dtype = node_output_dtype;
-        } else if (stage_output_dtype.value() != node_output_dtype) {
-            throw runtime_error("Current fused kernel codegen still requires a single resolved output_dtype per fused stage.");
-        }
-        if (node.compute_dtype.value() != expected_compute_dtype) {
-            throw runtime_error(
-                "Current fused kernel codegen still requires compute_dtype to follow the default policy for the "
-                "resolved stage dtype. Per-node compute dtypes are the next patch.");
-        }
-    }
-
-    if (!stage_output_dtype.has_value()) {
-        return DataType::FP32;
-    }
-
-    return stage_output_dtype.value();
 }
 
 vector<char> EquationCompiler::linkToCubin(const vector<char>& ltoir, const EquationSignature& sig) {
@@ -4695,7 +4617,6 @@ static void forceReductionProducerOutputDTypeIfNeeded(PhysicalExpression& expr, 
     producer.output_dtype = DataType::FP16;
 }
 
-static bool isContiguousReshapeAliasOp(ExprOp op) { return op == ExprOp::RESHAPE; }
 static bool isStorageAliasOp(ExprOp op) { return op == ExprOp::RESHAPE || op == ExprOp::STRIDED_VIEW; }
 
 static bool reshapeAliasPreservesDType(const PhysicalExpression& expr, uint32_t reshape_idx) {

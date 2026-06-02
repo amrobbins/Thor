@@ -326,16 +326,16 @@ class MultiConnectionLayer : public Layer {
         return featureInputs[0];
     }
     std::optional<Tensor> getFeatureOutput() override {
-        THOR_THROW_IF_FALSE(featureInputs.size() == 1);
-        return featureInputs[0];
+        THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
+        return featureOutputs[0];
     }
     std::optional<Tensor> getErrorInput() override {
-        THOR_THROW_IF_FALSE(featureInputs.size() == 1);
-        return featureInputs[0];
+        THOR_THROW_IF_FALSE(errorInputs.size() == 1);
+        return errorInputs[0];
     }
     std::optional<Tensor> getErrorOutput() override {
-        THOR_THROW_IF_FALSE(featureInputs.size() == 1);
-        return featureInputs[0];
+        THOR_THROW_IF_FALSE(errorOutputs.size() == 1);
+        return errorOutputs[0];
     }
     std::optional<Layer *> getNextLayer() override {
         THOR_THROW_IF_FALSE(nextLayers.size() == 1);

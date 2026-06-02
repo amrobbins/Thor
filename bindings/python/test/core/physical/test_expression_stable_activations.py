@@ -78,6 +78,26 @@ def _stable_swish_expr(x):
     return x * _stable_sigmoid_expr(x)
 
 
+def _stable_mish_expr(x):
+    return ex.mish(x)
+
+
+def _stable_relu6_expr(x):
+    return ex.relu6(x)
+
+
+def _stable_hard_tanh_expr(x):
+    return ex.hard_tanh(x, -0.25, 0.75)
+
+
+def _stable_hard_swish_expr(x):
+    return ex.hard_swish(x)
+
+
+def _stable_threshold_expr(x):
+    return ex.threshold(x, 0.25, -1.0)
+
+
 def _stable_sigmoid_np(x: np.ndarray) -> np.ndarray:
     return np.exp(-np.maximum(-x, 0.0)) / (1.0 + np.exp(-np.abs(x)))
 
@@ -112,6 +132,26 @@ def _stable_swish_np(x: np.ndarray) -> np.ndarray:
     return x * _stable_sigmoid_np(x)
 
 
+def _stable_mish_np(x: np.ndarray) -> np.ndarray:
+    return x * np.tanh(_stable_softplus_np(x))
+
+
+def _stable_relu6_np(x: np.ndarray) -> np.ndarray:
+    return np.minimum(np.maximum(x, 0.0), 6.0)
+
+
+def _stable_hard_tanh_np(x: np.ndarray) -> np.ndarray:
+    return np.minimum(np.maximum(x, -0.25), 0.75)
+
+
+def _stable_hard_swish_np(x: np.ndarray) -> np.ndarray:
+    return x * _stable_relu6_np(x + 3.0) / 6.0
+
+
+def _stable_threshold_np(x: np.ndarray) -> np.ndarray:
+    return np.where(x > 0.25, x, -1.0)
+
+
 @pytest.mark.cuda
 @pytest.mark.parametrize(
     ("name", "expr_builder", "np_builder"),
@@ -123,6 +163,11 @@ def _stable_swish_np(x: np.ndarray) -> np.ndarray:
         ("selu", _stable_selu_expr, _stable_selu_np),
         ("gelu", _stable_gelu_expr, _stable_gelu_np),
         ("swish", _stable_swish_expr, _stable_swish_np),
+        ("mish", _stable_mish_expr, _stable_mish_np),
+        ("relu6", _stable_relu6_expr, _stable_relu6_np),
+        ("hard_tanh", _stable_hard_tanh_expr, _stable_hard_tanh_np),
+        ("hard_swish", _stable_hard_swish_expr, _stable_hard_swish_np),
+        ("threshold", _stable_threshold_expr, _stable_threshold_np),
     ],
 )
 def test_stable_activation_expressions_handle_extreme_fp32_inputs(name, expr_builder, np_builder):

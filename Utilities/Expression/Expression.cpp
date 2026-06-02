@@ -3247,6 +3247,23 @@ Expression Expression::rmsNorm(const Expression& input,
     return out;
 }
 
+Expression Expression::mish() const { return *this * this->softplus().tanh(); }
+
+Expression Expression::relu6() const { return this->max(Expression(0.0)).min(Expression(6.0)); }
+
+Expression Expression::hardTanh(double min_value, double max_value) const {
+    if (min_value > max_value) {
+        throw std::invalid_argument("Expression::hardTanh requires min_value <= max_value.");
+    }
+    return this->max(Expression(min_value)).min(Expression(max_value));
+}
+
+Expression Expression::hardSwish() const { return *this * ((*this + Expression(3.0)).relu6() / Expression(6.0)); }
+
+Expression Expression::threshold(double threshold, double value) const {
+    return Expression::where(*this > Expression(threshold), *this, Expression(value));
+}
+
 Expression Expression::swish() const { return *this * this->sigmoid(); }
 
 static uint32_t cloneSubtreeIntoMergedExpression(const Expression& src_expr,

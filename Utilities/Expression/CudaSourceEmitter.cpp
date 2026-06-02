@@ -595,17 +595,6 @@ static bool isTwoByteFloatDType(DataType dtype) { return dtype == DataType::FP16
 
 static bool isFp8DType(DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2; }
 
-static std::string fp8RawLaneHelperName(DataType dtype) {
-    switch (dtype) {
-        case DataType::FP8_E4M3:
-            return "thor_fp8_e4m3_from_raw_lane";
-        case DataType::FP8_E5M2:
-            return "thor_fp8_e5m2_from_raw_lane";
-        default:
-            throw runtime_error("Unsupported fp8 raw-lane helper dtype: " + TensorDescriptor::getElementTypeName(dtype));
-    }
-}
-
 static std::string uint8Vector4LaneMember(uint32_t lane) {
     switch (lane) {
         case 0:
@@ -648,19 +637,6 @@ static std::string emitFp8PackLaneMemberExpr(const std::string& pack_expr, uint3
         default:
             throw runtime_error("Unsupported fp8 pack lane: " + std::to_string(lane));
     }
-}
-
-static void emitFp8RawLaneHelperDefinition(std::ostringstream& ss, DataType dtype) {
-    if (!isFp8DType(dtype)) {
-        return;
-    }
-
-    const std::string fp8_type = scalarStorageType(dtype);
-    ss << "__device__ __forceinline__ " << fp8_type << " " << fp8RawLaneHelperName(dtype) << "(unsigned int raw, unsigned int lane) {\n";
-    ss << "  " << fp8_type << " v;\n";
-    ss << "  v.__x = static_cast<__nv_fp8_storage_t>((raw >> (lane * 8U)) & 0xffU);\n";
-    ss << "  return v;\n";
-    ss << "}\n\n";
 }
 
 static bool isHalf2ComputeStorageDType(DataType dtype) { return dtype == DataType::FP16 || isFp8DType(dtype); }

@@ -607,6 +607,11 @@ class Expression {
     [[nodiscard]] Expression elu(double alpha = 1.0) const;
     [[nodiscard]] Expression selu() const;
     [[nodiscard]] Expression gelu() const;
+    [[nodiscard]] Expression mish() const;
+    [[nodiscard]] Expression relu6() const;
+    [[nodiscard]] Expression hardTanh(double min_value = -1.0, double max_value = 1.0) const;
+    [[nodiscard]] Expression hardSwish() const;
+    [[nodiscard]] Expression threshold(double threshold = 0.0, double value = 0.0) const;
     [[nodiscard]] Expression swish() const;
     [[nodiscard]] Expression softmax(cudnnSoftmaxAlgorithm_t algorithm = CUDNN_SOFTMAX_ACCURATE,
                                      cudnnSoftmaxMode_t mode = CUDNN_SOFTMAX_MODE_CHANNEL) const;

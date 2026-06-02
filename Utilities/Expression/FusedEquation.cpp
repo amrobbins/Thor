@@ -2,8 +2,6 @@
 #include <optional>
 #include <array>
 #include <algorithm>
-#include <cstdlib>
-#include <string_view>
 
 #include "Utilities/Expression/AutoDiff.h"
 #include "Utilities/Expression/CudaSourceEmitter.h"
@@ -25,11 +23,6 @@ using DataType = ThorImplementation::DataType;
 
 namespace ThorImplementation {
 
-static bool experimentalCudnnAttentionSupportSurfaceProbeEnabled() {
-    const char* value = std::getenv("THOR_EXPERIMENTAL_CUDNN_ATTENTION_SUPPORT_SURFACE");
-    return value != nullptr && std::string_view(value) == "1";
-}
-
 static bool runtimeInputIsTensor(const RuntimeInputValue& value) { return std::holds_alternative<Tensor>(value); }
 static bool runtimeInputIsRuntimeScalar(const RuntimeInputValue& value) { return std::holds_alternative<float>(value); }
 static bool runtimeInputIsTensorScalarBinding(const RuntimeInputValue& value) { return std::holds_alternative<TensorScalarBinding>(value); }
@@ -39,10 +32,6 @@ static const TensorScalarBinding& runtimeInputTensorScalarBinding(const RuntimeI
         throw std::runtime_error("Expected tensor scalar runtime input.");
     }
     return std::get<TensorScalarBinding>(value);
-}
-
-static bool optionalRuntimeInputIsTensorScalarBinding(const std::optional<RuntimeInputValue>& value) {
-    return value.has_value() && std::holds_alternative<TensorScalarBinding>(value.value());
 }
 
 static bool optionalRuntimeInputIsTensorLike(const std::optional<RuntimeInputValue>& value) {
@@ -687,24 +676,6 @@ static const std::optional<TensorPlacement> runtimeInputPlacementOrNull(const Ru
         return std::get<TensorScalarBinding>(value).buffer.getPlacement();
     }
     return std::nullopt;
-}
-
-static bool isScalarLikeNodeOp(ExprOp op) {
-    return op == ExprOp::SCALAR_FP || op == ExprOp::RUNTIME_SCALAR || op == ExprOp::TENSOR_RUNTIME_SCALAR;
-}
-
-static bool tryGetStaticScalarNodeValue(const PhysicalExpression& expr, uint32_t node_idx, double& value) {
-    if (node_idx >= expr.nodes.size()) {
-        return false;
-    }
-
-    const ExprNode& node = expr.nodes[node_idx];
-    if (node.op != ExprOp::SCALAR_FP) {
-        return false;
-    }
-
-    value = node.scalar_fp;
-    return true;
 }
 
 static bool tryGetLowerableScaleNode(const PhysicalExpression& expr, uint32_t node_idx, double& scale_fp, uint32_t& scale_node_idx) {
@@ -2612,8 +2583,6 @@ static uint64_t maxNumel(const std::vector<std::vector<uint64_t>>& dims_by_outpu
     return max_numel;
 }
 
-static DataType compiledStageOutputDType(const CompiledExecutionStage& stage, size_t output_idx) { return stage.outputDType(output_idx); }
-
 static PhysicalExecutionStage toPhysicalFusedStage(const CompiledExecutionStage& stage) {
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
         throw std::runtime_error("toPhysicalFusedStage called on non-fused stage.");
@@ -4063,15 +4032,6 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
         stage_input_dims.push_back(runtimeInputDims(input));
     }
     return resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
-}
-
-static bool stageHasTransposedMaterializedOutput(const CompiledExecutionStage& stage) {
-    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
-        return false;
-    }
-    return std::any_of(stage.outputs.begin(), stage.outputs.end(), [](const CompiledStageOutput& output) {
-        return output.materialized_layout == MaterializedTensorLayout::Transposed;
-    });
 }
 
 static std::vector<uint64_t> logicalDimsForBroadcastComparison(const CompiledExecutionStage& stage,

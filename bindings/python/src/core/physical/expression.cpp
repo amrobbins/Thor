@@ -1570,6 +1570,18 @@ Return the elementwise standard normal CDF of the input expression x.
 This lowers to Thor's NORMCDF expression op, which is emitted with CUDA's built-in normcdf implementation.
 )nbdoc");
 
+    expr.def_static("sigmoid", [](const Expression& x) { return x.sigmoid(); }, "x"_a);
+    expr.def_static("softplus", [](const Expression& x) { return x.softplus(); }, "x"_a);
+    expr.def_static("elu", [](const Expression& x, double alpha) { return x.elu(alpha); }, "x"_a, "alpha"_a = 1.0);
+    expr.def_static("selu", [](const Expression& x) { return x.selu(); }, "x"_a);
+    expr.def_static("gelu", [](const Expression& x) { return x.gelu(); }, "x"_a);
+    expr.def_static("mish", [](const Expression& x) { return x.mish(); }, "x"_a);
+    expr.def_static("relu6", [](const Expression& x) { return x.relu6(); }, "x"_a);
+    expr.def_static("hard_tanh", [](const Expression& x, double min_value, double max_value) { return x.hardTanh(min_value, max_value); }, "x"_a, "min_value"_a = -1.0, "max_value"_a = 1.0);
+    expr.def_static("hard_swish", [](const Expression& x) { return x.hardSwish(); }, "x"_a);
+    expr.def_static("threshold", [](const Expression& x, double threshold, double value) { return x.threshold(threshold, value); }, "x"_a, "threshold"_a = 0.0, "value"_a = 0.0);
+    expr.def_static("swish", [](const Expression& x) { return x.swish(); }, "x"_a);
+
     auto parse_softmax_mode = [](const std::string& mode) -> cudnnSoftmaxMode_t {
         if (mode == "channel") {
             return CUDNN_SOFTMAX_MODE_CHANNEL;
