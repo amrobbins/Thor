@@ -56,14 +56,14 @@ def _copy_gpu_to_numpy(tensor: PhysicalTensor, stream: Stream) -> np.ndarray:
     return host_tensor.numpy().copy()
 
 
-def _run_expr(expr, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num: int = 0, use_fast_math: bool = False):
+def _run_expr(expr, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num: int = 0):
     stream = Stream(gpu_num=gpu_num)
 
     gpu_inputs = {}
     for name, (arr, dtype) in inputs.items():
         gpu_inputs[name] = _copy_numpy_to_gpu(arr, dtype, stream, gpu_num=gpu_num)
 
-    eq = ex.compile(expr, device_num=gpu_num, use_fast_math=use_fast_math)
+    eq = ex.compile(expr, device_num=gpu_num)
     stamped = eq.stamp(gpu_inputs, stream)
     stamped.run()
 
@@ -71,14 +71,14 @@ def _run_expr(expr, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num
 
 
 def _run_outputs(
-        outs, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num: int = 0, use_fast_math: bool = False):
+        outs, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num: int = 0):
     stream = Stream(gpu_num=gpu_num)
 
     gpu_inputs = {}
     for name, (arr, dtype) in inputs.items():
         gpu_inputs[name] = _copy_numpy_to_gpu(arr, dtype, stream, gpu_num=gpu_num)
 
-    eq = ex.compile(outs, device_num=gpu_num, use_fast_math=use_fast_math)
+    eq = ex.compile(outs, device_num=gpu_num)
     stamped = eq.stamp(gpu_inputs, stream)
     stamped.run()
 

@@ -30,6 +30,11 @@ set(THOR_PY_PKG_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/${THOR_PY_PKG_NAME}")
 set(THOR_PY_PKG_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/${THOR_PY_PKG_NAME}")
 set(THOR_PY_VENV_DIR "${THOR_PY_PLATLIB}/${THOR_PY_PKG_NAME}")
 
+file(GLOB_RECURSE THOR_PY_PKG_FILES CONFIGURE_DEPENDS
+        "${THOR_PY_PKG_SRC_DIR}/*.py"
+        "${THOR_PY_PKG_SRC_DIR}/py.typed"
+)
+
 # ---- Sync Python package into the build tree (so the built extension lives inside a real package dir) ----
 add_custom_command(
         OUTPUT "${THOR_PY_PKG_BUILD_DIR}/.thor_pkg_sync.stamp"
@@ -37,8 +42,7 @@ add_custom_command(
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${THOR_PY_PKG_SRC_DIR}" "${THOR_PY_PKG_BUILD_DIR}"
         COMMAND ${CMAKE_COMMAND} -E touch "${THOR_PY_PKG_BUILD_DIR}/.thor_pkg_sync.stamp"
         DEPENDS
-        "${THOR_PY_PKG_SRC_DIR}/__init__.py"
-        "${THOR_PY_PKG_SRC_DIR}/py.typed"
+        ${THOR_PY_PKG_FILES}
         COMMENT "Thor: syncing python package sources into build tree"
 )
 add_custom_target(thor_py_pkg_sync DEPENDS "${THOR_PY_PKG_BUILD_DIR}/.thor_pkg_sync.stamp")

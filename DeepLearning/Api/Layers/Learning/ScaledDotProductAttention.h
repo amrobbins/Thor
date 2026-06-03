@@ -55,7 +55,7 @@ class ScaledDotProductAttention : public CustomLayer {
                               std::optional<Tensor> fp8AmaxOInput,
                               DataType computeDataType,
                               DataType outputDataType)
-        : CustomLayer(std::move(expression), std::move(inputNames), std::move(outputNames), inputInterfaces, outputInterfaces, {}, false),
+        : CustomLayer(std::move(expression), std::move(inputNames), std::move(outputNames), inputInterfaces, outputInterfaces, {}),
           tensorLayout(tensorLayout),
           maskKind(maskKind),
           diagonalLeftBound(diagonalLeftBound),

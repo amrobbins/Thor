@@ -120,7 +120,6 @@ class CudaKernelExpression {
         Builder& scalar(std::string name, DataType type, std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> value);
         Builder& launch(LaunchFn launch_fn);
         Builder& launchGrid1D(DimExpr elements, uint32_t block_size = 256, uint32_t dynamic_shared_bytes = 0);
-        Builder& useFastMath(bool enabled = true);
 
         [[nodiscard]] CudaKernelExpression build() const;
 
@@ -133,7 +132,6 @@ class CudaKernelExpression {
         std::vector<ScalarParamSpec> scalars_;
         LaunchFn launch_fn_;
         std::optional<LaunchSpec> launch_spec_;
-        bool use_fast_math_ = false;
     };
 
     [[nodiscard]] static Builder builder(std::string name) { return Builder(std::move(name)); }
@@ -180,7 +178,6 @@ class CudaKernelExpression {
                          std::vector<ScalarParamSpec> scalars,
                          LaunchFn launch_fn,
                          std::optional<LaunchSpec> launch_spec,
-                         bool use_fast_math,
                          bool loaded_source_compilation_allowed);
 
     [[nodiscard]] std::unordered_map<std::string, Tensor> allocateAndValidateOutputs(
@@ -200,7 +197,6 @@ class CudaKernelExpression {
     std::vector<ScalarParamSpec> scalars_;
     LaunchFn launch_fn_;
     std::optional<LaunchSpec> launch_spec_;
-    bool use_fast_math_ = false;
     bool loaded_source_compilation_allowed_ = true;
 };
 

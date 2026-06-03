@@ -93,8 +93,7 @@ Convolution3d::Convolution3d(uint32_t filterWidth,
                   placement,
                   defineParameters(numOutputChannels, hasBias, filterWidth, filterHeight, filterDepth, weightsDataType),
                   inferenceOnly,
-                  stampedId,
-                  false) {}
+                  stampedId) {}
 
 DynamicExpression Convolution3d::buildExpression(bool hasBias,
                                                  uint32_t strideD,

@@ -5317,7 +5317,11 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
     return plan;
 }
 
-FusedEquation FusedEquation::compile(const PhysicalOutputs& outputs, int device_num, bool use_fast_math) {
+FusedEquation FusedEquation::compile(const PhysicalOutputs& outputs, int device_num) {
+    return compileWithOptions(outputs, device_num, false);
+}
+
+FusedEquation FusedEquation::compileWithOptions(const PhysicalOutputs& outputs, int device_num, bool use_fast_math) {
     if (device_num < 0) {
         throw std::runtime_error("FusedEquation::compile requires device_num >= 0.");
     }
@@ -5344,7 +5348,9 @@ FusedEquation FusedEquation::compile(const PhysicalOutputs& outputs, int device_
     return FusedEquation(outputs, device_num, use_fast_math, base_signature);
 }
 
-FusedEquation FusedEquation::compile(const PhysicalExpression& expr, int device_num, bool use_fast_math) {
+FusedEquation FusedEquation::compileWithOptions(const PhysicalExpression& expr,
+                                                     int device_num,
+                                                     bool use_fast_math) {
     if (expr.output_node >= expr.nodes.size()) {
         throw std::runtime_error("FusedEquation::compile PhysicalExpression output_node is out of range.");
     }
@@ -5356,7 +5362,11 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, int device_
         .node_idx = expr.output_node,
     });
 
-    return compile(outputs, device_num, use_fast_math);
+    return compileWithOptions(outputs, device_num, use_fast_math);
+}
+
+FusedEquation FusedEquation::compile(const PhysicalExpression& expr, int device_num) {
+    return compileWithOptions(expr, device_num, false);
 }
 
 FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt_names,
@@ -6882,9 +6892,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         }
         const PhysicalConditionalOutputs& conditional = *outputs_template.conditional;
 
-        FusedEquation predicate_equation = FusedEquation::compile(conditional.predicate, device_num, use_fast_math);
-        FusedEquation then_equation = FusedEquation::compile(conditional.then_branch, device_num, use_fast_math);
-        FusedEquation else_equation = FusedEquation::compile(conditional.else_branch, device_num, use_fast_math);
+        FusedEquation predicate_equation = FusedEquation::compileWithOptions(conditional.predicate, device_num, use_fast_math);
+        FusedEquation then_equation = FusedEquation::compileWithOptions(conditional.then_branch, device_num, use_fast_math);
+        FusedEquation else_equation = FusedEquation::compileWithOptions(conditional.else_branch, device_num, use_fast_math);
 
         auto filter_tensor_inputs = [&](const FusedEquation& equation) {
             std::unordered_map<std::string, Tensor> filtered;

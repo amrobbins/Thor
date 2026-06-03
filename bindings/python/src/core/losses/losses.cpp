@@ -4,6 +4,7 @@
 
 namespace nb = nanobind;
 
+void bind_custom_loss(nb::module_ &losses);
 void bind_binary_cross_entropy(nb::module_ &losses);
 void bind_categorical_cross_entropy(nb::module_ &losses);
 void bind_mean_absolute_error(nb::module_ &losses);
@@ -33,6 +34,7 @@ void bind_losses(nb::module_ &losses) {
     // loss_shape.attr("__qualname__") = "Loss.LossShape";
     loss.attr("LossShape") = loss_shape;
 
+    bind_custom_loss(losses);
     bind_binary_cross_entropy(losses);
     bind_categorical_cross_entropy(losses);
     bind_mean_absolute_error(losses);

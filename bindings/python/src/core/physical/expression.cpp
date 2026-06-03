@@ -422,7 +422,6 @@ kernel launch dynamic shared-memory byte count.
             "block_size"_a = 256,
             "dynamic_shared_bytes"_a = 0,
             nb::rv_policy::reference_internal)
-        .def("use_fast_math", &CudaKernelExpression::Builder::useFastMath, "enabled"_a = true, nb::rv_policy::reference_internal)
         .def("build", &CudaKernelExpression::Builder::build);
 
     cuda_kernel_expression.def_static("builder", &CudaKernelExpression::builder, "name"_a)
@@ -430,6 +429,31 @@ kernel launch dynamic shared-memory byte count.
         .def_static("numel", &CudaKernelDimExpr::numel, "tensor_name"_a)
         .def_static("constant_dim", &CudaKernelDimExpr::constant, "value"_a)
         .def("name", &CudaKernelExpression::name)
+        .def("input_names", [](const CudaKernelExpression& self) {
+            std::vector<std::string> names;
+            names.reserve(self.inputs().size());
+            for (const auto& input : self.inputs()) {
+                names.push_back(input.name);
+            }
+            return names;
+        })
+        .def("tensor_input_names", [](const CudaKernelExpression& self) {
+            std::vector<std::string> names;
+            for (const auto& input : self.inputs()) {
+                if (input.kind == CudaKernelExpression::TensorParamSpec::Kind::Tensor) {
+                    names.push_back(input.name);
+                }
+            }
+            return names;
+        })
+        .def("output_names", [](const CudaKernelExpression& self) {
+            std::vector<std::string> names;
+            names.reserve(self.outputs().size());
+            for (const auto& output : self.outputs()) {
+                names.push_back(output.name);
+            }
+            return names;
+        })
         .def_prop_ro("source", &CudaKernelExpression::source)
         .def_prop_ro("compiled_source", &CudaKernelExpression::compiledSource)
         .def_prop_ro("loaded_source_compilation_allowed", &CudaKernelExpression::loadedSourceCompilationAllowed)
@@ -1939,12 +1963,11 @@ Args:
     outputs_type
         .def(
             "compile",
-            [](const Outputs& self, int device_num, bool use_fast_math) {
+            [](const Outputs& self, int device_num) {
                 nb::gil_scoped_release release;
-                return FusedEquation::compile(self.physicalOutputs(), device_num, use_fast_math);
+                return FusedEquation::compile(self.physicalOutputs(), device_num);
             },
-            "device_num"_a = 0,
-            "use_fast_math"_a = false)
+            "device_num"_a = 0)
         .def("to_json", [](const Outputs& self) { return ExpressionDefinition::fromOutputs(self).architectureJsonWithCudaKernelManifestSignature().dump(); })
         .def_static(
             "from_json",
@@ -2074,13 +2097,12 @@ Create graph-level conditional outputs from a scalar BOOLEAN predicate and two b
 
     expr.def_static(
         "compile",
-        [](const Expression& expr, int device_num, bool use_fast_math) {
+        [](const Expression& expr, int device_num) {
             nb::gil_scoped_release release;
-            return FusedEquation::compile(expr.expression(), device_num, use_fast_math);
+            return FusedEquation::compile(expr.expression(), device_num);
         },
         "expr"_a,
         "device_num"_a = 0,
-        "use_fast_math"_a = false,
         R"nbdoc(
 Compile an expression into a fused equation.
 
@@ -2088,12 +2110,8 @@ Parameters
 ----------
 expr : thor.physical.Expression
     The expression to compile.
-dtype : thor.DataType
-    The tensor data type to target.
 device_num : int, default 0
     The GPU device number.
-use_fast_math : bool, default False
-    Whether to enable fast-math optimizations during compilation.
 
 Returns
 -------
@@ -2103,13 +2121,12 @@ thor.physical.FusedEquation
 
     expr.def_static(
         "compile",
-        [](const Outputs& self, int device_num, bool use_fast_math) {
+        [](const Outputs& self, int device_num) {
             nb::gil_scoped_release release;
-            return FusedEquation::compile(self.physicalOutputs(), device_num, use_fast_math);
+            return FusedEquation::compile(self.physicalOutputs(), device_num);
         },
         "expr"_a,
         "device_num"_a = 0,
-        "use_fast_math"_a = false,
         R"nbdoc(
 Compile an expression into a fused equation.
 
@@ -2119,8 +2136,6 @@ expr : thor.physical.Expression
     The expression to compile.
 device_num : int, default 0
     The GPU device number.
-use_fast_math : bool, default False
-    Whether to enable fast-math optimizations during compilation.
 
 Returns
 -------
@@ -2890,11 +2905,10 @@ Return the compiled equation owned by this prepared dynamic expression.
 
     dynamic_expression.def_static(
         "from_expression_definition",
-        [](const ExpressionDefinition& definition, bool use_fast_math) {
-            return DynamicExpression::fromExpressionDefinition(definition, use_fast_math);
+        [](const ExpressionDefinition& definition) {
+            return DynamicExpression::fromExpressionDefinition(definition);
         },
-        "definition"_a,
-        "use_fast_math"_a = false);
+        "definition"_a);
 
     dynamic_expression.def(
         "__init__",

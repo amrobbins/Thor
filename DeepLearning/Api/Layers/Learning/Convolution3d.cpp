@@ -147,8 +147,7 @@ std::shared_ptr<ThorImplementation::Layer> Convolution3d::stamp(ThorImplementati
         placement,
         physicalParameters,
         inferenceOnly,
-        getId(),
-        false);
+        getId());
     physicalConvolution3d->setLayerName(getLayerType());
 
     return physicalConvolution3d;

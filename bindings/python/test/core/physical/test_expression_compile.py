@@ -23,8 +23,7 @@ def test_compile_add_sub_mul_div(dtype: thor.DataType):
     fused = ex.compile(
         expr,
         device_num=0,
-        use_fast_math=False,
-    )
+            )
 
     assert fused is not None
 
@@ -42,20 +41,17 @@ def test_compile_pow(dtype: thor.DataType):
     assert ex.compile(
         expr1,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
     assert ex.compile(
         expr2,
         device_num=0,
-        use_fast_math=True,
-    ) is not None
+            ) is not None
 
     assert ex.compile(
         expr3,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
 
 @pytest.mark.cuda
@@ -68,8 +64,7 @@ def test_compile_negation(dtype: thor.DataType):
     fused = ex.compile(
         expr,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
     assert fused is not None
 
@@ -88,26 +83,22 @@ def test_compile_min_max(dtype: thor.DataType):
     assert ex.compile(
         expr1,
         device_num=0,
-        use_fast_math=True,
-    ) is not None
+            ) is not None
 
     assert ex.compile(
         expr2,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
     assert ex.compile(
         expr3,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
     assert ex.compile(
         expr4,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
 
 @pytest.mark.cuda
@@ -122,20 +113,17 @@ def test_compile_exp_family(dtype: thor.DataType):
     assert ex.compile(
         expr1,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
     assert ex.compile(
         expr2,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
     assert ex.compile(
         expr3,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
 
 @pytest.mark.cuda
@@ -152,32 +140,27 @@ def test_compile_log_family(dtype: thor.DataType):
     assert ex.compile(
         expr1,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
     assert ex.compile(
         expr2,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
     assert ex.compile(
         expr3,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
     assert ex.compile(
         expr4,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
     assert ex.compile(
         expr5,
         device_num=0,
-        use_fast_math=False,
-    ) is not None
+            ) is not None
 
 
 @pytest.mark.cuda
@@ -189,8 +172,7 @@ def test_compile_sqrt(dtype: thor.DataType):
     fused = ex.compile(
         expr,
         device_num=0,
-        use_fast_math=False,
-    )
+            )
 
     assert fused is not None
 
@@ -210,16 +192,14 @@ def test_compile_nested_expression(dtype: thor.DataType):
     fused = ex.compile(
         expr,
         device_num=0,
-        use_fast_math=False,
-    )
+            )
 
     assert fused is not None
 
 
 @pytest.mark.cuda
-@pytest.mark.parametrize("use_fast_math", [False, True])
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
-def test_compile_with_and_without_fast_math(dtype: thor.DataType, use_fast_math: bool):
+def test_compile_transcendental_expression(dtype: thor.DataType):
     x = ex.input("x")
     y = ex.input("y")
 
@@ -228,8 +208,7 @@ def test_compile_with_and_without_fast_math(dtype: thor.DataType, use_fast_math:
     fused = ex.compile(
         expr,
         device_num=0,
-        use_fast_math=use_fast_math,
-    )
+            )
 
     assert fused is not None
 
@@ -291,8 +270,7 @@ def test_compile_scalar_only_expression(dtype: thor.DataType):
     fused = ex.compile(
         expr,
         device_num=0,
-        use_fast_math=False,
-    )
+            )
 
     assert fused is not None
 
@@ -305,8 +283,7 @@ def test_compile_min_max_scalar_only_expression(dtype: thor.DataType):
     fused = ex.compile(
         expr,
         device_num=0,
-        use_fast_math=False,
-    )
+            )
 
     assert fused is not None
 
@@ -340,8 +317,7 @@ def test_compile_various_expressions(dtype: thor.DataType, expr):
     fused = ex.compile(
         expr(x, y),
         device_num=0,
-        use_fast_math=False,
-    )
+            )
 
     assert fused is not None
 
@@ -352,7 +328,7 @@ def test_fused_equation_output_names_single_output():
     y = ex.input("y")
     expr = (x + 1.0) * (y - 2.0)
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     assert eq.output_names() == ["output"]
 
@@ -368,7 +344,7 @@ def test_fused_equation_output_names_multi_output():
         "shifted": x + 2.0,
     })
 
-    eq = outs.compile(device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0)
 
     assert eq.output_names() == ["sum", "prod", "shifted"]
 
@@ -378,7 +354,7 @@ def test_fused_equation_output_shape_single_input_single_output_from_tensor():
     x = ex.input("x")
     expr = (x + 1.0) * 2.0
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
     shape = eq.output_shape(x_gpu)
@@ -391,7 +367,7 @@ def test_fused_equation_output_shape_single_input_single_output_from_dict():
     x = ex.input("x")
     expr = ex.sqrt(x + 1.0)
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     x_gpu = _gpu_tensor([5, 7], thor.DataType.fp32)
     shape = eq.output_shape({
@@ -406,7 +382,7 @@ def test_fused_equation_output_shapes_single_input_single_output_from_tensor():
     x = ex.input("x")
     expr = ex.ln(x + 2.0)
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     x_gpu = _gpu_tensor([4, 6], thor.DataType.fp32)
     shapes = eq.output_shapes(x_gpu)
@@ -421,7 +397,7 @@ def test_fused_equation_output_shapes_single_input_single_output_from_dict():
     x = ex.input("x")
     expr = x * 3.0
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     x_gpu = _gpu_tensor([8, 2], thor.DataType.fp32)
     shapes = eq.output_shapes({
@@ -439,7 +415,7 @@ def test_fused_equation_output_shape_single_output_broadcast_from_dict():
     y = ex.input("y")
     expr = x + y
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     x_gpu = _gpu_tensor([2, 1, 4], thor.DataType.fp32)
     y_gpu = _gpu_tensor([1, 3, 4], thor.DataType.fp32)
@@ -462,7 +438,7 @@ def test_fused_equation_output_shapes_multi_output_same_domain():
         "prod": x * y,
     })
 
-    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+    eq = ex.compile(outs, device_num=0)
 
     x_gpu = _gpu_tensor([2, 1, 4], thor.DataType.fp32)
     y_gpu = _gpu_tensor([1, 3, 4], thor.DataType.fp32)
@@ -490,7 +466,7 @@ def test_fused_equation_output_shapes_multi_output_different_domains():
         "y_shift": y + 1.0,  # [1, 3, 4]
     })
 
-    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+    eq = ex.compile(outs, device_num=0)
 
     x_gpu = _gpu_tensor([2, 1, 4], thor.DataType.fp32)
     y_gpu = _gpu_tensor([1, 3, 4], thor.DataType.fp32)
@@ -514,7 +490,7 @@ def test_fused_equation_output_shape_reduction_single_output():
     x = ex.input("x")
     expr = ex.reduce_sum(x + 1.0, axis=1, squeeze=False)
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
     shape = eq.output_shape(x_gpu)
@@ -527,7 +503,7 @@ def test_fused_equation_output_shape_reduction_single_output_squeezed():
     x = ex.input("x")
     expr = ex.reduce_sum(x + 1.0, axis=[1, 2], squeeze=True)
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
     shape = eq.output_shape({
@@ -551,7 +527,7 @@ def test_fused_equation_output_shapes_multi_output_with_reduction_and_epilogue()
             "pointwise": x + y,  # [B, M, N]
         })
 
-    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+    eq = ex.compile(outs, device_num=0)
 
     x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
     y_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
@@ -583,7 +559,7 @@ def test_fused_equation_output_shape_rejects_multi_output_equation():
         "b": x * 2.0,
     })
 
-    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+    eq = ex.compile(outs, device_num=0)
     x_gpu = _gpu_tensor([2, 3], thor.DataType.fp32)
 
     with pytest.raises(RuntimeError, match="multiple final outputs|getOutputShape"):
@@ -596,7 +572,7 @@ def test_fused_equation_output_shape_rejects_single_tensor_for_multi_input_equat
     y = ex.input("y")
     expr = x + y
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
     x_gpu = _gpu_tensor([2, 3], thor.DataType.fp32)
 
     with pytest.raises(RuntimeError, match="single tensor input|requires 2 tensor inputs|getOutputShapes"):
@@ -608,7 +584,7 @@ def test_fused_equation_output_shapes_rejects_unexpected_input_name():
     x = ex.input("x")
     expr = x + 1.0
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
     x_gpu = _gpu_tensor([2, 3], thor.DataType.fp32)
 
     with pytest.raises(RuntimeError, match="Unexpected input"):
@@ -624,7 +600,7 @@ def test_fused_equation_output_shapes_rejects_missing_required_input():
     y = ex.input("y")
     expr = x + y
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
     x_gpu = _gpu_tensor([2, 3], thor.DataType.fp32)
 
     with pytest.raises(RuntimeError, match="Missing required fused equation input"):
@@ -638,7 +614,7 @@ def test_fused_equation_output_shape_as_type_single_input_pointwise():
     x = ex.input("x", output_dtype=thor.DataType.fp16)
     expr = (x + 1.0) * 2.0
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     x_gpu = _gpu_tensor([17], thor.DataType.fp32)
     shape = eq.output_shape({
@@ -654,7 +630,7 @@ def test_fused_equation_output_shape_as_type_single_output_broadcast_promoted():
     y = ex.input("y")
     expr = x + y
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     x_gpu = _gpu_tensor([17, 1], thor.DataType.fp32)
     y_gpu = _gpu_tensor([1, 3], thor.DataType.fp32)
@@ -672,7 +648,7 @@ def test_fused_equation_output_shape_as_type_direct_reduction_single_output():
     x = ex.input("x", output_dtype=thor.DataType.fp16)
     expr = ex.reduce_sum(x, axis=2, squeeze=False)
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
     shape = eq.output_shape({
@@ -687,7 +663,7 @@ def test_fused_equation_output_shape_as_type_direct_reduction_single_output_sque
     x = ex.input("x", output_dtype=thor.DataType.fp16)
     expr = ex.reduce_sum(x, axis=[1, 2], squeeze=True)
 
-    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    eq = ex.compile(expr, device_num=0)
 
     x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
     shape = eq.output_shape({
@@ -712,7 +688,7 @@ def test_fused_equation_output_shapes_as_type_multi_output_with_broadcast_and_mi
             "narrow_shift": x + 1.0,  # [17, 1]
         })
 
-    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+    eq = ex.compile(outs, device_num=0)
 
     x_gpu = _gpu_tensor([17, 1], thor.DataType.fp32)
     y_gpu = _gpu_tensor([1, 3], thor.DataType.fp32)
@@ -743,7 +719,7 @@ def test_fused_equation_output_shapes_as_type_multi_output_with_reduction_and_ep
             "pointwise": x + 2.0,  # [B, M, N]
         })
 
-    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+    eq = ex.compile(outs, device_num=0)
 
     x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
     y_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
@@ -770,7 +746,7 @@ def test_fused_equation_output_shapes_as_type_homogeneous_broadcast_same_runtime
         "prod": x * y,
     })
 
-    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+    eq = ex.compile(outs, device_num=0)
 
     x_gpu = _gpu_tensor([17, 1], thor.DataType.fp16)
     y_gpu = _gpu_tensor([1, 3], thor.DataType.fp16)

@@ -106,7 +106,7 @@ def _copy_gpu_to_numpy(tensor: PhysicalTensor, stream: Stream) -> np.ndarray:
     return host_tensor.numpy().copy()
 
 
-def _run_expr(expr, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num: int = 0, use_fast_math: bool = False):
+def _run_expr(expr, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num: int = 0):
     stream = Stream(gpu_num=gpu_num)
 
     gpu_inputs = {}
@@ -116,8 +116,7 @@ def _run_expr(expr, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num
     eq = ex.compile(
         expr,
         device_num=gpu_num,
-        use_fast_math=use_fast_math,
-    )
+            )
 
     stamped = eq.stamp(gpu_inputs, stream)
     stamped.run()
@@ -128,7 +127,7 @@ def _run_expr(expr, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num
 
 
 def _run_outputs(
-        outs, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num: int = 0, use_fast_math: bool = False):
+        outs, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num: int = 0):
     stream = Stream(gpu_num=gpu_num)
 
     gpu_inputs = {}
@@ -138,8 +137,7 @@ def _run_outputs(
     eq = ex.compile(
         outs,
         device_num=gpu_num,
-        use_fast_math=use_fast_math,
-    )
+            )
 
     stamped = eq.stamp(gpu_inputs, stream)
     stamped.run()

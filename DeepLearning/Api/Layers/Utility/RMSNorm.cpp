@@ -318,8 +318,7 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
         placement,
         physicalParameters,
         inferenceOnly,
-        getId(),
-        false);
+        getId());
     physicalRmsNorm->setLayerName(getLayerType());
     return physicalRmsNorm;
 }

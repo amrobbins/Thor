@@ -120,7 +120,7 @@ void ensureCudaContextCurrentForCudaKernelExpression(int device_num) {
     }
 }
 
-EquationSignature buildSignature(uint32_t num_params, int device_num, bool use_fast_math) {
+EquationSignature buildSignature(uint32_t num_params, int device_num) {
     cudaDeviceProp prop{};
     cudaError_t cuda_status = cudaGetDeviceProperties(&prop, device_num);
     if (cuda_status != cudaSuccess) {
@@ -132,7 +132,7 @@ EquationSignature buildSignature(uint32_t num_params, int device_num, bool use_f
     sig.sm_major = prop.major;
     sig.sm_minor = prop.minor;
     sig.device_num = device_num;
-    sig.use_fast_math = use_fast_math;
+    sig.use_fast_math = false;
     return sig;
 }
 
@@ -172,7 +172,6 @@ std::string customKernelCacheKey(const std::string& name,
     oss << "name=" << name << "\n";
     oss << "entry=" << entry << "\n";
     oss << "sm=" << sig.sm_major << sig.sm_minor << "\n";
-    oss << "fast_math=" << (sig.use_fast_math ? 1 : 0) << "\n";
     oss << "source_hash=" << stableSourceHash(compiled_source) << "\n";
     oss << compiled_source;
     return oss.str();
@@ -533,11 +532,6 @@ CudaKernelExpression::Builder& CudaKernelExpression::Builder::launchGrid1D(DimEx
     return *this;
 }
 
-CudaKernelExpression::Builder& CudaKernelExpression::Builder::useFastMath(bool enabled) {
-    use_fast_math_ = enabled;
-    return *this;
-}
-
 CudaKernelExpression CudaKernelExpression::Builder::build() const {
     if (source_.empty()) {
         throw std::invalid_argument("CudaKernelExpression requires CUDA source.");
@@ -579,7 +573,7 @@ CudaKernelExpression CudaKernelExpression::Builder::build() const {
     for (const auto& scalar : scalars_)
         insert(scalar.name, "scalar");
 
-    return CudaKernelExpression(name_, source_, entry_, inputs_, outputs_, scalars_, launch_fn_, launch_spec_, use_fast_math_, true);
+    return CudaKernelExpression(name_, source_, entry_, inputs_, outputs_, scalars_, launch_fn_, launch_spec_, true);
 }
 
 CudaKernelExpression::CudaKernelExpression(std::string name,
@@ -590,7 +584,6 @@ CudaKernelExpression::CudaKernelExpression(std::string name,
                                            std::vector<ScalarParamSpec> scalars,
                                            LaunchFn launch_fn,
                                            std::optional<LaunchSpec> launch_spec,
-                                           bool use_fast_math,
                                            bool loaded_source_compilation_allowed)
     : name_(std::move(name)),
       source_(std::move(source)),
@@ -600,14 +593,12 @@ CudaKernelExpression::CudaKernelExpression(std::string name,
       scalars_(std::move(scalars)),
       launch_fn_(std::move(launch_fn)),
       launch_spec_(std::move(launch_spec)),
-      use_fast_math_(use_fast_math),
       loaded_source_compilation_allowed_(loaded_source_compilation_allowed) {}
 
 std::string CudaKernelExpression::cacheSignature() const {
     std::ostringstream oss;
     oss << "name=" << name_ << "\n";
     oss << "entry=" << entry_ << "\n";
-    oss << "fast_math=" << (use_fast_math_ ? 1 : 0) << "\n";
     oss << "source_hash=" << stableSourceHash(source_) << "\n";
     oss << "inputs=";
     for (const TensorParamSpec& input : inputs_) {
@@ -669,7 +660,6 @@ json CudaKernelExpression::architectureJson() const {
     j["name"] = name_;
     j["source"] = source_;
     j["entry"] = entry_;
-    j["use_fast_math"] = use_fast_math_;
     j["compiled_source_hash"] = stableSourceHash(compiledSource());
     j["loaded_source_compilation_allowed"] = loaded_source_compilation_allowed_;
 
@@ -728,7 +718,6 @@ CudaKernelExpression CudaKernelExpression::deserialize(const json& j, bool allow
     }
     builder.source(j.at("source").get<std::string>());
     builder.entry(j.at("entry").get<std::string>());
-    builder.useFastMath(j.value("use_fast_math", false));
 
     for (const json& input_json : j.at("inputs")) {
         const std::string name = input_json.at("name").get<std::string>();
@@ -848,7 +837,7 @@ std::shared_ptr<CompiledCudaKernel> CudaKernelExpression::compile(int device_num
     }
 
     EquationSignature sig =
-        buildSignature(static_cast<uint32_t>(inputs_.size() + outputs_.size() + scalars_.size()), device_num, use_fast_math_);
+        buildSignature(static_cast<uint32_t>(inputs_.size() + outputs_.size() + scalars_.size()), device_num);
     const std::string compiled_source = customKernelCompiledSource(source_);
     const std::string key = customKernelCacheKey(name_, compiled_source, entry_, sig);
 
@@ -1279,7 +1268,7 @@ DynamicExpression CudaKernelExpression::asDynamicExpression() const {
     for (const OutputParamSpec& output : outputs_) {
         definition.expected_output_names.push_back(output.name);
     }
-    return DynamicExpression::fromExpressionDefinition(definition, use_fast_math_);
+    return DynamicExpression::fromExpressionDefinition(definition);
 }
 
 }  // namespace ThorImplementation

@@ -523,7 +523,6 @@ json canonicalKernelJson(const json& kernel_json) {
         kernel["source"] = kernel_json.at("source");
     }
     kernel["entry"] = kernel_json.at("entry");
-    kernel["use_fast_math"] = kernel_json.value("use_fast_math", false);
     kernel["compiled_source_hash"] = kernel_json.value("compiled_source_hash", std::string{});
     kernel["inputs"] = kernel_json.at("inputs");
     kernel["outputs"] = kernel_json.at("outputs");

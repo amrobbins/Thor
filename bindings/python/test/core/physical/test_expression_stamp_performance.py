@@ -120,7 +120,7 @@ def _build_flat_single(dtype: thor.DataType):
         "z": FLAT_SHAPE,
     }
     output_shape = FLAT_SHAPE
-    return ex.compile(expr, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape
+    return ex.compile(expr, device_num=GPU_NUM), input_shapes, output_shape
 
 
 def _build_flat_single_compute_bound(dtype: thor.DataType):
@@ -170,7 +170,7 @@ def _build_flat_single_compute_bound(dtype: thor.DataType):
         "z": FLAT_SHAPE,
     }
     output_shape = FLAT_SHAPE
-    return ex.compile(expr, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape
+    return ex.compile(expr, device_num=GPU_NUM), input_shapes, output_shape
 
 
 def _build_broadcast_single(dtype: thor.DataType):
@@ -186,7 +186,7 @@ def _build_broadcast_single(dtype: thor.DataType):
         "z": BCAST_Z_SHAPE,
     }
     output_shape = BCAST_OUT_SHAPE
-    return ex.compile(expr, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape
+    return ex.compile(expr, device_num=GPU_NUM), input_shapes, output_shape
 
 
 def _build_flat_multi(dtype: thor.DataType):
@@ -211,7 +211,7 @@ def _build_flat_multi(dtype: thor.DataType):
         "sum": FLAT_SHAPE,
         "mix": FLAT_SHAPE,
     }
-    return ex.compile(outs, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shapes
+    return ex.compile(outs, device_num=GPU_NUM), input_shapes, output_shapes
 
 
 def _build_flat_multi_disjoint_inputs_different_output_shapes(dtype: thor.DataType):
@@ -237,7 +237,7 @@ def _build_flat_multi_disjoint_inputs_different_output_shapes(dtype: thor.DataTy
         "ab_out": FLAT_SHAPE_BIG,
         "cd_out": FLAT_SHAPE_SMALL,
     }
-    return ex.compile(outs, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shapes
+    return ex.compile(outs, device_num=GPU_NUM), input_shapes, output_shapes
 
 
 def _build_broadcast_multi(dtype: thor.DataType):
@@ -263,7 +263,7 @@ def _build_broadcast_multi(dtype: thor.DataType):
         "xz": BCAST_OUT_SHAPE,
         "mix": BCAST_OUT_SHAPE,
     }
-    return ex.compile(outs, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shapes
+    return ex.compile(outs, device_num=GPU_NUM), input_shapes, output_shapes
 
 
 def _build_broadcast_multi_multiple_shapes_shared_inputs(dtype: thor.DataType):
@@ -293,7 +293,7 @@ def _build_broadcast_multi_multiple_shapes_shared_inputs(dtype: thor.DataType):
         "wide_mix": BCAST_WIDE_SHAPE,  # [256, 256, 512]
         "narrow": BCAST_NARROW_SHAPE,  # [256, 1, 512]
     }
-    return ex.compile(outs, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shapes
+    return ex.compile(outs, device_num=GPU_NUM), input_shapes, output_shapes
 
 
 def _build_broadcast_multi_multiple_shapes_disjoint_inputs(dtype: thor.DataType):
@@ -328,7 +328,7 @@ def _build_broadcast_multi_multiple_shapes_disjoint_inputs(dtype: thor.DataType)
         "narrow_prod": BCAST_NARROW_SHAPE,  # [256, 1, 512]
         "narrow_sum": BCAST_NARROW_SHAPE,  # [256, 1, 512]
     }
-    return ex.compile(outs, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shapes
+    return ex.compile(outs, device_num=GPU_NUM), input_shapes, output_shapes
 
 
 CASES = [

@@ -81,8 +81,7 @@ Convolution2d::Convolution2d(uint32_t filterWidth,
           placement,
           defineParameters(numOutputChannels, hasBias, filterWidth, filterHeight, weightsDataType),
           inferenceOnly,
-          stampedId,
-          false) {}
+          stampedId) {}
 
 DynamicExpression Convolution2d::buildExpression(
     bool hasBias, uint32_t strideH, uint32_t strideW, uint32_t padH, uint32_t padW, const TensorPlacement& placement) {

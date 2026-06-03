@@ -116,7 +116,7 @@ def _compile_adamw_step_equation(*, beta1: float, beta2: float, epsilon: float):
         "weights": weights_next,
         "m": m_next,
         "v": v_next,
-    }).compile(device_num=0, use_fast_math=False)
+    }).compile(device_num=0)
 
 
 def _run_adamw_expression_step(

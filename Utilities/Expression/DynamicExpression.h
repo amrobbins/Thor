@@ -269,7 +269,7 @@ class DynamicExpression {
     [[nodiscard]] const std::vector<std::string>& getExpectedOutputNames() const { return expected_output_names_; }
     [[nodiscard]] std::shared_ptr<const ExpressionDefinition> getSerializedDefinition() const { return serialized_definition_; }
 
-    [[nodiscard]] static DynamicExpression fromExpressionDefinition(const ExpressionDefinition& definition, bool use_fast_math = false) {
+    [[nodiscard]] static DynamicExpression fromExpressionDefinition(const ExpressionDefinition& definition) {
         definition.validate();
 
         if (!definition.outputs.expr) {
@@ -301,10 +301,10 @@ class DynamicExpression {
         return DynamicExpression(
             expected_input_names,
             expected_output_names,
-            [serialized_definition, use_fast_math](const TensorMap& inputs, const TensorMap& outputs, Stream& stream) {
+            [serialized_definition](const TensorMap& inputs, const TensorMap& outputs, Stream& stream) {
                 return DynamicExpressionBuild{
                     .equation = std::make_shared<FusedEquation>(
-                        FusedEquation::compile(serialized_definition->outputs, stream.getGpuNum(), use_fast_math)),
+                        FusedEquation::compile(serialized_definition->outputs, stream.getGpuNum())),
                     .stamp_inputs = inputs,
                     .tensor_scalar_inputs = {},
                     .preallocated_outputs = outputs,

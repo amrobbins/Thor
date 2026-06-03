@@ -1,29 +1,72 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.h"
 
+#include "DeepLearning/Implementation/Layers/Loss.h"
+#include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/Expression/Expression.h"
+
 using namespace std;
 using json = nlohmann::json;
 
 namespace Thor {
+namespace {
+
+constexpr const char *kPredictionsName = "predictions";
+constexpr const char *kLabelsName = "labels";
+constexpr const char *kLossName = "loss";
+constexpr const char *kGradientName = "predictions_grad";
+
+ThorImplementation::DynamicExpression makeBinaryCrossEntropyLossExpression(DataType lossDataType) {
+    ThorImplementation::Expression logits = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression zero(0.0);
+
+    // Numerically stable BCE-with-logits:
+    //   max(x, 0) - x * y + log1p(exp(-abs(x)))
+    ThorImplementation::Expression loss = (logits.max(zero) - (logits * labels) + (-logits.abs()).exp().log1p()).withOutputDType(lossDataType);
+    ThorImplementation::ExpressionDefinition definition =
+        ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{kLossName, loss}}));
+    return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
+}
+
+ThorImplementation::DynamicExpression makeBinaryCrossEntropyGradientExpression(DataType predictionsDataType) {
+    THOR_THROW_IF_FALSE(predictionsDataType == DataType::FP16 || predictionsDataType == DataType::FP32);
+
+    ThorImplementation::Expression logits = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression gradient =
+        ((logits.sigmoid() - labels) * ThorImplementation::Expression(ThorImplementation::Loss::getLossScalingFactor()))
+            .withOutputDType(predictionsDataType);
+    ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
+        ThorImplementation::Expression::outputs({{kGradientName, gradient}}));
+    return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
+}
+
+}  // namespace
 
 void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
     THOR_THROW_IF_FALSE(!rawLossAddedToNetwork);
 
-    BinaryCrossEntropy rawBinaryCrossEntropy = BinaryCrossEntropy::Builder()
-                                                .network(*network)
-                                                .predictions(predictionsTensor)
-                                                .labels(labelsTensor)
-                                                .rawLossAddedToNetwork()
-                                                .reportsElementwiseLoss()
-                                                .lossDataType(lossDataType)
-                                                .build();
+    CustomLoss rawBinaryCrossEntropy = CustomLoss::Builder()
+                                           .network(*network)
+                                           .lossExpression(makeBinaryCrossEntropyLossExpression(lossDataType))
+                                           .gradientExpression(makeBinaryCrossEntropyGradientExpression(predictionsTensor.getDataType()))
+                                           .predictions(predictionsTensor)
+                                           .labels(labelsTensor)
+                                           .predictionsName(kPredictionsName)
+                                           .labelsName(kLabelsName)
+                                           .lossName(kLossName)
+                                           .gradientName(kGradientName)
+                                           .reportsRawLoss()
+                                           .lossDataType(lossDataType)
+                                           .build();
     lossShaperInput = rawBinaryCrossEntropy.getLoss();
 
     if (lossShape == LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
-        lossTensor = lossShaper.getFeatureOutput().value();
+        lossTensor = lossShaper.getLossOutput();
     } else {
-        // No loss shaper needed in this case
+        // No loss shaper needed in this case.
         THOR_THROW_IF_FALSE(lossShape == LossShape::ELEMENTWISE);
         lossTensor = lossShaperInput;
     }
@@ -55,8 +98,8 @@ void BinaryCrossEntropy::deserialize(const json &j, Network *network) {
     if (j.at("layer_type").get<std::string>() != "binary_cross_entropy")
         throw runtime_error("Layer type mismatch in BinaryCrossEntropy::deserialize: " + j.at("layer_type").get<std::string>());
 
-    // Only connect the single raw-loss layer and add it to the network, like when it was built.
-    // Helper loss-shaper layers deserialize themselves.
+    // Only connect the historical single raw-loss BCE layer and add it to the network.
+    // New saves will contain a raw custom_loss support layer instead.
     BinaryCrossEntropy binaryCrossEntropy;
     THOR_THROW_IF_FALSE(j.at("loss_shape").get<LossShape>() == LossShape::RAW);
     binaryCrossEntropy.lossShape = LossShape::RAW;

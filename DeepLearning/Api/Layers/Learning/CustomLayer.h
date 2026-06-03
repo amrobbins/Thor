@@ -27,16 +27,14 @@ class CustomLayer : public TrainableLayer {
 
     CustomLayer(ThorImplementation::DynamicExpression expr,
                 const std::vector<TensorMap>& inputInterfaces,
-                std::vector<std::shared_ptr<ParameterSpecification>> parameters = {},
-                bool useFastMath = false);
+                std::vector<std::shared_ptr<ParameterSpecification>> parameters = {});
 
     CustomLayer(ThorImplementation::DynamicExpression expr,
                 std::vector<std::string> inputNames,
                 std::vector<std::string> outputNames,
                 const std::vector<TensorMap>& inputInterfaces,
                 const std::vector<TensorMap>& outputInterfaces,
-                std::vector<std::shared_ptr<ParameterSpecification>> parameters = {},
-                bool useFastMath = false);
+                std::vector<std::shared_ptr<ParameterSpecification>> parameters = {});
 
     const std::vector<std::string>& getInputNames() const { return inputNames; }
     const std::vector<std::string>& getOutputNames() const { return outputNames; }
@@ -108,8 +106,6 @@ class CustomLayer : public TrainableLayer {
     uint32_t encodeOutputConnection(uint32_t interfaceIndex, uint32_t outputPortIndex) const;
 
     ThorImplementation::DynamicExpression expr;
-    bool useFastMath = false;
-
     std::vector<std::string> inputNames;
     std::vector<std::string> outputNames;
 
@@ -146,7 +142,7 @@ class CustomLayer::Builder {
         THOR_THROW_IF_FALSE(!_inputNames.empty());
         THOR_THROW_IF_FALSE(!_outputNames.empty());
 
-        CustomLayer customLayer(*_expr, _inputNames, _outputNames, _inputInterfaces, _outputInterfaces, _parameters, _useFastMath);
+        CustomLayer customLayer(*_expr, _inputNames, _outputNames, _inputInterfaces, _outputInterfaces, _parameters);
 
         if (_layerOptimizer != nullptr)
             customLayer.attachDefaultOptimizer(_layerOptimizer);
@@ -214,14 +210,6 @@ class CustomLayer::Builder {
         return *this;
     }
 
-    // In the vast majority of pointwise and broadcast fused kernels, the kernel is memory bandwidth bound, not compute bound.
-    // So the recommendation here is usually to not use Nvidia --use_fast_math compiler flag, which this option enables.
-    // It is potentially less accurate often without a performance gain, so only use if you really know that it is something that you want.
-    virtual CustomLayer::Builder& useFastMath(bool useFastMath = true) {
-        this->_useFastMath = useFastMath;
-        return *this;
-    }
-
     virtual CustomLayer::Builder& optimizer(std::shared_ptr<Optimizer> _layerOptimizer) {
         THOR_THROW_IF_FALSE(this->_layerOptimizer == nullptr);
         this->_layerOptimizer = std::move(_layerOptimizer);
@@ -236,7 +224,6 @@ class CustomLayer::Builder {
     std::vector<TensorMap> _inputInterfaces;
     std::vector<TensorMap> _outputInterfaces;
     std::vector<std::shared_ptr<ParameterSpecification>> _parameters;
-    bool _useFastMath = false;
     std::shared_ptr<Optimizer> _layerOptimizer;
 };
 

@@ -28,8 +28,7 @@ class CustomMetric : public Metric {
                  std::string labelsName = "labels",
                  std::string metricName = "metric",
                  std::optional<Tensor> metricTensor = std::nullopt,
-                 std::string displayName = "Metric",
-                 bool useFastMath = false);
+                 std::string displayName = "Metric");
 
     ~CustomMetric() override = default;
 
@@ -65,7 +64,6 @@ class CustomMetric : public Metric {
     std::string labelsName = "labels";
     std::string metricName = "metric";
     std::string displayName = "Metric";
-    bool useFastMath = false;
 };
 
 class CustomMetric::Builder {
@@ -107,8 +105,7 @@ class CustomMetric::Builder {
                                   std::move(labelsName),
                                   std::move(metricName),
                                   _metricTensor,
-                                  std::move(displayName),
-                                  _useFastMath);
+                                  std::move(displayName));
         customMetric.addToNetwork(_network.value());
         return customMetric;
     }
@@ -170,11 +167,6 @@ class CustomMetric::Builder {
         return *this;
     }
 
-    virtual CustomMetric::Builder& useFastMath(bool enabled) {
-        this->_useFastMath = enabled;
-        return *this;
-    }
-
    private:
     std::optional<Network*> _network;
     std::shared_ptr<ThorImplementation::DynamicExpression> _expr;
@@ -185,7 +177,6 @@ class CustomMetric::Builder {
     std::optional<std::string> _labelsName;
     std::optional<std::string> _metricName;
     std::optional<std::string> _displayName;
-    bool _useFastMath = false;
 };
 
 }  // namespace Thor

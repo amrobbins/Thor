@@ -13,7 +13,7 @@ def _make_mse_expression() -> DynamicExpression:
         metric_outputs = ex.outputs({
             "metric": ex.reduce_mean(diff * diff, axis=[0, 1], squeeze=[0], compute_dtype=thor.DataType.fp32),
         })
-        equation = ex.compile(metric_outputs, device_num=stream.get_gpu_num(), use_fast_math=False)
+        equation = ex.compile(metric_outputs, device_num=stream.get_gpu_num())
         return DynamicExpressionBuild(
             equation=equation,
             stamp_inputs=inputs,

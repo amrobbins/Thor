@@ -1,6 +1,7 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 
@@ -30,22 +31,21 @@ class BinaryCrossEntropy : public Loss {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        // FIXME: How to prune backward then.
+        (void)placement;
+        (void)drivingLayer;
+        (void)drivingApiLayer;
+        (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
         return std::make_shared<ThorImplementation::BinaryCrossEntropy>(lossDataType);
     }
 
-    virtual bool isMultiLayer() const {
-        if (lossShape != LossShape::ELEMENTWISE || !rawLossAddedToNetwork)
-            return true;
-        return false;
-    }
+    virtual bool isMultiLayer() const { return true; }
 
     virtual void buildSupportLayersAndAddToNetwork();
 
-    bool rawLossAddedToNetwork;
+    bool rawLossAddedToNetwork = false;
 };
 
 class BinaryCrossEntropy::Builder {
@@ -63,12 +63,7 @@ class BinaryCrossEntropy::Builder {
         THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
 
         BinaryCrossEntropy binaryCrossEntropy;
-        if (_rawLossAddedToNetwork.has_value()) {
-            THOR_THROW_IF_FALSE(_rawLossAddedToNetwork.value() == true);
-            binaryCrossEntropy.rawLossAddedToNetwork = true;
-        } else {
-            binaryCrossEntropy.rawLossAddedToNetwork = false;
-        }
+        binaryCrossEntropy.rawLossAddedToNetwork = _rawLossAddedToNetwork.value_or(false);
         binaryCrossEntropy.predictionsTensor = _predictions.value();
         binaryCrossEntropy.labelsTensor = _labels.value();
         if (!_lossDataType.has_value())
@@ -76,21 +71,20 @@ class BinaryCrossEntropy::Builder {
         THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
         binaryCrossEntropy.lossDataType = _lossDataType.value();
 
-        if (_lossShape.value() == LossShape::BATCH) {
-            binaryCrossEntropy.lossShape = LossShape::BATCH;
-        } else if (_lossShape.value() == LossShape::ELEMENTWISE) {
-            binaryCrossEntropy.lossShape = LossShape::ELEMENTWISE;
-        }
+        THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::BATCH || _lossShape.value() == LossShape::ELEMENTWISE);
+        binaryCrossEntropy.lossShape = _lossShape.value();
         binaryCrossEntropy.initialized = true;
         binaryCrossEntropy.network = _network.value();
 
-        if (binaryCrossEntropy.isMultiLayer()) {
-            binaryCrossEntropy.buildSupportLayersAndAddToNetwork();
-        } else {
+        if (binaryCrossEntropy.rawLossAddedToNetwork) {
+            // Legacy/deserialization-only path: build the single raw BCE layer itself. New public BCE construction
+            // builds a raw CustomLoss support layer instead.
             THOR_THROW_IF_FALSE(binaryCrossEntropy.lossShape == LossShape::ELEMENTWISE);
             binaryCrossEntropy.lossTensor = Tensor(_lossDataType.value(), {1});
             binaryCrossEntropy.lossShaperInput = binaryCrossEntropy.lossTensor;
             binaryCrossEntropy.addToNetwork(_network.value());
+        } else {
+            binaryCrossEntropy.buildSupportLayersAndAddToNetwork();
         }
 
         return binaryCrossEntropy;
@@ -145,9 +139,7 @@ class BinaryCrossEntropy::Builder {
 
    protected:
     /**
-     * BinaryCrossEntropy is implemented as BCE-with-logits.
-     * When the public compound layer is built a raw elementwise BCE layer will be built and this will be recorded so that the
-     * next build is the single raw layer that can be directly stamped.
+     * Legacy/internal path for reconstructing the historical raw BCE layer. Public BCE construction now routes through CustomLoss.
      */
     virtual BinaryCrossEntropy::Builder &rawLossAddedToNetwork() {
         THOR_THROW_IF_FALSE(!_rawLossAddedToNetwork.has_value());

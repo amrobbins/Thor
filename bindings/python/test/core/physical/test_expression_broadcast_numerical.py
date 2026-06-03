@@ -80,7 +80,6 @@ def _run_expr_broadcast(
     *inputs: np.ndarray,
     dtype: thor.DataType,
     gpu_num: int = 0,
-    use_fast_math: bool = False,
 ) -> np.ndarray:
     assert len(inputs) >= 1
     inputs = [np.asarray(arr, dtype=_numpy_storage_dtype(dtype), order="C") for arr in inputs]
@@ -90,8 +89,7 @@ def _run_expr_broadcast(
     eq = ex.compile(
         expr,
         device_num=gpu_num,
-        use_fast_math=use_fast_math,
-    )
+            )
 
     stream = thor.physical.Stream(gpu_num)
     gpu_inputs = {
@@ -307,8 +305,7 @@ def test_broadcast_requested_output_shape_add_singletons(dtype: thor.DataType):
     fused_equation = ex.compile(
         expr,
         device_num=gpu_num,
-        use_fast_math=False,
-    )
+            )
 
     stamped_equation = fused_equation.stamp({
         'x': x_gpu,
@@ -383,8 +380,7 @@ def test_broadcast_nested_expression_fp32_numerical_stamped():
     fused_equation = ex.compile(
         expr,
         device_num=gpu_num,
-        use_fast_math=False,
-    )
+            )
 
     stamped_equation = fused_equation.stamp({
         'x': x_gpu,
@@ -416,8 +412,7 @@ def test_broadcast_incompatible_shapes_raises(dtype: thor.DataType):
     eq = ex.compile(
         expr,
         device_num=0,
-        use_fast_math=False,
-    )
+            )
 
     stream = thor.physical.Stream(0)
     x_gpu = _copy_numpy_to_gpu(x_np, stream, dtype, gpu_num=0)
@@ -550,8 +545,7 @@ def test_broadcast_direct_run_requested_output_shape_add_singletons(dtype: thor.
     fused_equation = ex.compile(
         expr,
         device_num=gpu_num,
-        use_fast_math=False,
-    )
+            )
 
     fused_equation.run({
         'x': x_gpu,
@@ -606,8 +600,7 @@ def test_broadcast_stamped_reused_twice(dtype: thor.DataType):
     fused_equation = ex.compile(
         expr,
         device_num=gpu_num,
-        use_fast_math=False,
-    )
+            )
 
     stamped_equation = fused_equation.stamp({
         'x': x_gpu,

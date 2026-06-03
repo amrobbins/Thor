@@ -127,7 +127,7 @@ def _build_flat_no_transpose(input_dtype: thor.DataType, output_dtype: thor.Data
         "y": TRANSPOSE_ALIGNED_SHAPE,
     }
     output_shape = TRANSPOSE_ALIGNED_SHAPE
-    return ex.compile(expr, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape
+    return ex.compile(expr, device_num=GPU_NUM), input_shapes, output_shape
 
 
 def _build_flat_transpose_aligned(input_dtype: thor.DataType, output_dtype: thor.DataType):
@@ -140,7 +140,7 @@ def _build_flat_transpose_aligned(input_dtype: thor.DataType, output_dtype: thor
         "y": TRANSPOSE_ALIGNED_SHAPE,
     }
     output_shape = (TRANSPOSE_ALIGNED_SHAPE[1], TRANSPOSE_ALIGNED_SHAPE[0])
-    return ex.compile(expr, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape
+    return ex.compile(expr, device_num=GPU_NUM), input_shapes, output_shape
 
 
 def _build_flat_transpose_ragged(input_dtype: thor.DataType, output_dtype: thor.DataType):
@@ -153,7 +153,7 @@ def _build_flat_transpose_ragged(input_dtype: thor.DataType, output_dtype: thor.
         "y": TRANSPOSE_RAGGED_SHAPE,
     }
     output_shape = (TRANSPOSE_RAGGED_SHAPE[1], TRANSPOSE_RAGGED_SHAPE[0])
-    return ex.compile(expr, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape
+    return ex.compile(expr, device_num=GPU_NUM), input_shapes, output_shape
 
 
 def _build_broadcast_outer_no_transpose(input_dtype: thor.DataType, output_dtype: thor.DataType):
@@ -166,7 +166,7 @@ def _build_broadcast_outer_no_transpose(input_dtype: thor.DataType, output_dtype
         "y": (1, BROADCAST_COLS),
     }
     output_shape = (BROADCAST_ROWS, BROADCAST_COLS)
-    return ex.compile(expr, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape
+    return ex.compile(expr, device_num=GPU_NUM), input_shapes, output_shape
 
 
 def _build_broadcast_outer_transpose(input_dtype: thor.DataType, output_dtype: thor.DataType):
@@ -179,7 +179,7 @@ def _build_broadcast_outer_transpose(input_dtype: thor.DataType, output_dtype: t
         "y": (1, BROADCAST_COLS),
     }
     output_shape = (BROADCAST_COLS, BROADCAST_ROWS)
-    return ex.compile(expr, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape
+    return ex.compile(expr, device_num=GPU_NUM), input_shapes, output_shape
 
 
 def _build_broadcast_row_transpose(input_dtype: thor.DataType, output_dtype: thor.DataType):
@@ -192,7 +192,7 @@ def _build_broadcast_row_transpose(input_dtype: thor.DataType, output_dtype: tho
         "y": (1, BROADCAST_COLS),
     }
     output_shape = (BROADCAST_COLS, BROADCAST_ROWS)
-    return ex.compile(expr, device_num=GPU_NUM, use_fast_math=False), input_shapes, output_shape
+    return ex.compile(expr, device_num=GPU_NUM), input_shapes, output_shape
 
 
 def _aligned_output_shape() -> tuple[int, ...]:

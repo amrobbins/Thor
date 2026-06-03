@@ -474,8 +474,7 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
         placement,
         physicalParameters,
         inferenceOnly,
-        getId(),
-        false);
+        getId());
     physicalFullyConnected->setLayerName(getLayerType());
 
     return physicalFullyConnected;

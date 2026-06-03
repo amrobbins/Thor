@@ -57,8 +57,7 @@ class SparseRowUpdatePlan {
         const Tensor& numRows,
         const std::unordered_map<std::string, SparseRowUpdateTensorBinding>& inputs,
         const std::unordered_map<std::string, Tensor>& indexedOutputs,
-        int deviceNum,
-        bool useFastMath = true);
+        int deviceNum);
 
     // Emits the optimizer-owned sparse-row update expression as straight-line source for one reduced float4 lane.
     // The embedding reducer supplies entries listed in localDenseLogicalInputNames directly as local float4 expressions

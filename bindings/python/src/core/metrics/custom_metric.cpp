@@ -29,8 +29,7 @@ void bind_custom_metric(nb::module_& metrics) {
            const std::string& predictionsName,
            const std::string& labelsName,
            const std::string& metricName,
-           const std::string& displayName,
-           bool useFastMath) {
+           const std::string& displayName) {
             CustomMetric::Builder builder;
             builder.network(network)
                 .expression(std::move(expression))
@@ -39,8 +38,7 @@ void bind_custom_metric(nb::module_& metrics) {
                 .predictionsName(predictionsName)
                 .labelsName(labelsName)
                 .metricName(metricName)
-                .displayName(displayName)
-                .useFastMath(useFastMath);
+                .displayName(displayName);
 
             CustomMetric built = builder.build();
             new (self) CustomMetric(std::move(built));
@@ -53,7 +51,6 @@ void bind_custom_metric(nb::module_& metrics) {
         "labels_name"_a = "labels",
         "metric_name"_a = "metric",
         "display_name"_a = "Metric",
-        "use_fast_math"_a = false,
         R"nbdoc(Construct an expression-backed CustomMetric.)nbdoc");
 
     custom_metric.def_prop_ro("predictions_name", &CustomMetric::getPredictionsName);
@@ -74,6 +71,5 @@ predictions_name : str, default "predictions"
 labels_name : str, default "labels"
 metric_name : str, default "metric"
 display_name : str, default "Metric"
-use_fast_math : bool, default False
 )nbdoc";
 }
