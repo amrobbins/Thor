@@ -2,19 +2,15 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
-#include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
-#include <optional>
 
 namespace Thor {
-
-class BinaryCrossEntropy;
 
 class Sigmoid : public Activation {
    public:
     class Builder;
-    Sigmoid() : backwardComputedExternally(false) {}
+    Sigmoid() = default;
 
-    ~Sigmoid() override {}
+    ~Sigmoid() override = default;
 
     std::shared_ptr<Layer> clone() const override {
         std::shared_ptr<Sigmoid> myClone = std::make_shared<Sigmoid>(*this);
@@ -57,21 +53,13 @@ class Sigmoid : public Activation {
         (void)drivingApiLayer;
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
-
-        if (backwardComputedExternally) {
-            // Loss-owned sigmoid keeps the external-backward physical-layer contract.
-            return std::make_shared<ThorImplementation::Sigmoid>(true);
-        }
-
         return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // feature out and error out
+        (void)tensorPlacement;
         return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
     }
-
-    bool backwardComputedExternally;
 };
 
 class Sigmoid::Builder : public Activation::Builder {
@@ -84,12 +72,10 @@ class Sigmoid::Builder : public Activation::Builder {
             sigmoid->featureInput = _featureInput;
             sigmoid->featureOutput = _featureInput.value().clone();
             sigmoid->initialized = true;
-            sigmoid->backwardComputedExternally = _backwardComputedExternally.value_or(false);
             sigmoid->addToNetwork(_network.value());
         } else {
-            // Template activation support
+            // Template activation support.
             sigmoid->initialized = true;
-            sigmoid->backwardComputedExternally = _backwardComputedExternally.value_or(false);
         }
         return sigmoid;
     }
@@ -103,18 +89,6 @@ class Sigmoid::Builder : public Activation::Builder {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
-
-   protected:
-    virtual Sigmoid::Builder &backwardComputedExternally() {
-        THOR_THROW_IF_FALSE(!_backwardComputedExternally.has_value());
-        _backwardComputedExternally = true;
-        return *this;
-    }
-
-   private:
-    std::optional<bool> _backwardComputedExternally;
-
-    friend class BinaryCrossEntropy;
 };
 
 }  // namespace Thor

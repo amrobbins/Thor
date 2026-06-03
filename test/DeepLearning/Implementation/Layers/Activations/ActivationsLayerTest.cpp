@@ -2,7 +2,6 @@
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 #include "test/Utilities/TensorOperations/GpuMatrixMultiply/MatrixMultiplyTestHelper.h"
 
-#include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
 #include "DeepLearning/Implementation/Layers/Activation/Softmax.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
@@ -20,102 +19,6 @@
 using namespace std;
 
 using namespace ThorImplementation;
-
-/**
- * sigmoid(x) = 1 / (1 + exp(-x))
- */
-static float sigmoid(float featureIn) { return 1.0f / (1.0f + exp(-featureIn)); }
-
-/**
- * d/dx(1/(1 + exp(-x))) = e^x/(e^x + 1)^2
- */
-static float sigmoidBackward(float featureIn, float errorIn) {
-    float expX = exp(featureIn);
-    float expX_1 = expX + 1.0f;
-    return errorIn * expX / (expX_1 * expX_1);
-}
-
-TEST(Sigmoid, Works) {
-    srand(time(NULL));
-
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-
-    for (int test = 0; test < 100; ++test) {
-        int numDimensions = (rand() % 5) + 1;
-        vector<unsigned long> dimensions;
-        int numElements = 1;
-        for (int i = 0; i < numDimensions; ++i) {
-            dimensions.push_back((rand() % 8) + 1);
-            numElements *= dimensions.back();
-        }
-
-        TensorDescriptor descriptor(DataType::FP16, dimensions);
-        Tensor featureInCpu(cpuPlacement, descriptor);
-        Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
-        Tensor destCpu(cpuPlacement, descriptor);
-
-        half *featureInMem = (half *)featureInCpu.getMemPtr();
-        for (int i = 0; i < numElements; ++i) {
-            featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
-        }
-
-        vector<shared_ptr<Layer>> layers;
-        layers.push_back(make_shared<NetworkInput>(featureInGpu));
-        layers.push_back(make_shared<NoOpLayer>());
-        shared_ptr<Sigmoid> sigmoidLayer = make_shared<Sigmoid>();
-        layers.push_back(sigmoidLayer);
-        layers.push_back(make_shared<NoOpLayer>());
-        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
-
-        LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = layers.back()->getFeatureOutput().value();
-
-        // Network is runnable here
-        layers[0]->forward(featureInCpu, false);
-        Stream stream = layers.front()->getStream();
-        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
-        destCpu.copyFromAsync(outputGpu, stream);
-
-        stream.synchronize();
-
-        half *destMem = (half *)destCpu.getMemPtr();
-        float thresh = 0.01;
-        for (int i = 0; i < numElements; ++i) {
-            float expectedValueFloat = (float)(half)sigmoid((float)featureInMem[i]);
-            half expectedValue = (half)expectedValueFloat;
-            half actualValue = destMem[i];
-            ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);
-        }
-
-        // Backward pass
-        Tensor errorInCpu(cpuPlacement, descriptor);
-        Tensor errorOutCpu(cpuPlacement, descriptor);
-        Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu = sigmoidLayer->getErrorOutput().value();
-
-        half *errorInMem = (half *)errorInCpu.getMemPtr();
-        for (int i = 0; i < numElements; ++i) {
-            errorInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
-        }
-        errorInGpu.copyFromAsync(errorInCpu, stream);
-
-        sigmoidLayer->backward(errorInGpu);
-        errorOutCpu.copyFromAsync(errorOutGpu, stream);
-        stream.synchronize();
-
-        half *errorOutMem = (half *)errorOutCpu.getMemPtr();
-        thresh = 0.01;
-        for (int i = 0; i < numElements; ++i) {
-            float expectedValueFloat = sigmoidBackward(featureInMem[i], errorInMem[i]);
-            half expectedValue = (half)expectedValueFloat;
-            half actualValue = errorOutMem[i];
-            ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);
-        }
-
-        LayerTestHelper::tearDownNetwork(layers);
-    }
-}
 
 /**
  *   e^xi / sum(e^xj, j = 1 to K)

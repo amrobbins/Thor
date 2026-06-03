@@ -1,27 +1,23 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.h"
 
-#include "Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.h"
-
 using namespace std;
 using json = nlohmann::json;
 
 namespace Thor {
 
 void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
-    THOR_THROW_IF_FALSE(!sigmoidAddedToNetwork);
-    shared_ptr<Activation> sigmoid = Sigmoid::Builder().backwardComputedExternally().build();
-    sigmoidOutput = sigmoid->addToNetwork(predictionsTensor, network);
+    THOR_THROW_IF_FALSE(!rawLossAddedToNetwork);
 
-    BinaryCrossEntropy::Builder binaryCrossEntropyBuilder = BinaryCrossEntropy::Builder()
-                                                                .network(*network)
-                                                                .predictions(sigmoidOutput)
-                                                                .labels(labelsTensor)
-                                                                .sigmoidAddedToNetwork()
-                                                                .reportsElementwiseLoss()
-                                                                .lossDataType(lossDataType);
-    BinaryCrossEntropy crossEntropy = binaryCrossEntropyBuilder.build();
-    lossShaperInput = crossEntropy.getLoss();
+    BinaryCrossEntropy rawBinaryCrossEntropy = BinaryCrossEntropy::Builder()
+                                                .network(*network)
+                                                .predictions(predictionsTensor)
+                                                .labels(labelsTensor)
+                                                .rawLossAddedToNetwork()
+                                                .reportsElementwiseLoss()
+                                                .lossDataType(lossDataType)
+                                                .build();
+    lossShaperInput = rawBinaryCrossEntropy.getLoss();
 
     if (lossShape == LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
@@ -35,9 +31,9 @@ void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
 
 json BinaryCrossEntropy::architectureJson() const {
     // The thing that is deserialized must be just the base layer, any helper layers
-    // are themselves deserialized. So loss_shape set to LossShape::ELEMENTWISE
+    // are themselves deserialized. So loss_shape is set to RAW.
 
-    json j;  // dfgf
+    json j;
     j["factory"] = Layer::Factory::Loss.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = "binary_cross_entropy";
@@ -47,7 +43,6 @@ json BinaryCrossEntropy::architectureJson() const {
     j["loss_data_type"] = lossDataType;
     j["labels_tensor"] = labelsTensor.architectureJson();
     j["predictions_tensor"] = predictionsTensor.architectureJson();
-    j["sigmoid_output_tensor"] = sigmoidOutput.architectureJson();
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
 
@@ -60,22 +55,22 @@ void BinaryCrossEntropy::deserialize(const json &j, Network *network) {
     if (j.at("layer_type").get<std::string>() != "binary_cross_entropy")
         throw runtime_error("Layer type mismatch in BinaryCrossEntropy::deserialize: " + j.at("layer_type").get<std::string>());
 
-    // Only connect the single layer and add it to the network, like when it was built.
-    // Helper layers deserialize themselves.
+    // Only connect the single raw-loss layer and add it to the network, like when it was built.
+    // Helper loss-shaper layers deserialize themselves.
     BinaryCrossEntropy binaryCrossEntropy;
     THOR_THROW_IF_FALSE(j.at("loss_shape").get<LossShape>() == LossShape::RAW);
     binaryCrossEntropy.lossShape = LossShape::RAW;
     binaryCrossEntropy.lossDataType = j.at("loss_data_type").get<DataType>();
 
     uint64_t originalTensorId;
-    originalTensorId = j["sigmoid_output_tensor"].at("id").get<uint64_t>();
+    originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     binaryCrossEntropy.predictionsTensor = network->getApiTensorByOriginalId(originalTensorId);
     originalTensorId = j["labels_tensor"].at("id").get<uint64_t>();
     binaryCrossEntropy.labelsTensor = network->getApiTensorByOriginalId(originalTensorId);
-    // The sigmoid layer itself, at this point, has been deserialized externally to here.
-    binaryCrossEntropy.sigmoidAddedToNetwork = true;
+    binaryCrossEntropy.rawLossAddedToNetwork = true;
 
     binaryCrossEntropy.lossTensor = Tensor::deserialize(j["loss_shaper_input_tensor"]);
+    binaryCrossEntropy.lossShaperInput = binaryCrossEntropy.lossTensor;
 
     binaryCrossEntropy.initialized = true;
     binaryCrossEntropy.addToNetwork(network);
