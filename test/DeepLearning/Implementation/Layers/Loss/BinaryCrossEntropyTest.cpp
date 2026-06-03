@@ -4,8 +4,7 @@
 
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
-#include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
-#include "DeepLearning/Implementation/Layers/Loss/CrossEntropy.h"
+#include "DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropy.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -15,17 +14,13 @@
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <set>
 #include <vector>
 
 using namespace std;
 
 using namespace ThorImplementation;
-
-half sigmoidH(half x) {
-    half one = 1.0f;
-    return one / (half)(one + (half)expf(-x));
-}
 
 TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
     srand(time(NULL));
@@ -70,13 +65,10 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
         layers.push_back(noOpLayer);
         shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        shared_ptr<Sigmoid> sigmoid = make_shared<Sigmoid>(true);
-        layers.push_back(sigmoid);
-        shared_ptr<CrossEntropy> crossEntropy =
-            make_shared<CrossEntropy>(CrossEntropyLossType::BINARY, DataType::FP16, false);
+        shared_ptr<BinaryCrossEntropy> binaryCrossEntropy = make_shared<BinaryCrossEntropy>(DataType::FP32);
         if (inferenceOnly)
-            crossEntropy->setConstructForInferenceOnly(true);
-        layers.push_back(crossEntropy);
+            binaryCrossEntropy->setConstructForInferenceOnly(true);
+        layers.push_back(binaryCrossEntropy);
         shared_ptr<NetworkOutput> lossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(lossOutput);
 
@@ -84,16 +76,15 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
         Stream labelsStream = labelsInput->getStream();
 
         LayerTestHelper::connectTwoLayers(activationsInput, noOpLayer);
-        LayerTestHelper::connectTwoLayers(noOpLayer, sigmoid, 0, 0);
-        LayerTestHelper::connectTwoLayers(sigmoid, crossEntropy, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
-        LayerTestHelper::connectTwoLayers(labelsInput, crossEntropy, 0, (int)Loss::ConnectionType::LABELS);
-        LayerTestHelper::connectTwoLayers(crossEntropy, lossOutput, 0, 0);
+        LayerTestHelper::connectTwoLayers(noOpLayer, binaryCrossEntropy, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
+        LayerTestHelper::connectTwoLayers(labelsInput, binaryCrossEntropy, 0, (int)Loss::ConnectionType::LABELS);
+        LayerTestHelper::connectTwoLayers(binaryCrossEntropy, lossOutput, 0, 0);
         LayerTestHelper::initializeNetwork(layers);
 
         if (inferenceOnly) {
-            ASSERT_TRUE(!crossEntropy->getErrorOutput().has_value());
+            ASSERT_TRUE(!binaryCrossEntropy->getErrorOutput().has_value());
         }
-        ASSERT_TRUE(!crossEntropy->getErrorInput().has_value());
+        ASSERT_TRUE(!binaryCrossEntropy->getErrorInput().has_value());
 
         assert(lossOutput->getFeatureInput().has_value());
         assert(lossOutput->getFeatureOutput().has_value());
@@ -115,7 +106,7 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
         Tensor errorOutputCpu;
         Tensor errorOutputGpu_h;
         if (!inferenceOnly) {
-            errorOutputGpu = sigmoid->getErrorOutput().value();
+            errorOutputGpu = binaryCrossEntropy->getErrorOutput().value();
             errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
             errorOutputGpu_h = errorOutputCpu.clone();
             errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
@@ -124,14 +115,9 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
         labelsStream.synchronize();
 
         /**
-         * Binary Cross Entropy Loss (i.e. sigmoid then cross entropy loss):
-         * loss = -( label * log(probability) + (1 - label) * (log(1 - probability)) )
-         * where label is 0 or 1
-         * Gradient of Binary Cross Entropy with respect to the predicted probability:
-         * gradient = probability - label
-         *
-         * In the loss function, log(0) is avoided by choosing a minimum value close to the minimum positive value of fp16 or fp32
-         * respectively. Note that this minimum does not affect the gradient.
+         * Binary Cross Entropy with logits:
+         * loss = max(logit, 0) - logit * label + log1p(exp(-abs(logit)))
+         * gradient = sigmoid(logit) - label
          */
         float *lossMem = (float *)lossCpu.getMemPtr();
         bool *labelMem = (bool *)labelsCpu.getMemPtr();
@@ -139,8 +125,10 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
         Tensor probabilities = activationsCpu.clone();
         half *probabilityMem = (half *)probabilities.getMemPtr();
         for (uint32_t b = 0; b < batchSize; ++b) {
-            probabilityMem[b] = sigmoidH(activationsMem[b]);
-            lossMem[b] = -(labelMem[b] * logf(probabilityMem[b]) + (1 - labelMem[b]) * (logf(1.0f - (float)probabilityMem[b])));
+            const float logit = static_cast<float>(activationsMem[b]);
+            const float label = labelMem[b] ? 1.0f : 0.0f;
+            probabilityMem[b] = static_cast<half>(1.0f / (1.0f + expf(-logit)));
+            lossMem[b] = std::max(logit, 0.0f) - logit * label + log1pf(expf(-fabsf(logit)));
         }
 
         // Verify the loss output

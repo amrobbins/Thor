@@ -1,13 +1,11 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
-#include "DeepLearning/Api/Layers/Activations/Sigmoid.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 
-#include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
-#include "DeepLearning/Implementation/Layers/Loss/CrossEntropy.h"
+#include "DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropy.h"
 #include <optional>
 
 namespace Thor {
@@ -20,8 +18,6 @@ class BinaryCrossEntropy : public Loss {
     ~BinaryCrossEntropy() override {}
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<BinaryCrossEntropy>(*this); }
-
-    Tensor getPredictions() const override { return sigmoidOutput; }
 
     std::string getLayerType() const override { return "BinaryCrossEntropy"; }
 
@@ -38,22 +34,18 @@ class BinaryCrossEntropy : public Loss {
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
-        // Sigmoid and LossShaper are connected during multi-layer flattening
-        std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy =
-            std::make_shared<ThorImplementation::CrossEntropy>(CrossEntropyLossType::BINARY, lossDataType);
-        return crossEntropy;
+        return std::make_shared<ThorImplementation::BinaryCrossEntropy>(lossDataType);
     }
 
     virtual bool isMultiLayer() const {
-        if (lossShape != LossShape::ELEMENTWISE || !sigmoidAddedToNetwork)
+        if (lossShape != LossShape::ELEMENTWISE || !rawLossAddedToNetwork)
             return true;
         return false;
     }
 
     virtual void buildSupportLayersAndAddToNetwork();
 
-    bool sigmoidAddedToNetwork;
-    Tensor sigmoidOutput;
+    bool rawLossAddedToNetwork;
 };
 
 class BinaryCrossEntropy::Builder {
@@ -71,11 +63,11 @@ class BinaryCrossEntropy::Builder {
         THOR_THROW_IF_FALSE(labelDimensions.size() == 1 && labelDimensions[0] == 1);
 
         BinaryCrossEntropy binaryCrossEntropy;
-        if (_sigmoidAddedToNetwork.has_value()) {
-            THOR_THROW_IF_FALSE(_sigmoidAddedToNetwork.value() == true);
-            binaryCrossEntropy.sigmoidAddedToNetwork = true;
+        if (_rawLossAddedToNetwork.has_value()) {
+            THOR_THROW_IF_FALSE(_rawLossAddedToNetwork.value() == true);
+            binaryCrossEntropy.rawLossAddedToNetwork = true;
         } else {
-            binaryCrossEntropy.sigmoidAddedToNetwork = false;
+            binaryCrossEntropy.rawLossAddedToNetwork = false;
         }
         binaryCrossEntropy.predictionsTensor = _predictions.value();
         binaryCrossEntropy.labelsTensor = _labels.value();
@@ -97,6 +89,7 @@ class BinaryCrossEntropy::Builder {
         } else {
             THOR_THROW_IF_FALSE(binaryCrossEntropy.lossShape == LossShape::ELEMENTWISE);
             binaryCrossEntropy.lossTensor = Tensor(_lossDataType.value(), {1});
+            binaryCrossEntropy.lossShaperInput = binaryCrossEntropy.lossTensor;
             binaryCrossEntropy.addToNetwork(_network.value());
         }
 
@@ -152,13 +145,13 @@ class BinaryCrossEntropy::Builder {
 
    protected:
     /**
-     * BinaryCrossEntropy is a sigmoid activation followed by a cross entropy loss.
-     * When the layer is built an external sigmoid will also be built and this will be recorded so that next attempt to build will
-     * result in a single layer that can be directly built.
+     * BinaryCrossEntropy is implemented as BCE-with-logits.
+     * When the public compound layer is built a raw elementwise BCE layer will be built and this will be recorded so that the
+     * next build is the single raw layer that can be directly stamped.
      */
-    virtual BinaryCrossEntropy::Builder &sigmoidAddedToNetwork() {
-        THOR_THROW_IF_FALSE(!_sigmoidAddedToNetwork.has_value());
-        _sigmoidAddedToNetwork = true;
+    virtual BinaryCrossEntropy::Builder &rawLossAddedToNetwork() {
+        THOR_THROW_IF_FALSE(!_rawLossAddedToNetwork.has_value());
+        _rawLossAddedToNetwork = true;
         return *this;
     }
 
@@ -168,7 +161,7 @@ class BinaryCrossEntropy::Builder {
     std::optional<Tensor> _labels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
-    std::optional<bool> _sigmoidAddedToNetwork;
+    std::optional<bool> _rawLossAddedToNetwork;
 
     friend class BinaryCrossEntropy;
 };
