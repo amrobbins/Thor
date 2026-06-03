@@ -1,364 +1,128 @@
-#include <optional>
-#include "MeanAbsoluteError.h"
-
-#include "DeepLearning/Implementation/Layers/Loss.h"
-#include "Utilities/TensorOperations/Loss/MeanAbsoluteError.h"
-
-#include <chrono>
-#include <thread>
+#include "DeepLearning/Implementation/Layers/Loss/MeanAbsoluteError.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/FusedEquation.h"
+
+#include <memory>
+#include <stdexcept>
+#include <utility>
+
 using namespace ThorImplementation;
 using namespace std;
 
-MeanAbsoluteError::~MeanAbsoluteError() {}
+namespace {
 
-MeanAbsoluteError::MeanAbsoluteError(DataType lossDataType) : Loss(lossDataType) {}
+constexpr const char* kPredictionsName = "predictions";
+constexpr const char* kLabelsName = "labels";
+constexpr const char* kLossName = "loss";
+constexpr const char* kGradientName = "predictions_grad";
+
+void validateLabelsDType(DataType dtype) {
+    switch (dtype) {
+        case DataType::BOOLEAN:
+        case DataType::UINT8:
+        case DataType::UINT16:
+        case DataType::UINT32:
+        case DataType::FP16:
+        case DataType::FP32:
+            return;
+        default:
+            throw runtime_error("Unsupported MeanAbsoluteError label dtype: " + TensorDescriptor::getElementTypeName(dtype));
+    }
+}
+
+void validatePredictionsDType(DataType dtype) {
+    if (dtype != DataType::FP16 && dtype != DataType::FP32) {
+        throw runtime_error("Unsupported MeanAbsoluteError predictions dtype: " + TensorDescriptor::getElementTypeName(dtype));
+    }
+}
+
+void validateDynamicInputs(const DynamicExpression::TensorMap& inputs) {
+    const auto predictionsIt = inputs.find(kPredictionsName);
+    if (predictionsIt == inputs.end())
+        throw runtime_error("MeanAbsoluteError expression missing predictions input.");
+    const auto labelsIt = inputs.find(kLabelsName);
+    if (labelsIt == inputs.end())
+        throw runtime_error("MeanAbsoluteError expression missing labels input.");
+
+    validatePredictionsDType(predictionsIt->second.getDescriptor().getDataType());
+    validateLabelsDType(labelsIt->second.getDescriptor().getDataType());
+    THOR_THROW_IF_FALSE(predictionsIt->second.getDescriptor().getDimensions() == labelsIt->second.getDescriptor().getDimensions());
+}
+
+DynamicExpressionBuild compileOutputs(const Outputs& outputs,
+                                      const DynamicExpression::TensorMap& stampInputs,
+                                      const DynamicExpression::TensorMap& preallocatedOutputs,
+                                      Stream& stream) {
+    return DynamicExpressionBuild{
+        .equation = std::make_shared<FusedEquation>(FusedEquation::compile(outputs.physicalOutputs(), stream.getGpuNum())),
+        .stamp_inputs = stampInputs,
+        .tensor_scalar_inputs = {},
+        .preallocated_outputs = preallocatedOutputs,
+        .requested_output_shapes = {},
+    };
+}
+
+}  // namespace
+
+MeanAbsoluteError::MeanAbsoluteError(DataType lossDataType)
+    : CustomLoss(makeForwardExpression(lossDataType),
+                 makeGradientExpression(),
+                 kPredictionsName,
+                 kLabelsName,
+                 kLossName,
+                 kGradientName,
+                 lossDataType) {}
 
 void MeanAbsoluteError::compileImpl() {
-    Layer::compileImpl();
     THOR_THROW_IF_FALSE(featureInput.has_value());
-    THOR_THROW_IF_FALSE(featureOutput.has_value());
-    THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() == 2);
-
-    if (!isInferenceOnly()) {
-        THOR_THROW_IF_FALSE(errorOutput.has_value());
-        THOR_THROW_IF_FALSE(errorOutput.value().isInitialized());
-        THOR_THROW_IF_FALSE(errorOutput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(errorOutput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
-        THOR_THROW_IF_FALSE(errorOutput.value().getDescriptor().getDataType() == DataType::FP16 ||
-               errorOutput.value().getDescriptor().getDataType() == DataType::FP32);
-
-        THOR_THROW_IF_FALSE(labelsInput.has_value());
-        THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
-        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
-
-        vector<uint64_t> labelDimensions = labelsInput.value().getDescriptor().getDimensions();
-        vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
-        THOR_THROW_IF_FALSE(featureInputDimensions == labelDimensions);
-
-        errorOutputCudnnTensorDescriptor =
-            createCudnnTensorDescriptor(errorOutput.value().getDescriptor().getDimensions(), errorOutput.value().getDescriptor().getDataType());
-    }
-
-    batchSize = featureInput.value().getDescriptor().getDimensions()[0];
-}
-
-void MeanAbsoluteError::infer(std::optional<Tensor> predictions, std::optional<Tensor> elementLoss, Stream stream) {
-    THOR_THROW_IF_FALSE(predictions.has_value());
-    THOR_THROW_IF_FALSE(elementLoss.has_value());
     THOR_THROW_IF_FALSE(labelsInput.has_value());
-    THOR_THROW_IF_FALSE(elementLoss.value().getDescriptor().getDimensions() == predictions.value().getDescriptor().getDimensions());
-    if (!isInferenceOnly())
-        THOR_THROW_IF_FALSE(errorOutput.has_value());
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions() == labelsInput.value().getDescriptor().getDimensions());
 
-    ScopedGpu scopedGpu(predictions.value().getPlacement().getDeviceNum());
+    validatePredictionsDType(featureInput.value().getDescriptor().getDataType());
+    validateLabelsDType(labelsInput.value().getDescriptor().getDataType());
 
-    THOR_THROW_IF_FALSE(compiled);
-    THOR_THROW_IF_FALSE(predictions.value().getDescriptor().getDataType() == DataType::FP16 ||
-           predictions.value().getDescriptor().getDataType() == DataType::FP32);
-
-    stream.waitEvent(labelsStream.putEvent());
-
-    if (predictions.value().getDescriptor().getDataType() == DataType::FP16) {
-        launchMeanAbsoluteErrorWithFP16Predictions();
-    } else if (predictions.value().getDescriptor().getDataType() == DataType::FP32) {
-        launchMeanAbsoluteErrorWithFP32Predictions();
-    } else {
-        THOR_UNREACHABLE();
-    }
+    CustomLoss::compileImpl();
 }
 
-void MeanAbsoluteError::backProp(std::optional<Tensor> labels,
-                                 std::optional<Tensor> normalizedPredictions,
-                                 std::optional<Tensor> lossGradient,
-                                 Stream stream) {
-    // Mean absolute loss gradient is pre-computed during infer() for efficiency
-    THOR_THROW_IF_FALSE(lossGradient.has_value());
-    THOR_THROW_IF_FALSE(lossGradient.value().getDataType() == DataType::FP32 ||
-           lossGradient.value().getDataType() == DataType::FP16);
+DynamicExpression MeanAbsoluteError::makeForwardExpression(DataType lossDataType) {
+    return DynamicExpression({kPredictionsName, kLabelsName},
+                             {kLossName},
+                             [lossDataType](const DynamicExpression::TensorMap& inputs,
+                                            const DynamicExpression::TensorMap& outputs,
+                                            Stream& stream) -> DynamicExpressionBuild {
+                                 validateDynamicInputs(inputs);
 
-    if (lossScalingFactor != 1) {
-        cudnnStatus_t cudnnStatus;
-        float lsffloat = (float)lossScalingFactor;
-
-        cudnnStatus = cudnnScaleTensor(stream.getCudnnHandle(), errorOutputCudnnTensorDescriptor, errorOutput.value().getMemPtr(), &lsffloat);
-        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-    }
+                                 const DataType predictionDType = inputs.at(kPredictionsName).getDescriptor().getDataType();
+                                 Expression predictions = Expression::input(kPredictionsName, predictionDType, predictionDType);
+                                 Expression labels = Expression::input(kLabelsName, predictionDType, predictionDType);
+                                 Expression diff = (predictions - labels).withDTypes(predictionDType, predictionDType);
+                                 Expression loss = diff.abs().withDTypes(predictionDType, lossDataType);
+                                 return compileOutputs(Expression::outputs({{kLossName, loss}}), inputs, outputs, stream);
+                             });
 }
 
-void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP16Predictions() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP16);
+DynamicExpression MeanAbsoluteError::makeGradientExpression() {
+    return DynamicExpression({kPredictionsName, kLabelsName},
+                             {kGradientName},
+                             [](const DynamicExpression::TensorMap& inputs,
+                                const DynamicExpression::TensorMap& outputs,
+                                Stream& stream) -> DynamicExpressionBuild {
+                                 validateDynamicInputs(inputs);
 
-    if (featureOutput.value().getDescriptor().getDataType() == DataType::FP16)
-        launchMeanAbsoluteErrorWithFP16PredictionsAndFP16Loss();
-    else if (featureOutput.value().getDescriptor().getDataType() == DataType::FP32)
-        launchMeanAbsoluteErrorWithFP16PredictionsAndFP32Loss();
-    else
-        THOR_UNREACHABLE();
-}
-
-void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP32Predictions() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP32);
-
-    if (featureOutput.value().getDescriptor().getDataType() == DataType::FP16)
-        launchMeanAbsoluteErrorWithFP32PredictionsAndFP16Loss();
-    else if (featureOutput.value().getDescriptor().getDataType() == DataType::FP32)
-        launchMeanAbsoluteErrorWithFP32PredictionsAndFP32Loss();
-    else
-        THOR_UNREACHABLE();
-}
-
-void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP16PredictionsAndFP16Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP16);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP16);
-
-    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
-        launchMeanAbsoluteError<half, half, half>(labelsInput.value().getMemPtr(),
-                                                  featureInput.value().getMemPtr(),
-                                                  featureOutput.value().getMemPtr(),
-                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                  featureOutput.value().getDescriptor().getDimensions()[1],
-                                                  batchSize,
-                                                  !isInferenceOnly(),
-                                                  stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
-        launchMeanAbsoluteError<float, half, half>(labelsInput.value().getMemPtr(),
-                                                   featureInput.value().getMemPtr(),
-                                                   featureOutput.value().getMemPtr(),
-                                                   isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                   featureOutput.value().getDescriptor().getDimensions()[1],
-                                                   batchSize,
-                                                   !isInferenceOnly(),
-                                                   stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
-        launchMeanAbsoluteError<uint8_t, half, half>(labelsInput.value().getMemPtr(),
-                                                     featureInput.value().getMemPtr(),
-                                                     featureOutput.value().getMemPtr(),
-                                                     isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                     featureOutput.value().getDescriptor().getDimensions()[1],
-                                                     batchSize,
-                                                     !isInferenceOnly(),
-                                                     stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
-        launchMeanAbsoluteError<uint16_t, half, half>(labelsInput.value().getMemPtr(),
-                                                      featureInput.value().getMemPtr(),
-                                                      featureOutput.value().getMemPtr(),
-                                                      isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                      featureOutput.value().getDescriptor().getDimensions()[1],
-                                                      batchSize,
-                                                      !isInferenceOnly(),
-                                                      stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
-        launchMeanAbsoluteError<uint32_t, half, half>(labelsInput.value().getMemPtr(),
-                                                      featureInput.value().getMemPtr(),
-                                                      featureOutput.value().getMemPtr(),
-                                                      isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                      featureOutput.value().getDescriptor().getDimensions()[1],
-                                                      batchSize,
-                                                      !isInferenceOnly(),
-                                                      stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
-        launchMeanAbsoluteError<bool, half, half>(labelsInput.value().getMemPtr(),
-                                                  featureInput.value().getMemPtr(),
-                                                  featureOutput.value().getMemPtr(),
-                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                  featureOutput.value().getDescriptor().getDimensions()[1],
-                                                  batchSize,
-                                                  !isInferenceOnly(),
-                                                  stream);
-    } else {
-        THOR_UNREACHABLE();
-    }
-}
-
-void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP16PredictionsAndFP32Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP16);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP32);
-
-    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
-        launchMeanAbsoluteError<half, half, float>(labelsInput.value().getMemPtr(),
-                                                   featureInput.value().getMemPtr(),
-                                                   featureOutput.value().getMemPtr(),
-                                                   isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                   featureOutput.value().getDescriptor().getDimensions()[1],
-                                                   batchSize,
-                                                   !isInferenceOnly(),
-                                                   stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
-        launchMeanAbsoluteError<float, half, float>(labelsInput.value().getMemPtr(),
-                                                    featureInput.value().getMemPtr(),
-                                                    featureOutput.value().getMemPtr(),
-                                                    isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                    featureOutput.value().getDescriptor().getDimensions()[1],
-                                                    batchSize,
-                                                    !isInferenceOnly(),
-                                                    stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
-        launchMeanAbsoluteError<uint8_t, half, float>(labelsInput.value().getMemPtr(),
-                                                      featureInput.value().getMemPtr(),
-                                                      featureOutput.value().getMemPtr(),
-                                                      isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                      featureOutput.value().getDescriptor().getDimensions()[1],
-                                                      batchSize,
-                                                      !isInferenceOnly(),
-                                                      stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
-        launchMeanAbsoluteError<uint16_t, half, float>(labelsInput.value().getMemPtr(),
-                                                       featureInput.value().getMemPtr(),
-                                                       featureOutput.value().getMemPtr(),
-                                                       isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                       featureOutput.value().getDescriptor().getDimensions()[1],
-                                                       batchSize,
-                                                       !isInferenceOnly(),
-                                                       stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
-        launchMeanAbsoluteError<uint32_t, half, float>(labelsInput.value().getMemPtr(),
-                                                       featureInput.value().getMemPtr(),
-                                                       featureOutput.value().getMemPtr(),
-                                                       isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                       featureOutput.value().getDescriptor().getDimensions()[1],
-                                                       batchSize,
-                                                       !isInferenceOnly(),
-                                                       stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
-        launchMeanAbsoluteError<bool, half, float>(labelsInput.value().getMemPtr(),
-                                                   featureInput.value().getMemPtr(),
-                                                   featureOutput.value().getMemPtr(),
-                                                   isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                   featureOutput.value().getDescriptor().getDimensions()[1],
-                                                   batchSize,
-                                                   !isInferenceOnly(),
-                                                   stream);
-    } else {
-        THOR_UNREACHABLE();
-    }
-}
-
-void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP32PredictionsAndFP16Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP32);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP16);
-
-    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
-        launchMeanAbsoluteError<half, float, half>(labelsInput.value().getMemPtr(),
-                                                   featureInput.value().getMemPtr(),
-                                                   featureOutput.value().getMemPtr(),
-                                                   isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                   featureOutput.value().getDescriptor().getDimensions()[1],
-                                                   batchSize,
-                                                   !isInferenceOnly(),
-                                                   stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
-        launchMeanAbsoluteError<float, float, half>(labelsInput.value().getMemPtr(),
-                                                    featureInput.value().getMemPtr(),
-                                                    featureOutput.value().getMemPtr(),
-                                                    isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                    featureOutput.value().getDescriptor().getDimensions()[1],
-                                                    batchSize,
-                                                    !isInferenceOnly(),
-                                                    stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
-        launchMeanAbsoluteError<uint8_t, float, half>(labelsInput.value().getMemPtr(),
-                                                      featureInput.value().getMemPtr(),
-                                                      featureOutput.value().getMemPtr(),
-                                                      isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                      featureOutput.value().getDescriptor().getDimensions()[1],
-                                                      batchSize,
-                                                      !isInferenceOnly(),
-                                                      stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
-        launchMeanAbsoluteError<uint16_t, float, half>(labelsInput.value().getMemPtr(),
-                                                       featureInput.value().getMemPtr(),
-                                                       featureOutput.value().getMemPtr(),
-                                                       isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                       featureOutput.value().getDescriptor().getDimensions()[1],
-                                                       batchSize,
-                                                       !isInferenceOnly(),
-                                                       stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
-        launchMeanAbsoluteError<uint32_t, float, half>(labelsInput.value().getMemPtr(),
-                                                       featureInput.value().getMemPtr(),
-                                                       featureOutput.value().getMemPtr(),
-                                                       isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                       featureOutput.value().getDescriptor().getDimensions()[1],
-                                                       batchSize,
-                                                       !isInferenceOnly(),
-                                                       stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
-        launchMeanAbsoluteError<bool, float, half>(labelsInput.value().getMemPtr(),
-                                                   featureInput.value().getMemPtr(),
-                                                   featureOutput.value().getMemPtr(),
-                                                   isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                   featureOutput.value().getDescriptor().getDimensions()[1],
-                                                   batchSize,
-                                                   !isInferenceOnly(),
-                                                   stream);
-    } else {
-        THOR_UNREACHABLE();
-    }
-}
-
-void MeanAbsoluteError::launchMeanAbsoluteErrorWithFP32PredictionsAndFP32Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP32);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP32);
-
-    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
-        launchMeanAbsoluteError<half, float, float>(labelsInput.value().getMemPtr(),
-                                                    featureInput.value().getMemPtr(),
-                                                    featureOutput.value().getMemPtr(),
-                                                    isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                    featureOutput.value().getDescriptor().getDimensions()[1],
-                                                    batchSize,
-                                                    !isInferenceOnly(),
-                                                    stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
-        launchMeanAbsoluteError<float, float, float>(labelsInput.value().getMemPtr(),
-                                                     featureInput.value().getMemPtr(),
-                                                     featureOutput.value().getMemPtr(),
-                                                     isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                     featureOutput.value().getDescriptor().getDimensions()[1],
-                                                     batchSize,
-                                                     !isInferenceOnly(),
-                                                     stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
-        launchMeanAbsoluteError<uint8_t, float, float>(labelsInput.value().getMemPtr(),
-                                                       featureInput.value().getMemPtr(),
-                                                       featureOutput.value().getMemPtr(),
-                                                       isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                       featureOutput.value().getDescriptor().getDimensions()[1],
-                                                       batchSize,
-                                                       !isInferenceOnly(),
-                                                       stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
-        launchMeanAbsoluteError<uint16_t, float, float>(labelsInput.value().getMemPtr(),
-                                                        featureInput.value().getMemPtr(),
-                                                        featureOutput.value().getMemPtr(),
-                                                        isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                        featureOutput.value().getDescriptor().getDimensions()[1],
-                                                        batchSize,
-                                                        !isInferenceOnly(),
-                                                        stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
-        launchMeanAbsoluteError<uint32_t, float, float>(labelsInput.value().getMemPtr(),
-                                                        featureInput.value().getMemPtr(),
-                                                        featureOutput.value().getMemPtr(),
-                                                        isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                        featureOutput.value().getDescriptor().getDimensions()[1],
-                                                        batchSize,
-                                                        !isInferenceOnly(),
-                                                        stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
-        launchMeanAbsoluteError<bool, float, float>(labelsInput.value().getMemPtr(),
-                                                    featureInput.value().getMemPtr(),
-                                                    featureOutput.value().getMemPtr(),
-                                                    isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                    featureOutput.value().getDescriptor().getDimensions()[1],
-                                                    batchSize,
-                                                    !isInferenceOnly(),
-                                                    stream);
-    } else {
-        THOR_UNREACHABLE();
-    }
+                                 const DataType predictionDType = inputs.at(kPredictionsName).getDescriptor().getDataType();
+                                 Expression predictions = Expression::input(kPredictionsName, predictionDType, predictionDType);
+                                 Expression labels = Expression::input(kLabelsName, predictionDType, predictionDType);
+                                 Expression zero = Expression(0.0).withDTypes(predictionDType, predictionDType);
+                                 Expression positive = Expression(1.0).withDTypes(predictionDType, predictionDType);
+                                 Expression negative = Expression(-1.0).withDTypes(predictionDType, predictionDType);
+                                 Expression diff = (predictions - labels).withDTypes(predictionDType, predictionDType);
+                                 Expression sign = Expression::where(diff > zero, positive, Expression::where(diff < zero, negative, zero))
+                                                       .withDTypes(predictionDType, predictionDType);
+                                 Expression scale = Expression(Loss::getLossScalingFactor()).withDTypes(predictionDType, predictionDType);
+                                 Expression grad = (sign * scale).withDTypes(predictionDType, predictionDType);
+                                 return compileOutputs(Expression::outputs({{kGradientName, grad}}), inputs, outputs, stream);
+                             });
 }

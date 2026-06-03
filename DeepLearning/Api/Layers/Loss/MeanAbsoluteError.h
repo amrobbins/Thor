@@ -1,6 +1,7 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -23,11 +24,7 @@ class MeanAbsoluteError : public Loss {
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
-    virtual bool isMultiLayer() const {
-        if (lossShape == LossShape::RAW)
-            return false;
-        return true;
-    }
+    virtual bool isMultiLayer() const { return true; }
 
     virtual void buildSupportLayersAndAddToNetwork();
 
@@ -77,8 +74,6 @@ class MeanAbsoluteError::Builder {
             _lossShape = LossShape::BATCH;
         if (!_lossDataType.has_value())
             _lossDataType = _predictions.value().getDataType();
-        uint32_t batchSize = _predictions.value().getDimensions()[0];
-
         MeanAbsoluteError meanAbsoluteError;
         meanAbsoluteError.predictionsTensor = _predictions.value();
         meanAbsoluteError.labelsTensor = _labels.value();
@@ -87,14 +82,7 @@ class MeanAbsoluteError::Builder {
         meanAbsoluteError.network = _network.value();
         meanAbsoluteError.initialized = true;
 
-        if (meanAbsoluteError.isMultiLayer()) {
-            meanAbsoluteError.buildSupportLayersAndAddToNetwork();
-        } else {
-            // lossTensor is the one that comes directly out of MeanAbsoluteError, that may be replaced by a loss shaper.
-            meanAbsoluteError.lossTensor = Tensor(_lossDataType.value(), {batchSize});
-            meanAbsoluteError.lossShaperInput = meanAbsoluteError.lossTensor;
-            meanAbsoluteError.addToNetwork(_network.value());
-        }
+        meanAbsoluteError.buildSupportLayersAndAddToNetwork();
 
         return meanAbsoluteError;
     }

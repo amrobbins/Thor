@@ -1,364 +1,123 @@
-#include <optional>
-#include "MeanSquaredError.h"
-
-#include "DeepLearning/Implementation/Layers/Loss.h"
-#include "Utilities/TensorOperations/Loss/MeanSquaredError.h"
-
-#include <chrono>
-#include <thread>
+#include "DeepLearning/Implementation/Layers/Loss/MeanSquaredError.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/FusedEquation.h"
+
+#include <memory>
+#include <stdexcept>
+#include <utility>
+
 using namespace ThorImplementation;
 using namespace std;
 
-MeanSquaredError::~MeanSquaredError() {}
+namespace {
 
-MeanSquaredError::MeanSquaredError(DataType lossDataType) : Loss(lossDataType) {}
+constexpr const char* kPredictionsName = "predictions";
+constexpr const char* kLabelsName = "labels";
+constexpr const char* kLossName = "loss";
+constexpr const char* kGradientName = "predictions_grad";
+
+void validateLabelsDType(DataType dtype) {
+    switch (dtype) {
+        case DataType::BOOLEAN:
+        case DataType::UINT8:
+        case DataType::UINT16:
+        case DataType::UINT32:
+        case DataType::FP16:
+        case DataType::FP32:
+            return;
+        default:
+            throw runtime_error("Unsupported MeanSquaredError label dtype: " + TensorDescriptor::getElementTypeName(dtype));
+    }
+}
+
+void validatePredictionsDType(DataType dtype) {
+    if (dtype != DataType::FP16 && dtype != DataType::FP32) {
+        throw runtime_error("Unsupported MeanSquaredError predictions dtype: " + TensorDescriptor::getElementTypeName(dtype));
+    }
+}
+
+void validateDynamicInputs(const DynamicExpression::TensorMap& inputs) {
+    const auto predictionsIt = inputs.find(kPredictionsName);
+    if (predictionsIt == inputs.end())
+        throw runtime_error("MeanSquaredError expression missing predictions input.");
+    const auto labelsIt = inputs.find(kLabelsName);
+    if (labelsIt == inputs.end())
+        throw runtime_error("MeanSquaredError expression missing labels input.");
+
+    validatePredictionsDType(predictionsIt->second.getDescriptor().getDataType());
+    validateLabelsDType(labelsIt->second.getDescriptor().getDataType());
+    THOR_THROW_IF_FALSE(predictionsIt->second.getDescriptor().getDimensions() == labelsIt->second.getDescriptor().getDimensions());
+}
+
+DynamicExpressionBuild compileOutputs(const Outputs& outputs,
+                                      const DynamicExpression::TensorMap& stampInputs,
+                                      const DynamicExpression::TensorMap& preallocatedOutputs,
+                                      Stream& stream) {
+    return DynamicExpressionBuild{
+        .equation = std::make_shared<FusedEquation>(FusedEquation::compile(outputs.physicalOutputs(), stream.getGpuNum())),
+        .stamp_inputs = stampInputs,
+        .tensor_scalar_inputs = {},
+        .preallocated_outputs = preallocatedOutputs,
+        .requested_output_shapes = {},
+    };
+}
+
+}  // namespace
+
+MeanSquaredError::MeanSquaredError(DataType lossDataType)
+    : CustomLoss(makeForwardExpression(lossDataType),
+                 makeGradientExpression(),
+                 kPredictionsName,
+                 kLabelsName,
+                 kLossName,
+                 kGradientName,
+                 lossDataType) {}
 
 void MeanSquaredError::compileImpl() {
-    Layer::compileImpl();
     THOR_THROW_IF_FALSE(featureInput.has_value());
-    THOR_THROW_IF_FALSE(featureOutput.has_value());
-    THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() == 2);
-
-    if (!isInferenceOnly()) {
-        THOR_THROW_IF_FALSE(errorOutput.has_value());
-        THOR_THROW_IF_FALSE(errorOutput.value().isInitialized());
-        THOR_THROW_IF_FALSE(errorOutput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(errorOutput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
-        THOR_THROW_IF_FALSE(errorOutput.value().getDescriptor().getDataType() == DataType::FP16 ||
-               errorOutput.value().getDescriptor().getDataType() == DataType::FP32);
-
-        THOR_THROW_IF_FALSE(labelsInput.has_value());
-        THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
-        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement().getDeviceNum() == featureInput.value().getPlacement().getDeviceNum());
-
-        vector<uint64_t> labelDimensions = labelsInput.value().getDescriptor().getDimensions();
-        vector<uint64_t> featureInputDimensions = featureInput.value().getDescriptor().getDimensions();
-        THOR_THROW_IF_FALSE(featureInputDimensions == labelDimensions);
-
-        errorOutputCudnnTensorDescriptor =
-            createCudnnTensorDescriptor(errorOutput.value().getDescriptor().getDimensions(), errorOutput.value().getDescriptor().getDataType());
-    }
-
-    batchSize = featureInput.value().getDescriptor().getDimensions()[0];
-}
-
-void MeanSquaredError::infer(std::optional<Tensor> predictions, std::optional<Tensor> elementLoss, Stream stream) {
-    THOR_THROW_IF_FALSE(predictions.has_value());
-    THOR_THROW_IF_FALSE(elementLoss.has_value());
     THOR_THROW_IF_FALSE(labelsInput.has_value());
-    THOR_THROW_IF_FALSE(elementLoss.value().getDescriptor().getDimensions() == predictions.value().getDescriptor().getDimensions());
-    if (!isInferenceOnly())
-        THOR_THROW_IF_FALSE(errorOutput.has_value());
+    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions() == labelsInput.value().getDescriptor().getDimensions());
 
-    ScopedGpu scopedGpu(predictions.value().getPlacement().getDeviceNum());
+    validatePredictionsDType(featureInput.value().getDescriptor().getDataType());
+    validateLabelsDType(labelsInput.value().getDescriptor().getDataType());
 
-    THOR_THROW_IF_FALSE(compiled);
-    THOR_THROW_IF_FALSE(predictions.value().getDescriptor().getDataType() == DataType::FP16 ||
-           predictions.value().getDescriptor().getDataType() == DataType::FP32);
-
-    stream.waitEvent(labelsStream.putEvent());
-
-    if (predictions.value().getDescriptor().getDataType() == DataType::FP16) {
-        launchMeanSquaredErrorWithFP16Predictions();
-    } else if (predictions.value().getDescriptor().getDataType() == DataType::FP32) {
-        launchMeanSquaredErrorWithFP32Predictions();
-    } else {
-        THOR_UNREACHABLE();
-    }
+    CustomLoss::compileImpl();
 }
 
-void MeanSquaredError::backProp(std::optional<Tensor> labels,
-                                std::optional<Tensor> normalizedPredictions,
-                                std::optional<Tensor> lossGradient,
-                                Stream stream) {
-    // Mean squared loss gradient is pre-computed during infer() for efficiency
-    THOR_THROW_IF_FALSE(lossGradient.has_value());
-    THOR_THROW_IF_FALSE(lossGradient.value().getDataType() == DataType::FP32 ||
-           lossGradient.value().getDataType() == DataType::FP16);
+DynamicExpression MeanSquaredError::makeForwardExpression(DataType lossDataType) {
+    return DynamicExpression({kPredictionsName, kLabelsName},
+                             {kLossName},
+                             [lossDataType](const DynamicExpression::TensorMap& inputs,
+                                            const DynamicExpression::TensorMap& outputs,
+                                            Stream& stream) -> DynamicExpressionBuild {
+                                 validateDynamicInputs(inputs);
 
-    if (lossScalingFactor != 1) {
-        cudnnStatus_t cudnnStatus;
-        float lsffloat = (float)lossScalingFactor;
-
-        cudnnStatus = cudnnScaleTensor(stream.getCudnnHandle(), errorOutputCudnnTensorDescriptor, errorOutput.value().getMemPtr(), &lsffloat);
-        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-    }
+                                 const DataType predictionDType = inputs.at(kPredictionsName).getDescriptor().getDataType();
+                                 Expression predictions = Expression::input(kPredictionsName, predictionDType, predictionDType);
+                                 Expression labels = Expression::input(kLabelsName, predictionDType, predictionDType);
+                                 Expression diff = (labels - predictions).withDTypes(predictionDType, predictionDType);
+                                 Expression loss = (diff * diff).withDTypes(predictionDType, lossDataType);
+                                 return compileOutputs(Expression::outputs({{kLossName, loss}}), inputs, outputs, stream);
+                             });
 }
 
-void MeanSquaredError::launchMeanSquaredErrorWithFP16Predictions() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP16);
+DynamicExpression MeanSquaredError::makeGradientExpression() {
+    return DynamicExpression({kPredictionsName, kLabelsName},
+                             {kGradientName},
+                             [](const DynamicExpression::TensorMap& inputs,
+                                const DynamicExpression::TensorMap& outputs,
+                                Stream& stream) -> DynamicExpressionBuild {
+                                 validateDynamicInputs(inputs);
 
-    if (featureOutput.value().getDescriptor().getDataType() == DataType::FP16)
-        launchMeanSquaredErrorWithFP16PredictionsAndFP16Loss();
-    else if (featureOutput.value().getDescriptor().getDataType() == DataType::FP32)
-        launchMeanSquaredErrorWithFP16PredictionsAndFP32Loss();
-    else
-        THOR_UNREACHABLE();
-}
-
-void MeanSquaredError::launchMeanSquaredErrorWithFP32Predictions() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP32);
-
-    if (featureOutput.value().getDescriptor().getDataType() == DataType::FP16)
-        launchMeanSquaredErrorWithFP32PredictionsAndFP16Loss();
-    else if (featureOutput.value().getDescriptor().getDataType() == DataType::FP32)
-        launchMeanSquaredErrorWithFP32PredictionsAndFP32Loss();
-    else
-        THOR_UNREACHABLE();
-}
-
-void MeanSquaredError::launchMeanSquaredErrorWithFP16PredictionsAndFP16Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP16);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP16);
-
-    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
-        launchMeanSquaredError<half, half, half>(labelsInput.value().getMemPtr(),
-                                                 featureInput.value().getMemPtr(),
-                                                 featureOutput.value().getMemPtr(),
-                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                 featureOutput.value().getDescriptor().getDimensions()[1],
-                                                 batchSize,
-                                                 !isInferenceOnly(),
-                                                 stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
-        launchMeanSquaredError<float, half, half>(labelsInput.value().getMemPtr(),
-                                                  featureInput.value().getMemPtr(),
-                                                  featureOutput.value().getMemPtr(),
-                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                  featureOutput.value().getDescriptor().getDimensions()[1],
-                                                  batchSize,
-                                                  !isInferenceOnly(),
-                                                  stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
-        launchMeanSquaredError<uint8_t, half, half>(labelsInput.value().getMemPtr(),
-                                                    featureInput.value().getMemPtr(),
-                                                    featureOutput.value().getMemPtr(),
-                                                    isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                    featureOutput.value().getDescriptor().getDimensions()[1],
-                                                    batchSize,
-                                                    !isInferenceOnly(),
-                                                    stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
-        launchMeanSquaredError<uint16_t, half, half>(labelsInput.value().getMemPtr(),
-                                                     featureInput.value().getMemPtr(),
-                                                     featureOutput.value().getMemPtr(),
-                                                     isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                     featureOutput.value().getDescriptor().getDimensions()[1],
-                                                     batchSize,
-                                                     !isInferenceOnly(),
-                                                     stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
-        launchMeanSquaredError<uint32_t, half, half>(labelsInput.value().getMemPtr(),
-                                                     featureInput.value().getMemPtr(),
-                                                     featureOutput.value().getMemPtr(),
-                                                     isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                     featureOutput.value().getDescriptor().getDimensions()[1],
-                                                     batchSize,
-                                                     !isInferenceOnly(),
-                                                     stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
-        launchMeanSquaredError<bool, half, half>(labelsInput.value().getMemPtr(),
-                                                 featureInput.value().getMemPtr(),
-                                                 featureOutput.value().getMemPtr(),
-                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                 featureOutput.value().getDescriptor().getDimensions()[1],
-                                                 batchSize,
-                                                 !isInferenceOnly(),
-                                                 stream);
-    } else {
-        THOR_UNREACHABLE();
-    }
-}
-
-void MeanSquaredError::launchMeanSquaredErrorWithFP16PredictionsAndFP32Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP16);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP32);
-
-    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
-        launchMeanSquaredError<half, half, float>(labelsInput.value().getMemPtr(),
-                                                  featureInput.value().getMemPtr(),
-                                                  featureOutput.value().getMemPtr(),
-                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                  featureOutput.value().getDescriptor().getDimensions()[1],
-                                                  batchSize,
-                                                  !isInferenceOnly(),
-                                                  stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
-        launchMeanSquaredError<float, half, float>(labelsInput.value().getMemPtr(),
-                                                   featureInput.value().getMemPtr(),
-                                                   featureOutput.value().getMemPtr(),
-                                                   isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                   featureOutput.value().getDescriptor().getDimensions()[1],
-                                                   batchSize,
-                                                   !isInferenceOnly(),
-                                                   stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
-        launchMeanSquaredError<uint8_t, half, float>(labelsInput.value().getMemPtr(),
-                                                     featureInput.value().getMemPtr(),
-                                                     featureOutput.value().getMemPtr(),
-                                                     isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                     featureOutput.value().getDescriptor().getDimensions()[1],
-                                                     batchSize,
-                                                     !isInferenceOnly(),
-                                                     stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
-        launchMeanSquaredError<uint16_t, half, float>(labelsInput.value().getMemPtr(),
-                                                      featureInput.value().getMemPtr(),
-                                                      featureOutput.value().getMemPtr(),
-                                                      isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                      featureOutput.value().getDescriptor().getDimensions()[1],
-                                                      batchSize,
-                                                      !isInferenceOnly(),
-                                                      stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
-        launchMeanSquaredError<uint32_t, half, float>(labelsInput.value().getMemPtr(),
-                                                      featureInput.value().getMemPtr(),
-                                                      featureOutput.value().getMemPtr(),
-                                                      isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                      featureOutput.value().getDescriptor().getDimensions()[1],
-                                                      batchSize,
-                                                      !isInferenceOnly(),
-                                                      stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
-        launchMeanSquaredError<bool, half, float>(labelsInput.value().getMemPtr(),
-                                                  featureInput.value().getMemPtr(),
-                                                  featureOutput.value().getMemPtr(),
-                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                  featureOutput.value().getDescriptor().getDimensions()[1],
-                                                  batchSize,
-                                                  !isInferenceOnly(),
-                                                  stream);
-    } else {
-        THOR_UNREACHABLE();
-    }
-}
-
-void MeanSquaredError::launchMeanSquaredErrorWithFP32PredictionsAndFP16Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP32);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP16);
-
-    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
-        launchMeanSquaredError<half, float, half>(labelsInput.value().getMemPtr(),
-                                                  featureInput.value().getMemPtr(),
-                                                  featureOutput.value().getMemPtr(),
-                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                  featureOutput.value().getDescriptor().getDimensions()[1],
-                                                  batchSize,
-                                                  !isInferenceOnly(),
-                                                  stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
-        launchMeanSquaredError<float, float, half>(labelsInput.value().getMemPtr(),
-                                                   featureInput.value().getMemPtr(),
-                                                   featureOutput.value().getMemPtr(),
-                                                   isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                   featureOutput.value().getDescriptor().getDimensions()[1],
-                                                   batchSize,
-                                                   !isInferenceOnly(),
-                                                   stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
-        launchMeanSquaredError<uint8_t, float, half>(labelsInput.value().getMemPtr(),
-                                                     featureInput.value().getMemPtr(),
-                                                     featureOutput.value().getMemPtr(),
-                                                     isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                     featureOutput.value().getDescriptor().getDimensions()[1],
-                                                     batchSize,
-                                                     !isInferenceOnly(),
-                                                     stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
-        launchMeanSquaredError<uint16_t, float, half>(labelsInput.value().getMemPtr(),
-                                                      featureInput.value().getMemPtr(),
-                                                      featureOutput.value().getMemPtr(),
-                                                      isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                      featureOutput.value().getDescriptor().getDimensions()[1],
-                                                      batchSize,
-                                                      !isInferenceOnly(),
-                                                      stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
-        launchMeanSquaredError<uint32_t, float, half>(labelsInput.value().getMemPtr(),
-                                                      featureInput.value().getMemPtr(),
-                                                      featureOutput.value().getMemPtr(),
-                                                      isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                      featureOutput.value().getDescriptor().getDimensions()[1],
-                                                      batchSize,
-                                                      !isInferenceOnly(),
-                                                      stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
-        launchMeanSquaredError<bool, float, half>(labelsInput.value().getMemPtr(),
-                                                  featureInput.value().getMemPtr(),
-                                                  featureOutput.value().getMemPtr(),
-                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                  featureOutput.value().getDescriptor().getDimensions()[1],
-                                                  batchSize,
-                                                  !isInferenceOnly(),
-                                                  stream);
-    } else {
-        THOR_UNREACHABLE();
-    }
-}
-
-void MeanSquaredError::launchMeanSquaredErrorWithFP32PredictionsAndFP32Loss() {
-    THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDataType() == DataType::FP32);
-    THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDataType() == DataType::FP32);
-
-    if (labelsInput.value().getDescriptor().getDataType() == DataType::FP16) {
-        launchMeanSquaredError<half, float, float>(labelsInput.value().getMemPtr(),
-                                                   featureInput.value().getMemPtr(),
-                                                   featureOutput.value().getMemPtr(),
-                                                   isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                   featureOutput.value().getDescriptor().getDimensions()[1],
-                                                   batchSize,
-                                                   !isInferenceOnly(),
-                                                   stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::FP32) {
-        launchMeanSquaredError<float, float, float>(labelsInput.value().getMemPtr(),
-                                                    featureInput.value().getMemPtr(),
-                                                    featureOutput.value().getMemPtr(),
-                                                    isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                    featureOutput.value().getDescriptor().getDimensions()[1],
-                                                    batchSize,
-                                                    !isInferenceOnly(),
-                                                    stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT8) {
-        launchMeanSquaredError<uint8_t, float, float>(labelsInput.value().getMemPtr(),
-                                                      featureInput.value().getMemPtr(),
-                                                      featureOutput.value().getMemPtr(),
-                                                      isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                      featureOutput.value().getDescriptor().getDimensions()[1],
-                                                      batchSize,
-                                                      !isInferenceOnly(),
-                                                      stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT16) {
-        launchMeanSquaredError<uint16_t, float, float>(labelsInput.value().getMemPtr(),
-                                                       featureInput.value().getMemPtr(),
-                                                       featureOutput.value().getMemPtr(),
-                                                       isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                       featureOutput.value().getDescriptor().getDimensions()[1],
-                                                       batchSize,
-                                                       !isInferenceOnly(),
-                                                       stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::UINT32) {
-        launchMeanSquaredError<uint32_t, float, float>(labelsInput.value().getMemPtr(),
-                                                       featureInput.value().getMemPtr(),
-                                                       featureOutput.value().getMemPtr(),
-                                                       isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                       featureOutput.value().getDescriptor().getDimensions()[1],
-                                                       batchSize,
-                                                       !isInferenceOnly(),
-                                                       stream);
-    } else if (labelsInput.value().getDescriptor().getDataType() == DataType::BOOLEAN) {
-        launchMeanSquaredError<bool, float, float>(labelsInput.value().getMemPtr(),
-                                                   featureInput.value().getMemPtr(),
-                                                   featureOutput.value().getMemPtr(),
-                                                   isInferenceOnly() ? nullptr : (half *)errorOutput.value().getMemPtr(),
-                                                   featureOutput.value().getDescriptor().getDimensions()[1],
-                                                   batchSize,
-                                                   !isInferenceOnly(),
-                                                   stream);
-    } else {
-        THOR_UNREACHABLE();
-    }
+                                 const DataType predictionDType = inputs.at(kPredictionsName).getDescriptor().getDataType();
+                                 Expression predictions = Expression::input(kPredictionsName, predictionDType, predictionDType);
+                                 Expression labels = Expression::input(kLabelsName, predictionDType, predictionDType);
+                                 Expression diff = (labels - predictions).withDTypes(predictionDType, predictionDType);
+                                 Expression scale = Expression(2.0f * Loss::getLossScalingFactor()).withDTypes(predictionDType, predictionDType);
+                                 Expression grad = (diff * scale).withDTypes(predictionDType, predictionDType);
+                                 return compileOutputs(Expression::outputs({{kGradientName, grad}}), inputs, outputs, stream);
+                             });
 }
