@@ -8,6 +8,7 @@ void bind_binary_accuracy(nb::module_ &metrics);
 void bind_categorical_accuracy(nb::module_ &metrics);
 void bind_custom_metric(nb::module_ &metrics);
 void bind_reduction_metrics(nb::module_ &metrics);
+void bind_loss_metric(nb::module_ &metrics);
 
 void bind_metrics(nb::module_ &metrics) {
     metrics.doc() = "Thor metrics";
@@ -19,4 +20,5 @@ void bind_metrics(nb::module_ &metrics) {
     bind_categorical_accuracy(metrics);
     bind_custom_metric(metrics);
     bind_reduction_metrics(metrics);
+    bind_loss_metric(metrics);
 }
