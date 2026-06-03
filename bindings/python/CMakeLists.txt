@@ -54,6 +54,8 @@ nanobind_add_module(_thor
         NB_STATIC
         ${THOR_PY_BIND_SOURCES}
 )
+thor_enable_release_host_lto(_thor)
+thor_enable_release_no_semantic_interposition(_thor)
 #target_link_options(_thor PRIVATE "LINKER:-rpath,\$ORIGIN")
 install(TARGETS Thor
         LIBRARY DESTINATION thor

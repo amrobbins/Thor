@@ -9,6 +9,8 @@
 
 #include "gtest/gtest.h"
 
+namespace {
+
 struct OutputStruct {
     std::thread::id id;
     std::string s;
@@ -93,6 +95,8 @@ static void popThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, 
     }
     ASSERT_TRUE(jobs.empty());
 }
+
+}  // namespace
 
 TEST(WorkQueueUnorderedTest, OutputIsCorrect) {
     constexpr int NUM_THREADS = 5;

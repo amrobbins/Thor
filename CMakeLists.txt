@@ -197,8 +197,6 @@ if (NOT CMAKE_BUILD_TYPE)
 endif ()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
-add_compile_options(-UNDEBUG)
-
 # ============================================================
 # Fast / multi-threaded linker selection
 # ============================================================
@@ -374,6 +372,93 @@ function(thor_apply_linker_settings target_name)
 endfunction()
 
 # ============================================================
+# Release-only link-time optimization
+# ============================================================
+# Host C++ LTO is handled through CMake's IPO support so CMake can pick the
+# correct compiler/linker flags for the active C++ toolchain. Keep this
+# target-scoped rather than setting CMAKE_INTERPROCEDURAL_OPTIMIZATION globally
+# so third-party FetchContent targets are not accidentally changed.
+set(_thor_release_lto_configured FALSE)
+if (CMAKE_CONFIGURATION_TYPES)
+    set(_thor_release_lto_configured TRUE)
+elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(_thor_release_lto_configured TRUE)
+endif ()
+
+if (_thor_release_lto_configured)
+    include(CheckIPOSupported)
+    check_ipo_supported(
+            RESULT _thor_cxx_ipo_supported
+            OUTPUT _thor_cxx_ipo_check_output
+            LANGUAGES CXX
+    )
+    if (NOT _thor_cxx_ipo_supported)
+        message(FATAL_ERROR
+                "Thor Release builds require C++ IPO/LTO, but CMake reported that it is not supported by the current toolchain/linker:\n"
+                "${_thor_cxx_ipo_check_output}")
+    endif ()
+endif ()
+
+function(thor_enable_release_host_lto target_name)
+    if (NOT TARGET ${target_name})
+        return()
+    endif ()
+
+    # Release-only host-side C++ LTO. Debug and RelWithDebInfo remain unchanged.
+    set_property(TARGET ${target_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endfunction()
+
+function(thor_enable_release_no_semantic_interposition target_name)
+    if (NOT TARGET ${target_name})
+        return()
+    endif ()
+
+    # Release-only host-code optimization for ELF shared-library builds.  This
+    # lets the compiler assume definitions within the current linkage unit are
+    # not semantically replaced by another DSO definition at runtime.  Apply it
+    # to C++ translation units directly and to CUDA translation units through
+    # nvcc's host-compiler forwarding path.
+    target_compile_options(${target_name} PRIVATE
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-fno-semantic-interposition>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xcompiler=-fno-semantic-interposition>
+    )
+
+    # With IPO/LTO, keep the option visible to the host link/LTO step too.
+    # HOST_LINK prevents the flag from being added to CUDA device-link commands.
+    target_link_options(${target_name} PRIVATE
+            $<$<CONFIG:Release>:$<HOST_LINK:-fno-semantic-interposition>>
+    )
+endfunction()
+
+function(thor_enable_release_cuda_device_lto target_name)
+    if (NOT TARGET ${target_name})
+        return()
+    endif ()
+
+    # nvcc device LTO requires relocatable device code plus a device-link step.
+    # CUDA_SEPARABLE_COMPILATION is target-wide in CMake, so for normal
+    # single-config builds this is enabled only when the configured build type is
+    # Release. Multi-config generators need the device-link path available for
+    # the Release configuration, but the actual -dlto flags below are still
+    # Release-only.
+    if (CMAKE_CONFIGURATION_TYPES OR CMAKE_BUILD_TYPE STREQUAL "Release")
+        set_property(TARGET ${target_name} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+        set_property(TARGET ${target_name} PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+    endif ()
+
+    # CMake's INTERPROCEDURAL_OPTIMIZATION_RELEASE property emits the
+    # compile-side CUDA LTO IR by adding lto_<arch> code generation targets
+    # such as code=[compute_120,lto_120].  Do not also pass compile-time -dlto
+    # here: nvcc rejects -dlto together with explicit -gencode/code control and
+    # tells callers to use code=lto_<arch> for the compile-side intermediate.
+    # Keep only the Release device-link -dlto flag so nvlink consumes and
+    # optimizes the LTO IR emitted by the compile step.
+    target_link_options(${target_name} PRIVATE
+            "$<$<CONFIG:Release>:$<DEVICE_LINK:-dlto>>"
+    )
+endfunction()
+
+# ============================================================
 # Automatic Git versioning
 # ============================================================
 set(
@@ -477,6 +562,9 @@ target_link_options(Thor PRIVATE
         "LINKER:--no-as-needed"
 )
 thor_apply_linker_settings(Thor)
+thor_enable_release_host_lto(Thor)
+thor_enable_release_no_semantic_interposition(Thor)
+thor_enable_release_cuda_device_lto(Thor)
 
 # OpenMP
 find_package(OpenMP REQUIRED)
@@ -842,6 +930,8 @@ target_compile_definitions(Thor PRIVATE
 file(GLOB_RECURSE TEST_SOURCES "${CMAKE_SOURCE_DIR}/test/*.cpp")
 add_executable(thor_tests ${TEST_SOURCES})
 thor_apply_linker_settings(thor_tests)
+thor_enable_release_host_lto(thor_tests)
+thor_enable_release_no_semantic_interposition(thor_tests)
 target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main CUDA::cudart CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
 target_link_libraries(thor_tests PRIVATE "${THOR_CUDNN_LIBRARY}")
 find_package(OpenMP REQUIRED)
@@ -867,6 +957,8 @@ add_executable(thor_embedding_sparse_backward_profile EXCLUDE_FROM_ALL
         benchmarks/EmbeddingSparseBackwardProfile.cpp
 )
 thor_apply_linker_settings(thor_embedding_sparse_backward_profile)
+thor_enable_release_host_lto(thor_embedding_sparse_backward_profile)
+thor_enable_release_no_semantic_interposition(thor_embedding_sparse_backward_profile)
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE Thor CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE "${THOR_CUDNN_LIBRARY}")
 target_link_libraries(thor_embedding_sparse_backward_profile PRIVATE OpenMP::OpenMP_CXX)

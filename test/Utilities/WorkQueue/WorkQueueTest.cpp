@@ -9,6 +9,8 @@
 
 #include "gtest/gtest.h"
 
+namespace {
+
 struct OutputStruct {
     std::thread::id id;
     std::string s;
@@ -36,6 +38,8 @@ class Executor : public WorkQueueExecutorBase<std::string, OutputStruct> {
    private:
     int workSize;
 };
+
+}  // namespace
 
 TEST(WorkQueueTest, OutputIsCorrect) {
     constexpr int EXECUTOR_WORK_SIZE = 10000;
